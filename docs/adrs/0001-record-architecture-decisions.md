@@ -8,12 +8,14 @@ Accepted
 
 ## Context
 
-We need to record the architectural decisions made on this project.
+Decisions about the design and the code are made step by step. A reader
+later needs to find what was decided and why.
 
 ## Decision
 
-We will use Architecture Decision Records, as described by Michael Nygard in his article "Documenting Architecture Decisions".
+Decisions are recorded as ADRs in `docs/adrs/`, in Nygard format, created
+with the `adrs` tool. They follow the rules in `docs/adrs/README.md`.
 
 ## Consequences
 
-See Michael Nygard's article, linked above. For a lightweight ADR toolset, see Nat Pryce's adr-tools.
+None further.

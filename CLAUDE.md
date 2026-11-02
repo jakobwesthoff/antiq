@@ -33,9 +33,8 @@ license text lives. There are none yet.
 
 ## Documentation conventions
 
-- ADRs (`docs/adrs/`) are created with the `adrs` tool and are precise
-  and brief: context in a few sentences, consequences only for genuine
-  trade-offs.
+- ADRs (`docs/adrs/`) follow the rules in `docs/adrs/README.md`. Read
+  them before writing or changing an ADR.
 - The specification of version 1 lives in `docs/specs/spec-v1.md`. It
   describes what is decided, without the reasons, which the ADRs carry.
 - Whatever needs to be addressed or thought about later, including
@@ -43,5 +42,4 @@ license text lives. There are none yet.
   at `todos/` (format and commands in `todos/README.md`), one note per
   topic, as soon as it comes up. A todo is deleted once completed.
 - When a decision lands or code changes make a doc stale, update the
-  README, the spec and the affected todos in the same unit of work. An ADR that
-  no longer holds gets superseded by a new one (`adrs new --supersedes`).
+  README, the spec and the affected todos in the same unit of work.

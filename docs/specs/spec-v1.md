@@ -26,13 +26,13 @@ do for `~/playground`:
 - syncing to a NAS
 
 On top of that, version 1 moves archives through tiers by age. Whether
-it includes the remote-only tier (ADR 0004) is open.
+it includes the remote-only tier (ADR 0007) is open.
 
 Not in version 1:
 
-- syncing one managed folder between machines (ADR 0005)
+- syncing one managed folder between machines (ADR 0008)
 - reading the archives and listings that `archive.sh` produced
-  (ADR 0006)
+  (ADR 0009)
 
 ## Command line
 

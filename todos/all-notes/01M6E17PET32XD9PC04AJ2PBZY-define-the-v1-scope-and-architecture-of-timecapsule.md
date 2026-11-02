@@ -54,19 +54,19 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0006 and in
+Settled decisions live in ADR 0002 to ADR 0009 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
 - 2026-11-02, user: the tool gets its own repository. Its name is open:
   timecapsule is the working name, and the name must be free on
   crates.io, not taken by another command-line tool, and without a
   strange meaning in a web search.
-- 2026-11-02, user: the remote-only tier (ADR 0004) is wanted, but may
+- 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
   not be part of the first version.
 - 2026-11-02, user: the design goes in this order, each step open to
   change later: a rudimentary CLI first to get a feeling for what is
   needed, then the business-logic parts, then the extension points
-  (ADR 0003), then onwards from there.
+  (ADR 0006), then onwards from there.
 
 ## Open questions
 
@@ -78,7 +78,7 @@ Settled decisions live in ADR 0002 to ADR 0006 and in
   need a merge, something git-like, which may be too complex to include.
 - **Import.** Whether the tool gets a structured import for existing
   folders, or for existing archives described by configuration, so that
-  people with existing stores can bring them in. ADR 0006 leaves this
+  people with existing stores can bring them in. ADR 0009 leaves this
   open; it does not have to be tailored to the playground's current
   format.
 - **Migration** of the existing `.tar.xz` archives and their listings
