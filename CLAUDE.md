@@ -36,9 +36,12 @@ license text lives. There are none yet.
 - ADRs (`docs/adrs/`) are created with the `adrs` tool and are precise
   and brief: context in a few sentences, consequences only for genuine
   trade-offs.
-- Deferred work, open questions and ideas go into the ntropy todo vault
+- The specification of version 1 lives in `docs/specs/spec-v1.md`. It
+  describes what is decided, without the reasons, which the ADRs carry.
+- Whatever needs to be addressed or thought about later, including
+  things that may end up not being done, goes into the ntropy todo vault
   at `todos/` (format and commands in `todos/README.md`), one note per
-  topic. A todo is deleted once completed.
+  topic, as soon as it comes up. A todo is deleted once completed.
 - When a decision lands or code changes make a doc stale, update the
-  README and the affected todos in the same unit of work. An ADR that
+  README, the spec and the affected todos in the same unit of work. An ADR that
   no longer holds gets superseded by a new one (`adrs new --supersedes`).
