@@ -1,8 +1,8 @@
-# timecapsule
+# antiq
 
 Archive what you no longer touch, find it when you need it.
 
-timecapsule is a command-line tool written in Rust for directories where
+antiq is a command-line tool written in Rust for directories where
 working folders pile up. It is in early design, and nothing works yet.
 
 The plan for version 1:

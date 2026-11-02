@@ -3,8 +3,6 @@
 Draft. This file describes version 1 as its design settles. The reasons
 behind the decisions are recorded as ADRs in `docs/adrs/`.
 
-The project's name is not final; timecapsule is its working name.
-
 ## Purpose
 
 The tool looks after directories where working folders pile up, such as

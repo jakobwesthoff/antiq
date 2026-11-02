@@ -1,7 +1,7 @@
 # Todos
 
 This directory is an [ntropy](https://ntropy.westhoffswelt.de) vault
-holding the deferred work of timecapsule: bugs, features, refactors and
+holding the deferred work of antiq: bugs, features, refactors and
 open questions. Each todo is one Markdown note in `all-notes/`, named
 `<ULID>-<slug>.md`. The ULID is the todo's permanent identity.
 `by-component/` and `by-tag/` are views, derived symlink trees that git
@@ -88,7 +88,7 @@ those citations change with it (`rg -i <ulid>` finds them).
 
 - `architecture`: module boundaries, traits and interfaces between parts
 - `config`: configuration files, their format and defaults
-- `migration`: bringing existing archives or folders into timecapsule
+- `migration`: bringing existing archives or folders into antiq
 - `ux`: console output, interactive selection, help texts
 - `testing`: test coverage, fixtures, test infrastructure
 - `error-handling`: error types, messages, recovery

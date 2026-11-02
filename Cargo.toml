@@ -1,11 +1,11 @@
 [package]
-name = "timecapsule"
+name = "antiq"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 rust-version = "1.97"
 description = "Archive what you no longer touch, find it when you need it"
-repository = "https://github.com/jakobwesthoff/timecapsule"
+repository = "https://github.com/jakobwesthoff/antiq"
 readme = "README.md"
 
 [dependencies]

@@ -1,16 +1,17 @@
 ---
-title: "Define the v1 scope and architecture of timecapsule"
+title: "Define the v1 scope and architecture of antiq"
 kind: investigation
 component: project
 status: needs-discussion
 origin: idea
 tags: [architecture]
 ---
-# Define the v1 scope and architecture of timecapsule
+# Define the v1 scope and architecture of antiq
 
-timecapsule replaces the two playground scripts `~/playground/archive.sh`
-and `~/playground/timecapsule-sync.sh` with a Rust tool that solves the
-use case more generically. The idea came up on 2026-11-02 while finishing
+antiq (working name timecapsule until 2026-11-02) replaces the two
+playground scripts `~/playground/archive.sh` and
+`~/playground/timecapsule-sync.sh` with a Rust tool that solves the use
+case more generically. The idea came up on 2026-11-02 while finishing
 the scripts' archive index and test backfill, in the dotfiles todo vault;
 the todo moved here when the repository was created the same day. It holds
 the braindump and the answers given so far, until the v1 spec and the
@@ -54,13 +55,11 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0009 and in
+Settled decisions live in ADR 0002 to ADR 0010 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
-- 2026-11-02, user: the tool gets its own repository. Its name is open:
-  timecapsule is the working name, and the name must be free on
-  crates.io, not taken by another command-line tool, and without a
-  strange meaning in a web search.
+- 2026-11-02, user: the tool gets its own repository and is named antiq
+  (ADR 0010).
 - 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
   not be part of the first version.
 - 2026-11-02, user: the design goes in this order, each step open to
@@ -87,7 +86,3 @@ Settled decisions live in ADR 0002 to ADR 0009 and in
 - **A TUI** or console output only.
 - **Naming scheme** for folders and archives, and whether it is generic or
   user-configured.
-- **Project name.** `tcap`, `tcaps`, `timecap` and `capsule` were checked
-  and turned down on 2026-11-02. A second round proposed dvala, nemuri,
-  esker, dormo and kepto (all free on crates.io, Homebrew, npm and PyPI
-  that day); none picked yet.

@@ -1,4 +1,4 @@
-# timecapsule
+# antiq
 
 Archive what you no longer touch, find it when you need it. One Rust
 crate with a library (`src/lib.rs`) and a command-line binary
@@ -8,7 +8,7 @@ vault at `todos/`.
 
 ## Licensing
 
-timecapsule is licensed under the **Mozilla Public License 2.0**
+antiq is licensed under the **Mozilla Public License 2.0**
 (`LICENSE`). `Cargo.toml` declares it as `license = "MPL-2.0"`.
 
 **Every source file must begin with the MPL-2.0 header comment.** This

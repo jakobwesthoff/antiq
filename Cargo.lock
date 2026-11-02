@@ -53,6 +53,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "antiq"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "thiserror",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -175,15 +184,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "timecapsule"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "thiserror",
 ]
 
 [[package]]
