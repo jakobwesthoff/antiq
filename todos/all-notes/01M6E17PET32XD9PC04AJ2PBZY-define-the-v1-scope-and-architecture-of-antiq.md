@@ -55,34 +55,50 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0010 and in
+Settled decisions live in ADR 0002 to ADR 0021 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
-- 2026-11-02, user: the tool gets its own repository and is named antiq
-  (ADR 0010).
 - 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
   not be part of the first version.
 - 2026-11-02, user: the design goes in this order, each step open to
   change later: a rudimentary CLI first to get a feeling for what is
   needed, then the business-logic parts, then the extension points
   (ADR 0006), then onwards from there.
+- 2026-11-02, user: command names, the noun for a managed folder and the
+  name of the per-unit opt-out follow the name antiq and are chosen next.
+- 2026-11-02, user: things to address or think about later become todos
+  as they come up, even if the outcome may be not to do them.
+
+## Design draft and review
+
+A design draft of v1 and its adversarial review (three reviewers, 67
+findings, 2026-11-02) are in the session logbook at
+`~/playground/2026_11_02_antiq-logbook/`:
+`plans/design-draft-v2.md` (the draft with every fix the reviewers and
+the lead agreed on), `plans/adversarial-ledger.md` (each finding with
+evidence and outcome) and `plans/open-questions.md` (the questions for
+the user). Agreed fixes enter the spec and ADRs only after the user has
+gone through them.
 
 ## Open questions
 
-- **Several machines.** Probably configurable, so both are possible:
-  separate targets per machine or per folder, or one playground on several
-  machines brought together. Bringing them together might merge only the
-  index, and a directory that exists only in the index is fetched from the
-  store when needed. The same folder worked on in two places at once would
-  need a merge, something git-like, which may be too complex to include.
+- **Review questions.** The 13 questions in
+  `plans/open-questions.md` of the logbook, among them: which remote is
+  built first and whether the path remote does delta transfer; how the
+  ID time is computed; whether replacing an archive asks first when
+  content would be lost; what happens to empty units; how tier ages are
+  measured; how other machines' live objects behave on a shared remote;
+  whether `reconcile` drops entries only on request; and whether live
+  packages stay zstd-compressed, given that uncompressed tar transferred
+  0.04 to 0.14 % per change in a measurement where zstd transferred up to
+  6 %.
+- **Several machines, live folders.** Bringing one live folder together
+  across machines stays out of v1 (ADR 0008); a shared remote for
+  archives is in (ADR 0017).
 - **Import.** Whether the tool gets a structured import for existing
-  folders, or for existing archives described by configuration, so that
-  people with existing stores can bring them in. ADR 0009 leaves this
-  open; it does not have to be tailored to the playground's current
-  format.
+  folders or archives. ADR 0009 leaves this open; the review recommends a
+  general import of `.tar.xz` files, run once over the old archives.
 - **Migration** of the existing `.tar.xz` archives and their listings
-  (313 on 2026-11-02): a one-off step, possibly built on that import
-  feature.
+  (313 on 2026-11-02, 15 GB, all paired with a listing): a one-off step,
+  possibly built on that import.
 - **A TUI** or console output only.
-- **Naming scheme** for folders and archives, and whether it is generic or
-  user-configured.
