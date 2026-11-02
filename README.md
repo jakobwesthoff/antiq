@@ -14,6 +14,8 @@ The plan for version 1:
 - Archives move to a backup store, such as a NAS, in tiers. In the later
   tier only the index stays local, and restoring fetches the archive from
   the store.
+- Folders still in use are backed up to the same store as packages, and
+  several machines can share one store.
 
 ## License
 
