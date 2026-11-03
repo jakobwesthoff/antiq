@@ -324,7 +324,8 @@ without asking. When files were removed or their content or metadata
 changed, antiq shows what would be lost and asks: replace, fork or
 skip; without a terminal it skips and lists the piece as needing a
 decision. A collection can allow replacing without asking. (ADR 0036)
-A diverged piece is refused.
+A diverged piece is refused. Archiving warns about names that would not
+survive on macOS or Linux and archives the piece anyway. (ADR 0054)
 
 ### sync
 
@@ -350,7 +351,14 @@ entry `unearthing`, checks the target again (missing parents are
 created; a file, symlink or piece in the path refuses), renames the tree
 into place and sets the entry to `live` with the time of unearthing.
 Unearthing an ID that is already unearthed does nothing and says where
-it is. The remote copy is kept while the piece is live; the local
+it is.
+
+Before extracting, `unearth` checks every member name against the
+target: names it cannot hold, name and path lengths, and names that
+collide under its case and Unicode rules, which come from a probe of
+the staging volume. It refuses the piece with a list of the offending
+names and the reason. Paths longer than the platform's path limit are
+extracted directory by directory. (ADR 0054) The remote copy is kept while the piece is live; the local
 archive is dropped only when the remote copy is confirmed and is always
 kept without a remote. (ADR 0034)
 
