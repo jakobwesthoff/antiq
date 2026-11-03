@@ -120,6 +120,18 @@ promises no identical output across versions (**read**). A bundled zstd
 change therefore changes the bytes of every package; the rsync cost of
 that change was not measured.
 
+## Archive settings through the crate
+
+Checked after the benchmark (`docs/research/compression-bench.md`) chose
+zstd for archives. On the same 150,000,000-byte tar, `zstd` 0.14.3 with
+level 19, `NbWorkers(14)`, `EnableLongDistanceMatching(true)`,
+`WindowLog(27)` and `ChecksumFlag(true)`, fed as a stream of unknown
+size, produced 12,714,549 bytes, byte-identical to
+`zstd -19 --long=27 -T14 -c < in.tar` (same SHA-256). The crate's
+`Decoder` with default settings decoded it to the original bytes;
+`zstd -t` accepted it and `zstd -lv` showed a 128 MiB window and an
+XXH64 check. The run took 17.7 s wall and 34.6 s CPU (**measured**).
+
 ## Pure Rust alternatives
 
 - `lzma-rs` 0.3.0 (2023-01-04, 44.7M downloads): its encoder only emits
