@@ -18,11 +18,13 @@ pub mod zstd;
 
 use crate::fsx::tree::TreeRoot;
 use crate::listing::ListingEntry;
-use crate::relpath::RelPath;
-use crate::tree::{EntryKind, PieceTree, Problem};
+use crate::relpath::{Name, RelPath};
+use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
+use hashing::HashingWriter;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
+use tar_write::{DirectoryStack, TarWriter};
 use zstd::ZstdSettings;
 
 /// The id of a package format, as the metadata stores it.
@@ -162,12 +164,45 @@ impl Packager for TarZstd {
 
     fn pack(
         &self,
-        _root: &TreeRoot,
-        _tree: &PieceTree,
-        _settings: &PackSettings,
-        _out: &mut dyn Write,
+        root: &TreeRoot,
+        tree: &PieceTree,
+        settings: &PackSettings,
+        out: &mut dyn Write,
     ) -> Result<Packed, PackError> {
-        Err(PackError::NotImplemented("packing a piece"))
+        // An incomplete walk would give an archive that silently lacks
+        // files, so nothing is written for it.
+        if let Some(problem) = tree.problems().first() {
+            return Err(PackError::TreeHasProblems(problem.clone()));
+        }
+        if tree.entries().first().is_none_or(|top| !top.path.is_root()) {
+            return Err(PackError::NoTopDirectory);
+        }
+        let folder = tree
+            .top()
+            .components()
+            .last()
+            .ok_or(PackError::NoContainerName)?;
+        let container =
+            Name::from_bytes(folder.to_vec()).expect("a component of a valid path is a valid name");
+
+        let compressed = HashingWriter::new(out);
+        let encoder = zstd::encoder(compressed, &settings.zstd).map_err(PackError::Write)?;
+        let mut writer = TarWriter::new(encoder, container);
+        let mut directories = DirectoryStack::new(root);
+        let mut content = |entry: &TreeEntry| directories.open(entry);
+        for entry in tree.entries() {
+            writer.add(entry, &mut content)?;
+        }
+        let (encoder, listing, notes) = writer.finish()?;
+        let mut compressed = encoder.finish().map_err(PackError::Write)?;
+        // The encoder does not flush the writer under it.
+        compressed.flush().map_err(PackError::Write)?;
+        Ok(Packed {
+            size: compressed.written(),
+            sha256: compressed.sha256(),
+            listing,
+            notes,
+        })
     }
 
     fn verify_strict(
@@ -220,7 +255,6 @@ impl crate::error::HasKind for PackError {}
 mod tests {
     use super::*;
     use crate::fsx::tree::TreeRoot;
-    use crate::tree::PieceTree;
 
     fn empty_root() -> (tempfile::TempDir, TreeRoot) {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -237,16 +271,7 @@ mod tests {
     #[test]
     fn the_unfinished_operations_answer_not_implemented() {
         let (dir, root) = empty_root();
-        let tree = PieceTree::new(RelPath::parse("p").expect("valid"), vec![], vec![]);
-        let settings = PackSettings {
-            zstd: ZstdSettings::live(1),
-        };
-        let mut sink = Vec::new();
         let errors = [
-            TarZstd
-                .pack(&root, &tree, &settings, &mut sink)
-                .expect_err("packing is not there yet")
-                .to_string(),
             TarZstd
                 .verify_strict(dir.path(), &root, &WalkRules)
                 .expect_err("not implemented")
@@ -263,7 +288,6 @@ mod tests {
         assert_eq!(
             errors,
             [
-                "packing a piece is not implemented",
                 "the strict verify is not implemented",
                 "listing a package is not implemented",
                 "unpacking a package is not implemented",
@@ -300,5 +324,419 @@ mod tests {
                 "`proj/a` was shorter than recorded and is padded with zeros",
             ]
         );
+    }
+}
+
+/// Packing real trees through a `TreeRoot`.
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+    use crate::testing::deep_path;
+    use crate::testing::tree::Tree;
+    use crate::tree::PieceTree;
+    use hashing::HashingReader;
+    use std::io::{BufWriter, Read};
+    use std::process::Command;
+
+    /// A walk of the tree below `root`, as the piece walk of a later item
+    /// will report it.
+    fn walk(root: &TreeRoot, top: &str) -> PieceTree {
+        fn collect(root: &TreeRoot, directory: &RelPath, entries: &mut Vec<TreeEntry>) {
+            for child in root.read_dir(directory).expect("the directory lists") {
+                let entry = root.lstat(&child.path).expect("the entry exists");
+                let is_directory = entry.kind == EntryKind::Directory;
+                entries.push(entry);
+                if is_directory {
+                    collect(root, &child.path, entries);
+                }
+            }
+        }
+        let mut entries = vec![root.lstat(&RelPath::root()).expect("the root exists")];
+        collect(root, &RelPath::root(), &mut entries);
+        PieceTree::new(RelPath::parse(top).expect("valid"), entries, vec![])
+    }
+
+    fn live() -> PackSettings {
+        PackSettings {
+            zstd: ZstdSettings::live(1),
+        }
+    }
+
+    fn pack(tree: &Tree, top: &str) -> (Vec<u8>, Packed) {
+        let root = TreeRoot::open(tree.root()).expect("the tree opens");
+        let walked = walk(&root, top);
+        let mut out = Vec::new();
+        let packed = TarZstd
+            .pack(&root, &walked, &live(), &mut out)
+            .expect("the piece packs");
+        (out, packed)
+    }
+
+    /// (path, type, link name, data) of every member of a package.
+    fn members(package: &[u8]) -> Vec<(String, tar::EntryType, Option<String>, Vec<u8>)> {
+        let decoder = zstd::decoder(package).expect("a zstd stream");
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .entries()
+            .expect("a tar stream")
+            .map(|entry| {
+                let mut entry = entry.expect("a member");
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).expect("member data");
+                (
+                    String::from_utf8_lossy(&entry.path_bytes()).into_owned(),
+                    entry.header().entry_type(),
+                    entry
+                        .link_name_bytes()
+                        .map(|name| String::from_utf8_lossy(&name).into_owned()),
+                    data,
+                )
+            })
+            .collect()
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        let mut reader = HashingReader::new(bytes);
+        std::io::copy(&mut reader, &mut std::io::sink()).expect("hashes");
+        reader.sha256()
+    }
+
+    #[test]
+    fn a_piece_packs_into_members_below_a_container_named_after_the_folder() {
+        let mut tree = Tree::new();
+        tree.file_with("src/main.rs", "fn main() {}", 0o600, 1_000_000_000);
+        tree.file("notes.txt", "hello");
+        tree.symlink("src/link", "main.rs");
+        tree.hard_link("notes.txt", "src/notes-copy.txt");
+        let (package, packed) = pack(&tree, "projects/proj");
+        let found = members(&package);
+        let paths: Vec<_> = found.iter().map(|m| m.0.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "proj/",
+                "proj/notes.txt",
+                "proj/src/",
+                "proj/src/link",
+                "proj/src/main.rs",
+                "proj/src/notes-copy.txt",
+            ]
+        );
+        assert_eq!(found[1].3, b"hello");
+        assert_eq!(found[3].1, tar::EntryType::Symlink);
+        assert_eq!(found[3].2.as_deref(), Some("main.rs"));
+        assert_eq!(found[5].1, tar::EntryType::Link);
+        assert_eq!(found[5].2.as_deref(), Some("proj/notes.txt"));
+        let listed: Vec<_> = packed.listing.iter().map(|e| e.path.to_string()).collect();
+        assert_eq!(
+            listed,
+            [
+                "notes.txt",
+                "src",
+                "src/link",
+                "src/main.rs",
+                "src/notes-copy.txt"
+            ]
+        );
+        assert!(packed.notes.is_empty());
+    }
+
+    #[test]
+    fn files_in_sibling_and_nested_directories_are_read_from_their_own_directory() {
+        let mut tree = Tree::new();
+        tree.file("a/one", "1");
+        tree.file("a/sub/two", "2");
+        tree.file("a/three", "3");
+        tree.file("b/four", "4");
+        tree.file("b/sub/five", "5");
+        let (package, _) = pack(&tree, "proj");
+        let contents: Vec<_> = members(&package)
+            .into_iter()
+            .filter(|member| member.1 == tar::EntryType::Regular)
+            .map(|member| (member.0, member.3))
+            .collect();
+        let expected: Vec<(String, Vec<u8>)> = [
+            ("proj/a/one", "1"),
+            ("proj/a/sub/two", "2"),
+            ("proj/a/three", "3"),
+            ("proj/b/four", "4"),
+            ("proj/b/sub/five", "5"),
+        ]
+        .iter()
+        .map(|(path, data)| (path.to_string(), data.as_bytes().to_vec()))
+        .collect();
+        assert_eq!(contents, expected);
+    }
+
+    #[test]
+    fn the_size_and_digest_describe_the_compressed_stream_once_it_is_flushed() {
+        let mut tree = Tree::new();
+        tree.file("a", "some content");
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        let mut sink = Vec::new();
+        let packed = {
+            let mut buffered = BufWriter::new(&mut sink);
+            TarZstd
+                .pack(&root, &walked, &live(), &mut buffered)
+                .expect("packs")
+        };
+        assert_eq!(packed.size, sink.len() as u64);
+        assert_eq!(packed.sha256, sha256(&sink));
+
+        // The pack itself flushed: a buffered sink holds everything
+        // before it is dropped.
+        let mut buffered_sink = Vec::new();
+        let mut buffered = BufWriter::new(&mut buffered_sink);
+        let again = TarZstd
+            .pack(&root, &walked, &live(), &mut buffered)
+            .expect("packs");
+        assert_eq!(buffered.buffer().len(), 0, "nothing is left unwritten");
+        drop(buffered);
+        assert_eq!(again.size, buffered_sink.len() as u64);
+    }
+
+    #[test]
+    fn packing_the_same_tree_twice_gives_the_same_bytes_and_a_touched_file_changes_them() {
+        let mut tree = Tree::new();
+        let file = tree.file_with("a", "same", 0o644, 1_000_000_000);
+        let (first, _) = pack(&tree, "proj");
+        let (second, _) = pack(&tree, "proj");
+        assert_eq!(first, second);
+        filetime::set_file_mtime(&file, filetime::FileTime::from_unix_time(1_000_000_001, 0))
+            .expect("the time can be set");
+        let (touched, _) = pack(&tree, "proj");
+        assert_ne!(first, touched);
+    }
+
+    #[test]
+    fn a_fifo_is_skipped_and_reported() {
+        let mut tree = Tree::new();
+        tree.file("a", "x");
+        tree.fifo("queue");
+        let (package, packed) = pack(&tree, "proj");
+        assert!(members(&package).iter().all(|m| !m.0.contains("queue")));
+        let notes: Vec<_> = packed.notes.iter().map(PackNote::to_string).collect();
+        assert_eq!(notes, ["`proj/queue` is a fifo and is not archived"]);
+    }
+
+    #[test]
+    fn a_1969_modification_time_is_stored_as_zero_and_reported() {
+        let mut tree = Tree::new();
+        let path = tree.file("old", "x");
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(-5, 0))
+            .expect("a time before 1970 can be set");
+        let (_, packed) = pack(&tree, "proj");
+        assert_eq!(packed.listing[0].mtime, 0);
+        let notes: Vec<_> = packed.notes.iter().map(PackNote::to_string).collect();
+        assert_eq!(
+            notes,
+            ["the modification time of `proj/old` is before 1970 and is stored as 1970"]
+        );
+    }
+
+    #[test]
+    fn a_file_that_shrank_after_the_walk_is_padded_and_reported() {
+        let mut tree = Tree::new();
+        let path = tree.file("log", "0123456789");
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        std::fs::write(&path, "0123").expect("the file shrinks");
+        let mut out = Vec::new();
+        let packed = TarZstd
+            .pack(&root, &walked, &live(), &mut out)
+            .expect("packs");
+        let found = members(&out);
+        assert_eq!(found[1].3, b"0123\0\0\0\0\0\0");
+        let notes: Vec<_> = packed.notes.iter().map(PackNote::to_string).collect();
+        assert_eq!(
+            notes,
+            ["`proj/log` was shorter than recorded and is padded with zeros"]
+        );
+    }
+
+    #[test]
+    fn a_file_that_vanished_after_the_walk_fails_the_pack_naming_it() {
+        let mut tree = Tree::new();
+        let path = tree.file("dir/gone", "x");
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        std::fs::remove_file(path).expect("the file is removed");
+        let error = TarZstd
+            .pack(&root, &walked, &live(), &mut Vec::new())
+            .expect_err("the file is gone");
+        assert!(
+            matches!(error, PackError::Read { ref path, .. } if path.to_string() == "dir/gone"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_fifo_after_the_walk_fails_the_pack_naming_it() {
+        let mut tree = Tree::new();
+        let path = tree.file("swapped", "x");
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        std::fs::remove_file(path).expect("the file is removed");
+        tree.fifo("swapped");
+        let error = TarZstd
+            .pack(&root, &walked, &live(), &mut Vec::new())
+            .expect_err("a fifo is not read");
+        assert!(
+            matches!(error, PackError::Read { ref path, .. } if path.to_string() == "swapped"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_below_a_path_longer_than_the_platform_limit_packs() {
+        let tree = Tree::new();
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let deep = deep_path(6);
+        for level in 1..=6 {
+            let directory: Vec<&[u8]> = deep.components().take(level).collect();
+            root.create_dir(
+                &RelPath::from_bytes(directory.join(&b'/')).expect("valid"),
+                0o755,
+            )
+            .expect("the directory is created");
+        }
+        let file = deep.concat(&RelPath::parse("data.txt").expect("valid"));
+        {
+            use std::io::Write;
+            let mut created = root.create_file(&file, 0o644).expect("the file is created");
+            created.write_all(b"deep").expect("written");
+        }
+        let walked = walk(&root, "proj");
+        let mut out = Vec::new();
+        let packed = TarZstd
+            .pack(&root, &walked, &live(), &mut out)
+            .expect("the piece packs");
+        let found = members(&out);
+        let last = found.last().expect("members");
+        assert_eq!(last.0, format!("proj/{file}"));
+        assert!(last.0.len() > 1024);
+        assert_eq!(last.3, b"deep");
+        assert_eq!(packed.listing.len(), 7);
+    }
+
+    #[test]
+    fn a_tree_with_problems_or_without_its_top_is_refused() {
+        let tree = Tree::new();
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        let top = RelPath::parse("proj").expect("valid");
+        let entries = walked.entries().to_vec();
+
+        for problem in [
+            Problem::Unreadable {
+                first: RelPath::parse("locked").expect("valid"),
+            },
+            Problem::MountPoint {
+                other: RelPath::parse("mnt").expect("valid"),
+            },
+        ] {
+            let flawed = PieceTree::new(top.clone(), entries.clone(), vec![problem.clone()]);
+            let mut out = Vec::new();
+            let error = TarZstd
+                .pack(&root, &flawed, &live(), &mut out)
+                .expect_err("a flawed walk is refused");
+            assert!(matches!(&error, PackError::TreeHasProblems(p) if *p == problem));
+            assert!(out.is_empty(), "nothing was written");
+        }
+
+        let headless = PieceTree::new(top, vec![], vec![]);
+        let error = TarZstd
+            .pack(&root, &headless, &live(), &mut Vec::new())
+            .expect_err("no top entry");
+        assert!(matches!(error, PackError::NoTopDirectory));
+
+        let nameless = PieceTree::new(RelPath::root(), entries, vec![]);
+        let error = TarZstd
+            .pack(&root, &nameless, &live(), &mut Vec::new())
+            .expect_err("no folder name");
+        assert!(matches!(error, PackError::NoContainerName));
+    }
+
+    #[test]
+    fn a_sink_that_fails_makes_the_pack_fail_with_a_write_error() {
+        // A slice of length zero accepts no byte, which `write_all` reports
+        // as an error.
+        let mut full: &mut [u8] = &mut [];
+        let mut tree = Tree::new();
+        tree.file("a", "x");
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let walked = walk(&root, "proj");
+        let error = TarZstd
+            .pack(&root, &walked, &live(), &mut full)
+            .expect_err("nothing can be written");
+        assert!(matches!(error, PackError::Write(_)), "{error:?}");
+    }
+
+    /// The tools that set and read a user extended attribute, with their
+    /// arguments before the path.
+    #[cfg(target_os = "macos")]
+    const XATTR_TOOLS: (&str, &[&str], &str, &[&str]) = (
+        "xattr",
+        &["-w", "user.antiq", "1"],
+        "xattr",
+        &["-p", "user.antiq"],
+    );
+    #[cfg(not(target_os = "macos"))]
+    const XATTR_TOOLS: (&str, &[&str], &str, &[&str]) = (
+        "setfattr",
+        &["-n", "user.antiq", "-v", "1"],
+        "getfattr",
+        &["-n", "user.antiq"],
+    );
+
+    /// Sets a user extended attribute with the platform's tool and reads
+    /// it back, so that the test fails naming the tool when the file
+    /// system refuses it.
+    fn set_xattr(path: &Path) {
+        let (set_tool, set, get_tool, get) = XATTR_TOOLS;
+        let status = Command::new(set_tool)
+            .args(set)
+            .arg(path)
+            .status()
+            .unwrap_or_else(|error| panic!("{set_tool} could not run: {error}"));
+        assert!(status.success(), "{set_tool} failed for {}", path.display());
+        let status = Command::new(get_tool)
+            .args(get)
+            .arg(path)
+            .output()
+            .unwrap_or_else(|error| panic!("{get_tool} could not run: {error}"))
+            .status;
+        assert!(
+            status.success(),
+            "{get_tool} cannot read the attribute back"
+        );
+    }
+
+    #[test]
+    fn an_archive_has_only_plain_member_types() {
+        let mut tree = Tree::new();
+        let marked = tree.file("marked", "x");
+        set_xattr(&marked);
+        tree.dir("dir");
+        tree.symlink("link", "marked");
+        tree.hard_link("marked", "again");
+        let (package, _) = pack(&tree, "proj");
+        let allowed = [
+            tar::EntryType::Regular,
+            tar::EntryType::Directory,
+            tar::EntryType::Symlink,
+            tar::EntryType::Link,
+        ];
+        let found = members(&package);
+        assert_eq!(found.len(), 5);
+        for member in found {
+            assert!(
+                allowed.contains(&member.1),
+                "{} is a {:?}",
+                member.0,
+                member.1
+            );
+        }
     }
 }

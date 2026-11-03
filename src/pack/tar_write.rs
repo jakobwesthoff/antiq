@@ -10,6 +10,7 @@
 
 use super::hashing::HashingReader;
 use super::{PackError, PackNote};
+use crate::fsx::tree::TreeRoot;
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
@@ -362,6 +363,65 @@ impl<W: Write> TarWriter<W> {
         let out = self.builder.into_inner().map_err(PackError::Write)?;
         Ok((out, self.listing, self.notes))
     }
+}
+
+/// Opens the files of a piece through the directory handles of the path
+/// being walked. Entries come in path order, so the handles of the
+/// directories above one file are mostly those of the file before it, and
+/// no open has to walk down from the root again (which `TreeRoot` does for
+/// every call made on a root).
+pub struct DirectoryStack<'a> {
+    root: &'a TreeRoot,
+    /// The names of the directories held open, from the top.
+    names: Vec<Vec<u8>>,
+    /// The open directory for each name in `names`.
+    handles: Vec<TreeRoot>,
+}
+
+impl<'a> DirectoryStack<'a> {
+    pub fn new(root: &'a TreeRoot) -> DirectoryStack<'a> {
+        DirectoryStack {
+            root,
+            names: Vec::new(),
+            handles: Vec::new(),
+        }
+    }
+
+    /// Opens the regular file the entry names.
+    pub fn open(&mut self, entry: &TreeEntry) -> io::Result<Box<dyn Read>> {
+        let components: Vec<&[u8]> = entry.path.components().collect();
+        let (file_name, directories) = components
+            .split_last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the root is not a file"))?;
+
+        // Keep the handles of the directories this path shares with the
+        // one before it.
+        let shared = self
+            .names
+            .iter()
+            .zip(directories)
+            .take_while(|(held, wanted)| held.as_slice() == **wanted)
+            .count();
+        self.names.truncate(shared);
+        self.handles.truncate(shared);
+        for directory in &directories[shared..] {
+            let parent = self.handles.last().unwrap_or(self.root);
+            let sub = parent.sub(&single(directory))?;
+            self.names.push(directory.to_vec());
+            self.handles.push(sub);
+        }
+
+        let parent = self.handles.last().unwrap_or(self.root);
+        Ok(Box::new(parent.open_read(&single(file_name))?))
+    }
+}
+
+/// The path of one component, which the path it came from already
+/// proved valid.
+fn single(component: &[u8]) -> RelPath {
+    let name =
+        Name::from_bytes(component.to_vec()).expect("a component of a valid path is a valid name");
+    RelPath::root().join(&name)
 }
 
 fn member_path(bytes: &[u8]) -> &Path {
