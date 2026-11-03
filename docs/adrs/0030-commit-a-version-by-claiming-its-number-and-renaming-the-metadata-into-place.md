@@ -31,9 +31,14 @@ A claim that already exists is a conflict, resolved as ADR 0017
 describes. A claim without metadata that is older than a grace period is
 abandoned, and the next version number skips it. An abandoned claim is
 removed only once a higher version is committed, so a version number is
-never used twice. Payloads that no retained metadata version references
-and old metadata files are removed once they are older than the grace
-period. Ages are measured on the remote's clock.
+never used twice. The highest committed version is retained; an older
+metadata file is removed once a higher version is committed and it is
+older than the grace period. Payloads that no retained metadata version
+references are removed once they are older than the grace period. Ages
+are measured on the remote's clock.
+
+A change recorded locally waits as a pending file until a sync commits
+it (ADR 0058); the protocol gives it its version number.
 
 ## Consequences
 

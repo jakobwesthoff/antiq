@@ -21,6 +21,12 @@ names, the file's real modification time, no extended attributes.
 Entries are sorted by path bytes. Hard links are detected by device and
 inode and stored as links. Special files are skipped and reported.
 
+An archive holds one top-level directory, named after the folder when
+it is packed, with the piece's entries below it; imported archives have
+that shape already (ADR 0055). Listings, the strict verify and
+reclaiming compare the paths below that directory, so a piece that is
+renamed, forked under a new name or unearthed elsewhere still compares.
+
 Unearthing extracts entry by entry with antiq's own checks before the
 crate's, stops at the first refused member, and sets directory modes and
 times in a final pass.

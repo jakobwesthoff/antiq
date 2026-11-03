@@ -18,6 +18,9 @@ One command covers listing and searching. Interactively it opens a
 picker over all objects, from which an object can be brought back or
 acted on otherwise. With `--json` it prints the matches.
 
+A query matches a piece's name and path and the member paths in its
+listing, so the contents of every archive are searchable.
+
 ## Consequences
 
 None further.

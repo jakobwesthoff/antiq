@@ -23,6 +23,11 @@ version that loses stays on the remote as a superseded archive until it
 is dropped explicitly, so resolving a conflict on one machine never
 deletes what another machine committed.
 
+A change that touches only metadata, such as the time a remote copy was
+checked or a history entry, is no conflict. It is applied on top of the
+remote's newer version: a check time is dropped when that version no
+longer references the payload, and history entries merge.
+
 No file on the remote is shared by machines for writing; a combined
 index is built locally. Syncing one live folder between machines stays
 out of the first version (ADR 0008).
