@@ -9,6 +9,9 @@
 #[path = "../../tests/support/tree.rs"]
 pub mod tree;
 
+mod pool;
+pub use pool::shared_pool;
+
 use crate::relpath::RelPath;
 
 /// A path of `levels` nested names of 200 bytes each. Past five levels it

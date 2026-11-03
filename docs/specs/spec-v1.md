@@ -712,7 +712,9 @@ of compressors in flight is also limited by memory against
 per worker, since zstd allocates a fixed round buffer for each encoder
 with long-distance matching. When nothing else is compressing, one
 worker is always granted, with a warning when the memory limit is below
-the cost of an encoder with one worker.
+the cost of an encoder with one worker. A compressor that finds no free
+worker or not enough memory waits until another finishes, and waiting
+compressors are served in the order they asked.
 
 An optional exclude list, empty by default, applies to live packages
 only; archives hold the whole tree except junk files.
