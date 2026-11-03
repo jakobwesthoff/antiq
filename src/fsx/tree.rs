@@ -360,26 +360,88 @@ fn change_mode(dir: BorrowedFd<'_>, name: &[u8], mode: Mode) -> io::Result<()> {
     Ok(())
 }
 
-/// Linux has no `fchmodat` flag that works for this, so the entry is opened
-/// without following a symlink, `fstat` tells a symlink apart on the open
-/// handle, and the mode is set through the handle's `/proc/self/fd` link,
-/// which names the very inode that was checked.
+/// The syscall number of `fchmodat2`, which takes the flags that
+/// `fchmodat` ignores. Linux has it since 6.6; the libc wrappers and
+/// rustix 1.1.6 have no function for it.
+#[cfg(target_os = "linux")]
+const SYS_FCHMODAT2: libc::c_long = 452;
+
+/// `fchmodat2` without following a symlink, replaceable by a test.
+#[cfg(target_os = "linux")]
+type Fchmodat2 = fn(BorrowedFd<'_>, &[u8], Mode) -> Result<(), Errno>;
+
+#[cfg(target_os = "linux")]
+fn fchmodat2_no_follow(dir: BorrowedFd<'_>, name: &[u8], mode: Mode) -> Result<(), Errno> {
+    use std::os::fd::AsRawFd;
+
+    let name = std::ffi::CString::new(name).map_err(|_| Errno::INVAL)?;
+    // SAFETY: `fchmodat2` reads a directory descriptor, a NUL-terminated
+    // string that outlives the call, a mode and a flag. Every argument is
+    // passed as the `long` that `syscall` reads it as.
+    let result = unsafe {
+        libc::syscall(
+            SYS_FCHMODAT2,
+            dir.as_raw_fd() as libc::c_long,
+            name.as_ptr() as libc::c_long,
+            mode.bits() as libc::c_long,
+            libc::AT_SYMLINK_NOFOLLOW as libc::c_long,
+        )
+    };
+    match result {
+        0 => Ok(()),
+        _ => Err(Errno::from_io_error(&io::Error::last_os_error()).unwrap_or(Errno::INVAL)),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn change_mode(dir: BorrowedFd<'_>, name: &[u8], mode: Mode) -> io::Result<()> {
+    change_mode_with(dir, name, mode, fchmodat2_no_follow, "/proc/self/fd")
+}
+
+/// Linux changes a mode without following a symlink in one of two ways.
+/// `fchmodat2` with `AT_SYMLINK_NOFOLLOW` does it in one call and refuses a
+/// symlink with `EOPNOTSUPP`. Where that call does not exist (`ENOSYS` on a
+/// kernel before 6.6, `EINVAL`, or `EPERM` from a seccomp profile that does
+/// not know it) the entry is opened without following a symlink, `fstat`
+/// tells a symlink apart on the open handle, and the mode is set through
+/// the handle's link in `proc_dir` (`/proc/self/fd`), which names the very
+/// inode that was checked. That needs `/proc`.
+#[cfg(target_os = "linux")]
+fn change_mode_with(
+    dir: BorrowedFd<'_>,
+    name: &[u8],
+    mode: Mode,
+    fchmodat2: Fchmodat2,
+    proc_dir: &str,
+) -> io::Result<()> {
     use rustix::fs::CWD;
     use std::os::fd::AsRawFd;
 
+    let symlink_refused = || {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the mode of a symlink cannot be changed",
+        )
+    };
+    match fchmodat2(dir, name, mode) {
+        Ok(()) => return Ok(()),
+        Err(Errno::OPNOTSUPP) => return Err(symlink_refused()),
+        Err(Errno::NOSYS | Errno::INVAL | Errno::PERM) => {}
+        Err(other) => return Err(other.into()),
+    }
     let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let entry = openat(dir, name, flags, Mode::empty())?;
     if EntryKind::from_mode(mode_of(fstat(&entry)?.st_mode)) == EntryKind::Symlink {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the mode of a symlink cannot be changed",
-        ));
+        return Err(symlink_refused());
     }
-    let through_proc = format!("/proc/self/fd/{}", entry.as_raw_fd());
-    chmodat(CWD, through_proc, mode, AtFlags::empty())?;
-    Ok(())
+    let through_proc = format!("{proc_dir}/{}", entry.as_raw_fd());
+    match chmodat(CWD, through_proc, mode, AtFlags::empty()) {
+        Err(Errno::NOENT) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "changing a mode without following symlinks needs /proc or Linux 6.6",
+        )),
+        done => Ok(done?),
+    }
 }
 
 #[allow(
@@ -717,6 +779,94 @@ mod tests {
 
         root.set_mode(&locked, 0o755).expect("the mode is restored");
         root.remove_dir(&locked).expect("the directory is removed");
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_modes {
+        use super::*;
+
+        fn not_implemented(_: BorrowedFd<'_>, _: &[u8], _: Mode) -> Result<(), Errno> {
+            Err(Errno::NOSYS)
+        }
+
+        fn invalid(_: BorrowedFd<'_>, _: &[u8], _: Mode) -> Result<(), Errno> {
+            Err(Errno::INVAL)
+        }
+
+        fn filtered(_: BorrowedFd<'_>, _: &[u8], _: Mode) -> Result<(), Errno> {
+            Err(Errno::PERM)
+        }
+
+        fn not_supported(_: BorrowedFd<'_>, _: &[u8], _: Mode) -> Result<(), Errno> {
+            Err(Errno::OPNOTSUPP)
+        }
+
+        fn denied(_: BorrowedFd<'_>, _: &[u8], _: Mode) -> Result<(), Errno> {
+            Err(Errno::ACCESS)
+        }
+
+        /// Sets 0600 on `name` in `tree` with `fchmodat2` replaced by
+        /// `attempt` and `/proc/self/fd` by `proc_dir`.
+        fn chmod_600(
+            tree: &Tree,
+            name: &str,
+            attempt: Fchmodat2,
+            proc_dir: &str,
+        ) -> io::Result<()> {
+            let root = root_of(tree);
+            let relative = path(name);
+            let (dir, name) = root.split(&relative).expect("the name splits");
+            let mode = Mode::from_bits_truncate(0o600);
+            change_mode_with(dir.as_fd(), name, mode, attempt, proc_dir)
+        }
+
+        fn mode_of_file(tree: &Tree, name: &str) -> u32 {
+            std::fs::metadata(tree.path(name)).expect("exists").mode() & 0o777
+        }
+
+        #[test]
+        fn without_proc_the_failure_says_what_is_missing_and_not_that_the_entry_is_gone() {
+            let mut tree = Tree::new();
+            tree.file_with("file", "x", 0o644, 1_000_000_000);
+            let error = chmod_600(&tree, "file", not_implemented, "/no/such/proc")
+                .expect_err("there is no way to change the mode");
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            assert!(error.to_string().contains("/proc"), "{error}");
+            assert_eq!(mode_of_file(&tree, "file"), 0o644);
+        }
+
+        #[test]
+        fn a_kernel_without_fchmodat2_falls_back_to_proc() {
+            for attempt in [not_implemented, invalid, filtered] {
+                let mut tree = Tree::new();
+                tree.file_with("file", "x", 0o644, 1_000_000_000);
+                chmod_600(&tree, "file", attempt, "/proc/self/fd").expect("the mode is set");
+                assert_eq!(mode_of_file(&tree, "file"), 0o600);
+            }
+        }
+
+        #[test]
+        fn another_error_of_fchmodat2_is_passed_on_without_a_fallback() {
+            let mut tree = Tree::new();
+            tree.file_with("file", "x", 0o644, 1_000_000_000);
+            let error = chmod_600(&tree, "file", denied, "/proc/self/fd").expect_err("denied");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(mode_of_file(&tree, "file"), 0o644);
+        }
+
+        #[test]
+        fn a_symlink_is_refused_whichever_way_the_mode_is_set() {
+            let mut tree = Tree::new();
+            tree.file_with("target", "x", 0o644, 1_000_000_000);
+            tree.symlink("link", "target");
+            for attempt in [not_supported, not_implemented] {
+                let error =
+                    chmod_600(&tree, "link", attempt, "/proc/self/fd").expect_err("refused");
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+                assert!(error.to_string().contains("symlink"), "{error}");
+            }
+            assert_eq!(mode_of_file(&tree, "target"), 0o644);
+        }
     }
 
     #[test]
