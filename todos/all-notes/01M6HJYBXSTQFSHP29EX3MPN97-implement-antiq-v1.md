@@ -2394,6 +2394,15 @@ the same commit; the lead checks that at acceptance.
   a run dies mid-write, in object and tracking directories that no
   cleanup covered. The start-of-run repairs remove them (I17; spec
   "Operations" says so, written by the lead).
+- 2026-11-04, review T of the merged diff (ledger `review-t-ledger.md`
+  in the logbook's `plans/impl/`): `remove_tree` and `move_dir` refuse
+  the root path of their tree; `TreeEntry` gains `mount_root` (Linux:
+  statx `STATX_ATTR_MOUNT_ROOT` when the kernel reports it; macOS:
+  `f_mntonname` of the directory against its parent's), so the delete
+  helper refuses a same-filesystem bind mount and the walk and selection
+  report it as a mount point. This replaces the I05 statement that bind
+  mounts are not seen; the bind-mount todo closes with the fix batch,
+  which lands before I19.
 
 ### I04
 
@@ -2474,6 +2483,16 @@ the same commit; the lead checks that at acceptance.
   the tar crate's `append_link` rewrites targets; nothing calls the
   sparse warning before I19. Spec "Packaging" and "Listing" written by
   I06.
+
+### I10
+
+- 2026-11-04: `collection.ignore` lines are anchored at each piece's
+  top; any entry named `.antiq-pin` at the top that is not a directory
+  pins, a directory of that name does not and `unpin` refuses it; the
+  pin is created with `TreeRoot::create_file` (O_EXCL, an empty marker
+  needs no atomic write) and removed with `remove_file`; a tree with walk
+  problems is not idle (an error) unless pinned. I10 writes these into
+  spec "Idle", "Pins" and "Config".
 
 ### I13
 
