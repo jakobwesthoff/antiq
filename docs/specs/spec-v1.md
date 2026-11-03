@@ -229,7 +229,11 @@ read-only and any write to it fails with a clear error. (ADR 0053)
 
 Paths and names are stored as the bytes the filesystem holds. In the
 escaped form, valid UTF-8 stays as it is, `%` becomes `%25`, and every
-byte that is not part of valid UTF-8 becomes `%XX`.
+byte that is not part of valid UTF-8 becomes `%XX`, with upper-case hex
+digits. Every byte sequence has this one escaped form, and a reader
+refuses any other spelling, such as `%41` for `A` or `%ff`. A `path` is
+names joined by single `/`; a name is not empty, has no `/` or NUL and is
+neither `.` nor `..`.
 
 ### Listing
 
