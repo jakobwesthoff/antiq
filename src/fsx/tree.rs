@@ -39,8 +39,34 @@ use std::path::Path;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
-/// How every directory on the way to an entry is opened.
-const DIRECTORY: OFlags = OFlags::RDONLY
+/// How every directory on the way to an entry is opened. Walking through a
+/// directory needs only permission to search it, so it is opened for
+/// searching and not for reading: macOS has `O_SEARCH` for that, Linux
+/// `O_PATH`. Where neither exists the directory is opened for reading.
+#[cfg(target_os = "macos")]
+const SEARCH: OFlags = OFlags::from_bits_retain(libc::O_SEARCH as _)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+#[cfg(target_os = "linux")]
+const SEARCH: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const SEARCH: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// How the root is opened: like a directory on the way, except that
+/// symlinks in the path to the root itself are followed.
+const ROOT: OFlags = SEARCH.difference(OFlags::NOFOLLOW);
+
+/// How a directory is opened to list it, which does need permission to
+/// read it.
+const LISTING: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
@@ -86,8 +112,7 @@ impl TreeRoot {
     /// root is a directory antiq chose (the collection, a staging
     /// directory), not something found inside a piece.
     pub fn open(path: &Path) -> io::Result<TreeRoot> {
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-        let fd = open(path, flags, Mode::empty())?;
+        let fd = open(path, ROOT, Mode::empty())?;
         Ok(TreeRoot {
             fd,
             prefix: RelPath::root(),
@@ -100,7 +125,7 @@ impl TreeRoot {
     /// longer be entered.
     pub fn sub(&self, path: &RelPath) -> io::Result<TreeRoot> {
         Ok(TreeRoot {
-            fd: self.open_dir(path)?,
+            fd: self.open_dir(path, SEARCH)?,
             prefix: self.prefix.concat(path),
         })
     }
@@ -150,7 +175,7 @@ impl TreeRoot {
     pub fn read_dir(&self, path: &RelPath) -> io::Result<Vec<DirEntry>> {
         let directory = self.prefix.concat(path);
         let mut entries = Vec::new();
-        for entry in Dir::new(self.open_dir(path)?)? {
+        for entry in Dir::new(self.open_dir(path, LISTING)?)? {
             let entry = entry?;
             let bytes = entry.file_name().to_bytes();
             if bytes == b"." || bytes == b".." {
@@ -223,21 +248,13 @@ impl TreeRoot {
     }
 
     /// Sets the permission bits of the file or directory at `path`,
-    /// relative to this root. A symlink is
-    /// refused: Linux has no way to change a symlink's mode.
+    /// relative to this root. A symlink is never followed. On Linux a
+    /// symlink is refused as `Unsupported`, since the kernel cannot change
+    /// the mode of a symlink itself; on macOS the symlink's own mode
+    /// changes.
     pub fn set_mode(&self, path: &RelPath, mode: u32) -> io::Result<()> {
         let (dir, name) = self.split_or_root(path)?;
-        if EntryKind::from_mode(read_stat(dir.as_fd(), name)?.mode) == EntryKind::Symlink {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the mode of a symlink cannot be changed",
-            ));
-        }
-        // Never a flag: Linux refuses `SYMLINK_NOFOLLOW` here, and symlinks
-        // were turned away above.
-        let no_flags = AtFlags::empty();
-        chmodat(dir.as_fd(), name, mode_bits(mode), no_flags)?;
-        Ok(())
+        change_mode(dir.as_fd(), name, mode_bits(mode))
     }
 
     /// Sets the modification time, in nanoseconds since the epoch, of the
@@ -297,9 +314,9 @@ impl TreeRoot {
         Ok(unlinkat(dir.as_fd(), name, AtFlags::REMOVEDIR)?)
     }
 
-    fn open_dir(&self, path: &RelPath) -> io::Result<OwnedFd> {
+    fn open_dir(&self, path: &RelPath, flags: OFlags) -> io::Result<OwnedFd> {
         let (dir, name) = self.split_or_root(path)?;
-        Ok(openat(dir.as_fd(), name, DIRECTORY, Mode::empty())?)
+        Ok(openat(dir.as_fd(), name, flags, Mode::empty())?)
     }
 
     /// Opens the directories above the last component of `path` and
@@ -315,7 +332,7 @@ impl TreeRoot {
         };
         let mut handle = Handle::Root(self.fd.as_fd());
         for name in names {
-            let next = openat(handle.as_fd(), name, DIRECTORY, Mode::empty())?;
+            let next = openat(handle.as_fd(), name, SEARCH, Mode::empty())?;
             handle = Handle::Opened(next);
         }
         Ok((handle, last))
@@ -333,6 +350,37 @@ impl TreeRoot {
 
 fn mode_bits(mode: u32) -> Mode {
     Mode::from_bits_truncate(mode as RawMode)
+}
+
+/// `fchmodat` that cannot follow a symlink, also when the entry is
+/// replaced by one between a check and the call: macOS refuses to follow
+/// one itself.
+#[cfg(not(target_os = "linux"))]
+fn change_mode(dir: BorrowedFd<'_>, name: &[u8], mode: Mode) -> io::Result<()> {
+    chmodat(dir, name, mode, AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(())
+}
+
+/// Linux has no `fchmodat` flag that works for this, so the entry is opened
+/// without following a symlink, `fstat` tells a symlink apart on the open
+/// handle, and the mode is set through the handle's `/proc/self/fd` link,
+/// which names the very inode that was checked.
+#[cfg(target_os = "linux")]
+fn change_mode(dir: BorrowedFd<'_>, name: &[u8], mode: Mode) -> io::Result<()> {
+    use rustix::fs::CWD;
+    use std::os::fd::AsRawFd;
+
+    let flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let entry = openat(dir, name, flags, Mode::empty())?;
+    if EntryKind::from_mode(mode_of(fstat(&entry)?.st_mode)) == EntryKind::Symlink {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the mode of a symlink cannot be changed",
+        ));
+    }
+    let through_proc = format!("/proc/self/fd/{}", entry.as_raw_fd());
+    chmodat(CWD, through_proc, mode, AtFlags::empty())?;
+    Ok(())
 }
 
 #[allow(
@@ -490,7 +538,9 @@ mod tests {
     use std::fs::Permissions;
     use std::io::{Read, Write};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -680,18 +730,6 @@ mod tests {
         root.set_times(&path("old"), before)
             .expect("the time is set");
         assert_eq!(root.lstat(&path("old")).expect("stat").mtime_ns, before);
-    }
-
-    #[test]
-    fn the_mode_of_a_symlink_is_not_changed() {
-        let tree = Tree::new();
-        let root = root_of(&tree);
-        root.create_symlink(&path("link"), b"nowhere")
-            .expect("the symlink is created");
-        let error = root
-            .set_mode(&path("link"), 0o600)
-            .expect_err("a symlink has no mode here");
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]
@@ -970,6 +1008,94 @@ mod tests {
         );
         let entry = sub.lstat(&path("c/f")).expect("the file is still reached");
         assert_eq!(entry.path, path("a/b/c/f"));
+    }
+
+    /// A tree with `search_only/inner/file`, where `search_only` can be
+    /// entered and written but not listed (mode 0311).
+    fn search_only_tree() -> (Tree, Unlock) {
+        let mut tree = Tree::new();
+        tree.file("search_only/inner/file", "x");
+        let locked = tree.path("search_only");
+        std::fs::set_permissions(&locked, Permissions::from_mode(0o311)).expect("mode is set");
+        assert!(
+            std::fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 0311 keeps from listing"
+        );
+        (tree, Unlock(vec![locked]))
+    }
+
+    #[test]
+    fn entries_below_a_directory_that_can_only_be_entered_are_reached() {
+        let (tree, _unlock) = search_only_tree();
+        let root = root_of(&tree);
+        let entry = root
+            .lstat(&path("search_only/inner/file"))
+            .expect("the file is stat'd");
+        assert_eq!(entry.kind, EntryKind::File);
+        root.remove_file(&path("search_only/inner/file"))
+            .expect("the file is removed");
+    }
+
+    #[test]
+    fn a_root_that_can_only_be_entered_is_opened_and_used() {
+        let (tree, _unlock) = search_only_tree();
+        let root = TreeRoot::open(&tree.path("search_only")).expect("the root opens");
+        assert_eq!(
+            root.lstat(&path("inner/file")).expect("stat").kind,
+            EntryKind::File
+        );
+        root.create_dir(&path("inner/new"), 0o755)
+            .expect("a directory is created");
+    }
+
+    #[test]
+    fn a_directory_that_can_only_be_entered_cannot_be_listed() {
+        let (tree, _unlock) = search_only_tree();
+        let root = root_of(&tree);
+        let error = root
+            .read_dir(&path("search_only"))
+            .expect_err("listing needs read permission");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_symlink_in_place_of_a_file_never_gets_its_target_changed() {
+        let mut tree = Tree::new();
+        let target = tree.file_with("target", "x", 0o644, 1_000_000_000);
+        tree.symlink("link", &target);
+        let root = root_of(&tree);
+        let _ = root.set_mode(&path("link"), 0o600);
+        let mode = std::fs::metadata(&target).expect("exists").mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn a_symlink_swapped_in_while_the_mode_is_set_never_gets_its_target_changed() {
+        let mut tree = Tree::new();
+        let outside = tree.file_with("outside/secret", "s", 0o600, 1_000_000_000);
+        tree.dir("inside");
+        let inside = tree.path("inside");
+        let root = TreeRoot::open(&inside).expect("the root opens");
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (inside, outside, stop) = (inside.clone(), outside.clone(), stop.clone());
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::fs::write(inside.join("file.tmp"), "x");
+                    let _ = std::fs::rename(inside.join("file.tmp"), inside.join("x"));
+                    let _ = std::os::unix::fs::symlink(&outside, inside.join("link.tmp"));
+                    let _ = std::fs::rename(inside.join("link.tmp"), inside.join("x"));
+                }
+            })
+        };
+        let changed = (0..20_000).any(|_| {
+            let _ = root.set_mode(&path("x"), 0o777);
+            let mode = std::fs::metadata(&outside).expect("exists").mode() & 0o777;
+            mode != 0o600
+        });
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("the swapper ends");
+        assert!(!changed, "set_mode changed a file outside the tree");
     }
 
     #[test]
