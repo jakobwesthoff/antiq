@@ -87,7 +87,9 @@ and the research choices are in ADR 0030 to ADR 0053 and the spec.
   folders or archives. ADR 0009 leaves this open; the review recommended
   a general import of `.tar.xz` files, run once over the old archives,
   and the user decided on 2026-11-03 to decide this later.
-- **Migration** of the existing `.tar.xz` archives and their listings
+- **Migration** (2026-11-03, user: the old archives are recompressed
+  once, outside antiq, when they are imported; antiq reads no xz,
+  ADR 0019) of the existing `.tar.xz` archives and their listings
   (313 on 2026-11-02, 15 GB, all paired with a listing): a one-off step,
   possibly built on that import.
 - **A TUI** or console output only.

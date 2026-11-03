@@ -18,7 +18,7 @@ Version 1 covers what the scripts `archive.sh` and `timecapsule-sync.sh`
 do for `~/playground`:
 
 - archiving folders by age
-- tar archives compressed with xz
+- compressed tar archives
 - an index of each archive's contents
 - searching the archives and bringing one back through a picker
 - rebuilding missing index entries
@@ -253,7 +253,8 @@ resolved.
 ## Packaging
 
 A Packager trait packs, verifies, lists and unpacks. Package formats
-have ids such as `tar+xz/1`. (ADR 0019)
+have ids such as `tar+zstd/1`. Archives and live packages are both tar
+compressed with zstd, with different settings. (ADR 0019)
 
 Tar is written in-process with hand-built GNU headers: mode masked to
 permission bits, uid and gid 0, empty owner names, the real modification
@@ -262,10 +263,10 @@ stored as links, special files skipped and reported. Each file's
 SHA-256 is computed in the same read and written to the listing.
 (ADR 0050)
 
-Archives are tar compressed with xz at preset 9 with a SHA-256 check.
-The thread count is the largest that fits a memory limit, 25 % of RAM
-by default, by liblzma's estimate; decoding uses the same limit.
-(ADR 0051)
+Archives are compressed with zstd at level 19 with long-distance
+matching and a 128 MiB window, one worker per core, at the default job
+size of 64 MiB. A run that archives several pieces compresses them in
+parallel. (ADR 0051)
 
 Live packages are tar compressed with zstd at level 3 in rsyncable mode,
 with a job size of 512 KiB, at least one worker and no long-distance
