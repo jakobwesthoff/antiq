@@ -15,7 +15,13 @@ use std::path::Path;
 /// holding `path`.
 pub(crate) fn available_space(path: &Path) -> Result<u64, FsxError> {
     let stat = rustix::fs::statvfs(path).map_err(|errno| io_error("stat", path)(errno.into()))?;
-    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    Ok(bytes_available(stat.f_bavail, stat.f_frsize))
+}
+
+/// Free blocks an unprivileged process may use, counted in the
+/// fundamental block size.
+fn bytes_available(blocks_available: u64, fragment_size: u64) -> u64 {
+    blocks_available.saturating_mul(fragment_size)
 }
 
 #[cfg(test)]
@@ -24,16 +30,16 @@ mod tests {
     use crate::testing::tree::Tree;
 
     #[test]
-    fn the_free_space_is_positive_and_below_the_size_of_the_filesystem() {
+    fn the_free_space_of_the_temp_volume_is_positive() {
         let tree = Tree::new();
         let free = available_space(tree.root()).expect("answers");
         assert!(free > 0, "the test needs a temp volume with free space");
-        let stat = rustix::fs::statvfs(tree.root()).expect("statvfs");
-        assert!(free <= stat.f_blocks * stat.f_frsize, "{free}");
-        // Other processes write while the test runs, so the two readings
-        // of the live volume differ a little.
-        let reading = stat.f_bavail * stat.f_frsize;
-        assert!(free.abs_diff(reading) < 1 << 30, "{free} against {reading}");
+    }
+
+    #[test]
+    fn free_blocks_are_counted_in_the_fundamental_block_size() {
+        assert_eq!(bytes_available(10, 4096), 40_960);
+        assert_eq!(bytes_available(u64::MAX, 2), u64::MAX);
     }
 
     #[test]

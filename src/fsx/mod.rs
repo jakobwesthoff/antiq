@@ -50,6 +50,22 @@ pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Err
     }
 }
 
+/// Gives directories their owner permissions back when a test ends, so
+/// the temp directory holding them can be removed.
+#[cfg(test)]
+pub(crate) struct RestoreModes(pub Vec<std::path::PathBuf>);
+
+#[cfg(test)]
+impl Drop for RestoreModes {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for path in &self.0 {
+            // Best effort: the directory may be gone already.
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
