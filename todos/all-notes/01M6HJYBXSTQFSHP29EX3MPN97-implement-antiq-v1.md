@@ -1146,10 +1146,13 @@ its finishing commit. Acceptance lines in an entry add to this.
   state-changing commands; read-only callers compute in memory when the
   index is missing (T13); search behind one function whose matching
   follows U1, including member paths from listings if U1 says so.
-- Paths: an absolute path the user typed is first canonicalised on its longest
-  existing prefix, so another spelling of the collection root (macOS
-  `/var` and `/private/var`) still lies below it; I02's `below_root`
-  stays lexical (lead decision, 2026-11-04).
+- Paths: a path the user typed has `.` and `..` folded lexically; then
+  only the shortest ancestor that is the collection root itself (same
+  device and inode) is replaced by the root, so another spelling of the
+  root (macOS `/var` and `/private/var`) still lies below it, and the
+  rest stays lexical: symlinks below the root are never followed. I02's
+  `below_root` stays lexical (lead decision, 2026-11-04, after a review
+  finding of I02's plan).
 - Depends on: I08, I09.
 - Tests: a unique 6-character prefix resolves (first failure: stub); 5
   characters are refused; two objects sharing a prefix give
@@ -1320,10 +1323,13 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Content: the tracking entry records the payload version unearthed
   (F16); an archived ID without a local archive fails with a clear
   error until I34 adds fetching.
-- Paths: an absolute path the user typed is first canonicalised on its longest
-  existing prefix, so another spelling of the collection root (macOS
-  `/var` and `/private/var`) still lies below it; I02's `below_root`
-  stays lexical (lead decision, 2026-11-04).
+- Paths: a path the user typed has `.` and `..` folded lexically; then
+  only the shortest ancestor that is the collection root itself (same
+  device and inode) is replaced by the root, so another spelling of the
+  root (macOS `/var` and `/private/var`) still lies below it, and the
+  rest stays lexical: symlinks below the root are never followed. I02's
+  `below_root` stays lexical (lead decision, 2026-11-04, after a review
+  finding of I02's plan).
 - Depends on: I08, I09, I12, I13, I15, I17.
 - Tests: archive then unearth restores the tree with modes, times,
   symlinks and hard links, and tracking is `live` with the unearthing
@@ -1361,10 +1367,13 @@ its finishing commit. Acceptance lines in an entry add to this.
   checksum flag are checked without holding a frame in memory;
   `std::fs::copy` clones on macOS through `fclonefileat` with an
   `fcopyfile` fallback (std source, `sys/fs/unix.rs`).
-- Paths: an absolute path the user typed is first canonicalised on its longest
-  existing prefix, so another spelling of the collection root (macOS
-  `/var` and `/private/var`) still lies below it; I02's `below_root`
-  stays lexical (lead decision, 2026-11-04).
+- Paths: a path the user typed has `.` and `..` folded lexically; then
+  only the shortest ancestor that is the collection root itself (same
+  device and inode) is replaced by the root, so another spelling of the
+  root (macOS `/var` and `/private/var`) still lies below it, and the
+  rest stays lexical: symlinks below the root are never followed. I02's
+  `below_root` stays lexical (lead decision, 2026-11-04, after a review
+  finding of I02's plan).
 - Depends on: I06, I08, I12, I13, I15, I17.
 - Tests: a zstd tar made with the crate imports and `find` shows it
   (first failure: `not_implemented`); xz and gzip magic refuse naming
@@ -2315,6 +2324,116 @@ ADRs:
 | 0055 `import` | I21 |
 | 0056 Console output and the picker | I01, I36 |
 | 0057 Picker from ntropy's picker | I36, I40 |
+
+
+## 11. Decisions taken during implementation
+
+Lead decisions on questions of the implementation agents and their
+reviewers, dated. Where a decision changes behaviour or a format, the
+item that implements it writes it into the spec or the ADR named, in
+the same commit; the lead checks that at acceptance.
+
+### I01 (merged)
+
+- 2026-11-03: a `BrokenPipe` on stdout or stderr stops that stream
+  without a panic and the run keeps its exit code (spec "Dry runs,
+  scheduling, exit codes", written).
+- 2026-11-03: the envelope's `command` is the command words joined by
+  one space; failures without a specific kind have the kind `other`;
+  `remote::policy` has its call site in I01's dispatch, `probe_state`
+  and `status_warning` get theirs in I16 (spec "JSON output", written).
+- 2026-11-03: `ListingEntry` types are `file`, `dir`, `symlink`,
+  `hardlink` (spec "Listing", written).
+- 2026-11-04, review R of part B (ledger `review-r-ledger.md` in the
+  logbook's `plans/impl/`): `TreeRoot` never follows a symlink when
+  changing a mode; the directory chain opens search-only; `open_read`
+  takes regular files only; a symlink changed while read gives its own
+  error; `sub()` carries its prefix and reports paths relative to the
+  original root, and walkers descend with `sub()`; `Payload.file` and
+  `Payload.listing` are validated names (spec "Storage" grammar for
+  format 1); `TreeRoot::rename` refuses an existing target. Fix batch by
+  the I01 agent, then an opus review of the diff.
+
+### I02
+
+- 2026-11-04: `below_root` stays lexical; root and given path come in
+  the same spelling. I15, I20 and I21 fold `.` and `..` lexically, then
+  replace only the shortest ancestor that is the collection root itself
+  (device and inode) by the root, so symlinks below the root are never
+  followed (see their Paths lines).
+- 2026-11-04: equal birth and modification times give the source
+  `oldest-mtime` (I02 writes it into ADR 0039 and spec "Objects").
+
+### I03
+
+- 2026-11-04: the filesystem primitives take no lock token; they are
+  `pub(crate)`, and the tokens sit at the store and ops layer.
+- 2026-11-04: `move_dir` moves between two `TreeRoot` handles through
+  `TreeRoot::rename` (no-replace), so pieces deeper than the path limit
+  move too. Where the filesystem refuses the no-replace flag (smbfs),
+  `rename` checks the target with an lstat and renames plainly; the
+  window in between is documented, and antiq's moves run under the run
+  lock.
+
+### I04
+
+- 2026-11-04: `collection.exclude` entries are written in the escaped
+  form of spec "Metadata" and parsed into `RelPath`.
+- 2026-11-04: an unknown `[collection]` key gives a warning naming it;
+  range checks with an error naming the key: `memory_percent` 1 to 100,
+  `remote_jobs` at least 1, `brake_percent` 0 to 100, timeouts and
+  `live_retries` above the value that would disable them; an empty
+  machine name is refused; a `.antiq` that is a symlink or a file is no
+  marker. I04 writes these into spec "Config" and "Collections and
+  pieces".
+
+### I05
+
+- 2026-11-04: a directory selection must descend into but cannot list
+  is reported as unreadable for selection and skipped; skipped
+  symlinks are symlinks a pattern matched, skipped dot entries are
+  directories only the dot rule kept out; the junk list applies to
+  entries that are not directories; patterns with empty, `.` or `..`
+  components are invalid; an exclude entry that exists also matches by
+  device and inode, so it works on case-insensitive volumes; an entry
+  that vanishes during a walk makes the piece unreadable for that run.
+  I05 writes these into spec "Selection", "Walks" and "Idle".
+- 2026-11-04: glob 0.3.4 lets `*.txt` match `.txt`, so I05 applies the
+  dot rule in its own per-component matcher (and records the glob
+  behaviour in `docs/research/foundations.md`).
+- 2026-11-04: patterns and names compare as bytes, so an NFC pattern
+  does not match an NFD name (I05 writes it into spec "Selection").
+- Out of scope, filed as a someday todo: bind mounts on the same
+  filesystem keep `st_dev`, so the device rule cannot see them.
+
+### I06
+
+- 2026-11-04: I06 defines the complete `Packager` trait (format, pack,
+  verify_strict, list, unpack, taking `&TreeRoot` where they touch a
+  tree); the tar+zstd implementation delegates verify, list and unpack
+  to free functions in `pack/verify.rs`, `pack/read.rs` and
+  `pack/extract.rs`, stubs until I12 and I13 fill them.
+- 2026-11-04: the container directory is the first member, with the top
+  directory's mode and time, and has no listing line; listing `size` is
+  the tar header size, 0 for directories, symlinks and hard links; the
+  first path of a hard-linked inode in path-byte order is the file,
+  later ones link to `<container>/<first path>` with listing type
+  `hardlink` and `link` the first path; the sparse warning fires above
+  1 GiB, strictly; a file that grew is cut at the header size, a short
+  read pads with zeros and marks the file changed, a vanished file fails
+  the pack naming it; `PackSettings` carries the archive or live preset.
+  I06 writes the listing and member rules into spec "Packaging" and
+  "Listing".
+
+### I07
+
+- 2026-11-04: two lines in `src/testing/mod.rs` export the shared test
+  pool; the Linux container run relies on `RUST_TEST_THREADS=4`, since
+  `sysconf` sees the host's memory, not a container limit (R5 holds
+  only with that).
+- Open, assigned: the bytes per worker of a level-3 lease is decided in
+  I14's plan; listing compression never leases while a payload lease is
+  held (I08).
 
 ## Relations
 
