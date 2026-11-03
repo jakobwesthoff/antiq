@@ -2357,7 +2357,7 @@ the same commit; the lead checks that at acceptance.
   format 1); `TreeRoot::rename` refuses an existing target. Fix batch by
   the I01 agent, then an opus review of the diff.
 
-### I02
+### I02 (merged)
 
 - 2026-11-04: `below_root` stays lexical; root and given path come in
   the same spelling. I15, I20 and I21 fold `.` and `..` lexically, then
@@ -2366,6 +2366,14 @@ the same commit; the lead checks that at acceptance.
   followed (see their Paths lines).
 - 2026-11-04: equal birth and modification times give the source
   `oldest-mtime` (I02 writes it into ADR 0039 and spec "Objects").
+
+- 2026-11-04 (I02 report): a relative `--to` or `--path` resolves
+  against the current directory like a piece reference; a path outside
+  the collection is refused with the new error kind
+  `outside_collection`, exit 1 (I15 adds the kind to `ErrorKind`; spec
+  "Command line" and "JSON output" written by the lead). Two machine
+  names alike in their first 32 escaped bytes give the same temp name;
+  accepted, since only an object's owner uploads it.
 
 ### I03
 

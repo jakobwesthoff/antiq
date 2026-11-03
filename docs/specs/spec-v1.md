@@ -955,9 +955,13 @@ current directory, normalised, and taken relative to the collection
 root; a path outside the collection is refused; archived pieces resolve
 the same way although their folder is gone. `.` and `..` in a path are
 resolved from its text, and a `..` that would go above the root of the
-filesystem is refused; `--to` and `--path` are normalised the same way.
-A ULID may be shortened to
-a prefix of at least 6 characters that is unique among the objects this
+filesystem is refused; `--to` and `--path` are normalised the same way,
+also relative to the current directory. Only the collection root itself
+is recognised by device and inode, so another spelling of it, such as
+`/var` and `/private/var` on macOS, still counts as the root; symlinks
+below the root are never followed. A path outside the collection is
+refused with the error kind `outside_collection`, exit 1. A ULID may be
+shortened to a prefix of at least 6 characters that is unique among the objects this
 machine knows at that moment. A reference that matches several objects
 refuses and lists them with their IDs; one that matches none is an
 error. Both exit 1. JSON output always carries full ULIDs; scripts use
@@ -1070,6 +1074,7 @@ kinds add keys to the error object. A `--dry-run` plan carries
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
 | `unknown_reference` | 1 | a piece reference matches no object | |
+| `outside_collection` | 1 | a path given as a piece, `--to` or `--path` lies outside the collection | |
 | `brake` | 1 | the brake holds and there is no terminal to ask | `planned`, `set_size`, `items`: up to ten `{id, path}` |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds) |
 | `no_remote` | 1 | a command needs a remote and none is attached | |
