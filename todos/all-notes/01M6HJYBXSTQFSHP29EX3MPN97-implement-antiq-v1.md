@@ -2566,6 +2566,11 @@ the same commit; the lead checks that at acceptance.
   only a file gone before it is opened is dropped. The caller (I32)
   holds the pool lease; a restart re-walks the piece. I14 writes these
   into spec "Packaging", "Verifying" and "Config".
+- 2026-11-04: what a live package left out reaches other machines
+  through a payload key `left_out` (escaped paths, live payloads only,
+  omitted when empty), not through the `encoder` record. I14's packer
+  returns the list; I32 adds the key to `Payload` and to spec
+  "Metadata" when it writes live payloads; I34 warns on it.
 
 ### I13
 
