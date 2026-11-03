@@ -2486,6 +2486,18 @@ the same commit; the lead checks that at acceptance.
   sparse warning before I19. Spec "Packaging" and "Listing" written by
   I06.
 
+### I08
+
+- 2026-11-04: history actions are `archive`, `reclaim`, `unearth`,
+  `fork` (on both IDs), `sync`, `import`, `resolve`; a listing file
+  carries the first 16 hex of its payload's SHA-256, and a put onto an
+  existing listing name compares the full SHA-256 of both files; an
+  unreadable `meta.pending` is an error, never a fallback;
+  `write_pending` is refused over an unparsable or too-new highest
+  committed version; `promote_pending` refuses a number not above the
+  highest local committed one. I08 writes these into spec "Metadata",
+  "Storage", "Metadata changes" and ADR 0058.
+
 ### I10
 
 - 2026-11-04: `collection.ignore` lines are anchored at each piece's
