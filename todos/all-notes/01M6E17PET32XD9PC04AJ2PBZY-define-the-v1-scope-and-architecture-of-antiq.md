@@ -55,7 +55,7 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0021 and in
+Settled decisions live in ADR 0002 to ADR 0029 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
 - 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
@@ -64,8 +64,6 @@ Settled decisions live in ADR 0002 to ADR 0021 and in
   change later: a rudimentary CLI first to get a feeling for what is
   needed, then the business-logic parts, then the extension points
   (ADR 0006), then onwards from there.
-- 2026-11-02, user: command names, the noun for a managed folder and the
-  name of the per-unit opt-out follow the name antiq and are chosen next.
 - 2026-11-02, user: things to address or think about later become todos
   as they come up, even if the outcome may be not to do them.
 
@@ -76,28 +74,26 @@ findings, 2026-11-02) are in the session logbook at
 `~/playground/2026_11_02_antiq-logbook/`:
 `plans/design-draft-v2.md` (the draft with every fix the reviewers and
 the lead agreed on), `plans/adversarial-ledger.md` (each finding with
-evidence and outcome) and `plans/open-questions.md` (the questions for
-the user). Agreed fixes enter the spec and ADRs only after the user has
-gone through them.
+evidence and outcome) and `plans/open-questions.md` (the questions and
+the user's answers of 2026-11-03). Research on the dependencies is in
+`docs/research/`; draft 2's section 11 lists what it changes in the
+design.
 
 ## Open questions
 
-- **Review questions.** The 13 questions in
-  `plans/open-questions.md` of the logbook, among them: which remote is
-  built first and whether the path remote does delta transfer; how the
-  ID time is computed; whether replacing an archive asks first when
-  content would be lost; what happens to empty units; how tier ages are
-  measured; how other machines' live objects behave on a shared remote;
-  whether `reconcile` drops entries only on request; and whether live
-  packages stay zstd-compressed, given that uncompressed tar transferred
-  0.04 to 0.14 % per change in a measurement where zstd transferred up to
-  6 %.
+- **Review fixes and answers.** The user answered the review questions
+  on 2026-11-03; the answers, the agreed review fixes and the research
+  consequences are not yet in the spec and ADRs.
+- **Commit protocol on an SMB path remote.** An exclusively created
+  `meta.<N+1>` is visible while it is written, and SMB offers no rename
+  that refuses an existing target (`docs/research/filesystem.md`).
 - **Several machines, live folders.** Bringing one live folder together
   across machines stays out of v1 (ADR 0008); a shared remote for
   archives is in (ADR 0017).
 - **Import.** Whether the tool gets a structured import for existing
-  folders or archives. ADR 0009 leaves this open; the review recommends a
-  general import of `.tar.xz` files, run once over the old archives.
+  folders or archives. ADR 0009 leaves this open; the review recommended
+  a general import of `.tar.xz` files, run once over the old archives,
+  and the user decided on 2026-11-03 to decide this later.
 - **Migration** of the existing `.tar.xz` archives and their listings
   (313 on 2026-11-02, 15 GB, all paired with a listing): a one-off step,
   possibly built on that import.
