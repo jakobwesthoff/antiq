@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The collection's config file.
+
+/// Errors of the config file.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {}
+
+impl crate::error::HasKind for ConfigError {}

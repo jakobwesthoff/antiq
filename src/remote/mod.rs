@@ -15,3 +15,31 @@ pub mod ssh;
 #[cfg(test)]
 pub mod testing;
 pub mod url;
+
+use crate::error::{ErrorKind, HasKind};
+
+/// Errors of remotes.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoteError {
+    #[error("no remote is attached")]
+    NoRemote,
+    /// The remote cannot be reached right now. `overdue` says it has been
+    /// away for longer than `away_warn_days` while remote work is pending.
+    #[error("{message}")]
+    Away { message: String, overdue: bool },
+    #[error("{0}")]
+    Broken(String),
+    #[error("{0} is not supported yet")]
+    Unsupported(String),
+}
+
+impl HasKind for RemoteError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            RemoteError::NoRemote => ErrorKind::NoRemote,
+            RemoteError::Away { .. } => ErrorKind::RemoteAway,
+            RemoteError::Broken(_) => ErrorKind::RemoteBroken,
+            RemoteError::Unsupported(_) => ErrorKind::Unsupported,
+        }
+    }
+}

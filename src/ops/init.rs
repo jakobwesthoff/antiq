@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `init` command.
+
+/// Errors of the `init` command.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {}
+
+impl crate::error::HasKind for InitError {}

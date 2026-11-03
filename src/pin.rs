@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Pin files.
+
+/// Errors of pin files.
+#[derive(Debug, thiserror::Error)]
+pub enum PinError {}
+
+impl crate::error::HasKind for PinError {}

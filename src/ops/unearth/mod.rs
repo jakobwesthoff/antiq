@@ -7,3 +7,9 @@
 pub mod live;
 pub mod local;
 pub mod remote;
+
+/// Errors of the `unearth` command.
+#[derive(Debug, thiserror::Error)]
+pub enum UnearthError {}
+
+impl crate::error::HasKind for UnearthError {}

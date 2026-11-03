@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `remote add`, `remote show` and `remote remove` commands.
+
+/// Errors of the `remote` commands.
+#[derive(Debug, thiserror::Error)]
+pub enum RemoteOpError {}
+
+impl crate::error::HasKind for RemoteOpError {}

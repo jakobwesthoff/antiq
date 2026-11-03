@@ -6,3 +6,9 @@
 
 pub mod new;
 pub mod unearthed;
+
+/// Errors of the `archive` command.
+#[derive(Debug, thiserror::Error)]
+pub enum ArchiveError {}
+
+impl crate::error::HasKind for ArchiveError {}

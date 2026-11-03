@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `import` command.
+
+/// Errors of the `import` command.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {}
+
+impl crate::error::HasKind for ImportError {}

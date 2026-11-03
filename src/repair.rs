@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Repairs at the start of a run.
+
+/// Errors of the start-of-run repairs.
+#[derive(Debug, thiserror::Error)]
+pub enum RepairError {}
+
+impl crate::error::HasKind for RepairError {}

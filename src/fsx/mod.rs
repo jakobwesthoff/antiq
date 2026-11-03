@@ -10,3 +10,9 @@ pub mod moves;
 pub mod remove;
 pub mod space;
 pub mod tree;
+
+/// Errors of the filesystem primitives.
+#[derive(Debug, thiserror::Error)]
+pub enum FsxError {}
+
+impl crate::error::HasKind for FsxError {}

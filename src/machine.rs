@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The machine name.
+
+/// Errors of the machine name.
+#[derive(Debug, thiserror::Error)]
+pub enum MachineError {}
+
+impl crate::error::HasKind for MachineError {}

@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The lstat walk of a piece.
+
+/// Errors of the piece walk.
+#[derive(Debug, thiserror::Error)]
+pub enum WalkError {}
+
+impl crate::error::HasKind for WalkError {}

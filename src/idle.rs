@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The idle verdict of a piece.
+
+/// Errors of the idle check.
+#[derive(Debug, thiserror::Error)]
+pub enum IdleError {}
+
+impl crate::error::HasKind for IdleError {}

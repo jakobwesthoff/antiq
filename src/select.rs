@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Selecting pieces.
+
+/// Errors of piece selection.
+#[derive(Debug, thiserror::Error)]
+pub enum SelectError {}
+
+impl crate::error::HasKind for SelectError {}

@@ -15,3 +15,9 @@ pub mod read;
 pub mod tar_write;
 pub mod verify;
 pub mod zstd;
+
+/// Errors of packing and unpacking.
+#[derive(Debug, thiserror::Error)]
+pub enum PackError {}
+
+impl crate::error::HasKind for PackError {}

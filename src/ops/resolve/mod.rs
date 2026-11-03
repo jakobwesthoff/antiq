@@ -8,3 +8,20 @@ pub mod conflict;
 pub mod diverged;
 pub mod replace;
 pub mod superseded;
+
+use crate::error::{ErrorKind, HasKind};
+
+/// Errors of the `resolve` command.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("{0} is not supported yet")]
+    Unsupported(String),
+}
+
+impl HasKind for ResolveError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            ResolveError::Unsupported(_) => ErrorKind::Unsupported,
+        }
+    }
+}

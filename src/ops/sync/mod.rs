@@ -10,3 +10,9 @@ pub mod live;
 pub mod pull;
 pub mod tiers;
 pub mod upload;
+
+/// Errors of the `sync` command.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {}
+
+impl crate::error::HasKind for SyncError {}

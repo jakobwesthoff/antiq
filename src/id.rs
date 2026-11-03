@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Object IDs.
+
+/// Errors of object IDs.
+#[derive(Debug, thiserror::Error)]
+pub enum IdError {}
+
+impl crate::error::HasKind for IdError {}

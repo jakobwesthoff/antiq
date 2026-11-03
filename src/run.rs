@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The guard around a state-changing run.
+
+/// Errors of the run guard.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {}
+
+impl crate::error::HasKind for RunError {}

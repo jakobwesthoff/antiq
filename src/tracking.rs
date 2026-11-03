@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Tracking entries.
+
+/// Errors of tracking entries.
+#[derive(Debug, thiserror::Error)]
+pub enum TrackingError {}
+
+impl crate::error::HasKind for TrackingError {}
