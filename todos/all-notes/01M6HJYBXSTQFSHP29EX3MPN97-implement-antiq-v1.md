@@ -132,7 +132,7 @@ Library, `src/lib.rs`:
 | `remote::ssh::session`, `::script`, `::classify` | `ssh` executable, master connection, `/bin/sh -s` scripts, away and broken | ADR 0048 | I24 |
 | `remote::rsync` | rsync resolution, probe, command line, stats | ADR 0049 | I25 |
 | `remote::ssh` (`mod.rs`) | `SshRemote`, the trait over ssh and rsync; the `ssh` arm of opening | ADR 0048, 0049 | I28 |
-| `remote::policy`, `remote::away`, `remote::network` | `--if-reachable`, `away_warn_days`, `network_check` | spec "Remotes", "Dry runs, scheduling, exit codes" | I29 |
+| `remote::policy`, `remote::away` | `--if-reachable`, `away_warn_days` | spec "Remotes", "Dry runs, scheduling, exit codes" | I29 |
 | `ops::<command>` | One module per command; `ops::archive`, `ops::unearth`, `ops::resolve` and `ops::sync` are directories with one file per part | spec "Operations", "Command line" | command items |
 | `testing` (`cfg(test)`) | Fixtures shared by library tests | section 4 | I01 |
 
@@ -272,8 +272,8 @@ parts that vary through these traits:
   terminal, an unknown or ambiguous piece; 2 usage error (clap's own
   usage errors exit 2: `USAGE_CODE` in clap_builder 4.6.7); 3 partial,
   from `CommandReport::partial()`; 4 remote away, turned into 0 by
-  `--if-reachable` through `remote::policy` (I01 call site, I29 fills
-  it).
+  `--if-reachable` through `remote::policy` (I01 stub, I29 fills it,
+  I30 places the first call site).
 - `EMFILE` and `ENFILE` are errors of the run, never an unreadable
   piece (O11). `main` raises the soft `RLIMIT_NOFILE` before anything
   else (I01).
@@ -484,7 +484,7 @@ SSH clients (ADR 0048), xz crates (antiq reads no xz, ADR 0019).
   boundary inside a piece or at its top, a mount point at the remote
   root, free space, the filesystem type (SMB and NFS warnings),
   `ENOTSUP` from `sync_all`, the staging volume's case and Unicode
-  rules, the network check. Each seam is an internal parameter (a probe
+  rules. Each seam is an internal parameter (a probe
   trait or a function value), not a config key (T17).
 
 ### 4.4 SSH and rsync
@@ -652,7 +652,12 @@ its finishing commit. Acceptance lines in an entry add to this.
   `remote::probe_state(&Collection) -> RemoteState` returns `None`,
   `remote::away::status_warning(...)` returns no warning,
   `remote::policy` returns the plain outcome (filled by I23 and I29),
-  each with its call site in place; raising the soft `RLIMIT_NOFILE` in
+  as plain stubs with unit tests; their call sites land with the first
+  consumer (I16 calls `probe_state` and `status_warning`, I30 calls
+  `remote::policy`; lead decision on the I01 plan, 2026-11-03); the
+  `ListingEntry` key names and type values go into spec "Listing" with
+  part B; a generic error kind `other` for failures without a specific
+  kind; raising the soft `RLIMIT_NOFILE` in
   `main` (O11); output through `io::Result` with `BrokenPipe` mapped to
   exit 0 and the print lints denied (O13).
 - Must not touch: any behaviour beyond parsing, the envelope and the
@@ -1619,29 +1624,23 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Docs: none.
 - Size: L.
 
-#### I29 Reachability policy: `--if-reachable`, the away warning and the network check
+#### I29 Reachability policy: `--if-reachable` and the away warning
 
 - Implements: spec "Remotes" (away longer than `away_warn_days` with
   remote work pending: `status` warns and `--if-reachable` no longer
   turns away into exit 0), "Dry runs, scheduling, exit codes"
-  (`--if-reachable` for scheduled runs; exit 4), "Config"
-  (`machine.network_check`: outside the home network the remote is
-  away).
-- Owns: `src/remote/{policy,away,network}.rs`; fills I01's
+  (`--if-reachable` for scheduled runs; exit 4). The network check is
+  out of v1 (U6).
+- Owns: `src/remote/{policy,away}.rs`; fills I01's
   `remote::policy` and `remote::away::status_warning` stubs, whose call
-  sites are in place (S5); the time the remote was last reachable is
+  sites I16 and I30 place (S5); the time the remote was last reachable is
   kept in `.antiq/remote-state.json` (T24).
-- Content: the network check compares per U6 behind a seam; when antiq
-  cannot determine the network, it tries to connect (O14).
-- Depends on: I23; the comparison of the network check waits on U6.
+- Depends on: I23.
 - Tests (library level; the binary exit test is in I30): away with
   `--if-reachable` gives the exit-0 outcome, without it `remote_away`
   (first failure: stub); away for eight days with pending work gives
   `remote_away` under `--if-reachable` and a `status` warning; broken
-  stays an error; the network seam reports "outside" and the remote is
-  away without a connection attempt; "cannot determine" leads to a
-  connection attempt; the parser of the gateway lookup reads recorded
-  output of each supported system.
+  stays an error.
 - Docs: the local layout in spec "Storage" (`remote-state.json`).
 - Size: M.
 
@@ -2037,10 +2036,10 @@ plan keeps them in wave 6.
   gains the explicit `resolve --drop-superseded` case that spec
   "Safety" has, and ADR 0039's source list gains `fork` and `minted`
   (T2), in place.
-- R2 Gaps that block items. U1 blocks the search part of I15 and I18;
-  U5 touches I11; U6 blocks the comparison of the network check in I29;
-  U7 confirms the brake set of `resolve --drop-superseded` in I35.
-  Recommendation: settle them while wave 1 runs.
+- R2 Open user designs. U2 (console look) blocks the console rendering
+  of the command items from I16 on; U4 (contents view) blocks I40. Both
+  are being designed with the user from rendered pictures while wave 1
+  runs.
 - R3 Long paths. On macOS, 44 members of a 1,300-byte path failed past
   `PATH_MAX` of 1,024 with the `tar` crate (names research), and spec
   "unearth" extracts such paths directory by directory. Every consumer
@@ -2136,7 +2135,7 @@ plan keeps them in wave 6.
 - T15 Metadata and history times are written in whole seconds.
 - T16 The terminal glue is covered by the pty harness of 4.5 in I36.
 - T17 Devices, free space, filesystem type, `ENOTSUP`, the volume's name
-  rules and the network check go through seams; no disk-image test.
+  rules go through seams; no disk-image test.
 - T18 `tar` without its default features.
 - T19 ULIDs are written in upper case; references accept either case.
 - T20 The binary stays `src/main.rs`, its modules under `src/cli/`.
@@ -2156,55 +2155,31 @@ plan keeps them in wave 6.
 
 ## 9. Questions for the user
 
-Behaviour, look and taste that the spec and ADRs leave open. Each with
-a recommendation.
+Answered by the user on 2026-11-03 (chat), binding for the items:
 
-- U1 Whether `find <query>` searches member paths in v1. The spec's
-  scope names "an index of each archive's contents" and "searching the
-  archives"; spec "find" says it "lists and searches all objects".
-  Recommendation: yes, the query also matches member paths from the
-  listings. Also open: fuzzy matching (as the picker) or substring;
-  whether new pieces without an ID appear; which size the JSON `size`
-  field carries. Recommendation: the picker's fuzzy matching; objects
-  only; `size` the current payload's size.
-- U2 Console look of `status`, `archive`, `sync` and the other commands,
-  including progress during long runs. Recommendation: plain grouped
-  text first (the rudimentary CLI), reviewed once real output exists.
-- U3 Picker keys and flow. Which keys trigger fork, pin or unpin, print
-  and the contents view (ntropy reserves Ctrl with c, d, n, p, u and w);
-  whether the picker closes after each action, as ntropy's does; whether
-  forking from the picker asks for a new name. Recommendation: ntropy's
-  accept keys, every action ends the picker, fork keeps the name.
-- U4 The contents view of the picker (todo
-  `01M6ESY4GEGYFC37C81N3PW6XG`, needs-discussion). Blocks I40 only.
-- U5 Small command-line gaps:
-  - `init` where `.antiq/` already exists, or inside a collection.
-    Recommendation: refuse, naming the existing collection's root.
-  - `init --yes` and the proposed `archive/` exclude. Recommendation:
-    `--yes` accepts the proposal as part of the plan.
-  - `sync`, `remote show`, `reconcile` and `--if-reachable` with no
-    remote attached. Recommendation: `sync` fails with exit 1 and a
-    `no_remote` kind; `remote show` reports none and exits 0;
-    `reconcile` does its local part.
-  - The exit code after an interactive "skip". Recommendation: 3, since
-    the table's 3 means "some objects skipped"; nothing stays pending.
-  - The exit code of `status` when it shows problems. Recommendation: 0
-    unless the command itself fails.
-- U6 What `machine.network_check` compares. The spec says "router
-  address of the home network". The default gateway's IP address is
-  simple to read, but private addresses such as `192.168.1.1` repeat
-  across networks, so another network can pass as home. Its hardware
-  (MAC) address tells networks apart, but comes from the ARP cache,
-  whose entries expire (20 minutes on macOS, measured as `max_age`
-  1200 s), and the lookup differs per system. Either way, when antiq
-  cannot determine the network, it tries to connect. Blocks the
-  comparison in I29.
-- U7 `resolve --drop-superseded` and the brake. With the brake's set
-  being the ID's archive payloads, dropping a superseded payload removes
-  at least half of the set while one current payload exists, so every
-  `--drop-superseded` holds the brake at the default 20 %: it always
-  asks on a terminal and needs `--force` without one. Recommendation:
-  keep it so.
+- U1 `find <query>` also matches member paths from the listings
+  (I15 search, I18). Fuzzy matching as the picker; objects only; JSON
+  `size` is the current payload's size.
+- U2 The console look of `status`, `archive`, `sync` and the other
+  commands is designed with the user before the command items start,
+  from rendered terminal pictures. Open; blocks the console rendering of
+  I16 and later command items, not their library parts.
+- U3 Picker flow: after pin, unpin or print the picker stays open;
+  unearth and fork close it. Keys and the fork name follow ntropy's
+  accept keys and keep the name unless the U4 design says otherwise.
+- U4 The contents view is designed with the user now, from rendered
+  pictures (todo `01M6ESY4GEGYFC37C81N3PW6XG`). Open; blocks I40.
+- U5 Accepted as recommended: `init` where `.antiq/` exists or inside a
+  collection refuses, naming the existing root; `init --yes` takes the
+  proposed `archive/` exclude; `sync` without a remote fails with exit 1
+  and kind `no_remote`, `remote show` reports none and exits 0,
+  `reconcile` does its local part, `--if-reachable` without a remote
+  changes nothing; an interactive "skip" ends with exit 3; `status`
+  exits 0 unless the command itself fails.
+- U6 `machine.network_check` is out of v1; a someday todo keeps the
+  gateway IP and MAC options and the ARP finding (O14).
+- U7 Every `resolve --drop-superseded` holds the brake (asks on a
+  terminal, needs `--force` without one), as the brake's set rule gives.
 
 ## 10. Coverage of the spec and the ADRs
 

@@ -342,7 +342,6 @@ remotes; version 1 accepts exactly one.
 | `machine.server_alive_count` | 4 | |
 | `machine.control_persist` | 60 | seconds |
 | `machine.rsync_timeout` | 300 | seconds |
-| `machine.network_check` | none | router address of the home network; outside it the remote is away |
 | `remote.url` | | as given to `remote add` |
 | `remote.id` | | the remote's ULID |
 | `remote.host_key_alias` | none | |
