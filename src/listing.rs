@@ -130,7 +130,7 @@ mod tests {
         let entry = ListingEntry {
             path: path("link"),
             kind: ListingType::Symlink,
-            size: 6,
+            size: 0,
             mtime: 5,
             mode: 0o777,
             link: Some(LinkTarget::from_bytes(b"../a%\xff".to_vec())),
@@ -138,7 +138,7 @@ mod tests {
         };
         assert_eq!(
             line(&entry),
-            r#"{"path":"link","type":"symlink","size":6,"mtime":5,"mode":511,"link":"../a%25%FF"}"#
+            r#"{"path":"link","type":"symlink","size":0,"mtime":5,"mode":511,"link":"../a%25%FF"}"#
         );
     }
 
@@ -164,7 +164,7 @@ mod tests {
         let lines = [
             r#"{"path":"a/%FF","type":"file","size":1,"mtime":-3,"mode":420,"sha256":"00"}"#,
             r#"{"path":"d","type":"dir","size":0,"mtime":0,"mode":493}"#,
-            r#"{"path":"l","type":"symlink","size":1,"mtime":0,"mode":511,"link":"x%FF"}"#,
+            r#"{"path":"l","type":"symlink","size":0,"mtime":0,"mode":511,"link":"x%FF"}"#,
             r#"{"path":"h","type":"hardlink","size":0,"mtime":0,"mode":420,"link":"a/b"}"#,
         ];
         for text in lines {
