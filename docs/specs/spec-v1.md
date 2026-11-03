@@ -713,10 +713,12 @@ sync after unearthing packs once.
 Commands that change state take an exclusive lock on `.antiq/lock` and
 write their pid, machine and start time into it. A command that finds
 the lock held fails at once with exit 1 and names the pid and start
-time. Read-only commands and dry runs take no lock; `status`, `find`
-and dry runs print a note while a run holds it, read from the pid in
-the lock file without trying the lock. A collection on an SMB or NFS
-mount gets a warning.
+time, when the lock file has them: a run that has taken the lock but not
+yet written them is named by neither. Read-only commands and dry runs
+take no lock; `status`, `find` and dry runs print a note while a run
+holds it, read from the pid in the lock file without trying the lock.
+The note is absent in the moment between a run taking the lock and
+writing the file. A collection on an SMB or NFS mount gets a warning.
 
 Every state-changing run, right after taking the lock, in this order:
 
@@ -1100,7 +1102,7 @@ kinds add keys to the error object. A `--dry-run` plan carries
 | `unknown_reference` | 1 | a piece reference matches no object | |
 | `outside_collection` | 1 | a path given as a piece, `--to` or `--path` lies outside the collection | |
 | `brake` | 1 | the brake holds and there is no terminal to ask | `planned`, `set_size`, `items`: up to ten `{id, path}` |
-| `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds) |
+| `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
 | `no_remote` | 1 | a command needs a remote and none is attached | |
 | `remote_away` | 4 | the remote cannot be reached | |
 | `remote_broken` | 1 | the remote is broken, as "Remotes" defines | |
