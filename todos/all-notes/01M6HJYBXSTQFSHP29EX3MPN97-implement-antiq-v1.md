@@ -453,9 +453,10 @@ SSH clients (ADR 0048), xz crates (antiq reads no xz, ADR 0019).
   hard links, a fifo, a small sparse file (`set_len`), paths longer than
   1,024 bytes (built through `TreeRoot`), unreadable directories (mode
   000, restored on drop so the temp directory can be removed).
-- `TempCollection`: a temp directory made a collection through the
-  `init` code once I11 lands; before that a minimal `.antiq/` written
-  directly by the I01 helper.
+- `TempCollection`: a temp directory with a minimal `.antiq/` written
+  directly by the I01 helper, with a fixed collection ID that tests
+  assert. A test of I11 checks that `init` produces the same layout and
+  config keys, IDs and machine name aside.
 - `FixedClock` with `advance`; `SeqIds` minting `Ulid::from_parts(ms,
   counter)`.
 - `ScriptedInteraction`: a queue of expected questions and answers; it
@@ -2493,6 +2494,30 @@ the same commit; the lead checks that at acceptance.
   needs no atomic write) and removed with `remove_file`; a tree with walk
   problems is not idle (an error) unless pinned. I10 writes these into
   spec "Idle", "Pins" and "Config".
+
+### I11
+
+- 2026-11-04: commands get `out: &mut Output` as the last parameter of
+  `cmd::*::run`, and `Output` gains `line` (stdout) and `note` (stderr);
+  I11 lands this as its own first commit. `TempCollection` stays the
+  I01 helper (section 4.2). The `archive.sh` exclude is proposed only
+  when `archive/` is a directory holding a `*.tar.xz` and
+  `archive/index/` holds a `*.lst` (ADR 0009), and the patterns would
+  select `archive` (I11 writes it into spec "Collections and pieces").
+
+### I14
+
+- 2026-11-04: `collection.live_exclude` entries are paths relative to
+  the collection root in the escaped form, parsed into `RelPath` like
+  `collection.exclude`; an entry and everything below it is left out of
+  the live package and the manifest, an entry at or above a piece's top
+  leaves that piece without a live package, an empty entry is an error;
+  the packer reports whether anything was left out (for `unearth`'s
+  warning). `live_retries` counts restarts, so the default 3 gives four
+  attempts. A file that vanishes after its read counts as changed;
+  only a file gone before it is opened is dropped. The caller (I32)
+  holds the pool lease; a restart re-walks the piece. I14 writes these
+  into spec "Packaging", "Verifying" and "Config".
 
 ### I13
 
