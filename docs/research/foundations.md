@@ -52,8 +52,9 @@ Measured, with separator-aware matching in all three crates:
 
 - **`glob`** (rust-lang, MIT OR Apache-2.0, 702M downloads, 160M
   recent, 0.3.4 on 2026-07-21): `MatchOptions` with
-  `require_literal_leading_dot` implements R2, also under `**`. No brace
-  alternation, no negation.
+  `require_literal_leading_dot` implements R2 only in part: `*`, `?`,
+  bracket classes and `**` do not match a leading dot, but a literal
+  after a `*` is not checked (below). No brace alternation, no negation.
 - **`globset`** (ripgrep repository, Unlicense OR MIT, 280M downloads,
   69M recent, 0.4.21 on 2026-10-27): braces, `**`, matching many patterns
   in one pass. No dot rule: `*` matches `.git`, so R2 would be antiq's
@@ -61,8 +62,8 @@ Measured, with separator-aware matching in all three crates:
 - **`wax`** (MIT, 3.4M downloads, one maintainer, 0.7.0 on 2026-01-29):
   richer syntax and its own walker, no dot rule.
 
-`.*` matches `.foo` in `glob`. Whether `.*` counts as naming a dot entry
-explicitly is not specified yet.
+`.*` matches `.foo` in `glob`, and ADR 0028 counts a pattern component
+with a literal leading dot, `.*` included, as naming a dot entry.
 
 `glob` 0.3.4 applies `require_literal_leading_dot` only to `*` (after its
 first character), `?` and `[...]`. A literal character that follows a `*`
@@ -243,9 +244,10 @@ On the test Mac `scutil --get ComputerName` printed `imperius` and
 
 ## Assessment
 
-- Glob: `glob` when braces are not needed, since it alone implements the
-  dot rule; otherwise `globset` with a dot rule in antiq. The
-  shallowest-match walk is antiq's own code in both cases.
+- Glob: `glob` for each path component when braces are not needed, with
+  the dot rule applied by antiq since the crate checks it only in part;
+  otherwise `globset` with a dot rule in antiq. The shallowest-match walk
+  is antiq's own code in both cases.
 - Ignore rules: `ignore`'s `Gitignore` for matching. One file or
   per-directory files is a design choice the numbers leave open; the
   per-directory lookup costs tens to a few hundred milliseconds on the
@@ -281,4 +283,3 @@ pattern through these functions.
 ## Open points for the spec
 
 - Whether an ignore file inside a unit counts toward its idle clock.
-- Whether `.*` names dot entries explicitly.
