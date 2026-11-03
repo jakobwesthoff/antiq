@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `unearth` command.
+
+use crate::cli::{Context, UnearthArgs};
+
+pub fn run(_ctx: &Context, _args: &UnearthArgs) -> anyhow::Result<u8> {
+    super::not_implemented("unearth")
+}

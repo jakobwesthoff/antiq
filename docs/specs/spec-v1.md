@@ -1023,20 +1023,38 @@ changes nothing.
 | 4 | remote away |
 
 Colour is used only on a terminal. Data goes to stdout, messages to
-stderr. Under `--json` an error is data: its JSON goes to stdout, and a
-usage error, too, prints the JSON envelope (kind `usage`) and exits 2.
-When the reader of stdout closes it early, antiq stops writing without a
-panic and the exit code stays the run's.
+stderr. Under `--json` an error is data: its JSON goes to stdout, like
+any other JSON output, and a usage error, too, prints the JSON envelope
+(kind `usage`) and exits 2. When the reader of stdout or stderr is gone,
+antiq stops writing to that stream without a panic, and the run ends
+with the exit code it would have had.
 
 ### JSON output
 
 Every JSON output is one object `{"format": 1, "command": "<name>",
-...}`. An error is `{"format": 1, "command": ..., "error": {"kind": ...,
-"message": ...}}`, with kinds such as `ambiguous_reference` (with
-`candidates`), `unknown_reference`, `brake` (with the planned count, the
-set size and up to ten items), `lock_held`, `remote_away`,
-`remote_broken`. A `--dry-run` plan carries `"dry_run": true` and an
-`actions` list.
+...}` on one line of stdout. `<name>` is the words of the command, joined
+by one space: `status`, `remote add`. A command line that fails to parse
+before naming a command has `"command": null`. An error is `{"format": 1,
+"command": ..., "error": {"kind": ..., "message": ...}}`, where `message`
+is the text of the error without the context lines a console shows. Some
+kinds add keys to the error object. A `--dry-run` plan carries
+`"dry_run": true` and an `actions` list.
+
+| Kind | Exit | Raised when | Added keys |
+|------|------|-------------|------------|
+| `usage` | 2 | the command line does not parse, or an answer does not fit the pending decision | |
+| `not_a_collection` | 1 | a command runs outside a collection | |
+| `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
+| `unknown_reference` | 1 | a piece reference matches no object | |
+| `brake` | 1 | the brake holds and there is no terminal to ask | `planned`, `set_size`, `items`: up to ten `{id, path}` |
+| `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds) |
+| `no_remote` | 1 | a command needs a remote and none is attached | |
+| `remote_away` | 4 | the remote cannot be reached | |
+| `remote_broken` | 1 | the remote is broken, as "Remotes" defines | |
+| `format_too_new` | 1 | a write meets metadata of a higher `format` | |
+| `other` | 1 | any other failure | |
+
+`--help` and `--version` print text and exit 0, also under `--json`.
 
 `status` adds `collection` (`id`, `path`), `remote` (`state`: `none`,
 `reachable`, `away`, `broken`) and `pieces`, a list of objects with
@@ -1049,4 +1067,27 @@ of the conditions `status` shows, such as `pinned`, `stale_backup`,
 `find` adds `query` and `matches`, a list of objects with `id`, `path`,
 `abs_path`, `name`, `state`, `created` and `size`.
 
-The JSON payloads of the other commands are not defined yet.
+`init` has no payload defined yet. Without a terminal, or with `--json`,
+it creates nothing and prints the plan unless `--yes` is given, and
+exits 3.
+
+`archive` has no payload defined yet.
+
+`unearth` has no payload defined yet.
+
+`fork` has no payload defined yet.
+
+`pin` and `unpin` have no payload defined yet.
+
+`sync` has no payload defined yet.
+
+`resolve` has no payload defined yet. Without a piece and without a
+terminal, or with `--json`, it lists the pending decisions and exits 3
+when there are any.
+
+`remote add`, `remote show` and `remote remove` have no payload defined
+yet.
+
+`reconcile` has no payload defined yet.
+
+`import` has no payload defined yet.

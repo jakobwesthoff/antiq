@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `fork` command.
+
+use crate::cli::{Context, ForkArgs};
+
+pub fn run(_ctx: &Context, _args: &ForkArgs) -> anyhow::Result<u8> {
+    super::not_implemented("fork")
+}

@@ -37,5 +37,7 @@ pub mod tracking;
 pub mod tree;
 pub mod walk;
 
+pub use error::Error;
+
 #[cfg(test)]
 mod testing;

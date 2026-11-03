@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `archive` command.
+
+use crate::cli::{Context, DryRunArgs};
+
+pub fn run(_ctx: &Context, _args: &DryRunArgs) -> anyhow::Result<u8> {
+    super::not_implemented("archive")
+}

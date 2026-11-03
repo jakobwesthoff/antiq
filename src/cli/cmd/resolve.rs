@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `resolve` command.
+
+use crate::cli::{Context, ResolveArgs};
+
+pub fn run(_ctx: &Context, _args: &ResolveArgs) -> anyhow::Result<u8> {
+    super::not_implemented("resolve")
+}

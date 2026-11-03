@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `init` command.
+
+use crate::cli::{Context, InitArgs};
+
+pub fn run(_ctx: &Context, _args: &InitArgs) -> anyhow::Result<u8> {
+    super::not_implemented("init")
+}

@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `find` command.
+
+use crate::cli::{Context, FindArgs};
+
+pub fn run(_ctx: &Context, _args: &FindArgs) -> anyhow::Result<u8> {
+    super::not_implemented("find")
+}

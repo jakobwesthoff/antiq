@@ -2,7 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! One module per command.
+//! One module per command. Each has a `run` that builds the call into the
+//! library and renders its result.
 
 pub mod archive;
 pub mod find;
@@ -17,3 +18,11 @@ pub mod status;
 pub mod sync;
 pub mod unearth;
 pub mod unpin;
+
+/// What a command without an implementation answers.
+fn not_implemented(command: &str) -> anyhow::Result<u8> {
+    Err(antiq::Error::NotImplemented {
+        command: command.to_string(),
+    }
+    .into())
+}

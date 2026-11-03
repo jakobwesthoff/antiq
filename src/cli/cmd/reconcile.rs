@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `reconcile` command.
+
+use crate::cli::{Context, ReconcileArgs};
+
+pub fn run(_ctx: &Context, _args: &ReconcileArgs) -> anyhow::Result<u8> {
+    super::not_implemented("reconcile")
+}

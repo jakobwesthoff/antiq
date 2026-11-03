@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `status` command.
+
+use crate::cli::Context;
+
+pub fn run(_ctx: &Context) -> anyhow::Result<u8> {
+    super::not_implemented("status")
+}

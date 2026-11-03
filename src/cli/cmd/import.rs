@@ -3,3 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The `import` command.
+
+use crate::cli::{Context, ImportArgs};
+
+pub fn run(_ctx: &Context, _args: &ImportArgs) -> anyhow::Result<u8> {
+    super::not_implemented("import")
+}
