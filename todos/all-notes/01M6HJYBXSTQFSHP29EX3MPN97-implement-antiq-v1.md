@@ -2475,6 +2475,12 @@ the same commit; the lead checks that at acceptance.
   sparse warning before I19. Spec "Packaging" and "Listing" written by
   I06.
 
+### I13
+
+- 2026-11-04: no path-length refusal before unearthing; only name
+  lengths are checked, since extraction works relative to directory
+  handles. I13 removes "and path" from ADR 0054 and spec "unearth".
+
 ### I07
 
 - 2026-11-04: two lines in `src/testing/mod.rs` export the shared test
