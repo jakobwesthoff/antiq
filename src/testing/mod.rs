@@ -9,6 +9,18 @@
 #[path = "../../tests/support/tree.rs"]
 pub mod tree;
 
+use crate::relpath::RelPath;
+
+/// A path of `levels` nested names of 200 bytes each. Past five levels it
+/// is longer than the 1,024 bytes macOS accepts in a path, and past 20
+/// longer than the 4,096 bytes of Linux.
+pub fn deep_path(levels: usize) -> RelPath {
+    let names: Vec<String> = (0..levels)
+        .map(|level| format!("{level:02}{}", "x".repeat(198)))
+        .collect();
+    RelPath::parse(&names.join("/")).expect("the names are valid")
+}
+
 #[cfg(test)]
 mod tests {
     use super::tree::{COLLECTION_ID, TempCollection, Tree};
