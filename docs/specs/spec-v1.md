@@ -24,9 +24,10 @@ do for `~/playground`:
 - rebuilding missing index entries
 - backing up to a NAS
 
-On top of that, version 1 moves archives through tiers by age, backs live
-folders up as packages, and lets several machines share one remote.
-Whether it includes the remote-only tier (ADR 0007) is open.
+On top of that, version 1 moves archives through tiers by age, including
+the remote-only tier (ADR 0007), backs live folders up as packages, lets
+several machines share one remote, and imports existing compressed tar
+archives (ADR 0055).
 
 Not in version 1:
 
@@ -410,8 +411,12 @@ of the same ID. (ADR 0045)
 | `resolve` | answers pending decisions |
 | `remote add`, `remote show`, `remote remove` | attach, show and detach the remote |
 | `reconcile` | brings the index in line with the stored metadata |
+| `import` | registers existing compressed tar archives as archived pieces |
 
-(ADR 0023)
+(ADR 0023, ADR 0055)
+
+antiq writes console output; the picker of `find` is its only
+full-screen part. (ADR 0056)
 
 Every command takes `--json`, which also makes it non-interactive.
 Otherwise a command is interactive when a controlling terminal is
@@ -420,7 +425,16 @@ item picked in the picker. Every JSON output carries a `format` field.
 (ADR 0020, ADR 0023)
 
 `find` lists and searches all objects; interactively it opens a picker
-from which an object can be unearthed. (ADR 0021)
+from which an object can be unearthed. (ADR 0021) The picker starts as a
+copy of ntropy's picker. It offers unearthing (Enter), a view of a
+piece's contents, printing the path (`--print`), forking, and pinning or
+unpinning. How the contents are shown is not decided yet. (ADR 0057)
+
+`import` takes compressed tar archives and registers each as an archived
+piece: a new ID with the oldest member modification time as its time
+(source `import`), the name of the archive's single top-level folder, a
+listing generated from the archive, and the archive as version 1. An
+archive without exactly one top-level folder is refused. (ADR 0055)
 
 Without a terminal, every decision point takes the non-destructive
 default: no action on that object, which is listed as needing a

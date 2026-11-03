@@ -55,11 +55,15 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0053 and in
+Settled decisions live in ADR 0002 to ADR 0057 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
-- 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
-  not be part of the first version.
+- 2026-11-03, user: the remote-only tier (ADR 0007) is part of the
+  first version.
+- 2026-11-03, user: next comes a full adversarial review of the spec
+  together with all ADRs (Fable, Opus, Sonnet and Haiku), once the Linux
+  filesystem tests and the SQLite archive question are researched and
+  folded in.
 - 2026-11-02, user: the design goes in this order, each step open to
   change later: a rudimentary CLI first to get a feeling for what is
   needed, then the business-logic parts, then the extension points
@@ -83,13 +87,8 @@ and the research choices are in ADR 0030 to ADR 0053 and the spec.
 - **Several machines, live folders.** Bringing one live folder together
   across machines stays out of v1 (ADR 0008); a shared remote for
   archives is in (ADR 0017).
-- **Import.** Whether the tool gets a structured import for existing
-  folders or archives. ADR 0009 leaves this open; the review recommended
-  a general import of `.tar.xz` files, run once over the old archives,
-  and the user decided on 2026-11-03 to decide this later.
 - **Migration** (2026-11-03, user: the old archives are recompressed
   once, outside antiq, when they are imported; antiq reads no xz,
   ADR 0019) of the existing `.tar.xz` archives and their listings
-  (313 on 2026-11-02, 15 GB, all paired with a listing): a one-off step,
-  possibly built on that import.
-- **A TUI** or console output only.
+  (313 on 2026-11-02, 15 GB, all paired with a listing), then registered
+  with `antiq import` (ADR 0055).
