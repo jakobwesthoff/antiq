@@ -412,6 +412,9 @@ remotes; version 1 accepts exactly one.
 | `remote.id` | | the remote's ULID |
 | `remote.host_key_alias` | none | |
 
+On macOS the hostname stands in when ComputerName cannot be read or is
+empty. An empty `machine.name` is an error.
+
 A value outside the range given in the table is an error that names the
 key. An unknown key in `[machine]` or in a `[[remote]]` entry is an
 error that names it. Unknown keys under `[collection]` are ignored, and
