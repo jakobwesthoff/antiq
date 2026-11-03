@@ -362,17 +362,16 @@ fn if_reachable_does_not_hide_an_unimplemented_command() {
 
 #[test]
 fn a_child_is_the_leader_of_a_session_of_its_own() {
-    let run = Antiq::program("sh")
-        .args(["-c", "echo $$; ps -o pgid= -p $$"])
-        .run();
-    let lines: Vec<&str> = run.stdout.lines().map(str::trim).collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "this test needs the `ps` executable; stderr: {}",
-        run.stderr
+    // A signal to the process group named by the shell's own pid reaches
+    // someone only if the shell leads that group, which `setsid` makes it
+    // do. `kill` is a builtin of the shell, so no other executable is
+    // needed.
+    let group = Antiq::program("sh").args(["-c", "kill -0 -$$"]).run();
+    assert!(
+        group.status.success(),
+        "the child does not lead its own process group; stderr: {}",
+        group.stderr
     );
-    assert_eq!(lines[0], lines[1], "the child leads its own process group");
 
     let tty = Antiq::program("sh").args(["-c", ": < /dev/tty"]).run();
     assert!(!tty.status.success(), "the child can open /dev/tty");
