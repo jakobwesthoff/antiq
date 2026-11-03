@@ -2429,6 +2429,12 @@ the same commit; the lead checks that at acceptance.
 - Out of scope, filed as a someday todo: bind mounts on the same
   filesystem keep `st_dev`, so the device rule cannot see them.
 
+- 2026-11-04 (I05 delivery, accepted): a selection candidate that is
+  deleted during the run is skipped silently; any other `lstat` failure
+  during selection puts its parent directory among the unreadable ones
+  (spec "Selection", written by I05). The bind-mount limit is stated in
+  spec "Walks".
+
 ### I06
 
 - 2026-11-04: I06 defines the complete `Packager` trait (format, pack,
