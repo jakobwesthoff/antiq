@@ -35,13 +35,21 @@ pub enum ConfigError {
     },
     #[error("version 1 accepts exactly one [[remote]] entry")]
     SecondRemote,
-    #[error("{key} must be {min} to {max}, found {value}")]
+    #[error("{key} must be {}, found {value}", describe_range(*min, *max))]
     OutOfRange {
         key: &'static str,
         value: i64,
         min: i64,
-        max: i64,
+        /// `None` where only a lower bound applies.
+        max: Option<i64>,
     },
+}
+
+fn describe_range(min: i64, max: Option<i64>) -> String {
+    match max {
+        Some(max) => format!("{min} to {max}"),
+        None => format!("at least {min}"),
+    }
 }
 
 fn at(path: &Option<PathBuf>) -> String {
@@ -109,10 +117,6 @@ pub struct CollectionConfig {
     #[serde(default = "defaults::live_retries")]
     pub live_retries: u32,
 }
-
-/// The upper bound of the settings that only have a lower one: the largest
-/// value their type holds.
-const UNBOUNDED: i64 = u32::MAX as i64;
 
 /// Every key `CollectionConfig` reads.
 const COLLECTION_KEYS: [&str; 16] = [
@@ -284,59 +288,59 @@ impl Config {
                 "collection.memory_percent",
                 collection.memory_percent,
                 1,
-                100,
+                Some(100),
             ),
             (
                 "collection.brake_percent",
                 collection.brake_percent.into(),
                 0,
-                100,
+                Some(100),
             ),
             (
                 "collection.remote_jobs",
                 collection.remote_jobs.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "collection.live_retries",
                 collection.live_retries.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "machine.connect_timeout",
                 machine.connect_timeout.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "machine.server_alive_interval",
                 machine.server_alive_interval.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "machine.server_alive_count",
                 machine.server_alive_count.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "machine.control_persist",
                 machine.control_persist.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
             (
                 "machine.rsync_timeout",
                 machine.rsync_timeout.into(),
                 1,
-                UNBOUNDED,
+                None,
             ),
         ];
         for (key, value, min, max) in ranged {
-            if !(min..=max).contains(&value) {
+            if value < min || max.is_some_and(|max| value > max) {
                 return Err(ConfigError::OutOfRange {
                     key,
                     value,
@@ -761,10 +765,18 @@ host_key_alias = "nas"
     }
 
     #[test]
-    fn a_range_error_names_the_key_the_bounds_and_the_value() {
+    fn a_range_without_an_upper_bound_reads_at_least() {
         assert_eq!(
             error_text(&with_collection_line("remote_jobs = 0")),
-            "collection.remote_jobs must be 1 to 4294967295, found 0"
+            "collection.remote_jobs must be at least 1, found 0"
+        );
+    }
+
+    #[test]
+    fn a_range_with_both_bounds_reads_from_to() {
+        assert_eq!(
+            error_text(&with_collection_line("brake_percent = 101")),
+            "collection.brake_percent must be 0 to 100, found 101"
         );
     }
 
