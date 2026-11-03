@@ -18,7 +18,10 @@ different IDs, so they do not collide.
 
 Each ID's metadata carries a version. Putting an ID back checks that the
 remote still has the version that was taken out. A mismatch is a
-conflict that the user resolves: keep mine, keep theirs, or fork.
+conflict that the user resolves: keep mine, keep theirs, or fork. The
+version that loses stays on the remote as a superseded archive until it
+is dropped explicitly, so resolving a conflict on one machine never
+deletes what another machine committed.
 
 No file on the remote is shared by machines for writing; a combined
 index is built locally. Syncing one live folder between machines stays

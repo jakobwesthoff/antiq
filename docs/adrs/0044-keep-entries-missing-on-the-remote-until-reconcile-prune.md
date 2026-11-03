@@ -8,14 +8,17 @@ Accepted
 
 ## Context
 
-`reconcile` was to drop entries whose archive is gone. A wrong or
-half-mounted remote makes every remote-only archive look gone, and the
-metadata is the only searchable record of them (ADR 0007).
+A wrong or half-mounted remote makes every remote-only archive look
+gone, and the metadata is the only searchable record of them
+(ADR 0007). Dropping such entries automatically would lose that record.
 
 ## Decision
 
-`reconcile` marks such entries as missing on the remote and shows
-them in `status`. They are dropped only with `reconcile --prune`.
+`reconcile` marks an entry as missing on the remote when it has no
+local archive and its archive, which the remote held before, is gone.
+`status` shows such entries. They are dropped only with
+`reconcile --prune`. An entry whose archive exists locally and has not
+been uploaded yet is pending upload and is never pruned.
 
 ## Consequences
 

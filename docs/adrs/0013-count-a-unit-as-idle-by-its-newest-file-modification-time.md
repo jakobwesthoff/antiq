@@ -13,8 +13,8 @@ days, so "idle" needs a definition.
 
 ## Decision
 
-A unit is idle when the newest modification time of any file in it is
-older than the threshold.
+A unit is idle when the newest modification time of any regular file
+in it is older than the threshold.
 
 Ignore rules in gitignore syntax exclude paths from this check. They
 come from the config and from ignore files of antiq's own at any

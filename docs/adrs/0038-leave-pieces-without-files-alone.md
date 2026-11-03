@@ -8,14 +8,15 @@ Accepted
 
 ## Context
 
-A piece with no regular files has no newest modification time, so
-ADR 0013 does not say when it is idle. `archive.sh` deletes empty trees
-without an archive.
+A piece in which the idle check finds no regular file has no newest
+modification time, so ADR 0013 does not say when it is idle. That
+includes a piece whose files are all ignored, marker files or junk.
+`archive.sh` deletes empty trees without an archive.
 
 ## Decision
 
-A piece without regular files is never idle and never archived. It is
-listed as empty and left alone.
+Such a piece is never idle and never archived. It is listed as empty
+and left alone.
 
 ## Consequences
 

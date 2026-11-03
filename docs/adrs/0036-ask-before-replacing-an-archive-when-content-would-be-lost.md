@@ -14,9 +14,12 @@ nowhere else.
 
 ## Decision
 
-A replacement that loses nothing happens without asking. When files
-were removed or their content or metadata changed, antiq shows what
-would be lost and asks: replace, fork or skip. Without a terminal it
+A replacement that loses nothing happens without asking. Content is
+lost when paths were removed or a file's content, mode, link target or
+modification time changed; directory modification times and junk files
+do not count (ADR 0035). Then antiq shows what would be lost and asks:
+replace, fork or skip. The answer applies to the loss shown at that
+moment. Without a terminal it
 skips and lists the piece as needing a decision (ADR 0025). A
 collection can allow replacing without asking.
 

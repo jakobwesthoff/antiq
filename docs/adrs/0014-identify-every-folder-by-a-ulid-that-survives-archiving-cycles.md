@@ -19,7 +19,7 @@ changes with every cycle of archiving and bringing back. How the
 creation time is determined is decided separately.
 
 The ID stays the same when a folder is brought back and archived again.
-The new archive replaces the old one, so an ID has one version. The
+The new archive replaces the old one as the ID's current archive. The
 index tracks a brought-back folder by its path.
 
 Forking a brought-back folder gives it a new ID, whose time is the time

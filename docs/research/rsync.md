@@ -19,7 +19,7 @@ source, named), **reported** (third party, linked).
 | R2 | Works against a stock Synology NAS over SSH without installing anything |
 | R3 | The path remote is a plain copy |
 | R4 | Transfer stats, literal and matched bytes |
-| R5 | Timeouts; exit code 24 tolerated |
+| R5 | Timeouts; exit code 24 tolerated (taken over from `timecapsule-sync.sh`, which mirrors whole trees) |
 | R6 | Refuse a local rsync below 3.1; openrsync is the macOS default |
 | R7 | Licence compatible with an MPL-2.0 binary |
 | R8 | Works on tar and zstd rsyncable packages |
@@ -176,8 +176,8 @@ payload file per version. Neither was tested.
 - Fixed command line: `LC_ALL=C`, `--stats`, `--no-human-readable`,
   `--no-whole-file`, `--timeout`, `-e` with antiq's ssh command. Never
   `--inplace` or `--append`.
-- Exit code 24 tolerated, 30 is a timeout; missing stats count as
-  unknown.
+- Exit code 24 means files vanished during the transfer, 30 is a timeout;
+  missing stats count as unknown.
 - `-z` only for uncompressed packages; no `--compress-choice` while the
   NAS runs 3.1.x.
 - `fast_rsync` would be the library for a NAS helper of antiq's own, a

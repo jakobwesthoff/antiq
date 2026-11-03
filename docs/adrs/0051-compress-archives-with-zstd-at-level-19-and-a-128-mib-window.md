@@ -24,5 +24,5 @@ in parallel, since an archive smaller than one job uses one core.
 
 ## Consequences
 
-Highly compressible tabular text gets larger than with xz: 15.9 % on
-the CSV and JSON sample.
+xz compresses highly compressible tabular text better: it is 15.9 %
+smaller on the CSV and JSON sample.
