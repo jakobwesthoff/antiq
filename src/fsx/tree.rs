@@ -141,12 +141,11 @@ impl TreeRoot {
     /// itself. The returned `path` is relative to the original root.
     pub fn lstat(&self, path: &RelPath) -> io::Result<TreeEntry> {
         let (dir, name) = self.split_or_root(path)?;
-        let raw = read_stat(dir.as_fd(), name)?;
+        let (raw, link_target) = read_entry(
+            || read_stat(dir.as_fd(), name),
+            || Ok(readlinkat(dir.as_fd(), name, Vec::new())?.into_bytes()),
+        )?;
         let kind = EntryKind::from_mode(raw.mode);
-        let link_target = match kind {
-            EntryKind::Symlink => Some(readlinkat(dir.as_fd(), name, Vec::new())?.into_bytes()),
-            _ => None,
-        };
         Ok(TreeEntry {
             path: self.prefix.concat(path),
             kind,
@@ -455,6 +454,40 @@ fn rename_no_replace(
         Err(Errno::NOENT) => Ok(renameat(from, from_name, to, to_name)?),
         Err(other) => Err(other.into()),
     }
+}
+
+/// Stats an entry and, for a symlink, reads its target. The two are
+/// separate lookups, so a symlink replaced in between would mix the fields
+/// of one with the target of the other. After reading the target the entry
+/// is stat'd again, and it counts as unchanged when its type, inode and
+/// change time are the same (the size is left out: it need not equal the
+/// target's length on every filesystem). A change, or an entry that is no
+/// longer a symlink when its target is read (`EINVAL`), gets one more
+/// attempt; after a second one the entry is reported as
+/// [`TreeError::Changed`].
+fn read_entry(
+    mut stat: impl FnMut() -> io::Result<RawStat>,
+    mut read_link: impl FnMut() -> io::Result<Vec<u8>>,
+) -> io::Result<(RawStat, Option<Vec<u8>>)> {
+    for _ in 0..2 {
+        let first = stat()?;
+        if EntryKind::from_mode(first.mode) != EntryKind::Symlink {
+            return Ok((first, None));
+        }
+        let target = match read_link() {
+            Ok(target) => target,
+            Err(error) if error.raw_os_error() == Some(Errno::INVAL.raw_os_error()) => continue,
+            Err(error) => return Err(error),
+        };
+        let second = stat()?;
+        let unchanged = first.mode == second.mode
+            && first.inode == second.inode
+            && first.ctime_ns == second.ctime_ns;
+        if unchanged {
+            return Ok((first, Some(target)));
+        }
+    }
+    Err(TreeError::Changed.into())
 }
 
 /// The fields of an `lstat`, in the units a [`TreeEntry`] uses.
@@ -786,6 +819,107 @@ mod tests {
             .expect("the file opens");
         let flags = rustix::fs::fcntl_getfl(&file).expect("the flags are read");
         assert!(!flags.contains(OFlags::NONBLOCK), "{flags:?}");
+    }
+
+    fn raw(mode: u32, inode: u64, ctime_ns: i128) -> RawStat {
+        RawStat {
+            mode,
+            size: 0,
+            allocated: 0,
+            mtime_ns: 0,
+            ctime_ns,
+            inode,
+            device: 1,
+            nlink: 1,
+            birth_ns: None,
+        }
+    }
+
+    const FILE: u32 = 0o100644;
+    const SYMLINK: u32 = 0o120777;
+
+    /// `read_entry` over scripted answers: the stats in order, then the
+    /// link reads in order.
+    fn scripted(
+        stats: Vec<io::Result<RawStat>>,
+        links: Vec<io::Result<Vec<u8>>>,
+    ) -> io::Result<(RawStat, Option<Vec<u8>>)> {
+        let (mut stats, mut links) = (stats.into_iter(), links.into_iter());
+        read_entry(
+            || stats.next().expect("no more stats were scripted"),
+            || links.next().expect("no more link reads were scripted"),
+        )
+    }
+
+    #[test]
+    fn a_file_is_stat_ed_once_and_its_link_is_not_read() {
+        let (entry, target) = scripted(vec![Ok(raw(FILE, 7, 1))], vec![]).expect("read");
+        assert_eq!(entry.inode, 7);
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn a_symlink_that_did_not_change_is_read_with_its_target() {
+        let stats = vec![Ok(raw(SYMLINK, 7, 1)), Ok(raw(SYMLINK, 7, 1))];
+        let (entry, target) = scripted(stats, vec![Ok(b"target".to_vec())]).expect("read");
+        assert_eq!(entry.inode, 7);
+        assert_eq!(target.as_deref(), Some(&b"target"[..]));
+    }
+
+    #[test]
+    fn a_symlink_replaced_during_the_read_is_read_again() {
+        for changed in [raw(SYMLINK, 8, 1), raw(SYMLINK, 7, 2), raw(FILE, 7, 1)] {
+            let stats = vec![
+                Ok(raw(SYMLINK, 7, 1)),
+                Ok(changed),
+                Ok(raw(SYMLINK, 9, 3)),
+                Ok(raw(SYMLINK, 9, 3)),
+            ];
+            let links = vec![Ok(b"old".to_vec()), Ok(b"new".to_vec())];
+            let (entry, target) = scripted(stats, links).expect("the second attempt holds");
+            assert_eq!(entry.inode, 9);
+            assert_eq!(target.as_deref(), Some(&b"new"[..]));
+        }
+    }
+
+    #[test]
+    fn a_symlink_that_keeps_changing_is_reported_as_changed() {
+        let stats = vec![
+            Ok(raw(SYMLINK, 1, 1)),
+            Ok(raw(SYMLINK, 2, 1)),
+            Ok(raw(SYMLINK, 3, 1)),
+            Ok(raw(SYMLINK, 4, 1)),
+        ];
+        let links = vec![Ok(b"a".to_vec()), Ok(b"b".to_vec())];
+        let error = scripted(stats, links).map(|_| ()).expect_err("it changed");
+        assert_eq!(TreeError::of(&error), Some(&TreeError::Changed));
+    }
+
+    #[test]
+    fn a_link_that_stopped_being_one_is_read_again() {
+        let stats = vec![Ok(raw(SYMLINK, 7, 1)), Ok(raw(FILE, 8, 2))];
+        let links = vec![Err(Errno::INVAL.into())];
+        let (entry, target) = scripted(stats, links).expect("the replacement is a file");
+        assert_eq!(entry.inode, 8);
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn another_error_while_reading_the_link_is_passed_on() {
+        let stats = vec![Ok(raw(SYMLINK, 7, 1))];
+        let links = vec![Err(Errno::ACCESS.into())];
+        let error = scripted(stats, links).map(|_| ()).expect_err("denied");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_size_of_a_symlink_is_the_length_of_its_target_on_the_local_filesystem() {
+        let mut tree = Tree::new();
+        tree.symlink("link", "some/target");
+        let entry = root_of(&tree).lstat(&path("link")).expect("stat");
+        assert_eq!(entry.size, "some/target".len() as u64);
+        assert_eq!(entry.link_target.as_deref(), Some(&b"some/target"[..]));
     }
 
     #[test]
