@@ -1146,6 +1146,10 @@ its finishing commit. Acceptance lines in an entry add to this.
   state-changing commands; read-only callers compute in memory when the
   index is missing (T13); search behind one function whose matching
   follows U1, including member paths from listings if U1 says so.
+- Paths: an absolute path the user typed is first canonicalised on its longest
+  existing prefix, so another spelling of the collection root (macOS
+  `/var` and `/private/var`) still lies below it; I02's `below_root`
+  stays lexical (lead decision, 2026-11-04).
 - Depends on: I08, I09.
 - Tests: a unique 6-character prefix resolves (first failure: stub); 5
   characters are refused; two objects sharing a prefix give
@@ -1316,6 +1320,10 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Content: the tracking entry records the payload version unearthed
   (F16); an archived ID without a local archive fails with a clear
   error until I34 adds fetching.
+- Paths: an absolute path the user typed is first canonicalised on its longest
+  existing prefix, so another spelling of the collection root (macOS
+  `/var` and `/private/var`) still lies below it; I02's `below_root`
+  stays lexical (lead decision, 2026-11-04).
 - Depends on: I08, I09, I12, I13, I15, I17.
 - Tests: archive then unearth restores the tree with modes, times,
   symlinks and hard links, and tracking is `live` with the unearthing
@@ -1353,6 +1361,10 @@ its finishing commit. Acceptance lines in an entry add to this.
   checksum flag are checked without holding a frame in memory;
   `std::fs::copy` clones on macOS through `fclonefileat` with an
   `fcopyfile` fallback (std source, `sys/fs/unix.rs`).
+- Paths: an absolute path the user typed is first canonicalised on its longest
+  existing prefix, so another spelling of the collection root (macOS
+  `/var` and `/private/var`) still lies below it; I02's `below_root`
+  stays lexical (lead decision, 2026-11-04).
 - Depends on: I06, I08, I12, I13, I15, I17.
 - Tests: a zstd tar made with the crate imports and `find` shows it
   (first failure: `not_implemented`); xz and gzip magic refuse naming
