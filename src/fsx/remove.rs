@@ -99,7 +99,10 @@ fn remove_tree_with(
     let opened = skip_if_missing(opened).map_err(failure("open", root, path))?;
     // A directory that vanished in between has nothing left to remove.
     opened
-        .map(|directory| remove_contents(&directory, reference, device_of, list))
+        .map(|directory| {
+            let mut grant = || grant_owner(root, path, top.mode);
+            remove_contents(&directory, &mut grant, reference, device_of, list)
+        })
         .transpose()?;
     skip_if_missing(root.remove_dir(path))
         .map(|_| ())
@@ -109,18 +112,19 @@ fn remove_tree_with(
 /// Removes everything inside `directory`. The kind and device of every
 /// entry come from its own `lstat`, as a directory listing may leave the
 /// kind open.
+///
+/// `grant_itself` gives `directory` owner access through the directory
+/// that holds it: asking the directory itself fails once it has lost its
+/// search permission.
 fn remove_contents(
     directory: &TreeRoot,
+    grant_itself: &mut dyn FnMut() -> io::Result<()>,
     reference: u64,
     device_of: DeviceOf<'_>,
     list: List<'_>,
 ) -> Result<(), FsxError> {
     let itself = RelPath::root();
-    let grant_itself = &mut || {
-        let mode = directory.lstat(&itself)?.mode;
-        grant_owner(directory, &itself, mode)
-    };
-    let entries = retry_once_with_access(grant_itself, &mut || list(directory))
+    let entries = retry_once_with_access(&mut *grant_itself, &mut || list(directory))
         .map_err(failure("list", directory, &itself))?;
 
     for entry in entries {
@@ -138,10 +142,11 @@ fn remove_contents(
             );
             let opened = skip_if_missing(opened).map_err(failure("open", directory, &name))?;
             let Some(child) = opened else { continue };
-            remove_contents(&child, reference, device_of, list)?;
-            retry_once_with_access(grant_itself, &mut || directory.remove_dir(&name))
+            let mut grant_child = || grant_owner(directory, &name, stat.mode);
+            remove_contents(&child, &mut grant_child, reference, device_of, list)?;
+            retry_once_with_access(&mut *grant_itself, &mut || directory.remove_dir(&name))
         } else {
-            retry_once_with_access(grant_itself, &mut || directory.remove_file(&name))
+            retry_once_with_access(&mut *grant_itself, &mut || directory.remove_file(&name))
         };
         skip_if_missing(removal).map_err(failure("remove", directory, &name))?;
     }
