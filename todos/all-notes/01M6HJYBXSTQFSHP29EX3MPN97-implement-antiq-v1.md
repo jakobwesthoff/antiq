@@ -2404,7 +2404,13 @@ the same commit; the lead checks that at acceptance.
   helper refuses a same-filesystem bind mount and the walk and selection
   report it as a mount point. This replaces the I05 statement that bind
   mounts are not seen; the bind-mount todo closes with the fix batch,
-  which lands before I19.
+  which lands before I19. On macOS a firmlink at the top of the system
+  volume compares as a mount root (safe direction, stated in the spec).
+  `remove_tree` works iteratively and stops at the walk's 512 levels
+  with its own error, and extraction refuses members deeper than that
+  (I13); a lock file that is not UTF-8 reads as an unknown holder; tests
+  added for the EPERM holder, the Linux mount-root branch and the
+  listing retry on macOS (T3 to T7).
 
 ### I04
 
@@ -2517,6 +2523,11 @@ the same commit; the lead checks that at acceptance.
   when `archive/` is a directory holding a `*.tar.xz` and
   `archive/index/` holds a `*.lst` (ADR 0009), and the patterns would
   select `archive` (I11 writes it into spec "Collections and pieces").
+- 2026-11-04 (I11 plan review, S2): `init` refuses when a selected
+  piece's top holds a collection marker, naming each nested collection
+  root, exit 1; the walk reports a collection marker deeper inside a
+  piece as a problem, so such a piece is never archived (I03 follow-up
+  batch).
 
 ### I14
 
