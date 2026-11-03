@@ -154,8 +154,9 @@ output alike; references accept either case.
 
 The ID time is the earliest of the directory's birth time and the birth
 and modification times of every entry inside it, ignoring times before
-1990; when no such time remains, it is the time of minting, with a
-warning. Its source (`birth`, `oldest-mtime`, `import`, `fork`,
+1990; when a birth time and a modification time are equal, the source is
+`oldest-mtime`; when no such time remains, it is the time of minting,
+with a warning. Its source (`birth`, `oldest-mtime`, `import`, `fork`,
 `minted`) is stored with it. The ID is minted once and never
 recomputed. (ADR 0039) `archive` and `sync` mint IDs for new pieces,
 `fork` for the fork (source `fork`, the time of the fork), `import` for
