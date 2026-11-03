@@ -1050,6 +1050,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   the container's name and the folder's name do not count (T3, F5);
   the tree side goes through `TreeRoot`.
 - Must not touch: extraction (I13).
+- Starts from: I06 left `verify_strict(package, root, rules)` in `src/pack/verify.rs` and `list(package)` in `src/pack/read.rs` as stubs returning `PackError::NotImplemented`, called by `TarZstd`; fill their bodies and extend the unit structs `Verified`, `Unpacked`, `WalkRules`, `TargetRules` in `src/pack/mod.rs` as needed.
 - Depends on: I05, I06.
 - Tests: a fresh pack verifies with no differences (first failure:
   stub); an edited file, a deleted file, an added file, a changed mode
@@ -1084,6 +1085,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   `O_CREAT`, `O_EXCL`) (O5); the staging volume's rules come from a
   probe behind a seam (S11).
 - Must not touch: the strict verify (I12).
+- Starts from: I06 left `unpack(package, staging, rules)` in `src/pack/extract.rs` as stubs returning `PackError::NotImplemented`, called by `TarZstd`; fill their bodies and extend the unit structs `Verified`, `Unpacked`, `WalkRules`, `TargetRules` in `src/pack/mod.rs` as needed.
 - Depends on: I06.
 - Tests: the six hostile archives of the tar research (absolute path,
   `../`, symlink then child, symlink to `/etc`, symlink then directory,
@@ -2453,6 +2455,14 @@ the same commit; the lead checks that at acceptance.
   the pack naming it; `PackSettings` carries the archive or live preset.
   I06 writes the listing and member rules into spec "Packaging" and
   "Listing".
+
+- 2026-11-04 (I06 delivery, accepted): the container's name is the last
+  component of the tree's top (a root top is refused); `pack` refuses a
+  tree with problems or without its top entry before writing a byte;
+  link names are written literally, with GNU long-name records, since
+  the tar crate's `append_link` rewrites targets; nothing calls the
+  sparse warning before I19. Spec "Packaging" and "Listing" written by
+  I06.
 
 ### I07
 
