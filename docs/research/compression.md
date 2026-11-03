@@ -183,6 +183,16 @@ Measured 2026-11-03 (**measured**): a level-19 encoder of the `zstd`
 crate reached about 150 MB of resident memory even for an input of
 10 KB.
 
+Measured 2026-11-04 (**measured**, release build, zstd 1.5.7 through the
+`zstd` crate, level 19 with long-distance matching, window log 27,
+default 64 MiB jobs, 400 MiB of semi-compressible input, peak resident
+memory from `/usr/bin/time -l`): 552 MiB with one worker, 676 MiB with
+two, 1002 MiB with four, about 430 MiB per encoder plus 140 MiB per
+worker. The fixed part is the round buffer zstd allocates once per
+encoder with long-distance matching, `MAX(windowSize, n*jobSize) +
+3*jobSize`, 320 MiB for one or two workers (**read**,
+`lib/compress/zstdmt_compress.c` of zstd 1.5.7).
+
 `zstd-sys` 2.1.2 has the default features `legacy` and
 `zdict_builder`; `zstd-safe` 8.2.0 depends on it with
 `default-features = false` (**read**, their `Cargo.toml`). A direct

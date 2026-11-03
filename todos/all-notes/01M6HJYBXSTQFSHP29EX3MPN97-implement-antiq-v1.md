@@ -2463,6 +2463,14 @@ the same commit; the lead checks that at acceptance.
 - Open, assigned: the bytes per worker of a level-3 lease is decided in
   I14's plan; listing compression never leases while a payload lease is
   held (I08).
+- 2026-11-04, review P of the finished diff (ledger `review-p-ledger.md`):
+  an archive encoder costs about 430 MiB plus 140 MiB per worker
+  (measured), so a lease is charged 448 MiB fixed plus 160 MiB per
+  worker instead of 256 MiB per worker (spec "Packaging" and
+  `docs/research/compression.md` written by the lead); the
+  one-lease-per-thread check is an `assert!`; tests added for FIFO among
+  blocked waiters, both wake-up paths, the want-0 clamp and the
+  machine's figures.
 
 ## Relations
 

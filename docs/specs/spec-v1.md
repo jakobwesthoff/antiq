@@ -653,10 +653,12 @@ maximum window to 128 MiB.
 All compression in a run shares one pool of one worker per core. A
 piece smaller than one job gets one worker, larger pieces take up to the
 free workers, and several pieces are compressed in parallel. The number
-of compressors in flight is also limited by memory: about 256 MiB per
-level-19 worker against `memory_percent` of RAM. When nothing else is
-compressing, one worker is always granted, with a warning when the
-memory limit is below one worker.
+of compressors in flight is also limited by memory against
+`memory_percent` of RAM: an archive encoder counts 448 MiB plus 160 MiB
+per worker, since zstd allocates a fixed round buffer for each encoder
+with long-distance matching. When nothing else is compressing, one
+worker is always granted, with a warning when the memory limit is below
+the cost of an encoder with one worker.
 
 An optional exclude list, empty by default, applies to live packages
 only; archives hold the whole tree except junk files.
