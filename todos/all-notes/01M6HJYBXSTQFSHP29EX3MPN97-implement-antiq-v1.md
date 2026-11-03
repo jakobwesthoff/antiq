@@ -1069,10 +1069,11 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Goal: extract safely and refuse names the target cannot hold.
 - Implements: ADR 0027 (a member path leading outside the piece is
   refused; unearthing never writes through a symlink), ADR 0034, ADR
-  0050 (entry by entry with antiq's checks before the crate's, stop at
+  0050 (members read with the crate, each written after antiq's own
+  checks through directory handles that never follow a symlink, stop at
   the first refused member, directory modes and times in a final pass),
   ADR 0054 (check every member name before extracting: names the target
-  cannot hold, name and path lengths, collisions under the target's
+  cannot hold, name lengths, collisions under the target's
   case and Unicode rules from a probe of the staging volume; refuse
   with the list and the reason; at archive time warn for macOS and
   Linux rules), spec "unearth" (paths longer than the platform limit
@@ -2524,6 +2525,20 @@ the same commit; the lead checks that at acceptance.
 - 2026-11-04: no path-length refusal before unearthing; only name
   lengths are checked, since extraction works relative to directory
   handles. I13 removes "and path" from ADR 0054 and spec "unearth".
+- 2026-11-04, I13 plan review (ledger `i13-ledger.md`, 17 findings
+  agreed): three passes over the stream (raw scan, gather, extract),
+  each drained so the checksum is checked; macOS name limit in UTF-16
+  units; the case fold is NFD, lower, upper, lower, NFD.
+- 2026-11-04 (O12): the final pass stays inside `unpack` (ADR 0050). A
+  directory whose mode denies its owner read or search can then hide
+  its children from the strict verify, so `WalkRules` says whether the
+  tree is antiq's own staging; only there may the verify give such a
+  directory owner access for the read and put its mode back afterwards
+  (I12). The staging cleanup already grants owner access (I03's
+  `remove_tree`).
+- 2026-11-04 (O13): Linux cannot set a symlink's mode, so the strict
+  verify and the listing comparison do not compare symlink modes on any
+  platform (I12 writes it into spec "Verifying").
 
 ### I07
 
