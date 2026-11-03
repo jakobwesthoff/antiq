@@ -386,7 +386,7 @@ remotes; version 1 accepts exactly one.
 |-----|---------|---------|
 | `collection.id` | minted at `init` | collection ULID |
 | `collection.patterns` | `["*"]` | selection patterns |
-| `collection.exclude` | `[]` | literal paths that are never pieces |
+| `collection.exclude` | `[]` | literal paths that are never pieces, in the escaped form of the metadata |
 | `collection.ignore` | `[]` | gitignore lines for the idle check |
 | `collection.junk` | `[".DS_Store"]` | junk list |
 | `collection.idle_days` | 14 | archive tier |
@@ -394,23 +394,28 @@ remotes; version 1 accepts exactly one.
 | `collection.backup_live` | `true` | back up live pieces |
 | `collection.live_exclude` | `[]` | paths left out of live packages only |
 | `collection.replace_without_asking` | `false` | ADR 0036 |
-| `collection.brake_percent` | 20 | ADR 0045 |
+| `collection.brake_percent` | 20 | ADR 0045, 0 to 100 |
 | `collection.grace_hours` | 24 | commit protocol |
 | `collection.away_warn_days` | 7 | see `--if-reachable` |
 | `collection.memory_percent` | 25 | compression memory limit, 1 to 100 |
-| `collection.remote_jobs` | 4 | remote operations at a time |
-| `collection.live_retries` | 3 | tolerant verify |
+| `collection.remote_jobs` | 4 | remote operations at a time, at least 1 |
+| `collection.live_retries` | 3 | tolerant verify, at least 1 |
 | `machine.name` | ComputerName on macOS, hostname elsewhere | stored at `init` |
 | `machine.rsync` | resolved at `remote add` | absolute path |
 | `machine.remote_rsync` | none | passed as `--rsync-path` |
-| `machine.connect_timeout` | 30 | seconds |
-| `machine.server_alive_interval` | 15 | seconds |
-| `machine.server_alive_count` | 4 | |
-| `machine.control_persist` | 60 | seconds |
-| `machine.rsync_timeout` | 300 | seconds |
+| `machine.connect_timeout` | 30 | seconds, at least 1 |
+| `machine.server_alive_interval` | 15 | seconds, at least 1 |
+| `machine.server_alive_count` | 4 | at least 1 |
+| `machine.control_persist` | 60 | seconds, at least 1 |
+| `machine.rsync_timeout` | 300 | seconds, at least 1 |
 | `remote.url` | | as given to `remote add` |
 | `remote.id` | | the remote's ULID |
 | `remote.host_key_alias` | none | |
+
+A value outside the range given in the table is an error that names the
+key. An unknown key in `[machine]` or in a `[[remote]]` entry is an
+error that names it. Unknown keys under `[collection]` are ignored, and
+each one is reported in a warning.
 
 ### Committing a version
 
