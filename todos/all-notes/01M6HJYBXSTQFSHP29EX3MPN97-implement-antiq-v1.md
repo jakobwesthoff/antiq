@@ -8,9 +8,8 @@ tags: [architecture]
 # Implement antiq v1
 
 This plan turns the version 1 design of antiq, `docs/specs/spec-v1.md`
-and ADRs 0001 to 0057 at commit `ef3f47d`, into 39 work items in 11
-waves plus one item that waits on the design of the picker's contents
-view. Each item names the spec sections and ADRs it implements, the
+and ADRs 0001 to 0057 at commit `ef3f47d`, into 40 work items in 11
+waves. Each item names the spec sections and ADRs it implements, the
 files it owns, the items it depends on, the tests that prove it, the
 docs it updates and its size, so that one implementation agent can take
 it in its own worktree and write its own detailed plan from there. The
@@ -1948,22 +1947,23 @@ its finishing commit. Acceptance lines in an entry add to this.
   `RUST_TEST_THREADS=4`, including the non-UTF-8 name tests; a check on
   the NAS share that the path remote's read-back checksum reads the
   server's data (R8).
-- Depends on: every item except I40.
+- Depends on: every other item.
 - Docs: README (what v1 does, how to set up a remote), spec status line
   ("Draft") per the lead.
 - Size: M.
 
-### Waiting on the user
+### After the picker
 
 #### I40 The picker's contents view
 
-- Blocked by the needs-discussion todo
-  `01M6ESY4GEGYFC37C81N3PW6XG-design-how-the-picker-shows-a-pieces-contents.md`.
-  ADR 0057 leaves open how the contents are shown and does not assume a
-  plain preview pane; the user named an overlay or a tree integrated
-  into the picker as directions. The item starts after that decision
-  and after I36.
-- Depends on: I36, the user's design decision (U4).
+- Implements: ADR 0057 and spec "Command line" (a key expands the
+  selected piece in place into a tree of its contents from its listing;
+  members whose paths match the query show as its children), U1 (the
+  query matches member paths). Design picture:
+  `~/playground/2026_11_02_antiq-logbook/design/mockups/png/n80-contents-tree.png`.
+- Owns: `src/cli/picker/` (after I36), `tests/picker.rs`.
+- Depends on: I15 (listing search), I36.
+- Size: M.
 
 ## 6. Dependency graph and waves
 
@@ -2003,8 +2003,8 @@ I01 lands in two merges; wave 2 starts after part B.
 | I33 | I28, I30 | 9 |
 | I37 | I31, I34, I35 | 10 |
 | I38 | I05, I06, I23, I28; after wave 9 | 10 |
-| I39 | all but I40 | 11 |
-| I40 | I36, U4 | after the decision |
+| I39 | all others | 11 |
+| I40 | I15, I36 | 8 |
 
 Waves and the files that keep them apart:
 
@@ -2017,7 +2017,7 @@ Waves and the files that keep them apart:
 | 5 | I18 to I21 | own `ops` and `cli::cmd` files; one spec "JSON output" paragraph per command |
 | 6 | I22 to I25 | disjoint; I23 fills the `remote::probe_state` stub, no edit of `status.rs` |
 | 7 | I26 to I29, I36 | I26 edits I19's `ops/archive/mod.rs` routing and `cli/cmd/archive.rs`; I28 edits I23's `remote/mod.rs` arm, `ops/remote.rs` and `cli/cmd/remote.rs`; I36 edits I18's `cli/cmd/find.rs` and is the only `Cargo.toml` editor |
-| 8 | I30, I34, I35 | `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
+| 8 | I30, I34, I35, I40 | I40 only in `src/cli/picker/`; `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
 | 9 | I31, I32, I33 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs` |
 | 10 | I37, I38 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs` |
 | 11 | I39 | |
@@ -2036,10 +2036,8 @@ plan keeps them in wave 6.
   gains the explicit `resolve --drop-superseded` case that spec
   "Safety" has, and ADR 0039's source list gains `fork` and `minted`
   (T2), in place.
-- R2 Open user designs. U2 (console look) blocks the console rendering
-  of the command items from I16 on; U4 (contents view) blocks I40. Both
-  are being designed with the user from rendered pictures while wave 1
-  runs.
+- R2 Console snapshots. The design pictures fix the look; the command
+  items' insta snapshots are reviewed against them before acceptance.
 - R3 Long paths. On macOS, 44 members of a 1,300-byte path failed past
   `PATH_MAX` of 1,024 with the `tar` crate (names research), and spec
   "unearth" extracts such paths directory by directory. Every consumer
@@ -2160,15 +2158,25 @@ Answered by the user on 2026-11-03 (chat), binding for the items:
 - U1 `find <query>` also matches member paths from the listings
   (I15 search, I18). Fuzzy matching as the picker; objects only; JSON
   `size` is the current payload's size.
-- U2 The console look of `status`, `archive`, `sync` and the other
-  commands is designed with the user before the command items start,
-  from rendered terminal pictures. Open; blocks the console rendering of
-  I16 and later command items, not their library parts.
+- U2 Console look, designed with the user from rendered terminal
+  pictures and written into spec "status" and "Command line": output
+  fits 80 columns, long paths shortened in the middle; `status` lists
+  only what needs the user or changes at the next run, as a table
+  (STATE, PIECE, AGE, WHAT), "nothing to do" otherwise, every piece via
+  `find`; long runs show one row per piece (path, size, bar, operation,
+  detail), on one line when the path fits and two lines otherwise;
+  `sync` shows its phases as a checklist. Pictures in
+  `~/playground/2026_11_02_antiq-logbook/design/mockups/png/`:
+  `n80-status-d.png`, `status-f-clean.png`, `n80-archive-h1-oneline.png`,
+  `n80-archive-h1-twoline.png`, `n80-sync-s2-oneline.png`,
+  `n80-sync-s2-twoline.png`; their sources are `gen.py` and `ans/` beside
+  them, rendered with `design/ansi-shot`. Command items match them in
+  their console snapshots.
 - U3 Picker flow: after pin, unpin or print the picker stays open;
   unearth and fork close it. Keys and the fork name follow ntropy's
   accept keys and keep the name unless the U4 design says otherwise.
-- U4 The contents view is designed with the user now, from rendered
-  pictures (todo `01M6ESY4GEGYFC37C81N3PW6XG`). Open; blocks I40.
+- U4 The contents view is a tree inside the list (ADR 0057, spec
+  "Command line"; picture `n80-contents-tree.png`). I40 builds it.
 - U5 Accepted as recommended: `init` where `.antiq/` exists or inside a
   collection refuses, naming the existing root; `init --yes` takes the
   proposed `archive/` exclude; `sync` without a remote fails with exit 1

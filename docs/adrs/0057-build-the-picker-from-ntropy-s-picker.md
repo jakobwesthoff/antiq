@@ -18,8 +18,9 @@ ntropy.
 
 antiq's picker starts as a copy of ntropy's picker. It offers
 unearthing (Enter), a view of a piece's contents, printing the path
-(`--print`), forking and pinning or unpinning. How the contents are
-shown is not decided yet; a plain preview pane is not assumed.
+(`--print`), forking and pinning or unpinning. The contents show as a
+tree inside the list: a key expands the selected piece in place, and
+members whose paths match the query show as its children.
 
 ## Consequences
 

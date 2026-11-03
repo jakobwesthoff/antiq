@@ -751,11 +751,20 @@ and is never pruned. (ADR 0044)
 
 ### status
 
-`status` is read-only. It shows pieces by state: pinned, new, empty,
-gone, unreadable, containing a mount point, future modification times,
-stale backups, diverged, needing a decision, superseded archives,
-pending remote work, missing on the remote, recovered trees, skipped
-symlinks and dot entries, and "remote-only in N days".
+`status` is read-only. On the console it lists only the pieces that need
+the user or change at the next run, one table row each with the state,
+the piece's path, the days since its last activity and what is
+pending: needing a decision, diverged, a stale backup, a superseded
+archive, pending remote work, missing on the remote, a recovered tree,
+unreadable, containing a mount point, future modification times, gone,
+new, or archiving at the next run. A line above the table gives the
+remote's state, the time of the last sync and the counts of live and
+archived pieces; a hint line below it names `antiq resolve` when a
+decision is pending and `antiq find` for every piece. Without such a
+piece it says that nothing is to do and names the next change, a piece
+that archives or becomes remote-only, with the days until then. Pinned
+and empty pieces and skipped symlinks and dot entries are counted, not
+listed. The JSON output carries every piece.
 
 ### Safety
 
@@ -807,7 +816,19 @@ error. Both exit 1. JSON output always carries full ULIDs; scripts use
 them.
 
 antiq writes console output; the picker of `find` is its only
-full-screen part. (ADR 0056)
+full-screen part. (ADR 0056) The output fits a terminal of 80 columns.
+A piece's path that does not fit is shortened in the middle, keeping its
+start and its end.
+
+Long runs show one row per piece: its path, its size, a progress bar,
+the operation running on it (packing, verifying, storing, removing,
+uploading, fetching) and one detail, such as the files checked or the
+bytes moved. A row takes one line when the path fits and two lines
+otherwise, the full path above the bar. `sync` shows its phases (pull,
+live backups, upload, commit, tiers) as a checklist: a finished phase
+is one summary line, the running phase lists its pieces as rows, later
+phases are dimmed. Without a terminal only the finished lines are
+printed.
 
 `--json` also makes a command non-interactive. Otherwise a command is
 interactive when a controlling terminal is available, also when its
@@ -817,7 +838,11 @@ output is redirected. (ADR 0020, ADR 0023)
 from which an object can be unearthed. (ADR 0021) The picker starts as a
 copy of ntropy's picker. It offers unearthing (Enter), a view of a
 piece's contents, printing the path (`--print`), forking, and pinning or
-unpinning. How the contents are shown is not decided yet. (ADR 0057)
+unpinning. A key expands the selected piece in place into a tree of its
+contents, read from its listing; when the query matches member paths,
+the matching members show as the expanded piece's children. After
+pinning, unpinning or printing the picker stays open; unearthing and
+forking close it. (ADR 0057)
 `--print` prints the absolute path of the picked piece's folder, for an
 archived piece the path it would be unearthed to. Without a terminal it
 prints the path of every match, one per line. With `--json`, `find`
