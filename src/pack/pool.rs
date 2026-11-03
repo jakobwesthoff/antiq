@@ -19,8 +19,12 @@ use crate::sysmem::{SysmemError, physical_memory};
 
 const MIB: u64 = 1024 * 1024;
 
-/// Memory one level-19 worker needs, in the budget's terms.
-pub const ARCHIVE_WORKER_BYTES: u64 = 256 * MIB;
+/// What an archive encoder counts against the memory budget whatever its
+/// worker count: the round buffer zstd allocates for long-distance matching.
+pub const ARCHIVE_FIXED_BYTES: u64 = 448 * MIB;
+
+/// What each worker of an archive encoder adds.
+pub const ARCHIVE_WORKER_BYTES: u64 = 160 * MIB;
 
 /// zstd's default job size for archives. A piece smaller than this
 /// cannot keep a second worker busy.
@@ -53,6 +57,10 @@ struct State {
     next_ticket: u64,
     serving: u64,
     waiting: usize,
+    /// How often a request went to sleep on `changed`, for tests that wait
+    /// for a wake-up to have been seen and answered.
+    #[cfg(test)]
+    waits: u64,
 }
 
 /// Workers taken from a [`Pool`], returned when the lease is dropped.
@@ -120,26 +128,35 @@ impl Pool {
         )
     }
 
-    /// Takes up to `want` workers, each counted as `bytes_per_worker`
-    /// against the memory budget (0 counts against the cores only), and
-    /// waits until at least one is available. Requests are served in the
-    /// order they arrive.
+    /// Takes up to `want` workers and waits until at least one is
+    /// available. Requests are served in the order they arrive.
     ///
-    /// Archives pass [`ARCHIVE_WORKER_BYTES`]; other compression passes the
-    /// figure of its own level. A thread must not call this while it holds
-    /// a lease, since it could wait for itself.
-    pub fn lease(&self, want: usize, bytes_per_worker: u64) -> Lease<'_> {
-        debug_assert!(
+    /// The lease counts `fixed_bytes + workers * bytes_per_worker` against
+    /// the memory budget. Archives pass [`ARCHIVE_FIXED_BYTES`] and
+    /// [`ARCHIVE_WORKER_BYTES`]; other compression passes the figures of
+    /// its own settings. A cost of `(0, 0)` counts against the cores only.
+    ///
+    /// A thread must not call this while it holds a lease, since it could
+    /// wait for itself.
+    pub fn lease(&self, want: usize, fixed_bytes: u64, bytes_per_worker: u64) -> Lease<'_> {
+        assert!(
             !HOLDING_LEASE.get(),
             "this thread already holds a lease and would wait for itself"
         );
+        let cost = Cost {
+            fixed: fixed_bytes,
+            per_worker: bytes_per_worker,
+        };
         let mut state = self.state();
         let ticket = state.next_ticket;
         state.next_ticket += 1;
         state.waiting += 1;
+        // Nothing from taking the ticket to the grant may panic: the ticket
+        // would never be served and every request behind it would wait for
+        // good.
         loop {
             if state.serving == ticket
-                && let Some(lease) = self.grant(&mut state, want, bytes_per_worker)
+                && let Some(lease) = self.grant(&mut state, want, cost)
             {
                 state.waiting -= 1;
                 state.serving += 1;
@@ -147,6 +164,10 @@ impl Pool {
                 // The next in line may be able to go now.
                 self.changed.notify_all();
                 return lease;
+            }
+            #[cfg(test)]
+            {
+                state.waits += 1;
             }
             state = self
                 .changed
@@ -157,22 +178,37 @@ impl Pool {
 
     /// Like [`Pool::lease`], but gives up instead of waiting, and also
     /// when another request is already waiting.
-    pub fn try_lease(&self, want: usize, bytes_per_worker: u64) -> Option<Lease<'_>> {
-        debug_assert!(
+    pub fn try_lease(
+        &self,
+        want: usize,
+        fixed_bytes: u64,
+        bytes_per_worker: u64,
+    ) -> Option<Lease<'_>> {
+        assert!(
             !HOLDING_LEASE.get(),
             "this thread already holds a lease and would wait for itself"
         );
+        let cost = Cost {
+            fixed: fixed_bytes,
+            per_worker: bytes_per_worker,
+        };
         let mut state = self.state();
         if state.next_ticket != state.serving {
             return None;
         }
-        self.grant(&mut state, want, bytes_per_worker)
+        self.grant(&mut state, want, cost)
     }
 
     /// Requests currently blocked in [`Pool::lease`].
     #[cfg(test)]
     fn waiting(&self) -> usize {
         self.state().waiting
+    }
+
+    /// Times requests went to sleep in [`Pool::lease`] so far.
+    #[cfg(test)]
+    fn waits(&self) -> u64 {
+        self.state().waits
     }
 
     // A poisoned lock is taken over: the counters are consistent after any
@@ -182,22 +218,25 @@ impl Pool {
     }
 
     /// Hands out workers if the cores and the memory allow it.
-    fn grant(&self, state: &mut State, want: usize, bytes_per_worker: u64) -> Option<Lease<'_>> {
+    fn grant(&self, state: &mut State, want: usize, cost: Cost) -> Option<Lease<'_>> {
         let by_cores = self.cores - state.workers_out;
-        // A worker size of 0 has no division result: no memory limit.
+        // The fixed part comes off first. A worker size of 0 has no
+        // division result: no further memory limit.
         let free = self.budget.saturating_sub(state.bytes_out);
-        let by_memory = free
-            .checked_div(bytes_per_worker)
-            .map_or(usize::MAX, |workers| {
-                usize::try_from(workers).unwrap_or(usize::MAX)
-            });
+        let by_memory = free.checked_sub(cost.fixed).map_or(0, |rest| {
+            rest.checked_div(cost.per_worker)
+                .map_or(usize::MAX, |workers| {
+                    usize::try_from(workers).unwrap_or(usize::MAX)
+                })
+        });
         let mut workers = want.max(1).min(by_cores).min(by_memory);
         let mut warning = None;
 
         if workers == 0 {
             // Nothing out means one worker is always granted, even when the
-            // memory limit is smaller than a worker. It counts in full, so
-            // nothing else starts next to it.
+            // memory limit is smaller than an encoder with one worker. It
+            // counts in full, so a lease with a memory cost waits for it;
+            // one that costs no memory still starts next to it.
             if state.workers_out > 0 {
                 return None;
             }
@@ -208,14 +247,15 @@ impl Pool {
                     "the memory limit of {} MiB is below the {} MiB of one compression worker, \
                      compressing with one worker at a time",
                     self.budget / MIB,
-                    bytes_per_worker / MIB
+                    cost.of(1) / MIB
                 )));
             }
         }
 
-        // `workers` fits the free memory by the divisions above, and a
-        // forced grant starts from nothing out, so this cannot overflow.
-        let bytes = workers as u64 * bytes_per_worker;
+        // A normal grant fits the free memory by the checks above, and a
+        // forced one starts from nothing out; only the forced one can reach
+        // the saturation.
+        let bytes = cost.of(workers);
         state.workers_out += workers;
         state.bytes_out += bytes;
         HOLDING_LEASE.set(true);
@@ -226,6 +266,21 @@ impl Pool {
             warning,
             not_send: PhantomData,
         })
+    }
+}
+
+/// What a lease counts against the memory budget.
+#[derive(Debug, Clone, Copy)]
+struct Cost {
+    fixed: u64,
+    per_worker: u64,
+}
+
+impl Cost {
+    /// `fixed + workers * per_worker`, saturating at `u64::MAX`.
+    fn of(self, workers: usize) -> u64 {
+        self.fixed
+            .saturating_add((workers as u64).saturating_mul(self.per_worker))
     }
 }
 
@@ -269,6 +324,13 @@ mod tests {
     /// waits this long has failed.
     const WAKE_BOUND: Duration = Duration::from_secs(30);
 
+    /// Failure bound for the tests that run many rounds, where a missed
+    /// wake-up is rescued and reported instead of waited for.
+    const ROUND_BOUND: Duration = Duration::from_secs(3);
+
+    /// Rounds of the tests that look for a missed wake-up.
+    const ROUNDS: usize = 300;
+
     /// Waits until `count` requests block in the pool. The spin yields
     /// instead of sleeping and fails when it runs out.
     fn wait_until_waiting(pool: &Pool, count: usize) {
@@ -281,30 +343,106 @@ mod tests {
         panic!("the thread never waited");
     }
 
+    /// Waits until requests have gone to sleep in the pool `count` times.
+    fn wait_until_waits(pool: &Pool, count: u64) {
+        for _ in 0..50_000_000 {
+            if pool.waits() >= count {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("the thread never went back to waiting");
+    }
+
+    /// Receives `count` messages. When one does not arrive in time, the
+    /// pool's waiters are woken so that their threads can end, and the
+    /// result says the wake-up was missed.
+    fn receive_all<T>(pool: &Pool, received: &mpsc::Receiver<T>, count: usize) -> bool {
+        for _ in 0..count {
+            if received.recv_timeout(ROUND_BOUND).is_err() {
+                pool.changed.notify_all();
+                return false;
+            }
+        }
+        true
+    }
+
     #[test]
     fn two_leases_never_exceed_the_cores() {
         let pool = Pool::new(4, 0);
-        let first = pool.try_lease(3, 0).expect("cores are free");
+        let first = pool.try_lease(3, 0, 0).expect("cores are free");
         assert_eq!(first.workers(), 3);
         // The test thread holds `first`, so the second lease runs on another.
         thread::scope(|scope| {
             scope.spawn(|| {
-                let second = pool.try_lease(3, 0).expect("one core is left");
+                let second = pool.try_lease(3, 0, 0).expect("one core is left");
                 assert_eq!(second.workers(), 1);
                 // A thread holds one lease at a time, so a third one is asked for elsewhere.
                 thread::scope(|inner| {
-                    inner.spawn(|| assert!(pool.try_lease(1, 0).is_none(), "all cores are out"));
+                    inner.spawn(|| assert!(pool.try_lease(1, 0, 0).is_none(), "all cores are out"));
                 });
             });
         });
     }
 
     #[test]
-    fn a_quarter_of_one_gibibyte_hands_out_one_level_19_worker() {
-        let pool = Pool::new(8, budget_for(1024 * MIB, 25));
-        let lease = pool.try_lease(8, ARCHIVE_WORKER_BYTES).expect("fits");
-        assert_eq!(lease.workers(), 1);
+    fn an_archive_encoder_counts_a_fixed_part_and_each_worker() {
+        let pool = Pool::new(8, 1024 * MIB);
+        let lease = pool
+            .try_lease(8, ARCHIVE_FIXED_BYTES, ARCHIVE_WORKER_BYTES)
+            .expect("fits");
+        // 1024 - 448 = 576 MiB leave room for three workers of 160 MiB.
+        assert_eq!(lease.workers(), 3);
         assert!(lease.warning().is_none());
+    }
+
+    #[test]
+    fn a_quarter_of_one_gibibyte_forces_one_archive_worker_and_warns() {
+        let pool = Pool::new(8, budget_for(1024 * MIB, 25));
+        let lease = pool
+            .try_lease(8, ARCHIVE_FIXED_BYTES, ARCHIVE_WORKER_BYTES)
+            .expect("forced");
+        assert_eq!(lease.workers(), 1);
+        assert_eq!(
+            lease.warning().expect("256 MiB hold no encoder").message,
+            "the memory limit of 256 MiB is below the 608 MiB of one compression worker, \
+             compressing with one worker at a time"
+        );
+    }
+
+    #[test]
+    fn a_second_encoder_waits_when_only_the_per_worker_part_is_free() {
+        let pool = Pool::new(8, 1024 * MIB);
+        let first = pool
+            .try_lease(1, ARCHIVE_FIXED_BYTES, ARCHIVE_WORKER_BYTES)
+            .expect("fits");
+        assert_eq!(first.workers(), 1);
+        // 1024 - 608 = 416 MiB are free: room for a worker, not for the
+        // fixed part of another encoder.
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                assert!(
+                    pool.try_lease(1, ARCHIVE_FIXED_BYTES, ARCHIVE_WORKER_BYTES)
+                        .is_none()
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_fixed_part_that_fits_leaves_workers_without_a_memory_limit() {
+        let pool = Pool::new(4, 100 * MIB);
+        let lease = pool.try_lease(4, 50 * MIB, 0).expect("fits");
+        assert_eq!(lease.workers(), 4);
+        assert!(lease.warning().is_none());
+    }
+
+    #[test]
+    fn a_fixed_part_above_the_budget_forces_one_worker() {
+        let pool = Pool::new(4, 100 * MIB);
+        let lease = pool.try_lease(4, 200 * MIB, 0).expect("forced");
+        assert_eq!(lease.workers(), 1);
+        assert!(lease.warning().is_some());
     }
 
     #[test]
@@ -318,7 +456,7 @@ mod tests {
     #[test]
     fn a_budget_below_one_worker_still_grants_one_and_warns() {
         let pool = Pool::new(4, 100 * MIB);
-        let lease = pool.try_lease(4, ARCHIVE_WORKER_BYTES).expect("forced");
+        let lease = pool.try_lease(4, 0, 256 * MIB).expect("forced");
         assert_eq!(lease.workers(), 1);
         let warning = lease.warning().expect("the limit is below one worker");
         assert_eq!(
@@ -331,57 +469,71 @@ mod tests {
     #[test]
     fn the_warning_is_given_once_per_pool() {
         let pool = Pool::new(4, 100 * MIB);
-        drop(pool.try_lease(1, ARCHIVE_WORKER_BYTES).expect("forced"));
-        let second = pool.try_lease(1, ARCHIVE_WORKER_BYTES).expect("forced");
+        let first = pool.try_lease(1, 0, 256 * MIB).expect("forced");
+        assert!(first.warning().is_some());
+        drop(first);
+        let second = pool.try_lease(1, 0, 256 * MIB).expect("forced");
         assert!(second.warning().is_none());
     }
 
     #[test]
     fn a_forced_lease_charges_its_full_size() {
         let pool = Pool::new(4, 100 * MIB);
-        let forced = pool.try_lease(1, ARCHIVE_WORKER_BYTES).expect("forced");
+        let forced = pool.try_lease(1, 0, 256 * MIB).expect("forced");
         thread::scope(|scope| {
             scope.spawn(|| {
                 assert!(
-                    pool.try_lease(1, 10 * MIB).is_none(),
+                    pool.try_lease(1, 0, 10 * MIB).is_none(),
                     "the forced worker is over the limit"
                 );
             });
         });
         drop(forced);
-        assert!(pool.try_lease(1, 10 * MIB).is_some());
+        assert!(pool.try_lease(1, 0, 10 * MIB).is_some());
+    }
+
+    #[test]
+    fn a_lease_that_costs_no_memory_starts_next_to_a_forced_one() {
+        let pool = Pool::new(4, 100 * MIB);
+        let _forced = pool.try_lease(1, 0, 256 * MIB).expect("forced");
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let free = pool.try_lease(1, 0, 0).expect("only cores count");
+                assert_eq!(free.workers(), 1);
+            });
+        });
     }
 
     #[test]
     fn try_lease_refuses_when_the_cores_are_out() {
         let pool = Pool::new(1, 1024 * MIB);
-        let held = pool.try_lease(1, 0).expect("free");
+        let held = pool.try_lease(1, 0, 0).expect("free");
         thread::scope(|scope| {
-            scope.spawn(|| assert!(pool.try_lease(1, 0).is_none()));
+            scope.spawn(|| assert!(pool.try_lease(1, 0, 0).is_none()));
         });
         drop(held);
-        assert!(pool.try_lease(1, 0).is_some());
+        assert!(pool.try_lease(1, 0, 0).is_some());
     }
 
     #[test]
     fn try_lease_refuses_when_the_memory_is_out() {
         let pool = Pool::new(8, 256 * MIB);
-        let held = pool.try_lease(1, 256 * MIB).expect("free");
+        let held = pool.try_lease(1, 0, 256 * MIB).expect("free");
         thread::scope(|scope| {
-            scope.spawn(|| assert!(pool.try_lease(1, 256 * MIB).is_none()));
+            scope.spawn(|| assert!(pool.try_lease(1, 0, 256 * MIB).is_none()));
         });
         drop(held);
-        assert!(pool.try_lease(1, 256 * MIB).is_some());
+        assert!(pool.try_lease(1, 0, 256 * MIB).is_some());
     }
 
     /// Takes the only worker on the test thread, lets a second thread block
     /// in `lease`, then drops the first and reports what the second got.
     fn blocked_lease_gets_woken(pool: &Pool, bytes_per_worker: u64) -> usize {
-        let held = pool.try_lease(1, bytes_per_worker).expect("free");
+        let held = pool.try_lease(1, 0, bytes_per_worker).expect("free");
         let (granted, received) = mpsc::channel();
         thread::scope(|scope| {
             scope.spawn(|| {
-                let lease = pool.lease(1, bytes_per_worker);
+                let lease = pool.lease(1, 0, bytes_per_worker);
                 granted.send(lease.workers()).expect("the test listens");
             });
             wait_until_waiting(pool, 1);
@@ -406,13 +558,13 @@ mod tests {
     #[test]
     fn a_waiter_goes_before_a_new_lease() {
         let pool = Pool::new(2, 0);
-        let held = pool.try_lease(2, 0).expect("free");
+        let held = pool.try_lease(2, 0, 0).expect("free");
         let (granted, received) = mpsc::channel();
         let (release, released) = mpsc::channel::<()>();
         let pool = &pool;
         thread::scope(|scope| {
             scope.spawn(move || {
-                let lease = pool.lease(2, 0);
+                let lease = pool.lease(2, 0, 0);
                 granted.send(lease.workers()).expect("the test listens");
                 released
                     .recv_timeout(WAKE_BOUND)
@@ -421,7 +573,7 @@ mod tests {
             wait_until_waiting(pool, 1);
             drop(held);
             assert!(
-                pool.try_lease(1, 0).is_none(),
+                pool.try_lease(1, 0, 0).is_none(),
                 "a new request must not overtake the waiter"
             );
             assert_eq!(received.recv_timeout(WAKE_BOUND).expect("woke"), 2);
@@ -430,17 +582,161 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_worker_size_has_no_memory_limit() {
+    fn a_request_that_fits_does_not_overtake_an_earlier_waiter() {
+        // A needs an idle pool; B costs no memory and would fit next to the
+        // held lease, so only its place in the queue holds it back.
+        let pool = Pool::new(4, 100 * MIB);
+        let held = pool.try_lease(1, 0, 0).expect("free");
+        let (tx, rx) = mpsc::channel::<&'static str>();
+        let (release, released) = mpsc::channel::<()>();
+        let pool = &pool;
+        thread::scope(|scope| {
+            let a = tx.clone();
+            scope.spawn(move || {
+                let _lease = pool.lease(1, 200 * MIB, 0);
+                a.send("A").expect("the test listens");
+                released
+                    .recv_timeout(WAKE_BOUND)
+                    .expect("the test releases");
+            });
+            wait_until_waiting(pool, 1);
+            let b = tx.clone();
+            scope.spawn(move || {
+                let _lease = pool.lease(1, 0, 0);
+                b.send("B").expect("the test listens");
+            });
+            // B was granted at once if it did not stay in the queue, and
+            // the count of waiting requests would stay at one.
+            wait_until_waiting(pool, 2);
+            drop(held);
+            // Both threads send after their grant, so their messages may
+            // arrive in either order.
+            let mut served = [
+                rx.recv_timeout(WAKE_BOUND).expect("A or B"),
+                rx.recv_timeout(WAKE_BOUND).expect("B or A"),
+            ];
+            served.sort_unstable();
+            assert_eq!(served, ["A", "B"]);
+            release.send(()).expect("A waits");
+        });
+    }
+
+    #[test]
+    fn a_drop_wakes_every_waiter_in_turn() {
+        // Two waiters on one core: the drop has to reach the head one, and
+        // its own drop the next. A missed wake-up leaves one of them stuck.
+        for round in 0..ROUNDS {
+            let pool = Pool::new(1, 0);
+            let held = pool.try_lease(1, 0, 0).expect("free");
+            let (tx, rx) = mpsc::channel::<u8>();
+            let pool = &pool;
+            let all_served = thread::scope(|scope| {
+                for id in 0..2 {
+                    let tx = tx.clone();
+                    scope.spawn(move || {
+                        let _lease = pool.lease(1, 0, 0);
+                        tx.send(id).expect("the test listens");
+                    });
+                    wait_until_waiting(pool, usize::from(id) + 1);
+                }
+                drop(held);
+                receive_all(pool, &rx, 2)
+            });
+            assert!(all_served, "a waiter was not woken in round {round}");
+        }
+    }
+
+    #[test]
+    fn a_waiter_that_slept_again_is_woken_by_the_next_drop() {
+        // The first drop frees too little for the head waiter A, which goes
+        // back to sleep behind B in the condition variable's queue. The
+        // second drop must still reach A.
+        for round in 0..ROUNDS {
+            let pool = Pool::new(4, 256 * MIB);
+            let held = pool.try_lease(1, 0, 128 * MIB).expect("free");
+            let (tx, rx) = mpsc::channel::<&'static str>();
+            let (got, got_it) = mpsc::channel::<()>();
+            let (go, may_go) = mpsc::channel::<()>();
+            let pool = &pool;
+            let all_served = thread::scope(|scope| {
+                scope.spawn(move || {
+                    let _lease = pool.lease(1, 0, 128 * MIB);
+                    got.send(()).expect("the test listens");
+                    may_go.recv_timeout(WAKE_BOUND).expect("the test lets go");
+                });
+                got_it.recv_timeout(WAKE_BOUND).expect("the first lease");
+                let a = tx.clone();
+                scope.spawn(move || {
+                    let _lease = pool.lease(1, 0, 256 * MIB);
+                    a.send("A").expect("the test listens");
+                });
+                wait_until_waiting(pool, 1);
+                let b = tx.clone();
+                scope.spawn(move || {
+                    let _lease = pool.lease(1, 0, 0);
+                    b.send("B").expect("the test listens");
+                });
+                wait_until_waiting(pool, 2);
+                let slept = pool.waits();
+                go.send(()).expect("the thread waits");
+                // Some waiter looked again and went back to sleep.
+                wait_until_waits(pool, slept + 1);
+                drop(held);
+                receive_all(pool, &rx, 2)
+            });
+            assert!(all_served, "a waiter was not woken in round {round}");
+        }
+    }
+
+    #[test]
+    fn a_grant_passes_the_wake_up_on() {
+        // One drop frees both: A needs the memory that came back, B needs
+        // only a core. B can go only after A's grant has woken it.
+        for round in 0..ROUNDS {
+            let pool = Pool::new(2, 256 * MIB);
+            let held = pool.try_lease(1, 0, 256 * MIB).expect("free");
+            let (tx, rx) = mpsc::channel::<u8>();
+            let (release, released) = mpsc::channel::<()>();
+            let pool = &pool;
+            let all_served = thread::scope(|scope| {
+                let a = tx.clone();
+                scope.spawn(move || {
+                    let _lease = pool.lease(1, 0, 256 * MIB);
+                    a.send(0).expect("the test listens");
+                    let _ = released.recv_timeout(WAKE_BOUND);
+                });
+                wait_until_waiting(pool, 1);
+                let b = tx.clone();
+                scope.spawn(move || {
+                    let _lease = pool.lease(1, 0, 0);
+                    b.send(1).expect("the test listens");
+                });
+                wait_until_waiting(pool, 2);
+                drop(held);
+                let all_served = receive_all(pool, &rx, 2);
+                release.send(()).expect("A waits for the release");
+                all_served
+            });
+            assert!(all_served, "a waiter was not woken in round {round}");
+        }
+    }
+
+    #[test]
+    fn a_zero_cost_has_no_memory_limit() {
         let pool = Pool::new(4, 0);
-        let lease = pool.try_lease(4, 0).expect("cores only");
+        let lease = pool.try_lease(4, 0, 0).expect("cores only");
         assert_eq!(lease.workers(), 4);
         assert!(lease.warning().is_none());
     }
 
     #[test]
-    fn a_huge_worker_size_does_not_overflow() {
+    fn a_huge_cost_does_not_overflow() {
         let pool = Pool::new(4, 1024 * MIB);
-        let lease = pool.try_lease(4, u64::MAX).expect("forced");
+        let huge = u64::MAX / 2 + 1;
+        let lease = pool.try_lease(4, huge, huge).expect("forced");
+        assert_eq!(lease.workers(), 1);
+        drop(lease);
+        let lease = pool.try_lease(4, 0, u64::MAX).expect("forced");
         assert_eq!(lease.workers(), 1);
     }
 
@@ -458,21 +754,33 @@ mod tests {
 
     #[test]
     fn a_want_of_zero_is_taken_as_one() {
-        let pool = Pool::new(4, 0);
-        assert_eq!(pool.try_lease(0, 0).expect("free").workers(), 1);
+        let pool = Pool::new(2, 0);
+        let first = pool.try_lease(0, 0, 0).expect("free");
+        assert_eq!(first.workers(), 1);
+        assert!(first.warning().is_none());
+        // The clamp matters while the first is held: a want of 0 would
+        // otherwise look like "no worker fits" and wait for an idle pool.
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let second = pool.try_lease(0, 0, 0).expect("a core is left");
+                assert_eq!(second.workers(), 1);
+            });
+        });
     }
 
     #[test]
     fn a_pool_has_at_least_one_core() {
         let pool = Pool::new(0, 0);
-        assert_eq!(pool.try_lease(8, 0).expect("free").workers(), 1);
+        assert_eq!(pool.try_lease(8, 0, 0).expect("free").workers(), 1);
     }
 
     #[test]
     fn dropping_a_lease_returns_its_workers_and_memory() {
         let pool = Pool::new(2, 512 * MIB);
-        drop(pool.try_lease(2, 256 * MIB).expect("free"));
-        let again = pool.try_lease(2, 256 * MIB).expect("everything came back");
+        drop(pool.try_lease(2, 0, 256 * MIB).expect("free"));
+        let again = pool
+            .try_lease(2, 0, 256 * MIB)
+            .expect("everything came back");
         assert_eq!(again.workers(), 2);
     }
 
@@ -487,23 +795,23 @@ mod tests {
             poisoner.join().expect_err("the thread panicked");
         });
         assert!(pool.state.is_poisoned(), "the precondition of this test");
-        assert_eq!(pool.try_lease(2, 0).expect("free").workers(), 2);
+        assert_eq!(pool.try_lease(2, 0, 0).expect("free").workers(), 2);
     }
 
     #[test]
     #[should_panic(expected = "already holds a lease")]
     fn a_second_lease_on_the_same_thread_is_refused() {
         let pool = Pool::new(4, 0);
-        let _first = pool.try_lease(1, 0).expect("free");
-        let _second = pool.try_lease(1, 0);
+        let _first = pool.try_lease(1, 0, 0).expect("free");
+        let _second = pool.try_lease(1, 0, 0);
     }
 
     #[test]
     #[should_panic(expected = "already holds a lease")]
     fn a_blocking_second_lease_on_the_same_thread_is_refused() {
         let pool = Pool::new(4, 0);
-        let _first = pool.try_lease(1, 0).expect("free");
-        let _second = pool.lease(1, 0);
+        let _first = pool.try_lease(1, 0, 0).expect("free");
+        let _second = pool.lease(1, 0, 0);
     }
 
     #[test]
@@ -526,10 +834,13 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_of_this_machine_has_at_least_one_core() {
+    fn the_pool_of_this_machine_has_its_cores_and_a_quarter_of_its_memory() {
         let pool = Pool::for_machine(25).expect("the test machine reports its memory");
-        assert!(pool.cores >= 1);
-        assert!(pool.budget > 0);
+        let cores = std::thread::available_parallelism()
+            .expect("the test machine reports its cores")
+            .get();
+        let memory = physical_memory().expect("the test machine reports its memory");
+        assert_eq!((pool.cores, pool.budget), (cores, budget_for(memory, 25)));
     }
 
     #[test]
