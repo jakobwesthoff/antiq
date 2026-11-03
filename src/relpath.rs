@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 
 /// The escaped form of `bytes`.
 pub fn escape(bytes: &[u8]) -> String {
@@ -236,6 +238,59 @@ fn escape_part(bytes: &[u8], limit: usize) -> String {
     part
 }
 
+/// The path `given` leads to, relative to `root`. Piece references, `--to`
+/// and `--path` take this way into the collection.
+///
+/// A relative `given` starts at `cwd`. `.` and `..` are resolved from the
+/// text of the paths alone, without asking the filesystem. `root` and `cwd`
+/// are absolute, and `given` has to spell the root the way `root` does: the
+/// root is found by walking up from the current directory, so `root` and
+/// `cwd` agree, but an absolute `given` typed through a symbolic link above
+/// the root (`/tmp/...` for `/private/tmp/...` on macOS) is not below it.
+/// Callers that take paths from the user match the root itself on disk
+/// before they call this.
+///
+/// Names are compared byte for byte, so a differently cased spelling of the
+/// root is outside it on a case-insensitive filesystem.
+pub fn below_root(root: &Path, given: &Path, cwd: &Path) -> Result<RelPath, RelPathError> {
+    for path in [root, cwd] {
+        if !path.is_absolute() {
+            return Err(RelPathError::NotAbsolute(shown(path)));
+        }
+    }
+    let root = lexical_absolute(cwd, root)?;
+    let path = lexical_absolute(cwd, given)?;
+    let below = path
+        .strip_prefix(&root)
+        .map_err(|_| RelPathError::OutsideRoot {
+            path: shown(&path),
+            root: shown(&root),
+        })?;
+    RelPath::from_bytes(below.as_os_str().as_bytes().to_vec())
+}
+
+/// `given` made absolute against `cwd`, with `.` and `..` resolved and
+/// repeated separators collapsed.
+fn lexical_absolute(cwd: &Path, given: &Path) -> Result<PathBuf, RelPathError> {
+    let mut folded = PathBuf::from("/");
+    for component in cwd.join(given).components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                if !folded.pop() {
+                    return Err(RelPathError::AboveRoot(shown(given)));
+                }
+            }
+            Component::Normal(name) => folded.push(name),
+        }
+    }
+    Ok(folded)
+}
+
+fn shown(path: &Path) -> String {
+    escape(path.as_os_str().as_bytes())
+}
+
 /// Errors of paths and names.
 #[derive(Debug, thiserror::Error)]
 pub enum RelPathError {
@@ -247,6 +302,12 @@ pub enum RelPathError {
     InvalidName(&'static str),
     #[error("a path cannot have a component that is {0}")]
     InvalidPath(&'static str),
+    #[error("`{0}` is not an absolute path")]
+    NotAbsolute(String),
+    #[error("`{0}` goes above the root of the filesystem")]
+    AboveRoot(String),
+    #[error("`{path}` is not below `{root}`")]
+    OutsideRoot { path: String, root: String },
 }
 
 impl crate::error::HasKind for RelPathError {}
@@ -521,5 +582,139 @@ mod tests {
                 assert!(input.starts_with(&decoded), "{part:?} is not a prefix");
             }
         }
+    }
+
+    fn below(root: &str, given: &str, cwd: &str) -> Result<RelPath, RelPathError> {
+        below_root(Path::new(root), Path::new(given), Path::new(cwd))
+    }
+
+    fn below_text(root: &str, given: &str, cwd: &str) -> String {
+        below(root, given, cwd).expect("below the root").to_string()
+    }
+
+    #[test]
+    fn dot_and_dotdot_fold() {
+        assert_eq!(below_text("/c", "/c/a/./b/../x", "/c"), "a/x");
+    }
+
+    #[test]
+    fn repeated_slashes_collapse() {
+        assert_eq!(below_text("/c", "/c//a///b", "/c"), "a/b");
+    }
+
+    #[test]
+    fn a_relative_given_is_joined_to_the_cwd() {
+        assert_eq!(below_text("/c", "x/y", "/c/a"), "a/x/y");
+    }
+
+    #[test]
+    fn a_cwd_inside_the_root_with_dotdot_reaches_a_sibling() {
+        assert_eq!(below_text("/c", "../b", "/c/a"), "b");
+    }
+
+    #[test]
+    fn dotdot_above_the_filesystem_root_is_refused() {
+        for (given, cwd) in [("/..", "/c"), ("a/../../..", "/x")] {
+            let error = below("/c", given, cwd).expect_err("above the root");
+            assert!(matches!(error, RelPathError::AboveRoot(_)), "{error:?}");
+        }
+        let error = below("/c", "/..", "/c").expect_err("above the root");
+        assert_eq!(
+            error.to_string(),
+            "`/..` goes above the root of the filesystem"
+        );
+    }
+
+    #[test]
+    fn dotdot_out_of_the_collection_is_outside_the_root() {
+        let error = below("/c", "/c/a/../..", "/c").expect_err("outside");
+        assert!(
+            matches!(error, RelPathError::OutsideRoot { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.to_string(), "`/` is not below `/c`");
+    }
+
+    #[test]
+    fn a_sibling_with_the_root_as_text_prefix_is_outside() {
+        let error = below("/a/b", "/a/bc/x", "/a/b").expect_err("outside");
+        assert!(
+            matches!(error, RelPathError::OutsideRoot { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_root_itself_is_the_root_path() {
+        assert!(below("/c", "/c", "/c").expect("the root").is_root());
+        assert!(below("/c", "a/..", "/c").expect("the root").is_root());
+    }
+
+    #[test]
+    fn a_relative_root_is_refused() {
+        let error = below("c", "/c/a", "/c").expect_err("relative root");
+        assert!(matches!(error, RelPathError::NotAbsolute(_)), "{error:?}");
+        assert_eq!(error.to_string(), "`c` is not an absolute path");
+    }
+
+    #[test]
+    fn a_relative_cwd_is_refused() {
+        let error = below("/c", "a", "c").expect_err("relative cwd");
+        assert!(matches!(error, RelPathError::NotAbsolute(_)), "{error:?}");
+        assert_eq!(error.to_string(), "`c` is not an absolute path");
+    }
+
+    #[test]
+    fn a_relative_cwd_is_refused_when_given_is_absolute() {
+        let error = below("/c", "/c/a", "c").expect_err("relative cwd");
+        assert!(matches!(error, RelPathError::NotAbsolute(_)), "{error:?}");
+        assert_eq!(error.to_string(), "`c` is not an absolute path");
+    }
+
+    #[test]
+    fn a_non_utf8_component_survives_and_prints_escaped() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let given = Path::new(OsStr::from_bytes(b"/c/a\xff"));
+        let path = below_root(Path::new("/c"), given, Path::new("/c")).expect("below the root");
+        assert_eq!(path.as_bytes(), b"a\xff");
+        assert_eq!(path.to_string(), "a%FF");
+        let outside = Path::new(OsStr::from_bytes(b"/d/\xff"));
+        let error = below_root(Path::new("/c"), outside, Path::new("/c")).expect_err("outside");
+        assert_eq!(error.to_string(), "`/d/%FF` is not below `/c`");
+    }
+
+    #[test]
+    fn a_symlink_in_the_path_is_not_followed() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("deep")).expect("directories");
+        std::os::unix::fs::symlink(real.join("deep"), dir.path().join("link")).expect("a link");
+        let given = dir.path().join("link/..");
+        assert_eq!(
+            std::fs::canonicalize(&given).expect("resolves"),
+            std::fs::canonicalize(&real).expect("resolves"),
+            "the filesystem would resolve `link/..` to `real`"
+        );
+        let path = below_root(dir.path(), &given, dir.path()).expect("below the root");
+        assert!(path.is_root());
+    }
+
+    #[test]
+    fn the_unresolved_spelling_of_the_root_is_outside() {
+        let error = below("/tmp/c", "/private/tmp/c/a", "/private/tmp/c").expect_err("outside");
+        assert!(
+            matches!(error, RelPathError::OutsideRoot { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_nul_byte_in_the_path_is_refused() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let given = Path::new(OsStr::from_bytes(b"/c/a\0b"));
+        let error = below_root(Path::new("/c"), given, Path::new("/c")).expect_err("a NUL byte");
+        assert!(matches!(error, RelPathError::InvalidPath(_)), "{error:?}");
     }
 }

@@ -952,7 +952,10 @@ applies to the commands that contact the remote: `sync`, `unearth`,
 A piece reference is a path or a ULID. A path is resolved against the
 current directory, normalised, and taken relative to the collection
 root; a path outside the collection is refused; archived pieces resolve
-the same way although their folder is gone. A ULID may be shortened to
+the same way although their folder is gone. `.` and `..` in a path are
+resolved from its text, and a `..` that would go above the root of the
+filesystem is refused; `--to` and `--path` are normalised the same way.
+A ULID may be shortened to
 a prefix of at least 6 characters that is unique among the objects this
 machine knows at that moment. A reference that matches several objects
 refuses and lists them with their IDs; one that matches none is an
