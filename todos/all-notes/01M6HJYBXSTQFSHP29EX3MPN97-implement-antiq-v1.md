@@ -1183,6 +1183,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   so later items only set fields; `remote.state` through the I01 stub
   until I23 fills it; the away warning through the I01 stub until I29.
 - Must not touch: data producers.
+- Also: print one warning per unknown `[collection]` key from
+  `Config::unknown_collection_keys` (section 11, I04).
 - Depends on: I04, I05, I08, I09, I10.
 - Tests: a fixture with new, pinned, empty, unreadable and future-time
   pieces gives the expected JSON (first failure: `not_implemented`);
@@ -2401,6 +2403,12 @@ the same commit; the lead checks that at acceptance.
   machine name is refused; a `.antiq` that is a symlink or a file is no
   marker. I04 writes these into spec "Config" and "Collections and
   pieces".
+
+- 2026-11-04 (I04 report): `Config::unknown_collection_keys` lists the
+  unknown keys; the first command that reads the config, `status` (I16),
+  prints one warning per key, and so does every later command. Printed
+  collection roots are canonical (`find_root` and `find` canonicalise
+  their start).
 
 ### I05
 
