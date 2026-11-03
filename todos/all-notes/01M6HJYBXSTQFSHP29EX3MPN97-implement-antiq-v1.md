@@ -2504,6 +2504,30 @@ the same commit; the lead checks that at acceptance.
   highest local committed one. I08 writes these into spec "Metadata",
   "Storage", "Metadata changes" and ADR 0058.
 
+### I09
+
+- 2026-11-04, I09 plan review (ledger `i09-ledger.md`, 18 findings
+  agreed): archive step 5 sets the entry from `removing` to `gone`,
+  keeping its local payloads; a gone entry whose own metadata is live and
+  whose folder is back at its path keeps its ID; an entry without
+  metadata, and own live metadata without an entry, derive to an error
+  per entry that `status` lists and I17 repairs. I09 writes these into
+  spec "States", "Local state" and "archive". Local payloads are
+  identified by file; an entry has a `removing_payload` field;
+  `read_all` returns the entries and the damaged files.
+- Write orders the later items follow (from I09): archive, unearth and
+  minting write the metadata first, then the entry (I19, I30, I32, I34;
+  removing sets `removing_payload`); I20 unearths as entry
+  `unearthing`, rename, entry `live`, then metadata; a fork (I22, I26,
+  I31, I37) writes the old ID's archived metadata, the old entry `gone`
+  keeping its local payloads, the new metadata, then the new entry; I21
+  writes a `gone` entry with the local archive at version 1, version
+  taken out `pending`. I17's repair writes the missing live entry for
+  own live metadata with a folder, uses `removing_payload`, removes
+  tracking temp files, and removes manifests through I14's code (as does
+  I35); I16 and I17 list damaged entries, and a damaged ID blocks
+  minting at its path.
+
 ### I10
 
 - 2026-11-04: `collection.ignore` lines are anchored at each piece's
