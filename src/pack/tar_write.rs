@@ -13,8 +13,8 @@ use super::{PackError, PackNote};
 use crate::fsx::tree::TreeRoot;
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::{Name, RelPath};
-use crate::tree::{EntryKind, TreeEntry};
-use std::collections::HashMap;
+use crate::tree::{EntryKind, PieceTree, TreeEntry};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -422,6 +422,55 @@ fn single(component: &[u8]) -> RelPath {
     let name =
         Name::from_bytes(component.to_vec()).expect("a component of a valid path is a valid name");
     RelPath::root().join(&name)
+}
+
+/// How far the apparent size of a piece may exceed what it takes on disk
+/// before `archive` warns, since sparse files are stored in full.
+const SPARSE_WARNING_BYTES: u64 = 1 << 30;
+
+/// The sizes behind a sparse-file warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SparseWarning {
+    /// Sum of the sizes of the piece's files.
+    pub apparent: u64,
+    /// Sum of the bytes the piece's files take on disk.
+    pub allocated: u64,
+}
+
+/// The sums of apparent and allocated sizes over the regular files of a
+/// piece. A file with several links counts once.
+fn size_sums(tree: &PieceTree) -> (u64, u64) {
+    let mut seen = HashSet::new();
+    let (mut apparent, mut allocated) = (0u64, 0u64);
+    for entry in tree.entries() {
+        if entry.kind != EntryKind::File {
+            continue;
+        }
+        if entry.nlink > 1 && !seen.insert((entry.device, entry.inode)) {
+            continue;
+        }
+        apparent = apparent.saturating_add(entry.size);
+        allocated = allocated.saturating_add(entry.allocated);
+    }
+    (apparent, allocated)
+}
+
+/// By how many bytes the apparent size of the piece exceeds its allocated
+/// size. Block rounding can make the allocated size the larger one, which
+/// gives 0; the difference is taken on the sums, not file by file.
+pub fn sparse_excess(tree: &PieceTree) -> u64 {
+    let (apparent, allocated) = size_sums(tree);
+    apparent.saturating_sub(allocated)
+}
+
+/// The warning for a piece whose apparent size exceeds its allocated size
+/// by more than 1 GiB.
+pub fn sparse_warning(tree: &PieceTree) -> Option<SparseWarning> {
+    let (apparent, allocated) = size_sums(tree);
+    (apparent.saturating_sub(allocated) > SPARSE_WARNING_BYTES).then_some(SparseWarning {
+        apparent,
+        allocated,
+    })
 }
 
 fn member_path(bytes: &[u8]) -> &Path {
@@ -945,6 +994,89 @@ mod tests {
             .finish()
             .expect_err("the end marker cannot be written");
         assert!(matches!(error, PackError::Write(_)));
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    fn sparse_file(path_text: &str, size: u64, allocated: u64) -> TreeEntry {
+        let mut file = entry(path_text, EntryKind::File);
+        file.size = size;
+        file.allocated = allocated;
+        file
+    }
+
+    fn tree_of(entries: Vec<TreeEntry>) -> PieceTree {
+        PieceTree::new(path("proj"), entries, vec![])
+    }
+
+    #[test]
+    fn the_warning_fires_only_above_1_gib_of_excess() {
+        let exactly = tree_of(vec![sparse_file("a", GIB + 4096, 4096)]);
+        assert_eq!(sparse_excess(&exactly), GIB);
+        assert_eq!(sparse_warning(&exactly), None);
+
+        let above = tree_of(vec![sparse_file("a", GIB + 4097, 4096)]);
+        assert_eq!(
+            sparse_warning(&above),
+            Some(SparseWarning {
+                apparent: GIB + 4097,
+                allocated: 4096
+            })
+        );
+    }
+
+    #[test]
+    fn block_rounding_does_not_count_as_excess() {
+        let rounded = tree_of(vec![sparse_file("a", 1, 4096)]);
+        assert_eq!(sparse_excess(&rounded), 0);
+    }
+
+    #[test]
+    fn the_excess_is_taken_on_the_sums_not_per_file() {
+        // The first file is 1 GiB + 4096 above its allocation, the second
+        // allocates 8192 bytes for no content: together the excess is
+        // 1 GiB - 4096.
+        let tree = tree_of(vec![
+            sparse_file("a", GIB + 4096, 0),
+            sparse_file("b", 0, 8192),
+        ]);
+        assert_eq!(sparse_excess(&tree), GIB - 4096);
+        assert_eq!(sparse_warning(&tree), None);
+    }
+
+    #[test]
+    fn a_file_with_several_links_counts_once() {
+        let mut first = sparse_file("a", GIB, 0);
+        first.nlink = 2;
+        let mut second = sparse_file("b", GIB, 0);
+        second.nlink = 2;
+        let tree = tree_of(vec![first, second]);
+        assert_eq!(sparse_excess(&tree), GIB);
+        assert_eq!(sparse_warning(&tree), None);
+    }
+
+    #[test]
+    fn only_regular_files_count() {
+        let mut directory = entry("d", EntryKind::Directory);
+        directory.size = 2 * GIB;
+        let mut link = symlink("l", b"x");
+        link.size = 2 * GIB;
+        assert_eq!(sparse_excess(&tree_of(vec![directory, link])), 0);
+    }
+
+    #[test]
+    fn a_small_sparse_file_shows_allocated_below_apparent_size() {
+        let mut tree = crate::testing::tree::Tree::new();
+        tree.sparse("hole", 8 * 1024 * 1024);
+        let root = TreeRoot::open(tree.root()).expect("the tree opens");
+        let file = root.lstat(&path("hole")).expect("the file exists");
+        assert!(
+            file.allocated < file.size,
+            "the file system makes this file sparse"
+        );
+        let walked = tree_of(vec![file]);
+        assert!(sparse_excess(&walked) > 0);
+        assert_eq!(sparse_warning(&walked), None, "far below 1 GiB");
     }
 
     /// A sink that takes `budget` bytes and then reports a full disk.
