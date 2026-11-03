@@ -62,6 +62,16 @@ window. 32 MiB jobs were 0.2 % larger and used more cores (9.9 against
 7.2 on the 1.2 GB archive); 128 MiB jobs were 0.25 % smaller and 10 to
 50 % slower.
 
+## Old archives made with preset 6
+
+The SQLite archive made by `archive.sh` is 114 MB, while `xz -9` of the
+same tar gives 74 MB. `xz -lvv` shows it was written with xz's default
+preset 6 (8 MiB dictionary, 24 MiB blocks, CRC64), not with the
+`-T0 -9 --check=sha256` of the current script; `xz -T0 -6` of the tar
+reproduces it byte for byte (**measured**). Of the 313 archives, 222
+have a 64 MiB dictionary with SHA-256 and 91 an 8 MiB dictionary with
+CRC64 (**measured**, `xz -lvv`).
+
 ## Decompression flags
 
 A frame with a window of up to 128 MiB (`--long=27`) decodes with
@@ -74,5 +84,3 @@ states the same for window logs above 27.
 - Single-threaded runs; machines other than this Mac.
 - The `zstd` and `liblzma` crates (`docs/research/compression.md` shows
   they produce the same bytes as the command-line tools).
-- Why the SQLite archive made by `archive.sh` is 114 MB while `xz -9`
-  of the same tar gives 74 MB.
