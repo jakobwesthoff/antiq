@@ -1977,6 +1977,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   `RUST_TEST_THREADS=4`, including the non-UTF-8 name tests; a check on
   the NAS share that the path remote's read-back checksum reads the
   server's data (R8).
+- Linux container: the image needs `setfattr` (package `attr`), which I06's xattr test calls, and `CARGO_MANIFEST_DIR` set for the binary tests; `ps` is not needed (the session test uses `kill -0 -$$`).
 - Depends on: every other item.
 - Docs: README (what v1 does, how to set up a remote), spec status line
   ("Draft") per the lead.
