@@ -705,6 +705,8 @@ Every state-changing run, right after taking the lock, in this order:
 - empties `.antiq/trash/`, `.antiq/tmp/` and `.antiq/staging/`; an
   entry that cannot be removed after one retry with owner write added
   stays, with a warning, and does not fail the run;
+- removes the temp files an interrupted atomic write left in `.antiq/`
+  and below it, outside `.antiq/recovered/`;
 - turns an `unearthing` entry whose folder matches the version's listing
   into `live`, with the time the entry was written (recorded in the
   entry) as its unearthing time, and drops any other `unearthing`

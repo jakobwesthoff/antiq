@@ -1217,6 +1217,9 @@ its finishing commit. Acceptance lines in an entry add to this.
   ID this machine committed as archived as unearthed at that version,
   now.
 - Must not touch: command files.
+- Also: remove the temp files an interrupted `write_atomic` left in
+  `.antiq/` (`.<name>.<pid>.<n>.tmp`, outside `recovered/`), with a
+  test (section 11, I03).
 - Depends on: I03, I04, I08, I09, I12.
 - Tests: a held lock gives `lock_held` with the pid (first failure:
   stub); a `removing` entry with its tree in `trash/<ulid>` is
@@ -2374,6 +2377,10 @@ the same commit; the lead checks that at acceptance.
   `rename` checks the target with an lstat and renames plainly; the
   window in between is documented, and antiq's moves run under the run
   lock.
+- 2026-11-04: `write_atomic` leaves `.<name>.<pid>.<n>.tmp` behind when
+  a run dies mid-write, in object and tracking directories that no
+  cleanup covered. The start-of-run repairs remove them (I17; spec
+  "Operations" says so, written by the lead).
 
 ### I04
 
