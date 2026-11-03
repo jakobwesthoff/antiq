@@ -2160,7 +2160,9 @@ Answered by the user on 2026-11-03 (chat), binding for the items:
   `size` is the current payload's size.
 - U2 Console look, designed with the user from rendered terminal
   pictures and written into spec "status" and "Command line": output
-  fits 80 columns, long paths shortened in the middle; `status` lists
+  adapts to the terminal's width, a wide layout where there is room
+  (the wider design reads better) and a narrow one at 80 columns with
+  long paths shortened in the middle; `status` lists
   only what needs the user or changes at the next run, as a table
   (STATE, PIECE, AGE, WHAT), "nothing to do" otherwise, every piece via
   `find`; long runs show one row per piece (path, size, bar, operation,
@@ -2169,7 +2171,9 @@ Answered by the user on 2026-11-03 (chat), binding for the items:
   `~/playground/2026_11_02_antiq-logbook/design/mockups/png/`:
   `n80-status-d.png`, `status-f-clean.png`, `n80-archive-h1-oneline.png`,
   `n80-archive-h1-twoline.png`, `n80-sync-s2-oneline.png`,
-  `n80-sync-s2-twoline.png`; their sources are `gen.py` and `ans/` beside
+  `n80-sync-s2-twoline.png` for 80 columns, `status-d-attention-table.png`,
+  `progress-k-h1.png` and `progress-o-sync-phases.png` for wide
+  terminals; their sources are `gen.py` and `ans/` beside
   them, rendered with `design/ansi-shot`. Command items match them in
   their console snapshots.
 - U3 Picker flow: after pin, unpin or print the picker stays open;

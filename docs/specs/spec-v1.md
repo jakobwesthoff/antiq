@@ -816,9 +816,12 @@ error. Both exit 1. JSON output always carries full ULIDs; scripts use
 them.
 
 antiq writes console output; the picker of `find` is its only
-full-screen part. (ADR 0056) The output fits a terminal of 80 columns.
-A piece's path that does not fit is shortened in the middle, keeping its
-start and its end.
+full-screen part. (ADR 0056) The output adapts to the terminal's width:
+on a wide terminal tables and progress rows use their wide layout, with
+full paths and extra columns such as sizes and transfer rates, since it
+reads more easily; on a terminal of 80 columns they use their narrow
+layout, in which a path that does not fit is shortened in the middle,
+keeping its start and its end. Without a terminal the width is 80.
 
 Long runs show one row per piece: its path, its size, a progress bar,
 the operation running on it (packing, verifying, storing, removing,
