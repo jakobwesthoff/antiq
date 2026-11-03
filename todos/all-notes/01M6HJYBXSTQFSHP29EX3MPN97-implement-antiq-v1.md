@@ -2437,6 +2437,16 @@ the same commit; the lead checks that at acceptance.
   (spec "Selection", written by I05). The bind-mount limit is stated in
   spec "Walks".
 
+- 2026-11-04, review Q of the finished diff (ledger `review-q-ledger.md`):
+  a piece that contains an existing exclude entry is never archived,
+  reclaimed or packed for backup, and status lists it with the excluded
+  path, as with a mount point (lead's safe default, told to the user;
+  detected by device and inode through a new `Problem::Excluded`); walk
+  and selection stop at a depth of 512 levels, past which the piece is
+  unreadable, and run iteratively; a directory that vanishes between
+  listing and opening is skipped. I05 writes these into spec
+  "Selection" and "Walks".
+
 ### I06
 
 - 2026-11-04: I06 defines the complete `Packager` trait (format, pack,
