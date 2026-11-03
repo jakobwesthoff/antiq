@@ -30,6 +30,24 @@ pub enum RemoteState {
     Broken,
 }
 
+/// The three answers to "can the remote be used right now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reachability {
+    Reachable,
+    Away,
+    Broken,
+}
+
+impl From<Reachability> for RemoteState {
+    fn from(reachability: Reachability) -> RemoteState {
+        match reachability {
+            Reachability::Reachable => RemoteState::Reachable,
+            Reachability::Away => RemoteState::Away,
+            Reachability::Broken => RemoteState::Broken,
+        }
+    }
+}
+
 /// Looks at the remote of a collection without changing anything.
 pub fn probe_state(_collection: &Collection) -> RemoteState {
     RemoteState::None
@@ -54,6 +72,18 @@ mod tests {
             names,
             [r#""none""#, r#""reachable""#, r#""away""#, r#""broken""#]
         );
+    }
+
+    #[test]
+    fn a_reachability_is_the_state_of_an_attached_remote() {
+        let states = [
+            (Reachability::Reachable, RemoteState::Reachable),
+            (Reachability::Away, RemoteState::Away),
+            (Reachability::Broken, RemoteState::Broken),
+        ];
+        for (reachability, state) in states {
+            assert_eq!(RemoteState::from(reachability), state);
+        }
     }
 
     #[test]

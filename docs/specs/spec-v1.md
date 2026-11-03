@@ -249,6 +249,18 @@ pieces alike. Listings are compressed with zstd at level 3 with the
 content checksum and read with the same 128 MiB window limit as every
 other decoder.
 
+An entry line is a JSON object with these keys, in this order:
+
+| Key | Type | Content |
+|-----|------|---------|
+| `path` | string | path in the escaped form |
+| `type` | string | `file`, `dir`, `symlink` or `hardlink`; special files are not archived and have no type |
+| `size` | integer | bytes |
+| `mtime` | integer | modification time in whole seconds since the epoch |
+| `mode` | integer | permission bits |
+| `link` | string | the target in the escaped form; for `symlink` and `hardlink` only |
+| `sha256` | string | lower-case hex; for `file` only |
+
 ### Local state
 
 Each machine keeps a tracking entry per folder: path, ID, the metadata
