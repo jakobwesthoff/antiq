@@ -2488,8 +2488,11 @@ the same commit; the lead checks that at acceptance.
   `sysconf` sees the host's memory, not a container limit (R5 holds
   only with that).
 - Open, assigned: the bytes per worker of a level-3 lease is decided in
-  I14's plan; listing compression never leases while a payload lease is
-  held (I08).
+  I14's plan.
+- 2026-11-04: listing compression takes no pool lease at all. A listing
+  is compressed by one single-threaded level-3 encoder of a few MiB,
+  next to whatever payload lease the thread holds, so the
+  one-lease-per-thread rule never trips (I08).
 - 2026-11-04, review P of the finished diff (ledger `review-p-ledger.md`):
   an archive encoder costs about 430 MiB plus 140 MiB per worker
   (measured), so a lease is charged 448 MiB fixed plus 160 MiB per
