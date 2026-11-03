@@ -64,6 +64,18 @@ Measured, with separator-aware matching in all three crates:
 `.*` matches `.foo` in `glob`. Whether `.*` counts as naming a dot entry
 explicitly is not specified yet.
 
+`glob` 0.3.4 applies `require_literal_leading_dot` only to `*` (after its
+first character), `?` and `[...]`. A literal character that follows a `*`
+is compared without the check: with the rule on, `*.txt` matches `.txt`
+(measured by a unit test in `src/select.rs`; the code is `src/lib.rs`
+lines 809-820 and 847-873 of the crate). ADR 0028 allows a dot entry
+only through a pattern that names the dot, so antiq splits a pattern at
+`/`, matches each component with `glob` and applies the dot rule itself.
+Two more readings of the same source: `**` at the end of a pattern needs
+at least one directory (`a/**` does not match `a`, lines 648-656 and
+847-851), and `**` anywhere else may take none (`a/**/b` matches `a/b`,
+lines 816-820).
+
 ## 2. Ignore rules
 
 `ignore` 0.4.34 (ripgrep repository, Unlicense OR MIT, 205M downloads,

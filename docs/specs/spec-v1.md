@@ -76,16 +76,39 @@ leading dot in that path component. (ADR 0028)
 
 Never pieces: `.antiq/`, symlinks, and paths on the collection's exclude
 list. Exclude entries are literal paths relative to the collection
-root, not patterns, and nothing below an excluded path is a piece.
-Selection uses lstat and never descends into a symlink. Skipped
-symlinks and dot entries are counted in `status`.
+root, not patterns, and nothing below an excluded path is a piece. The
+exclude list is applied before pieces are matched and before anything
+below an entry is listed. An exclude entry that exists also excludes the
+directory it names under another spelling that the volume treats as the
+same name, such as another case, since the directory is recognised by its
+device and inode as well. Selection uses lstat and never descends into
+a symlink. Skipped symlinks and dot entries are counted in `status`: a
+skipped symlink is one that a pattern selects, a skipped dot entry a
+directory that a pattern would select, or look below, if the dot rule did
+not keep it out.
+
+A pattern is matched one path component at a time. A wildcard (`*`, `?`,
+a bracket class) never matches the start of a component that begins with
+a dot. `**` stands for any number of directories without a leading dot,
+none included, and for one or more at the end of a pattern, so `a/**`
+selects what is below `a` and not `a`. A pattern is refused if it has an
+empty component (a trailing `/` included), a `.` or `..` component, or a
+`/` inside a bracket class, which never matches a separator.
 
 A path that is valid UTF-8 is matched against the patterns as it is. A
 path with bytes that are not valid UTF-8 is matched in its escaped form
 (see "Metadata"), since the glob matcher takes only UTF-8. A pattern can
 therefore not tell the two apart: `a%FF` matches the valid name `a%FF`
 and the name `a` followed by the byte `0xFF`, and in the escaped form a
-`%` of the name reads `%25`.
+`%` of the name reads `%25`. Patterns and names compare as bytes, so a
+pattern in composed Unicode form does not match a name in decomposed
+form.
+
+A directory that selection has to look into and cannot read is skipped
+and reported. A path at or below it is neither new
+nor gone in that run. When the collection root itself cannot be listed,
+the run fails. Running out of file descriptors fails the run as it does
+in a walk. An entry deleted while selection runs is skipped.
 
 A folder at a path that no tracking entry claims is a new piece with a
 new ID, also when an archived piece has the same path; `status` and

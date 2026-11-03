@@ -28,7 +28,14 @@ impl crate::error::HasKind for WalkError {}
 /// unprivileged test cannot create: a second device, a descriptor
 /// shortage.
 pub(crate) trait Hooks {
-    fn device(&self, path: &RelPath, reported: u64) -> u64;
+    /// The device to use for `path`, relative to the piece's top, in place
+    /// of the `reported` one.
+    fn device(&self, _path: &RelPath, reported: u64) -> u64 {
+        reported
+    }
+
+    /// An error to raise instead of making the call of kind `call` that
+    /// works on `path`.
     fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error>;
 }
 
@@ -47,10 +54,6 @@ pub(crate) enum Call {
 pub(crate) struct RealFs;
 
 impl Hooks for RealFs {
-    fn device(&self, _path: &RelPath, reported: u64) -> u64 {
-        reported
-    }
-
     fn fault(&self, _path: &RelPath, _call: Call) -> Option<io::Error> {
         None
     }
