@@ -168,6 +168,10 @@ One layout module serves local storage and every remote:
 - the listing in its own compressed file next to the metadata;
 - a manifest per package for change detection.
 
+Paths in metadata, listings and manifests are stored as the bytes the
+filesystem holds; a path that is not valid UTF-8 is written in an escaped
+form that maps back to the same bytes.
+
 The index is derived from metadata and listings, kept as plain files,
 rebuildable, and behind a module interface. Listings are fetched
 incrementally by metadata version.

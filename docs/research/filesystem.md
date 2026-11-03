@@ -171,6 +171,34 @@ through rustix, nix and `fs4::available_space` (**measured**).
 `sysinfo` 0.40.1 reported 362 GB available for `/` at the same time
 (**measured**). Hard links are not supported on smbfs (`ENOTSUP`).
 
+## Linux
+
+Measured 2026-11-03 in an OrbStack Ubuntu 26.04 machine (arm64, Rust
+1.97.0) as an unprivileged user, on a loop-mounted ext4 image (a second
+one as the other device), btrfs, tmpfs, and the overlay root of a
+`debian:stable-slim` container (static musl build). Results were the
+same on all four unless noted (**measured**):
+
+| Probe | Linux |
+|---|---|
+| `File::try_lock` | `WouldBlock`, holder's pid read back, free after `kill -9`; `fs4` the same |
+| `sync_all`, `sync_data`, directory fsync | all succeed |
+| `create_new` race | one winner in 30 of 30 rounds |
+| `RENAME_NOREPLACE`, rename, hard link | `AlreadyExists` onto an existing name, succeeds onto a new one; rename replaces; hard links work |
+| rename across filesystems | `ErrorKind::CrossesDevices` (errno 18) |
+| `remove_dir_all` with a `0555` directory | `PermissionDenied`, tree half deleted; the crate the same |
+| birth time | glibc `created()` works; musl `created()` returns `Unsupported`; `rustix::fs::statx` gives `stx_btime` under musl, equal to glibc's to the nanosecond |
+| filesystem type | numeric `f_type`: ext4 `0xef53`, btrfs `0x9123683e`, tmpfs `0x1021994`, overlay `0x794c7630` |
+| free space | `statvfs` agrees across rustix, nix, `fs4` and `df` |
+| non-UTF-8 names | created, walked and read back as exact bytes |
+
+So the macOS findings hold on Linux, with three Linux specifics: a static
+musl build needs `statx` for the birth time, the filesystem type needs a
+table of magic numbers, and names that are not UTF-8 occur.
+
+Not measured: running as root, x86_64, network mounts on Linux, glibc
+`created()` on the overlay.
+
 ## Crate facts
 
 | Crate | Latest | Released | Downloads (recent) | Reverse deps | Licence |
@@ -217,7 +245,7 @@ RustSec has no entries for most of these; `nix` has RUSTSEC-2021-0119
 
 ## Not verified
 
-- Anything on Linux.
+- Network mounts and x86_64 on Linux.
 - Locking and `O_EXCL` on smbfs from two machines; NFS writes.
 - The NAS's Samba settings (oplocks, case sensitivity, `strict sync`).
 - Whether `fsync` returning 0 on smbfs means the data is on the
