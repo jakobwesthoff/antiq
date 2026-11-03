@@ -37,6 +37,10 @@ license text lives. There are none yet.
   them before writing or changing an ADR.
 - The specification of version 1 lives in `docs/specs/spec-v1.md`. It
   describes what is decided, without the reasons, which the ADRs carry.
+- Research on how antiq can do something (crates, C libraries,
+  executables, measurements) lives in `docs/research/`, one document
+  per topic. It records findings, not decisions; a decision taken on
+  it becomes an ADR.
 - Whatever needs to be addressed or thought about later, including
   things that may end up not being done, goes into the ntropy todo vault
   at `todos/` (format and commands in `todos/README.md`), one note per
