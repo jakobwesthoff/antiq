@@ -8,6 +8,9 @@ use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 use ulid::Ulid;
 
 /// The ID of an object, a ULID. It is written in upper case and read in
@@ -69,6 +72,48 @@ pub trait IdSource: Send + Sync {
     fn mint(&self, time: Timestamp) -> ObjectId;
 }
 
+/// Mints IDs with a random part, one per call.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RandomIds;
+
+impl IdSource for RandomIds {
+    fn mint(&self, time: Timestamp) -> ObjectId {
+        ObjectId(Ulid::from_datetime(SystemTime::from(time)))
+    }
+}
+
+/// The time in milliseconds since the epoch; a time before 1970 is 0, as
+/// `Ulid::from_datetime` reads it.
+#[cfg(test)]
+fn milliseconds(time: Timestamp) -> u64 {
+    u64::try_from(time.as_millisecond()).unwrap_or(0)
+}
+
+/// Mints IDs whose random part counts up, so tests get the same IDs on
+/// every run.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct SeqIds {
+    next: AtomicU64,
+}
+
+#[cfg(test)]
+impl SeqIds {
+    pub fn new(first: u64) -> Self {
+        SeqIds {
+            next: AtomicU64::new(first),
+        }
+    }
+}
+
+#[cfg(test)]
+impl IdSource for SeqIds {
+    fn mint(&self, time: Timestamp) -> ObjectId {
+        let counter = self.next.fetch_add(1, Ordering::Relaxed);
+        ObjectId(Ulid::from_parts(milliseconds(time), u128::from(counter)))
+    }
+}
+
 /// Errors of object IDs.
 #[derive(Debug, thiserror::Error)]
 pub enum IdError {
@@ -83,6 +128,8 @@ mod tests {
     use super::*;
     use crate::error::{Error, ErrorKind};
     use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::Barrier;
     use ulid::Ulid;
 
     const TEXT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -159,5 +206,112 @@ mod tests {
             Fixed.mint(time).timestamp_ms(),
             u64::try_from(time.as_millisecond()).expect("after 1970")
         );
+    }
+
+    fn at(text: &str) -> Timestamp {
+        text.parse().expect("a valid timestamp")
+    }
+
+    fn milliseconds(time: Timestamp) -> u64 {
+        u64::try_from(time.as_millisecond()).expect("after 1970")
+    }
+
+    #[test]
+    fn random_ids_carry_the_given_time() {
+        let time = at("2026-11-03T10:00:00.123Z");
+        assert_eq!(RandomIds.mint(time).timestamp_ms(), milliseconds(time));
+    }
+
+    #[test]
+    fn random_ids_of_one_time_differ() {
+        let time = at("2026-11-03T10:00:00Z");
+        let ids: HashSet<ObjectId> = (0..1000).map(|_| RandomIds.mint(time)).collect();
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn random_ids_sort_by_their_time() {
+        let early = RandomIds.mint(at("2020-01-01T00:00:00Z"));
+        let late = RandomIds.mint(at("2026-01-01T00:00:00Z"));
+        assert!(early < late);
+    }
+
+    #[test]
+    fn a_time_before_1970_mints_with_time_zero_randomly() {
+        assert_eq!(RandomIds.mint(at("1969-12-31T23:59:59Z")).timestamp_ms(), 0);
+    }
+
+    #[test]
+    fn sequential_ids_count_up_within_one_time() {
+        let time = at("2026-11-03T10:00:00Z");
+        let ids = SeqIds::default();
+        let ulids: Vec<Ulid> = (0..3).map(|_| ids.mint(time).ulid()).collect();
+        let ms = milliseconds(time);
+        assert_eq!(
+            ulids,
+            [
+                Ulid::from_parts(ms, 0),
+                Ulid::from_parts(ms, 1),
+                Ulid::from_parts(ms, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn sequential_ids_start_where_told() {
+        let time = at("2026-11-03T10:00:00Z");
+        let ids = SeqIds::new(7);
+        assert_eq!(
+            ids.mint(time).ulid(),
+            Ulid::from_parts(milliseconds(time), 7)
+        );
+    }
+
+    #[test]
+    fn a_default_source_starts_at_zero() {
+        let time = at("2026-11-03T10:00:00Z");
+        let ms = milliseconds(time);
+        assert_eq!(SeqIds::default().mint(time).ulid(), Ulid::from_parts(ms, 0));
+        let random: RandomIds = Default::default();
+        assert_eq!(random.mint(time).timestamp_ms(), ms);
+    }
+
+    #[test]
+    fn a_time_before_1970_mints_with_time_zero_sequentially() {
+        let id = SeqIds::new(5).mint(at("1969-12-31T23:59:59Z"));
+        assert_eq!(id.ulid(), Ulid::from_parts(0, 5));
+    }
+
+    #[test]
+    fn sequential_ids_sort_by_time_not_by_call_order() {
+        let ids = SeqIds::default();
+        let later = ids.mint(at("2026-01-01T00:00:00Z"));
+        let earlier = ids.mint(at("2020-01-01T00:00:00Z"));
+        assert!(earlier < later);
+    }
+
+    #[test]
+    fn sequential_ids_stay_unique_across_threads() {
+        const THREADS: usize = 8;
+        const MINTS: usize = 250;
+        let time = at("2026-11-03T10:00:00Z");
+        let ids = SeqIds::default();
+        let start = Barrier::new(THREADS);
+        let minted: Vec<Vec<ObjectId>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        (0..MINTS).map(|_| ids.mint(time)).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("a minting thread does not panic"))
+                .collect()
+        });
+        let unique: HashSet<ObjectId> = minted.into_iter().flatten().collect();
+        assert_eq!(unique.len(), THREADS * MINTS);
     }
 }
