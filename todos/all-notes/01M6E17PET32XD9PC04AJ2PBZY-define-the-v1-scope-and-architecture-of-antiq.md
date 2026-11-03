@@ -55,7 +55,7 @@ What the scripts do today:
 
 ## Decisions
 
-Settled decisions live in ADR 0002 to ADR 0029 and in
+Settled decisions live in ADR 0002 to ADR 0053 and in
 `docs/specs/spec-v1.md`. What stays here shapes the remaining work:
 
 - 2026-11-02, user: the remote-only tier (ADR 0007) is wanted, but may
@@ -75,18 +75,11 @@ findings, 2026-11-02) are in the session logbook at
 `plans/design-draft-v2.md` (the draft with every fix the reviewers and
 the lead agreed on), `plans/adversarial-ledger.md` (each finding with
 evidence and outcome) and `plans/open-questions.md` (the questions and
-the user's answers of 2026-11-03). Research on the dependencies is in
-`docs/research/`; draft 2's section 11 lists what it changes in the
-design.
+the user's answers of 2026-11-03). The agreed fixes, the answers
+and the research choices are in ADR 0030 to ADR 0053 and the spec.
 
 ## Open questions
 
-- **Review fixes and answers.** The user answered the review questions
-  on 2026-11-03; the answers, the agreed review fixes and the research
-  consequences are not yet in the spec and ADRs.
-- **Commit protocol on an SMB path remote.** An exclusively created
-  `meta.<N+1>` is visible while it is written, and SMB offers no rename
-  that refuses an existing target (`docs/research/filesystem.md`).
 - **Several machines, live folders.** Bringing one live folder together
   across machines stays out of v1 (ADR 0008); a shared remote for
   archives is in (ADR 0017).
