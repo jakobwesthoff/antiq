@@ -692,8 +692,9 @@ its finishing commit. Acceptance lines in an entry add to this.
 
 #### I02 Relative paths, escaped forms and object IDs
 
-- Goal: unescape, the payload and machine name parts, temp names,
-  lexical normalisation, and minting IDs from a folder's times.
+- Goal: the payload and machine name parts, temp names, lexical
+  normalisation, and minting IDs from a folder's times. Escape,
+  unescape and the `RelPath`/`Name` validation are I01's (merged).
 - Implements: spec "Metadata" (escaped form: valid UTF-8 stays, `%`
   becomes `%25`, every byte not part of valid UTF-8 becomes `%XX`),
   "Storage" (name part: every byte outside `[A-Za-z0-9._-]` as `%XX`,
@@ -705,24 +706,21 @@ its finishing commit. Acceptance lines in an entry add to this.
   per T2; minted once), ADR 0014, 0039.
 - Owns: the functions of `src/relpath.rs` and `src/id.rs` beyond I01's
   types.
-- Content: unescape with a round trip against I01's escape for any
-  bytes; lexical normalisation for references, `--to` and `--path`
+- Content: lexical normalisation for references, `--to` and `--path`
   (resolve `.` and `..`, refuse a path above the root); `RandomIds`
   through `Ulid::from_datetime` per unit and `SeqIds` for tests
   (foundations §4); `id_time()` returning time and source, with the 1990
-  floor applied before minting and the T2 fallback. Hex digits in `%XX`
-  are upper case (the spec writes `%25`), recorded in the spec.
+  floor applied before minting and the T2 fallback. `SeqIds` needs an
+  atomic counter, since `IdSource` is `Send + Sync`.
 - Must not touch: walking the disk (the caller passes the times); I01's
   types.
 - Depends on: I01.
-- Tests: `a%25%FFb` unescapes to `b"a%\xffb"` (first failure: stub); a
-  name of 70 bytes with an escape across byte 64 is cut before the
+- Tests: a name of 70 bytes with an escape across byte 64 is cut before the
   escape; `id_time` ignores a 1989 time and picks a 1995 mtime with
   source `oldest-mtime`; a birth time earlier than every mtime gives
   `birth`; times all before 1990 give the minting time, source
   `minted`, and a warning; `..` past the root is refused.
-- Docs: spec "Metadata" (hex case).
-- Acceptance: property-style round-trip test over random bytes passes.
+- Docs: keep spec "Storage" and "Objects" true.
 - Size: M.
 
 #### I03 Filesystem primitives and the run lock
