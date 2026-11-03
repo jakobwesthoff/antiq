@@ -21,23 +21,36 @@ import, decisions), then the extension points (the remote trait with
 its path and SSH implementations and the commit protocol), then `sync`
 and the multi-machine logic on top of them, then the ADR that records
 the traits as built and an acceptance run on real SSH and on Linux; the
-picker runs alongside from wave 7. The plan also lists the risks, the
-technical questions for the lead, the behaviour questions for the user,
+picker runs alongside from wave 7. The plan also records the technical
+decisions taken on it, the risks, the behaviour questions for the user,
 and a table that maps every spec section and ADR to the items that
 implement it.
+
+Ids in parentheses such as (F5), (O2), (S7) or (H6) name findings of the
+plan's adversarial review of 2026-11-03; each finding, its evidence and
+the agreed fix are in the review ledger,
+`~/playground/2026_11_02_antiq-logbook/plans/impl/plan-review-ledger.md`.
 
 ## 1. Ground rules
 
 These bind every item.
 
-- Base: `main` at `ef3f47d`. `src/main.rs` holds an empty clap `Cli`,
+- Base: `main` at the commit that lands this plan (the design as of `ef3f47d` plus the ADR 0039 and 0045 fixes of `7c693c8`). `src/main.rs` holds an empty clap `Cli`,
   `src/lib.rs` a doc comment. Dependencies: anyhow 1.0.104, clap 4.6.7
   (derive), thiserror 2.0.21. `cargo test` runs 0 tests.
+- The lead files each item's step todo through ntropy before its agent
+  starts, with a *Part of* line to this plan's todo
+  `01M6HJYBXSTQFSHP29EX3MPN97-implement-antiq-v1.md`. The agent deletes
+  its step todo in its finishing commit.
 - Every commit passes `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings` and `cargo test`. Each
   behaviour change starts with a failing test. Every changed production
   line is covered (section 4.8). Docs (spec, ADRs, README) change in the
   same commit as the behaviour.
+- Tests assume a non-root user. A test that relies on a permission
+  (an unreadable directory, a `0555` directory that blocks a rename)
+  first asserts that the precondition holds and fails with a message
+  naming it when it does not.
 - Every source file starts with the MPL-2.0 header (`CLAUDE.md`), tests
   and test scripts included; in a script it goes below the shebang.
   Manifests and Markdown carry none. Scripts pass `shellcheck`.
@@ -54,16 +67,20 @@ These bind every item.
   with the reason written next to it, checked once through a temporary
   example that shows the expected compiler error.
 - ADRs may be rewritten in place until implementation starts; once code
-  lands, a changed decision becomes a new ADR. The merge of I01 is the
-  first code. Questions in section 8 that would change an ADR are
-  therefore best settled before I01 merges.
+  lands, a changed decision becomes a new ADR. The merge of I01 part A
+  is the first code. The in-place ADR fixes of section 8 (T2, R1) land
+  before it.
 - Nothing is pushed.
-- An item edits only the files it owns plus the shared lines its entry
-  names. I01 creates every file of the module tree as a stub, so later
-  items fill files and never add module declarations.
+- An item edits only the files it owns plus the shared edits its entry
+  names. I01 creates every file of the module tree as a stub, including
+  every `mod.rs` and every submodule file of `ops` and `cli::cmd`, so
+  later items fill files and never add module declarations.
+- Types that I01 defines complete (section 2.2) are frozen. A change to
+  one goes through the lead, who schedules it so that no parallel item
+  breaks.
 - The README changes only at milestones (I16, I30, I39). Spec changes
-  go into the section an item implements; JSON payloads go into the
-  per-command placeholder lines I01 adds to "JSON output".
+  go into the section an item implements; JSON payloads and new error
+  kinds go into the per-command paragraphs I01 adds to "JSON output".
 
 ## 2. Architecture
 
@@ -82,8 +99,10 @@ Library, `src/lib.rs`:
 | `interact` | `Interaction` trait, `Question`, `Choice`, `NonInteractive`, scripted double | ADR 0020, 0025; spec "Decisions" | I01 |
 | `plan` | `Plan<A>` for dry runs | ADR 0046 | I01, I17 |
 | `report` | `CommandReport` trait, `Warning` | spec "JSON output" | I01 |
-| `relpath` | `RelPath` and `Name` as bytes, escaped form, payload name part, machine part, temp names, lexical normalisation | spec "Metadata", "Storage" | I02 |
-| `id` | `ObjectId`, `IdSource`, ID time | ADR 0014, 0039; spec "Objects" | I02 |
+| `tree` | `TreeEntry`, `PieceTree` and the walk's problem types | spec "Walks" | I01 |
+| `relpath` | `RelPath` and `Name` as bytes and the escape function (I01); unescape, payload name part, machine part, temp names, lexical normalisation (I02) | spec "Metadata", "Storage" | I01, I02 |
+| `id` | `ObjectId` (I01); `IdSource` implementations and ID time (I02) | ADR 0014, 0039; spec "Objects" | I01, I02 |
+| `fsx::tree` | `TreeRoot`: dirfd-relative opening, stat, reading and creating below a root, for paths past the platform's path limit | spec "Walks", "unearth" | I01 |
 | `fsx` (`atomic`, `remove`, `moves`, `space`, `device`) | Atomic write, delete helper, moves with owner write, free space, device and filesystem type, birth time | spec "Storage", "Walks", "Operations" | I03 |
 | `lock` | `.antiq/lock`, `RunLock` | spec "Operations" | I03 |
 | `config` | `config.toml`: typed read, edits that keep comments | spec "Config" | I04 |
@@ -92,7 +111,7 @@ Library, `src/lib.rs`:
 | `select` | Selecting pieces; later behind `SelectionStrategy` | ADR 0012, 0028; spec "Selection" | I05, I38 |
 | `walk` | The lstat walk of a piece | spec "Walks" | I05 |
 | `idle`, `pin` | Idle verdict, empty, pins | ADR 0013, 0024, 0029, 0037, 0038; spec "Idle", "Pins" | I10 |
-| `meta` | Metadata JSON | ADR 0053; spec "Metadata" | I08 |
+| `meta` | Metadata data types with their serde attributes (I01); format guard, reading and writing (I08) | ADR 0053; spec "Metadata" | I01, I08 |
 | `listing` | Listing as zstd JSON Lines | spec "Listing" | I08 |
 | `store` | Local object store `.antiq/objects/` | spec "Storage" | I08 |
 | `tracking` | Tracking entries, derived states, pending decisions | spec "Local state", "States", "Decisions" | I09 |
@@ -107,57 +126,68 @@ Library, `src/lib.rs`:
 | `pack::frames` | zstd frame inspection for `import` | ADR 0055 | I21 |
 | `run`, `repair` | Run guard (lock plus start-of-run repairs) | spec "Operations" | I17 |
 | `brake` | The brake | ADR 0045 | I35 |
-| `remote` (`mod.rs`) | `Remote` trait, `Reachability`, opening the configured remote | ADR 0015, 0031 | I23, I38 |
+| `remote` (`mod.rs`) | `Remote` trait, `Reachability` (I01), opening the configured remote with an `ssh` arm that answers `unsupported` (I23) | ADR 0015, 0031 | I01, I23, I38 |
 | `remote::url`, `remote::marker`, `remote::path` | URL parsing, `antiq-remote.json`, path remote | ADR 0026, 0031, 0047 | I23 |
 | `remote::commit`, `remote::cleanup`, `remote::testing` | Commit protocol, cleanup, fault-injecting remote for tests | ADR 0030 | I27 |
 | `remote::ssh::session`, `::script`, `::classify` | `ssh` executable, master connection, `/bin/sh -s` scripts, away and broken | ADR 0048 | I24 |
 | `remote::rsync` | rsync resolution, probe, command line, stats | ADR 0049 | I25 |
-| `remote::ssh` (`mod.rs`) | `SshRemote`, the trait over ssh and rsync | ADR 0048, 0049 | I28 |
+| `remote::ssh` (`mod.rs`) | `SshRemote`, the trait over ssh and rsync; the `ssh` arm of opening | ADR 0048, 0049 | I28 |
 | `remote::policy`, `remote::away`, `remote::network` | `--if-reachable`, `away_warn_days`, `network_check` | spec "Remotes", "Dry runs, scheduling, exit codes" | I29 |
 | `ops::<command>` | One module per command; `ops::archive`, `ops::unearth`, `ops::resolve` and `ops::sync` are directories with one file per part | spec "Operations", "Command line" | command items |
 | `testing` (`cfg(test)`) | Fixtures shared by library tests | section 4 | I01 |
 
-Binary, `src/main.rs` with modules under `src/cli/` (T20 in section 8):
+Binary, `src/main.rs` with modules under `src/cli/` (T20):
 
 | Module | Responsibility | Item |
 |---|---|---|
 | `cli` (`mod.rs`) | clap types for the whole command surface, dispatch to `cli::cmd` | I01 |
 | `cli::output` | JSON envelope, error object, exit codes, colour, stdout and stderr | I01 |
 | `cli::tty` | Controlling terminal, `TtyInteraction` implementing `interact::Interaction` | I01 |
-| `cli::cmd::<command>` | One file per command: builds the call into `ops`, renders the console output | command items |
+| `cli::cmd::<command>` | One file per command: builds the call into `ops`, renders the console output; `cli::cmd::sync` is a directory (`mod`, `conflict`, `live`, `tiers`) | command items |
 | `cli::picker` (`mod.rs`, `state.rs`, `layout.rs`) | The picker of `find` | I36, I40 |
 
 ### 2.2 Core types
+
+I01 defines these complete; they are frozen after I01 (section 1).
 
 - `ObjectId`: newtype over `ulid::Ulid`. Text form is the crate's upper
   case (T19). Parses either case.
 - `RelPath`: a path relative to the collection root as bytes, since
   "paths and names are stored as the bytes the filesystem holds"
   (spec "Metadata"). Serialises in the escaped form. `Name` is one
-  component.
-- `Collection`: root path, `.antiq/` path accessors for every entry of
-  the local layout (`config.toml`, `lock`, `objects/`, `tracking/`,
-  `index/`, `tmp/`, `staging/`, `trash/`, `recovered/`), the parsed
-  `Config` and the collection ULID.
-- `Config`: `collection` policy, `machine`, `remotes: Vec<RemoteConfig>`
-  with every key and default of the spec's config table.
-- `TreeEntry` and `PieceTree`: the walk's result per entry: relative
-  path, type, size, modification time in nanoseconds, ctime, inode,
-  device, mode, link count, link target, birth time; sorted by path
-  bytes; problems (`unreadable` with the first failing entry,
-  `other_device` with the mount point path).
+  component. The escape function is part of I01 so that selection (I05)
+  can match non-UTF-8 names through it (O16 fix, I05).
+- `TreeEntry` and `PieceTree` (`src/tree.rs`): the walk's result per
+  entry: relative path, type, size, allocated size, modification time
+  in nanoseconds, ctime, inode, device, mode, link count, link target,
+  birth time; sorted by path bytes; problems (`unreadable` with the
+  first failing entry, `mount_point` with the path of the other
+  device).
+- `TreeRoot` (`src/fsx/tree.rs`): a directory handle through which every
+  consumer opens, stats, reads and creates entries relative to a root,
+  so that paths longer than the platform's path limit work (R3).
 - `ListingEntry`: path, type, size, modification time in whole seconds,
-  mode, link target, SHA-256 (spec "Listing"). I01 defines the struct so
-  that the tar writer (I06) and the listing format (I08) can be built in
-  parallel.
+  mode, link target, SHA-256 (spec "Listing").
 - `Metadata`, `Payload`, `HistoryEntry`, `Lifecycle`, `PayloadKind`,
-  `CreatedSource`: the tables of spec "Metadata", with an `extra` map on
-  every struct that can grow (foundations research §5).
-- `TrackingEntry`: the fields of spec "Local state", plus the fields
-  `status` needs to show stale backups and entries missing on the
-  remote (I09 adds them to the spec).
-- `IdleVerdict`: pinned, empty, active with the newest time, idle,
-  only future times; future files listed.
+  `CreatedSource` (`src/meta.rs`): the tables of spec "Metadata" with
+  their serde attributes: field order as the spec lists the keys,
+  `skip_serializing_if` for the keys left out where they do not apply,
+  `verified` with three states (absent, null, a time), and a flattened
+  `extra` map on every struct that can grow (foundations research §5).
+  `CreatedSource` includes `minted` (T2).
+- `Reachability`: reachable, away, broken (spec "Remotes"), in
+  `src/remote/mod.rs`.
+- `Collection` and `Config` are defined by I04, `TrackingEntry` by I09:
+  - `Collection`: root path, `.antiq/` path accessors for every entry of
+    the local layout, the parsed `Config` and the collection ULID.
+  - `Config`: `collection` policy, `machine`, `remotes:
+    Vec<RemoteConfig>` with every key and default of the config table.
+  - `TrackingEntry`: the fields of spec "Local state", the payload
+    version a piece was unearthed from (F16), the time the entry was
+    written (`written`, F22), and the fields `status` needs to show
+    stale backups, entries missing on the remote and divergence.
+- `IdleVerdict` (I10): pinned, empty, active with the newest time,
+  idle, only future times; future files listed.
 - `Plan<A>`: an ordered list of actions of a command-specific type `A`
   plus where the brake would hold.
 - One report type per command, `Serialize`, implementing
@@ -179,10 +209,10 @@ parts that vary through these traits:
       fn format(&self) -> PackageFormat;
       fn pack(&self, tree: &PieceTree, settings: &PackSettings, out: &mut dyn Write)
           -> Result<Packed, PackError>; // size, SHA-256, listing entries, reports
-      fn verify_strict(&self, package: &Path, tree_root: &Path, rules: &WalkRules)
+      fn verify_strict(&self, package: &Path, tree_root: &TreeRoot, rules: &WalkRules)
           -> Result<Verified, PackError>; // with the lstat record of every entry
       fn list(&self, package: &Path) -> Result<Vec<ListingEntry>, PackError>;
-      fn unpack(&self, package: &Path, staging: &Path, rules: &TargetRules)
+      fn unpack(&self, package: &Path, staging: &TreeRoot, rules: &TargetRules)
           -> Result<Unpacked, PackError>;
   }
   ```
@@ -192,13 +222,17 @@ parts that vary through these traits:
   metadata pull and push, payload put, get and delete, and exclusive
   creation; the commit protocol, cleanup and tiers need listing an
   object directory, a rename into place, the remote clock, a checksum of
-  a remote file and a flush (NAS `sync`). Sketch, settled by I23:
+  a remote file and a flush (NAS `sync`). The bulk pull is one call;
+  the push is the per-object commit protocol of ADR 0030 under the
+  `remote_jobs` limit (F3). Listings and metadata files come through the
+  small-file read (F2). Sketch, settled by I23:
 
   ```rust
   pub trait Remote: Send + Sync {
       fn reachability(&self) -> Result<Reachability, RemoteError>; // checks the marker
       fn begin_phase(&self) -> Result<(), RemoteError>;  // SSH: `-O check`, new master
       fn clock(&self) -> Result<Timestamp, RemoteError>;
+      fn pull_metadata(&self, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError>;
       fn list_objects(&self) -> Result<Vec<ObjectId>, RemoteError>;
       fn list_dir(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError>;
       fn read_file(&self, id: ObjectId, name: &str) -> Result<Vec<u8>, RemoteError>;
@@ -225,17 +259,24 @@ parts that vary through these traits:
   wrapper variant against stub enums, so later items add variants only
   in their own files.
 - `Error::kind() -> ErrorKind` gives the JSON error kind and the exit
-  code. `ErrorKind` holds the kinds the spec names (`ambiguous_reference`
-  with candidates, `unknown_reference`, `brake` with planned count, set
-  size and up to ten items, `lock_held`, `remote_away`, `remote_broken`)
-  and the ones the items need (`not_a_collection`, `usage`, others). I01
-  also adds a transitional `not_implemented`; I39 removes it.
+  code. I01 lists each kind with its source: the kinds spec "JSON
+  output" names (`ambiguous_reference` with candidates,
+  `unknown_reference`, `brake` with the planned count, the set size and
+  up to ten items, `lock_held`, `remote_away`, `remote_broken`),
+  `not_a_collection` (spec "Collections and pieces": commands fail
+  outside a collection), `usage` (T8), and the transitional
+  `not_implemented`, which I39 removes. Items that add a kind add it to
+  the spec's "JSON output".
 - Exit codes (spec "Dry runs, scheduling, exit codes"): 0 success; 1
   error, including remote broken, lock held, a held brake without a
   terminal, an unknown or ambiguous piece; 2 usage error (clap's own
   usage errors exit 2: `USAGE_CODE` in clap_builder 4.6.7); 3 partial,
   from `CommandReport::partial()`; 4 remote away, turned into 0 by
-  `--if-reachable` as I29 implements.
+  `--if-reachable` through `remote::policy` (I01 call site, I29 fills
+  it).
+- `EMFILE` and `ENFILE` are errors of the run, never an unreadable
+  piece (O11). `main` raises the soft `RLIMIT_NOFILE` before anything
+  else (I01).
 - The binary propagates errors with anyhow and context (ADR 0005) and
   finds the `antiq::Error` in the chain to pick the exit code and JSON
   kind.
@@ -245,11 +286,16 @@ parts that vary through these traits:
 - antiq writes console output; the picker is its only full-screen part
   (ADR 0056). Data goes to stdout, messages to stderr; colour only on a
   terminal (spec "Dry runs, scheduling, exit codes").
+- All output goes through functions returning `io::Result`; a
+  `BrokenPipe` on stdout ends the command with exit 0. Clippy's
+  `print_stdout` and `print_stderr` lints are denied in the binary, so
+  no `println!` can panic on a closed pipe (O13).
 - Every JSON output is one object `{"format": 1, "command": "<name>",
   ...}`; errors add `{"error": {"kind": ..., "message": ...}}`; a dry run
-  carries `"dry_run": true` and `actions` (spec "JSON output"). The
-  library's report types derive `Serialize`; `cli::output` wraps them in
-  the envelope. Warnings travel in each report as a list and print to
+  carries `"dry_run": true` and `actions` (spec "JSON output"). JSON
+  errors go to stdout, plain messages to stderr (T9). The library's
+  report types derive `Serialize`; `cli::output` wraps them in the
+  envelope. Warnings travel in each report as a list and print to
   stderr on the console.
 - Console rendering lives in `cli::cmd::<command>`, next to the call.
 
@@ -265,8 +311,8 @@ parts that vary through these traits:
   default. `NonInteractive` answers nothing, so every decision point
   takes the non-destructive default and the object is listed as needing
   a decision (spec "Decisions"). `cli::tty::TtyInteraction` renders a
-  question on `/dev/tty`. One generic question type keeps the trait
-  closed: items add questions without editing `interact.rs` (T21).
+  question on `/dev/tty`. Items add questions without editing
+  `interact.rs` (T21).
 - Pending decisions live in the tracking entries (spec "Local state").
   `resolve` executes one answer at once, under the lock, with the loss
   computed at that moment; no answer is stored (spec "Decisions").
@@ -275,13 +321,18 @@ parts that vary through these traits:
 
 - Every state-changing command takes `--dry-run`, which prints the plan
   and changes nothing (ADR 0046). Read-only commands and `--dry-run`
-  never touch `trash/`, `tmp/` and `staging/` (spec "Operations").
+  never touch `trash/`, `tmp/` and `staging/` (spec "Operations"). A
+  dry run takes no lock and prints the same note as `status` when one is
+  held (T7).
 - Each state-changing op is split into `plan(...) -> Plan<Action>`,
-  which reads local state (and the remote through read-only calls, T7)
-  and decides, and `apply(plan, &RunGuard)`, which acts. `--dry-run`
+  which reads local state (and the remote through read-only calls) and
+  decides, and `apply(plan, &RunGuard)`, which acts. `--dry-run`
   renders the plan; the normal path applies it. Steps whose outcome
   depends on an earlier step (a verify that may fail, an upload that may
   fail) appear in the plan as intended actions.
+- A dry run writes nothing on the remote, not even the probe file the
+  path remote's clock needs; cleanup steps that depend on an age appear
+  as "age unknown in a dry run" (F14).
 - The brake evaluates on the plan, so `--dry-run` reports where it would
   hold (ADR 0045).
 
@@ -292,28 +343,36 @@ parts that vary through these traits:
   Every function that writes into `.antiq/` or deletes a folder takes
   `&RunLock` or `&RunGuard`; `RunLock` has private fields and only
   `lock::acquire` makes one.
-- Recommended type-state for the irreversible steps (T22): a folder is
-  removed only through a function that takes a `DurableArchive`, made
-  only by the store after a `Verified` (from the strict verify) and the
-  durable writes of payload, listing, metadata and tracking (spec
-  "archive" step 2, ADR 0033). A local archive is dropped only through
-  a function that takes a `ConfirmedRemoteCopy`, made only by the check
-  of ADR 0043. Each token gets a `compile_fail` doctest showing that it
-  cannot be built outside its module.
+- Type-state for the irreversible steps (T22): a folder is removed only
+  through a function that takes a `DurableArchive`, made only by the
+  store after a `Verified` (from the strict verify) and the durable
+  writes of payload, listing, metadata and tracking (spec "archive"
+  step 2, ADR 0033). A local archive is dropped only through a function
+  that takes a `ConfirmedRemoteCopy`, made only by the check of ADR
+  0043. The flows where the user's answer itself authorises a removal
+  (the `theirs` choice of a version conflict sends the local archive
+  through trash; `--theirs` on a diverged folder sends the folder
+  through trash) take a `UserDecision`, made only by the decision
+  handling of `resolve` and of the in-place questions (F9). Each token
+  gets a `compile_fail` doctest showing that it cannot be built outside
+  its module.
 
 ### 2.9 Local metadata before `sync`
 
 The spec says changes "are recorded locally and committed as a new
 metadata version at the next `sync`" and that `.antiq/objects/<ulid>/`
 has the remote's layout, but not where a recorded, uncommitted change
-lives. The proposal (T1): `objects/<ulid>/meta.<N>` holds versions
-known to be committed (pulled or committed by this machine);
+lives. Decision (T1): `objects/<ulid>/meta.<N>` holds versions known to
+be committed (pulled or committed by this machine);
 `objects/<ulid>/meta.pending` holds the next version, written through
-the atomic write. Local readers prefer `meta.pending`. `sync` commits it
-as `meta.<N+1>` on the remote with the protocol of ADR 0030, with N the
-version taken out (recorded in tracking), and then renames it locally
-to `meta.<N+1>`. Without a remote it stays pending. I08 implements the
-store side; if the lead accepts, I08 records it as an ADR.
+the atomic write. Local readers prefer `meta.pending`. `sync` commits
+it with the protocol of ADR 0030, which gives the version number (one
+above the highest committed version or claim on the remote, F15), and
+then renames it locally to `meta.<N>` with that number. While a change
+is pending, the tracking entry's "version taken out" reads `pending`;
+I30 rewrites it to the committed number (F21). Without a remote the
+change stays pending. I08 implements the store side and records the
+decision as a new ADR.
 
 ### 2.10 Concurrency
 
@@ -335,29 +394,30 @@ one item per wave edits `Cargo.toml` after that. I01 runs `cargo audit`
 | anyhow | 1.0.104 | | binary errors | present | in place |
 | clap | 4.6.7 | derive | arguments (ADR 0004) | present | in place |
 | thiserror | 2.0.21 | | library errors (ADR 0005) | present | in place |
-| serde | 1.0.229 | derive | all formats | | I01 |
+| serde | 1.0.229 | derive | all formats | not researched; ntropy uses 1.0.228 | I01 |
 | serde_json | 1.0.154 | preserve_order | metadata, listings, tracking, JSON output | keeps unknown keys in input order, nested too (foundations §5) | I01 |
 | toml | 1.1.8 | | typed config read; `deny_unknown_fields` names the bad key (foundations §6) | | I01 |
 | toml_edit | 0.25.17 | | config edits that keep comments and order (foundations §6) | | I01 |
-| jiff | 0.2.39 | serde | `Timestamp`, UTC by type (foundations §5) | fractional digits vary with the value; a fixed width needs a custom serializer (T15) | I01 |
+| jiff | 0.2.39 | serde | `Timestamp`, UTC by type (foundations §5) | fractional digits vary with the value, so whole seconds need a custom serializer (T15) | I01 |
 | ulid | 3.0.0 | default (`std`) | IDs; `Ulid::from_datetime` per unit, not a shared `Generator`; `Ulid::from_parts` for fixed test IDs | a time before 1970 gives timestamp 0 without an error, so the 1990 rule runs before minting (foundations §4) | I01 |
 | sha2 | 0.11.1 | | SHA-256 | pure Rust, hardware instructions detected at run time on aarch64; RUSTSEC-2021-0100 affects 0.9.7 only (foundations §3) | I01 |
-| glob | 0.3.4 | | selection patterns | the only measured crate whose `require_literal_leading_dot` implements the dot rule; no braces (foundations §1) | I01 |
+| glob | 0.3.4 | | selection patterns | the only measured crate whose `require_literal_leading_dot` implements the dot rule; no braces (foundations §1); matches only UTF-8 paths, so non-UTF-8 names go through their escaped form (O16) | I01 |
 | ignore | 0.4.34 | | gitignore matching for the idle check (`Gitignore`) | measured with anchored rules and negation (foundations §2) | I01 |
-| tar | 0.4.46 | default features off if it builds (T18) | tar writing and reading | at least 0.4.45 for RUSTSEC-2026-0067 and 0068; RUSTSEC-2021-0080 and 2018-0002 are older (tar research) | I01 |
+| tar | 0.4.46 | default features off (T18) | tar writing and reading | at least 0.4.45 for RUSTSEC-2026-0067 and 0068; RUSTSEC-2021-0080 and 2018-0002 are older (tar research) | I01 |
 | zstd | 0.14.3 | default features off; `experimental`, `zstdmt` | compression | `experimental` exposes `RSyncable`, `zstdmt` multithreading; at least 0.14.3 for RUSTSEC-2026-0391; `legacy` off, which holds the RUSTSEC-2026-0392 code (compression research) | I01 |
-| zstd-sys | `=2.1.2+zstd.1.5.7` | | pins the bundled zstd 1.5.7 exactly (ADR 0052) | zstd-sys RUSTSEC-2026-0410 is wasm32 only (compression research) | I01 |
+| zstd-sys | `=2.1.2+zstd.1.5.7` | default features off (`--no-default-features`) | pins the bundled zstd 1.5.7 exactly (ADR 0052) | zstd-sys 2.1.2's defaults are `legacy` and `zdict_builder`, which a direct dependency with defaults would switch back on through feature unification; RUSTSEC-2026-0410 is wasm32 only (compression research) | I01 |
 | filetime | 0.2.29 | | directory times in the final extraction pass; fixtures | used by the tar research probe | I01 |
-| rustix | 1.1.6 | fs, process | plain `fsync`, `statvfs`, `statfs`, pid liveness, `setsid` in tests, dirfd-relative walking (R3) | probed in the filesystem research, which names RustSec entries only for `nix` and `remove_dir_all` | I01 |
+| rustix | 1.1.6 | fs, process | plain `fsync`, `statvfs`, `statfs`, dirfd-relative access (`fsx::tree`), `fcntl_nocache` and `fadvise` for read-back, pid liveness, `setrlimit`, `setsid` in tests | probed in the filesystem research, which names RustSec entries only for `nix` and `remove_dir_all` | I01 |
 | libc | 0.2.191 | | `sysconf(_SC_PHYS_PAGES)` for the memory budget (T12) | not researched; `cargo search` shows a 1.0 alpha, so the version is given explicitly | I01 |
 | whoami | 2.1.3 | | machine name: `devicename()` on macOS, hostname elsewhere | `devicename()` on Linux reads `PRETTY_HOSTNAME` and fails when absent (foundations §7) | I01 |
 | tempfile (dev) | 3.27.0 | | temporary collections and remotes | probed in the filesystem research | I01 |
-| insta (dev) | 1.49.0 | filters | console output snapshots | not researched; ntropy uses it | I01 |
+| insta (dev) | 1.49.0 | filters | console output snapshots | not researched; ntropy uses 1.48.0 | I01 |
 | unicode-normalization | 0.1.26 | | NFD folding for name collisions (ADR 0054) | not researched (T11) | I13 |
 | crossterm | 0.29.0 | | picker drawing | ntropy's version (ADR 0057); advisories to check with `cargo audit` | I36 |
 | nucleo | 0.5.0 | | picker matching | ntropy's version | I36 |
 | unicode-width | 0.2.3 | | picker layout | ntropy pins 0.2.2 | I36 |
 | unicode-segmentation | 1.13.x | | picker layout | ntropy's version 1.13.3 | I36 |
+| rustix features `pty`, `termios` | 1.1.6 | | pty harness for the terminal glue (T16) | `openpt`, `grantpt`, `unlockpt`, `ptsname`, `tcsetwinsize`, `ioctl_tiocsctty` exist in rustix 1.1.6 | I36 |
 
 Not taken: `walkdir` and `jwalk` (the walk needs the device and
 unreadable reports and long paths, R3; a plain `read_dir` walk measured
@@ -390,8 +450,9 @@ SSH clients (ADR 0048), xz crates (antiq reads no xz, ADR 0019).
 - `testing::Tree` (library) and `tests/support/tree.rs` (binary tests):
   build directories, files with content, mode and modification time
   (filetime), symlinks (absolute, relative, dangling, pointing outside),
-  hard links, a fifo, a sparse file (`set_len`), unreadable directories
-  (mode 000, restored on drop so the temp directory can be removed).
+  hard links, a fifo, a small sparse file (`set_len`), paths longer than
+  1,024 bytes (built through `TreeRoot`), unreadable directories (mode
+  000, restored on drop so the temp directory can be removed).
 - `TempCollection`: a temp directory made a collection through the
   `init` code once I11 lands; before that a minimal `.antiq/` written
   directly by the I01 helper.
@@ -404,8 +465,12 @@ SSH clients (ADR 0048), xz crates (antiq reads no xz, ADR 0019).
 - Binary tests cannot inject a clock: they set file times relative to
   the real time and set `idle_days`, `remote_only_days` and
   `grace_hours` to 0 where a test needs immediate eligibility.
+- Compression in library tests runs through one process-wide test pool
+  (I07), so parallel tests do not each start level-19 encoders (R5).
 - Helpers needed by one item stay in that item's test module; shared
   ones go into a new file under `src/testing/` or `tests/support/`.
+  `tests/support/mod.rs` allows dead code, since each test crate uses a
+  part of it.
 
 ### 4.3 Remote test doubles
 
@@ -416,10 +481,11 @@ SSH clients (ADR 0048), xz crates (antiq reads no xz, ADR 0019).
   and runs a callback between steps, so another machine can claim,
   commit or delete in the middle of a commit (ADR 0030).
 - Seams for conditions an unprivileged test cannot create: a device
-  boundary inside a piece, a mount point at the remote root, free
-  space, the filesystem type (SMB and NFS warnings), `ENOTSUP` from
-  `sync_all`. Each seam is an internal parameter (a probe trait or a
-  function value), not a config key (T17).
+  boundary inside a piece or at its top, a mount point at the remote
+  root, free space, the filesystem type (SMB and NFS warnings),
+  `ENOTSUP` from `sync_all`, the staging volume's case and Unicode
+  rules, the network check. Each seam is an internal parameter (a probe
+  trait or a function value), not a config key (T17).
 
 ### 4.4 SSH and rsync
 
@@ -427,9 +493,9 @@ What runs where, on this machine (macOS, no guaranteed sshd):
 
 | Layer | Runs in | Covers |
 |---|---|---|
-| Unit tests | `cargo test` | ssh argv and `-o` options, ControlPath length, POSIX quoting, `/bin/sh -s` script text, the stderr classifier on recorded texts, rsync argv and environment, the version probe on `rsync  version 3.5.1  protocol version 33` and `openrsync: protocol version 29`, the stats parser on recorded output |
+| Unit tests | `cargo test` | ssh argv and `-o` options, the ControlPath limit of 86 bytes, POSIX quoting, `/bin/sh -s` script text, the command and mux classifiers on recorded texts, rsync argv and environment, the version probe on `rsync  version 3.5.1  protocol version 33` and `openrsync: protocol version 29`, the stats parser on recorded output |
 | Loopback shim | `cargo test` | `SshRemote` end to end without networking: `tests/fixtures/ssh-shim.sh` behaves like `ssh` (accepts the options antiq passes, simulates `-M -N -f`, `-O check` and `-O exit` with a socket file, runs the remote command with the local `/bin/sh`); rsync runs the shim through `-e`, which works because rsync runs an arbitrary `-e` program with plain argv (ssh research) |
-| Fault modes | `cargo test` | the shim reads an environment variable to exit 255 with recorded error texts (away, broken); a fake rsync script (`machine.rsync` points at it) exits 23, 24, 30 or prints no stats |
+| Fault modes | `cargo test` | the shim reads an environment variable to exit 255 with recorded error texts (away, broken, mux failures); a fake rsync script (`machine.rsync` points at it) exits 23, 24, 30 or prints no stats |
 | Real sshd | opt-in | the unmodified `ssh` against `/usr/sbin/sshd` started by the test as the user on 127.0.0.1 |
 | Linux container | opt-in (I39) | a Debian container with sshd and rsync 3.x under OrbStack (`docker` 29.8.2 answers on this machine) |
 
@@ -452,6 +518,10 @@ What runs where, on this machine (macOS, no guaranteed sshd):
   The test reaches the server through an `ssh` wrapper on `PATH` that
   adds `-F <test config>`, which keeps the user's own `~/.ssh/config`
   out of the test.
+- The sshd harness (`tests/support/sshd.rs`, I24, T23) starts one
+  `sshd -D -e` per test, stopped by a `Drop` guard, on a free port taken
+  through port 0, with its own ControlPath, and polls the TCP port until
+  the server answers before the test connects (O7).
 
 ### 4.5 Interactive parts without a terminal
 
@@ -468,13 +538,18 @@ What runs where, on this machine (macOS, no guaranteed sshd):
 - The picker keeps ntropy's split: all interaction logic in
   `PickerState`, unit-tested without a terminal, drawing into
   `impl Write`; layout snapshots with insta.
-- The terminal glue left over is covered by a small pty harness or
-  listed as an accepted exception (T16).
+- The terminal glue left over is covered by a pty harness in I36 (T16):
+  `openpt`, `grantpt`, `unlockpt` and `ptsname` give a pty pair;
+  `tcsetwinsize` sets a window size, since crossterm asks the terminal
+  for it; the child runs `setsid()` and `ioctl_tiocsctty` on the slave
+  in `pre_exec`, so the pty is its controlling terminal and `/dev/tty`
+  opens it; the test writes keys to the master and reads the frames.
 
 ### 4.6 Determinism
 
-- A golden test hashes the live-package output for a fixed input
-  (ADR 0052).
+- A golden test hashes the live encoder's output for a seeded stream
+  generated in memory, with 1 and with 4 workers, so umask and clock
+  play no part (ADR 0052, O8).
 - A tar stability test: the same tree packs to the same bytes; a
   touched file changes its header (ADR 0050, tar research).
 
@@ -482,9 +557,12 @@ What runs where, on this machine (macOS, no guaranteed sshd):
 
 The filesystem research ran on Linux (OrbStack, ext4, btrfs, tmpfs,
 overlay); antiq's own tests run there in I39 through
-`scripts/test-linux.sh` (cargo test inside a Rust container).
+`scripts/test-linux.sh`: `cargo test` inside a Rust container as a
+non-root user, with 4 GB of memory and `RUST_TEST_THREADS=4` (R5).
 Linux-only behaviour (non-UTF-8 names, `f_type` magic numbers) gets
-`#[cfg(target_os = "linux")]` tests.
+`#[cfg(target_os = "linux")]` tests. Tests of the staging volume's
+real case and Unicode rules are macOS-only; elsewhere the rules come
+through the seam (S11).
 
 ### 4.8 Coverage
 
@@ -501,25 +579,31 @@ Linux-only behaviour (non-UTF-8 names, `f_type` magic numbers) gets
 ## 5. Work items
 
 Sizes: S up to about 500 lines with tests (up to a day), M 500 to 1000
-(one to two days), L 1000 to 1500 (two to three days). "First failure"
-says what a test shows before the change. Where an entry has no Goal
-line, its title is the goal.
+(one to two days), L 1000 to 1500 (two to three days), XL above that
+(only I01, which lands in two merges). "First failure" says what a test
+shows before the change. Where an entry has no Goal line, its title is
+the goal. "Shared edits" names files another item owns that this item
+changes, and what it changes there.
 
 Every item is accepted when its tests pass, the three check commands
 pass on every commit, every changed production line is covered or
 listed as an exception (4.8), the docs it names are updated in the
-same commits, its JSON payload (if it adds a command's behaviour) is in
-the spec, and its step todo is deleted in its finishing commit.
-Acceptance lines in an entry add to this.
+same commits, its JSON payload and new error kinds (if it adds a
+command's behaviour) are in the spec, and its step todo is deleted in
+its finishing commit. Acceptance lines in an entry add to this.
 
 ### Wave 1
 
 #### I01 Lay down the module tree, shared types and the command surface
 
 - Goal: a crate that builds, lints and tests clean, with every module
-  file of section 2.1 present, the shared types complete, the whole
-  command surface parsed, and every command answering
-  `not_implemented` until its item lands. This is the rudimentary CLI.
+  file of section 2.1 present, the shared types of section 2.2
+  complete, the whole command surface parsed, and every command
+  answering `not_implemented` until its item lands. This is the
+  rudimentary CLI.
+- Lands in two merges. Part A: skeleton, command surface, envelope,
+  errors, output rules, test support. Part B: the shared types of
+  section 2.2 and `src/fsx/tree.rs`. Wave 2 starts after part B.
 - Implements: ADR 0003, 0004, 0005, 0010, 0020, 0022 (terms in help
   texts), 0023, 0046 (`--dry-run` on every state-changing command),
   0055 (`import` in the surface), 0056; spec "Command line" (command
@@ -539,49 +623,71 @@ Acceptance lines in an entry add to this.
   `remote show`, `remote remove [--force] [--dry-run]`; `reconcile
   [--prune] [--force] [--dry-run] [--if-reachable]`; `import [--path
   <dir>] <file>... [--dry-run]`. A flag a command does not take is a
-  usage error.
+  usage error. clap's `help` subcommand is disabled
+  (`disable_help_subcommand`), so the surface has exactly these
+  subcommands (O18).
 - Owns: `Cargo.toml`, `Cargo.lock` (section 3), `src/lib.rs`,
   `src/main.rs`, `src/error.rs`, `src/clock.rs`, `src/interact.rs`,
-  `src/plan.rs`, `src/report.rs`, stubs of every other module file,
-  `src/cli/mod.rs`, `src/cli/output.rs`, `src/cli/tty.rs`, stubs of
-  `src/cli/cmd/*.rs`, `src/testing/mod.rs`, `tests/support/{mod,cmd,tree}.rs`,
-  `tests/cli.rs`, `scripts/check.sh` (fmt, clippy, test),
-  `scripts/uncovered-lines.sh`; in the spec, one placeholder line per
-  command under "JSON output".
-- Shared types defined complete here: `ObjectId`, `RelPath` and `Name`
-  (type and constructors; I02 adds the escaped form), `ListingEntry`
-  and its entry type, `Clock` with `SystemClock` and `FixedClock`,
-  `IdSource` (trait; I02 implements), `Interaction`, `Question`,
-  `Choice`, `NonInteractive`, `ScriptedInteraction` (`cfg(test)`),
-  `Plan<A>`, `CommandReport`, `Warning`, `ErrorKind`, `Error` with one
-  `#[from]` variant per module error stub. Stubs that later items fill
-  without touching their callers: `remote::probe_state(&Collection) ->
-  RemoteState` returns `None`, `remote::away::status_warning(...)`
-  returns no warning (filled by I23 and I29).
-- Must not touch: any behaviour beyond parsing and the envelope.
+  `src/plan.rs`, `src/report.rs`, `src/tree.rs`, `src/fsx/tree.rs`, the
+  type parts of `src/relpath.rs`, `src/id.rs`, `src/meta.rs` and
+  `src/remote/mod.rs`, stubs of every other module file including every
+  `mod.rs`, `src/ops/mod.rs` and all `ops` submodule files
+  (`archive/{mod,new,unearthed}`, `unearth/{mod,local,remote,live}`,
+  `resolve/{mod,replace,conflict,diverged,superseded}`,
+  `sync/{mod,pull,upload,commit,conflict,live,tiers}`), `src/cli/mod.rs`,
+  `src/cli/cmd/mod.rs` and stubs of every `src/cli/cmd` file (with
+  `sync/{mod,conflict,live,tiers}`), `src/cli/output.rs`,
+  `src/cli/tty.rs`, `src/testing/mod.rs`,
+  `tests/support/{mod,cmd,tree,sshd}.rs` (`sshd.rs` a stub that I24
+  fills), `tests/cli.rs`, `scripts/check.sh` (fmt, clippy, test),
+  `scripts/uncovered-lines.sh`; in the spec, one paragraph per command
+  under "JSON output", separated by blank lines, so parallel items edit
+  different paragraphs (S9).
+- Content: the shared types of section 2.2 with their serde attributes;
+  the escape function on `RelPath`; `TreeRoot` with dirfd-relative
+  open, stat, read-link, read-dir, create (`mkdirat`, `openat` with
+  `O_NOFOLLOW`, `O_CREAT`, `O_EXCL`) and remove; `Reachability`;
+  `ErrorKind` with each kind's source (section 2.4); stubs that later
+  items fill without touching their callers:
+  `remote::probe_state(&Collection) -> RemoteState` returns `None`,
+  `remote::away::status_warning(...)` returns no warning,
+  `remote::policy` returns the plain outcome (filled by I23 and I29),
+  each with its call site in place; raising the soft `RLIMIT_NOFILE` in
+  `main` (O11); output through `io::Result` with `BrokenPipe` mapped to
+  exit 0 and the print lints denied (O13).
+- Must not touch: any behaviour beyond parsing, the envelope and the
+  shared types.
 - Depends on: none.
 - Tests: `antiq --help` lists the thirteen subcommands, `pin` and
-  `unpin` counted apart (first failure: no subcommands); `antiq status --dry-run`, `antiq find --force`,
-  `antiq status --if-reachable` and `antiq resolve --mine` without a
-  piece exit 2 (first failure: unknown arguments are not defined
-  yet); `antiq --json status` prints `{"format":1,"command":"status",
+  `unpin` counted apart, and no `help` subcommand (first failure: no
+  subcommands); `antiq status --dry-run`, `antiq find --force`, `antiq
+  status --if-reachable` and `antiq resolve --mine` without a piece
+  exit 2 (first failure: unknown arguments are not defined yet); `antiq
+  --json status` prints `{"format":1,"command":"status",
   "error":{"kind":"not_implemented",...}}` and exits 1; unit tests map
   every `ErrorKind` to its exit code; the envelope serialises in key
-  order `format`, `command`, then the payload; `setsid` helper in
+  order `format`, `command`, then the payload; the `setsid` helper in
   `tests/support/cmd.rs` proven by a test that `/dev/tty` cannot be
-  opened in the child.
-- Docs: spec "JSON output" placeholders; no README change.
+  opened in the child; output into a stdout pipe the reader has closed
+  exits 0 without a panic; the soft `RLIMIT_NOFILE` after start is above 256;
+  metadata types serialise in the spec's key order with the left-out
+  keys absent and the three `verified` states; `escape(b"a%\xffb")` is
+  `a%25%FFb`; `TreeRoot` creates, stats and reads a file at a depth
+  past 1,024 bytes.
+- Docs: spec "JSON output" paragraphs and error kinds with their
+  sources; no README change.
 - Acceptance: `scripts/check.sh` green; `cargo audit` clean or every
-  finding listed; `shellcheck` clean; every file carries the MPL header.
-- Size: L.
+  finding listed; `cargo tree -e features -i zstd-sys` shows neither
+  `legacy` nor `zdict_builder` (O1); `shellcheck` clean; every file
+  carries the MPL header.
+- Size: XL (two merges).
 
 ### Wave 2
 
 #### I02 Relative paths, escaped forms and object IDs
 
-- Goal: byte-exact relative paths with the escaped form, the payload and
-  machine name parts, temp names, and minting IDs from a folder's
-  times.
+- Goal: unescape, the payload and machine name parts, temp names,
+  lexical normalisation, and minting IDs from a folder's times.
 - Implements: spec "Metadata" (escaped form: valid UTF-8 stays, `%`
   becomes `%25`, every byte not part of valid UTF-8 becomes `%XX`),
   "Storage" (name part: every byte outside `[A-Za-z0-9._-]` as `%XX`,
@@ -589,25 +695,27 @@ Acceptance lines in an entry add to this.
   same way, cut to 32 bytes; temp name `.<final name>.<machine part>.part`),
   "Objects" (ID time: earliest of the directory's birth time and the
   birth and modification times of every entry, ignoring times before
-  1990; source `birth`, `oldest-mtime`, `import`, `fork`; minted once),
-  ADR 0014, 0039.
-- Owns: `src/relpath.rs`, `src/id.rs`.
-- Content: escape and unescape with a round trip for any bytes; lexical
-  normalisation for references, `--to` and `--path` (resolve `.` and
-  `..`, refuse a path above the root); `RandomIds` through
-  `Ulid::from_datetime` per unit and `SeqIds` for tests (foundations
-  §4); `id_time()` returning time and source, with the 1990 floor
-  applied before minting. Hex digits in `%XX` are upper case (the spec
-  writes `%25`), recorded in the spec.
-- Must not touch: walking the disk (the caller passes the times).
+  1990; source `birth`, `oldest-mtime`, `import`, `fork`, and `minted`
+  per T2; minted once), ADR 0014, 0039.
+- Owns: the functions of `src/relpath.rs` and `src/id.rs` beyond I01's
+  types.
+- Content: unescape with a round trip against I01's escape for any
+  bytes; lexical normalisation for references, `--to` and `--path`
+  (resolve `.` and `..`, refuse a path above the root); `RandomIds`
+  through `Ulid::from_datetime` per unit and `SeqIds` for tests
+  (foundations §4); `id_time()` returning time and source, with the 1990
+  floor applied before minting and the T2 fallback. Hex digits in `%XX`
+  are upper case (the spec writes `%25`), recorded in the spec.
+- Must not touch: walking the disk (the caller passes the times); I01's
+  types.
 - Depends on: I01.
-- Tests: `b"a%\xffb"` escapes to `a%25%FFb` and back (first failure:
-  stub); a name of 70 bytes with an escape across byte 64 is cut before
-  the escape; `id_time` ignores a 1989 time and picks a 1995 mtime with
+- Tests: `a%25%FFb` unescapes to `b"a%\xffb"` (first failure: stub); a
+  name of 70 bytes with an escape across byte 64 is cut before the
+  escape; `id_time` ignores a 1989 time and picks a 1995 mtime with
   source `oldest-mtime`; a birth time earlier than every mtime gives
-  `birth`; times all before 1990 hit T2's rule; `..` past the root is
-  refused.
-- Docs: spec "Metadata" (hex case), T2's outcome if it adds a rule.
+  `birth`; times all before 1990 give the minting time, source
+  `minted`, and a warning; `..` past the root is refused.
+- Docs: spec "Metadata" (hex case).
 - Acceptance: property-style round-trip test over random bytes passes.
 - Size: M.
 
@@ -627,28 +735,29 @@ Acceptance lines in an entry add to this.
   `src/lock.rs`.
 - Content: `write_atomic`, `flush_file` and `flush_dir` (plain `fsync`
   through rustix on `ENOTSUP`; std's `sync_all` uses `F_FULLFSYNC` on
-  macOS, which smbfs refuses); `remove_tree` (chmod u+rwx retry on
-  `PermissionDenied`, refuses to descend into another device);
-  `move_dir` (owner write around the rename, `CrossesDevices`
+  macOS, which smbfs refuses); `remove_tree` through `TreeRoot` (chmod
+  u+rwx retry on `PermissionDenied`, refuses to descend into another
+  device); `move_dir` (owner write around the rename, `CrossesDevices`
   reported as such); `available_space` (`statvfs`); device of a path,
   mount point test (`st_dev` against the parent, `statfs` mount name on
   macOS), filesystem kind (local, SMB, NFS, other) from `statfs`
   (`f_fstypename` on macOS, `f_type` magic numbers on Linux); birth time
   (std `created()`). Lock: open without truncating, `try_lock`, then
   `set_len(0)` and write pid, machine, start; `lock::holder()` for
-  `status` and `find` reads the file and tests whether the pid is alive,
-  taking no lock (T13 has the reason).
+  `status`, `find` and dry runs reads the file and tests whether the pid
+  is alive, taking no lock (T13).
 - Must not touch: callers.
 - Depends on: I01.
 - Tests: atomic write replaces content and leaves no temp file (first
   failure: stub); the fallback path runs when the flush seam returns
   `ENOTSUP`; `remove_tree` deletes a tree with a `0555` directory (std's
-  `remove_dir_all` failed there, filesystem research §4);
-  `move_dir` moves a `0555` directory to another parent and restores
-  its mode (EACCES without owner write, reproduced in review 2, finding
-  O4); a second `try_lock` on another open file description returns
-  held with the first holder's pid; the device seam makes `remove_tree`
-  stop at a foreign device.
+  `remove_dir_all` failed there, filesystem research §4) and a tree
+  deeper than 1,024 bytes; `move_dir` moves a `0555` directory to
+  another parent and restores its mode (EACCES without owner write,
+  reproduced in review 2, finding O4), after asserting the precondition;
+  a second `try_lock` on another open file description returns held
+  with the first holder's pid; the device seam makes `remove_tree` stop
+  at a foreign device.
 - Docs: none.
 - Acceptance: all helpers used through these functions only.
 - Size: M.
@@ -665,18 +774,20 @@ Acceptance lines in an entry add to this.
 - Owns: `src/config.rs`, `src/collection.rs`, `src/machine.rs`.
 - Content: typed `Config` with every default of the table; strict
   structs for `machine` and `remote` (`deny_unknown_fields`); an error
-  for a second `[[remote]]`; a `ConfigDoc` over `toml_edit` with the
-  edits later items need (write a new config at `init`, set or remove
-  the `[[remote]]` entry, set `machine.rsync`); `Collection::find(start)`
-  and the layout accessors; machine name: `whoami::devicename()` on
-  macOS falling back to the hostname, the hostname elsewhere.
+  for a second `[[remote]]`; `memory_percent` validated to 1 to 100
+  (O9); a `ConfigDoc` over `toml_edit` with the edits later items need
+  (write a new config at `init`, set or remove the `[[remote]]` entry,
+  set `machine.rsync`); `Collection::find(start)` and the layout
+  accessors; machine name: `whoami::devicename()` on macOS falling back
+  to the hostname, the hostname elsewhere.
 - Must not touch: creating `.antiq/` (I11).
 - Depends on: I01.
 - Tests: discovery from a nested subdirectory finds the root (first
   failure: stub); `-C` start path; outside any collection gives
   `not_a_collection`; each default equals the spec table (one assertion
   per key); an unknown key under `[machine]` fails naming the key; two
-  `[[remote]]` entries fail; an edit keeps comments and key order.
+  `[[remote]]` entries fail; `memory_percent = 0` and `101` fail; an
+  edit keeps comments and key order.
 - Docs: none.
 - Acceptance: a `Collection` gives every path of the local layout.
 - Size: M.
@@ -695,23 +806,33 @@ Acceptance lines in an entry add to this.
   junk list (spec "Idle"), foundations §1, filesystem research §5.
 - Owns: `src/select.rs`, `src/walk.rs`.
 - Content: `glob::Pattern` with `require_literal_separator` and
-  `require_literal_leading_dot`; a top-down walk that stops at a match
+  `require_literal_leading_dot`; valid UTF-8 paths match as they are,
+  paths with non-UTF-8 bytes match through their escaped form (glob
+  0.3.4 matches only UTF-8, O16); a top-down walk that stops at a match
   and descends only where a pattern can still match; exclude entries as
   literal relative paths with nothing below them a piece (T10);
-  `walk_piece()` returning `PieceTree` sorted by path bytes, junk left
-  out, problems recorded; dirfd-relative traversal so paths past the
-  platform's path limit work (R3).
-- Must not touch: idle rules (I10), packing.
+  `walk_piece()` filling I01's `PieceTree` through `TreeRoot`, sorted by
+  path bytes, junk left out, problems recorded, the allocated size read
+  for each file; a piece whose top directory is on another device than
+  the collection root is `mount_point` (O12); `EMFILE` and `ENFILE`
+  are run errors, not `unreadable` (O11).
+- Must not touch: idle rules (I10), packing; I01's tree types.
 - Depends on: I01.
 - Tests: `*` skips `.git`, `.*` selects it, `projects/.*` selects
   `projects/.x` (first failure: stub); `**/*` selects what `*` selects;
   a symlinked directory is never a piece and is counted; `.antiq` is
   never a piece; an excluded path and its subtree are not pieces;
   entries come out in path-byte order (`dir`, `dir-y`, `dir/x`, tar
-  research); a `000` directory makes the piece unreadable naming it; the
-  device seam flags a foreign device with its path; a tree deeper than
-  1,024 bytes walks completely.
-- Docs: spec "Selection" (exclude semantics after T10).
+  research); a `000` directory makes the piece unreadable naming it,
+  after asserting it cannot be read; the device seam flags a foreign
+  device inside a piece and at its top; a small sparse file reports an
+  allocated size below its size; a tree deeper than 1,024 bytes walks
+  completely; an `EMFILE` from the seam fails the run; on Linux, a
+  non-UTF-8 name is selected through its escaped form.
+- Docs: spec "Selection" (exclude semantics; non-UTF-8 names match
+  through their escaped form, where a `%` of the name reads `%25`),
+  "Walks" (a piece whose top directory is on another device counts as
+  containing a mount point).
 - Acceptance: one walk API used by idle, packing, verify, change
   detection.
 - Size: L.
@@ -735,22 +856,27 @@ Acceptance lines in an entry add to this.
   `src/pack/tar_write.rs`, `src/pack/hashing.rs`, `src/pack/zstd.rs`
   (encoder settings for archives and live packages as named constants,
   decoder constructor with `window_log_max(27)`).
-- Content: hard links by `(dev, ino)` through `append_link`; the archive
-  layout of members per T3 (top-level folder or not); worker count as a
-  plain parameter (I07 supplies it).
+- Content: one top-level directory, the container, named after the
+  folder when packed, holding the piece's entries; listing paths are
+  relative to the container (T3, F5); files read through `TreeRoot`;
+  hard links by `(dev, ino)` through `append_link`; the sparse warning
+  as a pure function of the tree's sizes and allocated sizes (S10);
+  worker count as a plain parameter (I07 supplies it).
 - Must not touch: verification and extraction (I12, I13), live-package
   tolerance (I14).
 - Depends on: I01.
 - Tests: a `0600` file keeps its mode, uid 0, empty uname (first
-  failure: stub); entries in path-byte order; packing the same tree
-  twice gives the same bytes and touching a file changes them; a hard
-  link reads back as `EntryType::Link`; a fifo is skipped and reported;
-  a 1969 mtime is stored as 0 and reported; the zstd frame has the
-  checksum flag and window log 27 and decodes with the 128 MiB limit; a
-  2 GiB file made with `set_len` triggers the sparse warning; a reader
-  that returns fewer bytes than the header size pads and marks the file
-  changed.
-- Docs: spec "Packaging" if T3 adds the member layout.
+  failure: stub); entries in path-byte order below the container;
+  packing the same tree twice gives the same bytes and touching a file
+  changes them; a hard link reads back as `EntryType::Link`; a fifo is
+  skipped and reported; a 1969 mtime is stored as 0 and reported; the
+  zstd frame has the checksum flag and window log 27 and decodes with
+  the 128 MiB limit; the sparse warning function fires for an apparent
+  size 1 GiB above the allocated size and not below; a reader that
+  returns fewer bytes than the header size pads and marks the file
+  changed; a file past 1,024 bytes of path packs.
+- Docs: spec "Packaging" and "Listing" (the container; listing paths
+  below it).
 - Acceptance: listing entries equal what I12 reads back.
 - Size: L.
 
@@ -766,52 +892,58 @@ Acceptance lines in an entry add to this.
 - Content: cores from `std::thread::available_parallelism`; RAM from
   `sysconf(_SC_PHYS_PAGES)` times the page size (T12); `Pool::lease(want,
   bytes_per_worker)` blocks until at least one worker and the memory
-  allow it; dropping the lease returns its workers.
+  allow it; when nothing is leased, one worker is always granted, with a
+  warning when the budget is below one worker (O9); dropping the lease
+  returns its workers; a process-wide pool for library tests (O15).
 - Must not touch: the encoder (I06 takes the worker count).
 - Depends on: I01.
 - Tests: two leases never exceed the cores (first failure: stub); with
-  1 GiB RAM at 25 % only one level-19 worker is handed out; a lease
-  waits until another is dropped (thread test with a timeout); a piece
-  below one job gets one worker.
-- Docs: none.
+  1 GiB RAM at 25 % only one level-19 worker is handed out; with a
+  budget below one worker one worker is still granted and a warning
+  given; a lease waits until another is dropped (thread test with a
+  timeout); a piece below one job gets one worker.
+- Docs: spec "Packaging" (the one-worker floor).
 - Size: S.
 
 ### Wave 3
 
-#### I08 Metadata and listing formats and the local object store
+#### I08 Metadata and listing IO and the local object store
 
-- Goal: the formats shared through the remote and their local home.
-- Implements: ADR 0053; spec "Metadata" (key order, payload object,
-  keys left out where they do not apply, unknown fields kept, higher
-  `format` read-only with a clear error on write, escaped paths),
-  "Listing" (zstd-compressed JSON Lines, first line `{"format":1}`, one
-  line per entry), "Storage" (`.antiq/objects/<ulid>/` with the
-  remote's layout; payload files never overwritten, a put onto an
-  existing name succeeds only when the full SHA-256 matches), the
-  proposal of section 2.9, foundations §5.
-- Owns: `src/meta.rs`, `src/listing.rs`, `src/store.rs`.
-- Content: serde structs with `extra` maps; a first pass reading only
-  `format`; `verified` with its three states (absent, null, a time);
-  history actions named after the rows of spec "Metadata changes";
-  listing writer and streaming reader (compression settings per T4);
-  store: current metadata (the highest `meta.<N>` that parses, plus
-  `meta.pending`), write pending, promote pending to `meta.<N>`, put a
-  payload or listing from `.antiq/tmp/` under its final name, paths,
-  object enumeration. Writes go through `fsx::write_atomic` and take
-  `&RunLock`.
-- Must not touch: remote code.
-- Depends on: I02, I03.
-- Tests: serialising a metadata value gives keys in the spec order
-  (first failure: stub); unknown keys at the top and inside a payload
-  survive a round trip; a `format: 2` file reads but refuses a write
-  with `format_too_new`; `listing`, `verified`, `superseded`, `encoder`
-  are absent for a live payload; a listing round trip keeps a path with
-  a non-UTF-8 byte; the store picks the highest parsing version and
-  reports the unparsable one; putting different bytes under an existing
-  payload name fails; a `compile_fail` doctest shows a store write
-  without a `RunLock`.
-- Docs: spec "Listing" (key names), "Metadata" (history action names),
-  ADR for section 2.9 if the lead accepts T1.
+- Goal: read and write the formats shared through the remote, and their
+  local home.
+- Implements: ADR 0053; spec "Metadata" (key order, keys left out where
+  they do not apply, unknown fields kept, higher `format` read-only with
+  a clear error on write, escaped paths), "Listing" (zstd-compressed
+  JSON Lines, first line `{"format":1}`, one line per entry, file name
+  `<sha256 16 hex>.listing.zst`), "Storage" (`.antiq/objects/<ulid>/`
+  with the remote's layout; payload files never overwritten, a put onto
+  an existing name succeeds only when the full SHA-256 matches), section
+  2.9, foundations §5.
+- Owns: the functions of `src/meta.rs` beyond I01's types,
+  `src/listing.rs`, `src/store.rs`.
+- Content: a first pass reading only `format`; times in whole seconds
+  (T15); history actions named after the rows of spec "Metadata
+  changes", the committing version's entry carrying the commit time
+  (T6); listing writer at level 3 with the content checksum and a
+  streaming reader through the 128 MiB decoder (T4); store: current
+  metadata (the highest `meta.<N>` that parses, plus `meta.pending`),
+  write pending, promote pending to `meta.<N>` with the number the
+  protocol gave, put a payload or listing from `.antiq/tmp/` under its
+  final name, paths, object enumeration. Writes go through
+  `fsx::write_atomic` and take `&RunLock`.
+- Must not touch: remote code; I01's metadata types.
+- Depends on: I01, I02, I03, I04.
+- Tests: a written metadata file has keys in the spec order (first
+  failure: stub); unknown keys at the top and inside a payload survive a
+  read and write; a `format: 2` file reads but refuses a write with
+  `format_too_new`; a listing round trip keeps a path with a non-UTF-8
+  byte; the store picks the highest parsing version and reports the
+  unparsable one; promoting `meta.pending` gives `meta.<N>`; putting
+  different bytes under an existing payload name fails; a `compile_fail`
+  doctest shows a store write without a `RunLock`.
+- Docs: spec "Listing" (key names, compression settings), "Metadata"
+  (history action names, whole seconds), a new ADR for section 2.9
+  (T1).
 - Size: L.
 
 #### I09 Tracking entries and derived states
@@ -825,14 +957,18 @@ Acceptance lines in an entry add to this.
   machine).
 - Owns: `src/tracking.rs`.
 - Content: `TrackingEntry` with serde and atomic writes to
-  `.antiq/tracking/<ulid>.json`; `PendingDecision` for the four kinds of
-  the decision table; fields `status` needs: stale backup since,
+  `.antiq/tracking/<ulid>.json`; "version taken out" as a number or
+  `pending` (F21); the payload version unearthed (F16); `written`, the
+  time the entry was written (F22); `PendingDecision` for the four kinds
+  of the decision table; fields `status` needs: stale backup since,
   missing on the remote, diverged; `derive_state(entry, metadata,
-  folder_present, own_collection)` for every row of the states table.
+  folder_present, own_collection)` for every row of the states table,
+  over I01's metadata types.
 - Must not touch: live manifests (I14 owns their files).
-- Depends on: I02, I03.
+- Depends on: I01, I02, I03, I04.
 - Tests: one case per row of the states table (first failure: stub);
-  round trip; a write without `RunLock` does not compile.
+  round trip with `pending` as version taken out; `written` set on each
+  write; a write without `RunLock` does not compile.
 - Docs: spec "Local state" (the added fields).
 - Size: M.
 
@@ -852,9 +988,10 @@ Acceptance lines in an entry add to this.
 - Owns: `src/idle.rs`, `src/pin.rs`.
 - Content: `ignore::gitignore::Gitignore` from `collection.ignore` lines
   and one per `.antiqignore`, anchored at its directory; the verdict
-  type of section 2.2; `pin::create`, `pin::remove`, `pin::is_pinned`.
+  type of section 2.2; `pin::create`, `pin::remove`, `pin::is_pinned`
+  (writes through I03's helpers).
 - Must not touch: the commands `pin` and `unpin` (I18).
-- Depends on: I04, I05.
+- Depends on: I03, I04, I05.
 - Tests: a pinned empty piece is pinned (first failure: stub); a piece
   whose only files are ignored, markers or junk is empty; a newer
   `.antiqignore` is not activity; a file dated two days ahead is
@@ -887,7 +1024,7 @@ Acceptance lines in an entry add to this.
   `archive.sh` layout yields an exclude proposal (with `--yes` per U5);
   `**` produces the note; `--dry-run` creates nothing; `init` inside a
   collection follows U5.
-- Docs: spec "JSON output" (`init` payload).
+- Docs: spec "JSON output" (`init` paragraph).
 - Size: M.
 
 #### I12 Strict verify and comparison with a listing
@@ -899,12 +1036,15 @@ Acceptance lines in an entry add to this.
   target; equal path sets under the same walk rules; junk left out; the
   lstat of each entry recorded while reading: size, modification time
   in nanoseconds, ctime, inode), the listing comparison used by
-  reclaiming and by the start-of-run repair of `unearthing` entries
-  (path, type, size, modification time in whole seconds, mode, link
-  target, content hash; directory times and junk do not count), tar
-  research ("Strict verify").
+  reclaiming and by the start-of-run repairs (path, type, size,
+  modification time in whole seconds, mode, link target, content hash;
+  directory times and junk do not count), tar research ("Strict
+  verify").
 - Owns: `src/pack/read.rs` (members of a package as a stream, listing
   from a package), `src/pack/verify.rs`.
+- Content: both comparisons work on the paths below the container, so
+  the container's name and the folder's name do not count (T3, F5);
+  the tree side goes through `TreeRoot`.
 - Must not touch: extraction (I13).
 - Depends on: I05, I06.
 - Tests: a fresh pack verifies with no differences (first failure:
@@ -912,7 +1052,9 @@ Acceptance lines in an entry add to this.
   and a repointed symlink are each reported (tar research case list); a
   truncated stream fails the integrity check; junk on disk is ignored;
   the lstat record holds every entry; the listing comparison ignores a
-  newer directory time and reports a changed mtime.
+  newer directory time and reports a changed mtime; a folder renamed
+  after packing still verifies; a tree past 1,024 bytes of path
+  verifies.
 - Docs: none.
 - Size: M.
 
@@ -931,7 +1073,12 @@ Acceptance lines in an entry add to this.
   extracted directory by directory), tar research (owner `rwx` on
   directories until the final pass), names research.
 - Owns: `src/pack/extract.rs`, `src/pack/names.rs`; adds
-  `unicode-normalization` if T11 says so.
+  `unicode-normalization` (T11).
+- Content: the container's contents are extracted into the target
+  directory, whatever its name (F5); paths past the platform limit are
+  created through `TreeRoot` (`mkdirat`, `openat` with `O_NOFOLLOW`,
+  `O_CREAT`, `O_EXCL`) (O5); the staging volume's rules come from a
+  probe behind a seam (S11).
 - Must not touch: the strict verify (I12).
 - Depends on: I06.
 - Tests: the six hostile archives of the tar research (absolute path,
@@ -939,9 +1086,10 @@ Acceptance lines in an entry add to this.
   hard link outside) are refused or stopped with nothing written
   outside staging (first failure: stub); a round trip keeps file,
   symlink and directory modes and times; a `0644` directory extracts its
-  children; `README` and `Readme` in one directory are refused on the
-  case-insensitive temp volume with both names listed; `café` in NFC
-  and NFD likewise; a 256-byte name is reported for Linux at archive
+  children; with the seam's case-insensitive rules, `README` and
+  `Readme` in one directory are refused with both names listed, and
+  `café` in NFC and NFD likewise; a macOS-only test runs the real probe
+  on the temp volume; a 256-byte name is reported for Linux at archive
   time; a 1,300-byte path extracts.
 - Docs: none.
 - Size: L.
@@ -961,18 +1109,18 @@ Acceptance lines in an entry add to this.
   differs; same SHA-256 means only the manifest is replaced), the live
   exclude list (spec "Packaging"), compression research (byte identity;
   `NbWorkers(0)` ignores rsyncable).
-- Owns: `src/pack/live.rs`, `src/pack/manifest.rs` (stored in
-  `.antiq/tracking/`, file name per T5).
+- Owns: `src/pack/live.rs`, `src/pack/manifest.rs` (stored as
+  `.antiq/tracking/<ulid>.manifest.json`, T5).
 - Must not touch: `sync` (I32 drives it).
 - Depends on: I05, I06.
-- Tests: the golden hash for a fixed generated input (first failure:
-  stub); one worker and four workers give the same bytes; a seam that
-  changes a file between read and second lstat makes the packer
-  restart, and after `live_retries` the piece is stale; a vanished file
-  is dropped; the manifest diff reports a touched file and a new
-  directory; repacking unchanged content reports the same SHA-256; the
-  encoder record names zstd 1.5.7 and the parameters.
-- Docs: spec "Change detection" if T5 places the manifest.
+- Tests: the golden hash of the live encoder over a seeded in-memory
+  stream, the same with 1 and 4 workers (first failure: stub, O8); a
+  seam that changes a file between read and second lstat makes the
+  packer restart, and after `live_retries` the piece is stale; a
+  vanished file is dropped; the manifest diff reports a touched file and
+  a new directory; repacking unchanged content reports the same
+  SHA-256; the encoder record names zstd 1.5.7 and the parameters.
+- Docs: spec "Change detection" (manifest file name).
 - Size: L.
 
 ### Wave 4
@@ -993,7 +1141,7 @@ Acceptance lines in an entry add to this.
 - Content: rebuild from the store and tracking; an update call for
   state-changing commands; read-only callers compute in memory when the
   index is missing (T13); search behind one function whose matching
-  follows U1.
+  follows U1, including member paths from listings if U1 says so.
 - Depends on: I08, I09.
 - Tests: a unique 6-character prefix resolves (first failure: stub); 5
   characters are refused; two objects sharing a prefix give
@@ -1014,53 +1162,62 @@ Acceptance lines in an entry add to this.
   folder at a path no tracking entry claims is a new piece, shown next
   to an archived piece of the same path), "Objects" (a piece without an
   ID shows as new), "Operations" (a note while a run holds the lock; a
-  warning for a collection on SMB or NFS), "JSON output" (`status`
-  payload: `collection`, `remote.state`, `pieces` with `id`, `path`,
-  `name`, `state`, `flags`, `remote_only_in_days`), ADR 0040.
+  warning for a collection on SMB or NFS), "Committing a version"
+  (`status` reports an unparsable highest `meta.<N>`), "JSON output"
+  (`status` payload: `collection`, `remote.state`, `pieces` with `id`,
+  `path`, `name`, `state`, `flags`, `remote_only_in_days`), ADR 0040.
 - Owns: `src/ops/status.rs`, `src/cli/cmd/status.rs`, `tests/status.rs`,
   README (first milestone).
-- Content: every flag computed from the fields I08 and I09 define, so
-  later items only set fields; `remote.state` through the I01 stub until
-  I23 fills it; the away warning through the I01 stub until I29.
+- Content: every flag computed from the fields I01, I08 and I09 define,
+  so later items only set fields; `remote.state` through the I01 stub
+  until I23 fills it; the away warning through the I01 stub until I29.
 - Must not touch: data producers.
 - Depends on: I04, I05, I08, I09, I10.
 - Tests: a fixture with new, pinned, empty, unreadable and future-time
   pieces gives the expected JSON (first failure: `not_implemented`);
   fixture tracking and metadata give archived, remote-only with days,
   gone, live on another machine, superseded, stale, needing a decision,
-  missing on the remote, recovered; a held lock prints the note; a
-  console snapshot.
-- Docs: spec "JSON output" if field details are added; README: `init`
-  and `status` work.
+  missing on the remote, recovered; an unparsable highest version is
+  reported; a held lock prints the note; a console snapshot.
+- Docs: spec "JSON output" (`status` paragraph, if field details are
+  added); README: `init` and `status` work.
 - Size: L.
 
 #### I17 Run guard, start-of-run repairs and dry-run plans
 
 - Goal: the frame every state-changing command runs in.
 - Implements: spec "Operations" (lock with pid, machine and start time;
-  held lock exits 1 naming pid and start time; right after the lock:
-  empty `trash/`, `tmp/`, `staging/` with one retry adding owner write,
-  warn and continue; finish `removing` entries; an `unearthing` entry
-  whose folder matches the version's listing becomes `live` with the
-  entry's write time as unearthing time, any other `unearthing` entry
-  is dropped and an unrecognised folder becomes a new piece reported
-  once; a present folder of an ID this machine committed as archived is
-  unearthed at that version, now; `recovered/` never emptied; read-only
-  commands and `--dry-run` never touch these directories), ADR 0046
-  (plan rendering, JSON `dry_run` and `actions`).
-- Owns: `src/run.rs`, `src/repair.rs`, `src/plan.rs` (extends I01's
-  type with rendering helpers).
+  held lock exits 1 naming pid and start time; the start-of-run
+  repairs; `recovered/` never emptied; read-only commands and
+  `--dry-run` never touch the run directories), ADR 0046 (plan
+  rendering, JSON `dry_run` and `actions`).
+- Owns: `src/run.rs`, `src/repair.rs`, `src/plan.rs` (adds rendering
+  helpers to I01's type).
+- Content: the repairs in this order (F4): first finish `removing`
+  entries, for a folder still in place and for a tree in
+  `trash/<ulid>` alike, by comparing it with the listing of the
+  committed version and then deleting it, since the verify's lstat
+  record does not survive a crash; then empty `trash/`, `tmp/` and
+  `staging/`, with one retry adding owner write, warning and continuing
+  on failure; turn an `unearthing` entry whose folder matches the
+  version's listing into `live` with the entry's `written` time as
+  unearthing time (F22), drop any other `unearthing` entry and report an
+  unrecognised folder once as a new piece; treat a present folder of an
+  ID this machine committed as archived as unearthed at that version,
+  now.
 - Must not touch: command files.
-- Depends on: I03, I08, I09, I12.
+- Depends on: I03, I04, I08, I09, I12.
 - Tests: a held lock gives `lock_held` with the pid (first failure:
-  stub); a leftover file in `trash/` is gone after `RunGuard::begin`; an
-  entry that resists removal (seam) gives a warning and the run goes
-  on; a `removing` entry is finished; an `unearthing` entry with a
-  matching folder becomes `live` with the entry's time; one with a
-  differing folder is dropped and the folder reported as new; a folder
-  of an own archived ID becomes unearthed; a dry-run guard touches
-  nothing.
-- Docs: none.
+  stub); a `removing` entry with its tree in `trash/<ulid>` is
+  finished before the trash is emptied, and one with its folder in place
+  likewise; a leftover file in `trash/` is gone after `RunGuard::begin`;
+  an entry that resists removal (seam) gives a warning and the run goes
+  on; an `unearthing` entry with a matching folder becomes `live` with
+  the entry's `written` time; one with a differing folder is dropped and
+  the folder reported as new; a folder of an own archived ID becomes
+  unearthed; a dry-run touches nothing.
+- Docs: spec "Operations" (the repair order: `removing` entries before
+  emptying the trash).
 - Size: L.
 
 ### Wave 5
@@ -1074,10 +1231,11 @@ Acceptance lines in an entry add to this.
   be unearthed to; without a terminal the path of every match, one per
   line; with `--json` the matches and `--print` adds nothing), "JSON
   output" (`find` payload: `query`, `matches` with `id`, `path`,
-  `abs_path`, `name`, `state`, `created`, `size`), "Pins" (`pin` and
-  `unpin` refuse on a piece whose folder is not present; no metadata
-  change), "reconcile" (rebuilds the index, does the start-of-run
-  repairs; the remote part is I35).
+  `abs_path`, `name`, `state`, `created`, `size`), "Operations"
+  (`status` and `find` print a note while a run holds the lock), "Pins"
+  (`pin` and `unpin` refuse on a piece whose folder is not present; no
+  metadata change), "reconcile" (rebuilds the index, does the
+  start-of-run repairs; the remote part is I35).
 - Owns: `src/ops/{find,pin,reconcile}.rs`,
   `src/cli/cmd/{find,pin,unpin,reconcile}.rs`,
   `tests/{find,pin,reconcile}.rs`.
@@ -1086,11 +1244,12 @@ Acceptance lines in an entry add to this.
 - Tests: `find --json` lists objects with full ULIDs (first failure:
   `not_implemented`); a query narrows the list per U1; `find --print`
   without a terminal prints one absolute path per match, for an
-  archived piece its stored path; `pin` creates `.antiq-pin` and a
-  second run reports it already pinned; `pin` on an archived piece
-  refuses; `reconcile` rebuilds a deleted index; `reconcile --dry-run`
-  prints the plan.
-- Docs: spec "JSON output" (`pin`, `unpin`, `reconcile`).
+  archived piece its stored path; `find` prints the lock note while a
+  run holds the lock (H4); `pin` creates `.antiq-pin` and a second run
+  reports it already pinned; `pin` on an archived piece refuses;
+  `reconcile` rebuilds a deleted index; `reconcile --dry-run` prints the
+  plan.
+- Docs: spec "JSON output" (`pin`, `unpin`, `reconcile` paragraphs).
 - Size: M.
 
 #### I19 `archive` for pieces that are not unearthed
@@ -1113,22 +1272,26 @@ Acceptance lines in an entry add to this.
   warning), 0054 (name warnings, archived anyway).
 - Owns: `src/ops/archive/{mod,new}.rs`, `src/cli/cmd/archive.rs`,
   `tests/archive.rs`.
-- Content: parallel pieces through the I07 pool; the proof tokens of
-  section 2.8 if T22 is accepted; the diverged refusal hook, a check of
-  the tracking flag that I31 sets.
+- Content: the trashed tree is named `trash/<ulid>`, so the repair of
+  I17 finds it (F4); the tracking entry's "version taken out" reads
+  `pending` until `sync` commits (F21); parallel pieces through the I07
+  pool; the proof tokens of section 2.8; the diverged refusal hook, a
+  check of the tracking flag that I31 sets; the trash re-walk through
+  `TreeRoot`.
 - Must not touch: unearthed pieces (I26 adds `unearthed.rs` and its
   routing).
 - Depends on: I02, I06, I07, I08, I09, I10, I12, I13, I15, I17.
 - Tests: an idle piece ends as payload, listing and pending metadata
-  with lifecycle `archived`, and its folder is gone (first failure:
-  `not_implemented`); a verify difference (seam) keeps the folder; a
-  write after the verify, detected in the trash, renames the folder
-  back as unearthed; the same with its path taken lands in
-  `recovered/`; too little space (seam) skips with exit 3; pinned,
-  empty, unreadable and mount-point pieces stay; `--dry-run` lists the
-  pieces and changes nothing; a name colliding on macOS rules gives a
-  warning and archives; two pieces run in parallel.
-- Docs: spec "JSON output" (`archive`).
+  with lifecycle `archived`, its tracking says `pending`, and its folder
+  is gone (first failure: `not_implemented`); a verify difference
+  (seam) keeps the folder; a write after the verify, detected in the
+  trash, renames the folder back as unearthed; the same with its path
+  taken lands in `recovered/`; too little space (seam) skips with exit
+  3; pinned, empty, unreadable and mount-point pieces stay; `--dry-run`
+  lists the pieces and changes nothing; a name colliding on macOS rules
+  gives a warning and archives; two pieces run in parallel; a piece
+  with a path past 1,024 bytes archives.
+- Docs: spec "JSON output" (`archive` paragraph).
 - Size: L.
 
 #### I20 `unearth` from a local archive
@@ -1146,17 +1309,19 @@ Acceptance lines in an entry add to this.
   "Metadata changes" (`unearth` row), ADR 0034, 0037, 0054.
 - Owns: `src/ops/unearth/{mod,local}.rs`, `src/cli/cmd/unearth.rs`,
   `tests/unearth.rs`.
-- Content: an archived ID without a local archive fails with a clear
+- Content: the tracking entry records the payload version unearthed
+  (F16); an archived ID without a local archive fails with a clear
   error until I34 adds fetching.
 - Depends on: I08, I09, I12, I13, I15, I17.
 - Tests: archive then unearth restores the tree with modes, times,
   symlinks and hard links, and tracking is `live` with the unearthing
-  time (first failure: `not_implemented`); `--version 1` picks the
-  first payload; `--to` outside the patterns refuses; a taken target
-  refuses; a staged-tree difference (seam) moves nothing; a colliding
-  name list refuses before extraction; unearthing twice reports the
-  location.
-- Docs: spec "JSON output" (`unearth`).
+  time and payload version (first failure: `not_implemented`);
+  `--version 1` picks the first payload; `--to` outside the patterns
+  refuses; a taken target refuses; a staged-tree difference (seam)
+  moves nothing; a colliding name list refuses before extraction;
+  unearthing twice reports the location; archive and unearth of a piece
+  with a path past 1,024 bytes end to end (O5).
+- Docs: spec "JSON output" (`unearth` paragraph).
 - Size: L.
 
 #### I21 `import`
@@ -1178,18 +1343,22 @@ Acceptance lines in an entry add to this.
   `sync`), compression-bench ("Decompression flags").
 - Owns: `src/ops/import.rs`, `src/pack/frames.rs`,
   `src/cli/cmd/import.rs`, `tests/import.rs`.
-- Content: frame walking over headers and block headers, so every
-  frame's window and checksum flag are checked without holding a frame
-  in memory; `std::fs::copy` clones on macOS through `fclonefileat`
-  with an `fcopyfile` fallback (std source, `sys/fs/unix.rs`).
+- Content: the archive's single top-level folder is the container of
+  `tar+zstd/1` and the listing holds the paths below it (F5); frame
+  walking over headers and block headers, so every frame's window and
+  checksum flag are checked without holding a frame in memory;
+  `std::fs::copy` clones on macOS through `fclonefileat` with an
+  `fcopyfile` fallback (std source, `sys/fs/unix.rs`).
 - Depends on: I06, I08, I12, I13, I15, I17.
 - Tests: a zstd tar made with the crate imports and `find` shows it
   (first failure: `not_implemented`); xz and gzip magic refuse naming
   the codec; window log 28 refuses naming `zstd -19 --long=27`; no
   checksum refuses; two top-level folders refuse; `../x` refuses; a
   second import of the same file is skipped; the input file is
-  unchanged afterwards; a taken path warns and both objects are found.
-- Docs: spec "JSON output" (`import`).
+  unchanged afterwards; a taken path warns and both objects are found;
+  an import with `--path` to another name later reclaims against its
+  listing.
+- Docs: spec "JSON output" (`import` paragraph).
 - Size: L.
 
 ### Wave 6
@@ -1203,14 +1372,18 @@ Acceptance lines in an entry add to this.
   "Metadata changes"; unearthing the old ID later needs `--to`), ADR
   0014.
 - Owns: `src/ops/fork.rs`, `src/cli/cmd/fork.rs`, `tests/fork.rs`.
-- Content: a `fork_unearthed()` core that I26 (answer `--fork`), I31
-  and I34 call.
+- Content: a core that only mints the new ID (F1). The `fork` row of
+  "Metadata changes" (old ID: lifecycle `archived`, live payload
+  removed; new ID created) is written by the `fork` command and by I26's
+  `--fork` answer. I31's conflict fork and I34's fork of another
+  collection's live piece call the core but never write the old ID.
 - Depends on: I15, I17, I20.
 - Tests: fork of an unearthed piece gives a new ID with source `fork`
-  and the old unearthed time (first failure: `not_implemented`); fork
-  of a live piece refuses; `--name` renames; a taken name refuses;
-  unearthing the old ID without `--to` refuses on the taken path.
-- Docs: spec "JSON output" (`fork`).
+  and the old unearthed time, and records the `fork` row for the old ID
+  (first failure: `not_implemented`); fork of a live piece refuses;
+  `--name` renames; a taken name refuses; unearthing the old ID without
+  `--to` refuses on the taken path.
+- Docs: spec "JSON output" (`fork` paragraph).
 - Size: S.
 
 #### I23 Remote trait, path remote, marker and the `remote` commands
@@ -1220,31 +1393,39 @@ Acceptance lines in an entry add to this.
   archives fetched on demand), 0026, 0031, 0047; spec "Remotes" (URL
   forms `ssh://[user@]host[:port]/<path>` and an absolute local path;
   root path only `[A-Za-z0-9._/-]`; `remote add` refuses while a remote
-  is attached and when a probe fails, writing nothing; `remote show`
-  prints kind, URL, ULID, reachability and probed versions; `remote
-  remove` detaches only and lists the remote-only pieces that become
-  unreachable, the brake follows in I35; a path remote whose root is
-  not a mount point gets a warning), "Path remote" (plain copy with
-  `sync_all` and the `fsync` fallback for file and directory;
-  reachability mapping: missing root, or a root that is not a mount
-  point and has no marker, is away; another ULID, a mount point without
-  marker or an I/O error on the marker is broken), "Storage" (remote
-  layout; temp names; put onto an existing name only with a matching
-  SHA-256), "Committing a version" (path remote clock from a probe
-  file's modification time).
-- Owns: `src/remote/{mod,url,marker,path}.rs`, `src/ops/remote.rs`,
+  is attached and when a probe fails, writing nothing; a failing
+  exclusive create is one of the probes; `remote show` prints kind, URL,
+  ULID, reachability and probed versions; `remote remove` detaches only
+  and lists the remote-only pieces that become unreachable, the brake
+  follows in I35; a path remote whose root is not a mount point gets a
+  warning), "Path remote" (plain copy with `sync_all` and the `fsync`
+  fallback for file and directory; reachability mapping: missing root,
+  or a root that is not a mount point and has no marker, is away;
+  another ULID, a mount point without marker or an I/O error on the
+  marker is broken), "Storage" (remote layout; temp names; put onto an
+  existing name only with a matching SHA-256), "Committing a version"
+  (path remote clock from a probe file's modification time).
+- Owns: the trait and opening in `src/remote/mod.rs` (beyond I01's
+  types), `src/remote/{url,marker,path}.rs`, `src/ops/remote.rs`,
   `src/cli/cmd/remote.rs`, `tests/remote_path.rs`; fills the
   `remote::probe_state` stub, so `status` shows `remote.state`.
+- Content: opening by URL with an `ssh` arm that answers `unsupported`
+  until I28 (S4); the path remote's checksum reads the file back past
+  the client cache, through `fcntl_nocache` on macOS and `fadvise` with
+  "don't need" on Linux (O17); `pull_metadata` in one call.
 - Depends on: I03, I04, I08, I15, I17.
 - Tests: `remote add --init <dir>` writes the marker and the
   `[[remote]]` entry (first failure: `not_implemented`); `remote add`
-  on a directory without marker refuses and writes nothing; a second
-  `remote add` refuses; marker with another ULID gives broken; missing
-  root gives away; the mount seam turns a missing marker into broken;
-  attaching copies the remote's metadata into the store; `remote show
-  --json`; `remote remove` detaches and keeps local metadata; payload
-  put under an existing name with different bytes fails.
-- Docs: spec "JSON output" (`remote add`, `show`, `remove`).
+  on a directory without marker refuses and writes nothing; a failing
+  exclusive create (seam) refuses `remote add` and writes nothing (F18);
+  a second `remote add` refuses; marker with another ULID gives broken;
+  missing root gives away; the mount seam turns a missing marker into
+  broken; attaching copies the remote's metadata into the store;
+  `remote show --json`; `remote remove` detaches and keeps local
+  metadata; payload put under an existing name with different bytes
+  fails; an `ssh://` URL answers `unsupported`.
+- Docs: spec "JSON output" (`remote add`, `show`, `remove`
+  paragraphs).
 - Size: L.
 
 #### I24 SSH session layer and the loopback shim
@@ -1261,19 +1442,35 @@ Acceptance lines in an entry add to this.
   as `/bin/sh -s` with the script and quoted values on stdin; `set -C`
   for exclusive creation; exit 255 and the error text decide away or
   broken), "Committing a version" (SSH clock from `date +%s` in the
-  same command), ssh research (option A; `sun_path` of 104 bytes).
+  same command), ssh research (option A).
 - Owns: `src/remote/ssh/{session,script,classify}.rs`,
   `tests/fixtures/ssh-shim.sh`, `tests/ssh_session.rs`,
-  `tests/support/sshd.rs` (opt-in harness of 4.4).
+  `tests/support/sshd.rs` (fills I01's stub; harness of 4.4).
+- Content: the ControlPath directory is `/tmp/antiq-<uid>/`, mode
+  `0700`, checked before use; the ControlPath is at most 86 bytes,
+  since `ssh -M` binds the path plus a 17-character suffix, and a
+  longer one is antiq's own error (O2). Restarting a master after a
+  failed `-O check` is `-O exit`, then removing the socket file (only a
+  socket, only in antiq's directory), then `-M`, then `-O check`; if
+  that fails too, commands run as direct connections with a warning
+  (O3). Two classifiers (O4): a command's result is classified only on
+  exit 255 and only by lines with ssh's own prefixes, ignoring "Control
+  socket" lines; mux failures are classified apart; "Connection
+  refused" counts as away only in the "ssh: connect to host ...
+  Connection refused" form (T14); a `mux_client_` line saying the
+  session was refused (sshd's `MaxSessions`) gives one warning per run.
 - Depends on: I01, I04.
-- Tests: argv carries every `-o` option (first failure: stub); the
-  ControlPath stays under 104 bytes; quoting survives `'`, spaces and
-  newlines; the classifier maps each recorded stderr text (ssh
-  research list) per T14; a stale socket of a dead pid is removed;
-  through the shim, a master starts, `-O check` passes, a script runs
-  with arguments, `set -C` refuses a second create; opt-in: the same
-  against the real sshd.
-- Docs: none.
+- Tests: argv carries every `-o` option (first failure: stub); an
+  86-byte ControlPath is accepted and an 87-byte one refused; a
+  directory with the wrong mode or owner is refused; quoting survives
+  `'`, spaces and newlines; the classifiers map each recorded text (ssh
+  research list, mux texts) as above; a stale socket of a dead pid is
+  removed; through the shim, a master starts, `-O check` passes, a
+  script runs with arguments, `set -C` refuses a second create, a dead
+  master is replaced by the restart sequence; opt-in: the same against
+  the real sshd, plus `kill -9` of the master followed by the restart.
+- Docs: spec "SSH remote" (the 86-byte limit and the ControlPath
+  directory).
 - Size: M.
 
 #### I25 rsync resolution, probe and command line
@@ -1322,19 +1519,31 @@ Acceptance lines in an entry add to this.
   `--json`, exit 3 when any; an answer that does not fit is a usage
   error; the "replacing with loss" row), "Metadata changes"
   (reclaiming row).
-- Owns: `src/ops/archive/unearthed.rs` and its routing line in
-  `src/ops/archive/mod.rs`, `src/ops/resolve/{mod,replace}.rs`,
+- Owns: `src/ops/archive/unearthed.rs`, `src/ops/resolve/{mod,replace}.rs`,
   `src/cli/cmd/resolve.rs`, `tests/{rearchive,resolve}.rs`.
+- Shared edits: `src/ops/archive/mod.rs` (I19): the line that routes
+  unearthed pieces to `unearthed.rs`; `src/cli/cmd/archive.rs` (I19):
+  rendering of reclaimed pieces and decisions.
+- Content: reclaim and loss compare against the listing of the payload
+  version the piece was unearthed from (F16); the `--fork` answer writes
+  the `fork` row through I22's core (F1); the routing `match` in
+  `resolve/mod.rs` over the four decision kinds, with
+  `conflict.rs`, `diverged.rs` and `superseded.rs` answering
+  `unsupported` until I31 and I37 fill them (S7); `resolve <piece>`
+  without an answer walks that piece's decisions (T25).
 - Depends on: I12, I19, I20, I22.
 - Tests: an unearthed, unchanged piece is reclaimed with no new payload
-  (first failure: routed to "new piece"); a reclaim without a usable
-  archive copy is pending remote work; an added file replaces without
-  asking; a removed file asks, and a scripted "fork" forks; without a
-  terminal the piece is listed as needing a decision and the run exits
-  3; `resolve <piece> --replace` replaces with the loss at that moment;
-  `--mine` on this decision exits 2; `replace_without_asking` skips the
-  question; a diverged piece is refused.
-- Docs: spec "JSON output" (`resolve`).
+  (first failure: routed to "new piece"); a piece unearthed with
+  `--version 1` is compared with version 1's listing; a reclaim without
+  a usable archive copy is pending remote work; an added file replaces
+  without asking; a removed file asks, and a scripted "fork" forks;
+  without a terminal the piece is listed as needing a decision and the
+  run exits 3; `resolve <piece> --replace` replaces with the loss at
+  that moment; `--mine` on this decision exits 2; `resolve <piece>`
+  without a terminal lists that piece's decisions and exits 3;
+  `replace_without_asking` skips the question; a diverged piece is
+  refused.
+- Docs: spec "JSON output" (`resolve` paragraph).
 - Size: L.
 
 #### I27 Commit protocol and remote cleanup
@@ -1356,6 +1565,13 @@ Acceptance lines in an entry add to this.
   other run; ages on the remote's clock), the unparsable highest
   version rule.
 - Owns: `src/remote/{commit,cleanup,testing}.rs`.
+- Content: retention per T4 (the highest committed version kept; older
+  ones removed once a higher one exists and they are older than the
+  grace period; listings follow their payload); the own-temp-name rule
+  also covers `<temp>.` followed by six characters of `[A-Za-z0-9]`,
+  which rsync 3.5.1 leaves when killed hard, and such names of other
+  machines go after the grace period (O6); in a dry run, age-dependent
+  steps report "age unknown in a dry run" (F14).
 - Depends on: I08, I23.
 - Tests (with `FaultRemote`): a commit writes `meta.1` (first failure:
   stub); another machine's claim between steps gives a conflict; a
@@ -1363,8 +1579,11 @@ Acceptance lines in an entry add to this.
   older than the grace period is skipped and the next version uses
   N+2; an unreferenced payload older than the grace period is removed,
   a younger one stays, a superseded one stays; a directory with a
-  `format: 2` file is left alone and reported; retention per T4.
-- Docs: spec "Committing a version" for T4 and T6 outcomes.
+  `format: 2` file is left alone and reported; an old `meta.<N>` is
+  removed per T4; an own `<temp>.Ab12Cd` is removed early and another
+  machine's only after the grace period.
+- Docs: spec "Committing a version" (retention per T4, the rsync
+  leftover names, the commit time per T6).
 - Size: L.
 
 #### I28 The SSH remote
@@ -1383,11 +1602,15 @@ Acceptance lines in an entry add to this.
   exclusive create checked by a second create, unreachable; nothing
   written then), "Committing a version" (rename refusing an existing
   target: `ln` to the final name, then remove the temp name).
-- Owns: `src/remote/ssh/mod.rs`, `tests/remote_ssh.rs`; the SSH branch
-  in `src/ops/remote.rs`.
+- Owns: `src/remote/ssh/mod.rs` (including the `ssh` arm of opening),
+  `tests/remote_ssh.rs`.
+- Shared edits: `src/remote/mod.rs` (I23): the `ssh` arm of the opening
+  `match` calls into `remote::ssh` (S4); `src/ops/remote.rs` and
+  `src/cli/cmd/remote.rs` (I23): the SSH probes of `remote add` and the
+  probed versions in `remote show`.
 - Depends on: I23, I24, I25.
 - Tests (loopback shim with real rsync): `remote add --init
-  ssh://...` probes and writes config (first failure: unsupported URL);
+  ssh://...` probes and writes config (first failure: `unsupported`);
   openrsync as remote rsync refuses with the reason; a missing hash tool
   refuses; a put, a get, an interrupted put resumed from
   `.antiq-partial`; a seeded live upload leaves the old name's bytes
@@ -1404,16 +1627,22 @@ Acceptance lines in an entry add to this.
   (`--if-reachable` for scheduled runs; exit 4), "Config"
   (`machine.network_check`: outside the home network the remote is
   away).
-- Owns: `src/remote/{policy,away,network}.rs`; fills the
-  `remote::away::status_warning` stub; the time the remote was last
-  reachable is kept in a local file named per T24.
-- Depends on: I23; the network check waits on U6.
-- Tests: away with `--if-reachable` gives exit 0, without it exit 4
+- Owns: `src/remote/{policy,away,network}.rs`; fills I01's
+  `remote::policy` and `remote::away::status_warning` stubs, whose call
+  sites are in place (S5); the time the remote was last reachable is
+  kept in `.antiq/remote-state.json` (T24).
+- Content: the network check compares per U6 behind a seam; when antiq
+  cannot determine the network, it tries to connect (O14).
+- Depends on: I23; the comparison of the network check waits on U6.
+- Tests (library level; the binary exit test is in I30): away with
+  `--if-reachable` gives the exit-0 outcome, without it `remote_away`
   (first failure: stub); away for eight days with pending work gives
-  exit 4 under `--if-reachable` and a `status` warning; broken stays
-  exit 1; the network seam reports "outside" and the remote is away
-  without a connection attempt.
-- Docs: the local layout in spec "Storage" if T24 adds a file.
+  `remote_away` under `--if-reachable` and a `status` warning; broken
+  stays an error; the network seam reports "outside" and the remote is
+  away without a connection attempt; "cannot determine" leads to a
+  connection attempt; the parser of the gateway lookup reads recorded
+  output of each supported system.
+- Docs: the local layout in spec "Storage" (`remote-state.json`).
 - Size: M.
 
 #### I36 The picker for `find`
@@ -1423,22 +1652,23 @@ Acceptance lines in an entry add to this.
   unearthing on Enter, printing the path with `--print`, forking,
   pinning or unpinning), ADR 0020 and 0056, spec "Command line" (`find`
   opens a picker interactively).
-- Owns: `src/cli/picker/{mod,state,layout}.rs`, the interactive branch
-  of `src/cli/cmd/find.rs`, `Cargo.toml` (crossterm, nucleo,
-  unicode-width, unicode-segmentation), `tests/picker.rs` if the pty
-  harness is built.
+- Owns: `src/cli/picker/{mod,state,layout}.rs` and their snapshot files,
+  `Cargo.toml` (crossterm, nucleo, unicode-width, unicode-segmentation,
+  rustix `pty` and `termios`), `tests/picker.rs` (pty harness).
+- Shared edits: `src/cli/cmd/find.rs` (I18): the interactive branch.
 - Content: copy `src/bin/ntropy/run/picker/` (ntropy is MPL-2.0 like
-  antiq; the header stays): `mod.rs` (982 lines), `state.rs` (1,117) and
-  `layout.rs` (1,014) including tests. The ties to ntropy are
-  `layout.rs` (ntropy's `Candidate`) and the `open_tty()` call, both
-  replaced; actions through ntropy's `AcceptKey` mechanism with the keys
-  of U3; after the pick, the action runs through the same `ops`
-  functions as the commands.
+  antiq; the header stays): `mod.rs` (982 lines), `state.rs` (1,117),
+  `layout.rs` (1,014) including tests, and the `snapshots/` directory
+  (one `.snap` file), renamed to antiq's module path (H2). The ties to
+  ntropy are `layout.rs` (ntropy's `Candidate`) and the `open_tty()`
+  call, both replaced; actions through ntropy's `AcceptKey` mechanism
+  with the keys of U3; after the pick, the action runs through the same
+  `ops` functions as the commands. The pty harness follows 4.5 (T16).
 - Depends on: I18, I20, I22.
-- Tests: ntropy's state tests carried over (first failure: module
-  absent); layout snapshots for archived, live and remote-only rows; a
-  pick with the print action prints the absolute path; the pty smoke
-  test per T16.
+- Tests: ntropy's state tests and snapshot carried over (first failure:
+  module absent); layout snapshots for archived, live and remote-only
+  rows; a pick with the print action prints the absolute path; through
+  the pty, Enter on a row unearths and Esc ends without action.
 - Docs: none beyond the README at I39.
 - Size: L.
 
@@ -1450,27 +1680,33 @@ Acceptance lines in an entry add to this.
 - Implements: spec "sync" (pull metadata first; upload pending
   archives; commit recorded metadata changes; at most `remote_jobs`
   remote operations at a time; compression may run ahead of uploads),
-  "Several machines" (`sync` pulls metadata first; the machine whose
-  version lost learns it at its next sync), "Objects" (`sync` mints IDs
-  for new pieces), "Metadata changes" (`sync` row: `verified` times,
-  history), "Remotes" (every operation checks the marker), ADR 0016,
-  0017, 0032, 0030 (through I27).
-- Owns: `src/ops/sync/{mod,pull,upload,commit}.rs`, stubs
-  `src/ops/sync/{conflict,live,tiers}.rs` with their call sites (I31,
-  I32, I33 fill them), `src/cli/cmd/sync.rs`, `tests/sync.rs`, README
-  (second milestone).
-- Content: a version conflict is recorded as a pending decision through
-  the `conflict` stub and the piece is skipped (exit 3) until I31.
+  "Storage" (listings fetched incrementally), "Several machines"
+  (`sync` pulls metadata first; the machine whose version lost learns
+  it at its next sync), "Metadata changes" (`sync` row: `verified`
+  times, history), "Remotes" (every operation checks the marker), ADR
+  0016, 0017, 0032, 0030 (through I27).
+- Owns: `src/ops/sync/{mod,pull,upload,commit}.rs`,
+  `src/cli/cmd/sync/mod.rs`, `tests/sync.rs`, README (second
+  milestone); the call sites of the phase stubs.
+- Content: the phases in the spec's order (F7): pull metadata and fetch
+  missing listings (F2); refresh live packages (I32, first call site);
+  upload pending archives; commit recorded metadata changes, rewriting
+  the tracking's `pending` to the committed number (F21); delete live
+  packages whose archive is committed (I32, second call site); apply
+  the tiers (I33). A version conflict goes through the `conflict` stub,
+  which records a pending decision and skips the piece (exit 3) until
+  I31. A dry run writes no probe file (F14).
 - Depends on: I19, I21, I27, I29.
 - Tests (path remote, two machines): an archive made on A is uploaded
-  and committed as `meta.1`, the pending file promoted (first failure:
-  `not_implemented`); B pulls and `find` on B lists it; an import is
-  uploaded; a failed upload (fault) leaves the piece pending and exits
-  3; `--dry-run` reads the remote and writes nothing on either side;
-  away gives exit 4, or 0 with `--if-reachable`; at most `remote_jobs`
-  operations run at once (fault remote counter).
-- Docs: spec "JSON output" (`sync`); README: archive, unearth, find,
-  import and sync against a path remote work.
+  and committed as `meta.1`, the pending file promoted and tracking
+  rewritten (first failure: `not_implemented`); B pulls metadata and
+  listings and `find` on B lists it; an import is uploaded; a failed
+  upload (fault) leaves the piece pending and exits 3; `--dry-run`
+  reads the remote and writes nothing on either side; through the
+  binary, away exits 4, and 0 with `--if-reachable` (S5); at most
+  `remote_jobs` operations run at once (fault remote counter).
+- Docs: spec "JSON output" (`sync` paragraph); README: archive,
+  unearth, find, import and sync against a path remote work.
 - Size: L.
 
 #### I34 Unearthing through the remote
@@ -1487,16 +1723,24 @@ Acceptance lines in an entry add to this.
   archive payload until archived), "fork" (a fork made while unearthing
   another collection's piece uses that unearthing time), "Operations"
   (space for the archive's size when fetched), ADR 0007, 0040.
-- Owns: `src/ops/unearth/{remote,live}.rs`, source selection in
-  `src/ops/unearth/mod.rs`, `tests/unearth_remote.rs`.
+- Owns: `src/ops/unearth/{remote,live}.rs`, `tests/unearth_remote.rs`.
+- Shared edits: `src/ops/unearth/mod.rs` (I20): source selection;
+  `src/cli/cmd/unearth.rs` (I20): the new messages.
+- Content: the listing is fetched with the archive (F2); a fetched
+  archive stays as the local archive while the piece is within the
+  local tier, with its `verified` record kept (F17); a fork of another
+  collection's live piece never writes that collection's ID (F1).
 - Depends on: I20, I22, I23, I29.
-- Tests: a remote-only piece is fetched and unearthed (first failure:
-  "no local archive"); a newer remote version is reported; with the
-  remote away a local archive still unearths with a warning, and a
-  remote-only piece exits 4; a gone piece comes back from its live
-  package; another collection's live piece unearths only as a fork with
-  a new ID; a stale package warns.
-- Docs: spec "JSON output" (`unearth` additions).
+- Tests: a remote-only piece is fetched and unearthed, and the archive
+  stays local (first failure: "no local archive"); a newer remote
+  version is reported; with the remote away a local archive still
+  unearths with a warning, and a remote-only piece exits 4; a gone piece
+  comes back from its live package; another collection's live piece
+  unearths only as a fork with a new ID, and its metadata is unchanged;
+  a fork of a live piece without a package fails with a clear error
+  (F8); a stale package warns.
+- Docs: spec "unearth" (the fetched archive kept within the local
+  tier); spec "JSON output" (`unearth` additions).
 - Size: L.
 
 #### I35 The brake, remote `reconcile` and detaching
@@ -1513,19 +1757,31 @@ Acceptance lines in an entry add to this.
   before, is gone from the remote is marked missing; `--prune` drops
   such entries and gone pieces; an entry with a local archive not yet
   uploaded is pending upload and never pruned), "Committing a version"
-  (`status` and `reconcile` report an unparsable highest `meta.<N>`),
-  "JSON output" (error kind `brake` with the planned count, set size and
-  up to ten items).
-- Owns: `src/brake.rs`, the remote part of `src/ops/reconcile.rs`, the
-  brake in `src/ops/remote.rs` (`remote remove`), `tests/{brake,reconcile_remote}.rs`.
+  (`reconcile` reports an unparsable highest `meta.<N>`), "JSON
+  output" (error kind `brake` with the planned count, set size and up to
+  ten items).
+- Owns: `src/brake.rs`, `tests/{brake,reconcile_remote}.rs`.
+- Shared edits: `src/ops/reconcile.rs` and `src/cli/cmd/reconcile.rs`
+  (I18): the remote part; `src/ops/remote.rs` and
+  `src/cli/cmd/remote.rs` (I23): the brake of `remote remove`.
+- Content: the planned removals and the affected set per step (F20):
+  for `reconcile --prune`, the entries to drop against all entries this
+  machine tracks or knows from metadata; for `remote remove`, the
+  remote-only pieces that become unreachable against all objects of the
+  collection; for `resolve --drop-superseded`, the superseded payloads
+  to drop against the ID's archive payloads (with one current payload,
+  at least half, so it always holds at the default; U7). Age-dependent
+  cleanup in a dry run reports "age unknown in a dry run" (F14).
 - Depends on: I18, I23, I27.
 - Tests: 3 of 10 planned removals with the default 20 % hold the brake
   and list them (first failure: stub); `--force` passes; a scripted
   "yes" passes; `--dry-run` reports the brake; an archive missing on
   the remote marks the entry missing and `--prune` drops it; a pending
   upload is never pruned; `remote remove` with remote-only pieces goes
-  through the brake; a commit by another machine is reported.
-- Docs: spec "JSON output" (`reconcile` additions).
+  through the brake; a commit by another machine is reported; an
+  unparsable highest version is reported.
+- Docs: spec "Safety" (the set of each brake step); spec "JSON output"
+  (`reconcile` additions).
 - Size: L.
 
 ### Wave 9
@@ -1542,16 +1798,30 @@ Acceptance lines in an entry add to this.
   "Decisions" (version conflict row; `sync` asks in place on a
   terminal).
 - Owns: `src/ops/sync/conflict.rs`, `src/ops/resolve/conflict.rs`,
-  `tests/sync_conflict.rs`.
+  `src/cli/cmd/sync/conflict.rs`, `tests/sync_conflict.rs`.
+- Shared edits: `src/cli/cmd/resolve.rs` (I26): rendering of version
+  conflicts.
+- Content: a pending change that touches only metadata (such as
+  `verified` times or history) is rebased onto the remote's newer
+  version instead of raising a conflict: `verified` is dropped when its
+  payload is no longer referenced, the local copy is kept, history
+  entries merge (F6). The `fork` choice is its own operation: the local
+  archive becomes version 1 of a new ID through I22's core, and the old
+  ID is not written (F1). The `theirs` choice removes through a
+  `UserDecision` (F9).
 - Depends on: I26, I30.
 - Tests (two machines): both archive the same unearthed ID, the second
   sync gets a conflict (first failure: recorded only); "mine" writes a
   new version with theirs superseded; "theirs" sends the local archive
   through trash and tracking follows; "fork" makes the local archive
-  version 1 of a new ID; without a terminal the decision is pending and
-  `resolve <piece> --theirs` executes it; a remote version from another
-  machine marks the unearthed folder diverged and `archive` refuses it.
-- Docs: none beyond JSON additions.
+  version 1 of a new ID and leaves the old ID's metadata as it was;
+  without a terminal the decision is pending and `resolve <piece>
+  --theirs` executes it; a `verified`-only pending change after another
+  machine's commit is rebased, not a conflict; a remote version from
+  another machine marks the unearthed folder diverged and `archive`
+  refuses it.
+- Docs: spec "Several machines" (the rebase of metadata-only changes);
+  JSON additions.
 - Size: L.
 
 #### I32 Live backups in `sync`
@@ -1559,21 +1829,31 @@ Acceptance lines in an entry add to this.
 - Implements: ADR 0018, 0047 (full upload on a path remote), 0049
   (seeding); spec "sync" (refresh the live packages of changed pieces;
   delete a live package only after its archive's metadata is committed
-  on the remote), "Change detection", "Verifying" (tolerant verify,
-  stale), "States" (gone piece keeps its live package), "Pins" (pinned
-  pieces still backed up), `collection.backup_live`,
+  on the remote), "Objects" (`sync` mints IDs for new pieces), "Change
+  detection", "Verifying" (tolerant verify, stale), "States" (gone piece
+  keeps its live package), "Pins" (pinned pieces still backed up),
+  "fork" (the old ID's live package is deleted), `collection.backup_live`,
   `collection.live_exclude`, "Metadata changes" (`sync` row: live
   payload replaced).
-- Owns: `src/ops/sync/live.rs`, `tests/sync_live.rs`.
-- Depends on: I14, I30.
-- Tests: a live piece gets an ID and a live package (first failure:
-  stub phase); an unchanged piece transfers nothing; a touched file
-  with the same content only replaces the manifest; a changed piece
-  uploads a new package, through the seed on the SSH shim; a file
-  changing during reads ends as "backup stale since"; the live package
-  of an archived piece is deleted only after the archive's commit;
-  `backup_live = false` uploads nothing; the first sync after
-  unearthing packs once.
+- Owns: `src/ops/sync/live.rs`, `src/cli/cmd/sync/live.rs`,
+  `tests/sync_live.rs`.
+- Content: both call sites of I30 (refresh before the uploads, deletion
+  after the commit); new pieces get their ID here, and with
+  `backup_live = false` they still get an ID and payload-less live
+  metadata (F8); the old ID's live package is deleted once the fork's
+  change is committed (F10).
+- Depends on: I14, I28, I30.
+- Tests: a live piece gets an ID and a live package (first failure: stub
+  phase); with `backup_live = false` it gets an ID and metadata without
+  a payload; an unchanged piece transfers nothing; a touched file with
+  the same content only replaces the manifest; a changed piece uploads a
+  new package, through the seed on the SSH shim; a file changing during
+  reads ends as "backup stale since"; the live package of an archived
+  piece is deleted only after the archive's commit; after a fork, the
+  old ID's live package is deleted; the first sync after unearthing
+  packs once.
+- Docs: spec "sync" (IDs and payload-less metadata with `backup_live =
+  false`).
 - Size: L.
 
 #### I33 Tiers and local archive retention
@@ -1589,14 +1869,19 @@ Acceptance lines in an entry add to this.
   newer current archive is fetched while the piece is within the local
   tier, otherwise only metadata), "unearth" (the local archive is
   always kept without a remote).
-- Owns: `src/ops/sync/tiers.rs`, `tests/sync_tiers.rs`.
-- Depends on: I30.
+- Owns: `src/ops/sync/tiers.rs`, `src/cli/cmd/sync/tiers.rs`,
+  `tests/sync_tiers.rs`.
+- Content: the commit time comes from the history entry of the
+  committing version (T6); the drop goes through a
+  `ConfirmedRemoteCopy` (section 2.8).
+- Depends on: I28, I30.
 - Tests: with `remote_only_days = 0` a committed, confirmed archive
   leaves local storage through the trash and `verified` is set (first
-  failure: stub phase); a checksum mismatch keeps it; a collection
-  without a remote keeps it; an unreferenced local archive is never
-  dropped; a newer remote archive within the local tier is fetched;
-  `status` shows "remote-only in N days".
+  failure: stub phase), on the path remote and through the SSH shim; a
+  checksum mismatch keeps it; a collection without a remote keeps it;
+  an unreferenced local archive is never dropped; a newer remote archive
+  within the local tier is fetched; `status` shows "remote-only in N
+  days".
 - Size: M.
 
 ### Wave 10
@@ -1615,9 +1900,12 @@ Acceptance lines in an entry add to this.
   `status` lists pieces with superseded archives), ADR 0045.
 - Owns: `src/ops/resolve/{diverged,superseded}.rs`,
   `tests/resolve_remote.rs`.
+- Shared edits: `src/cli/cmd/resolve.rs` (I26): rendering of these two
+  decisions.
+- Content: `--theirs` removes the folder through a `UserDecision` (F9).
 - Depends on: I31, I34, I35.
 - Tests: `--theirs` on a diverged folder without a terminal and without
-  `--force` refuses (first failure: unsupported answer); with `--force`
+  `--force` refuses (first failure: `unsupported`); with `--force`
   the folder is in trash and the current version is unearthed;
   `--mine` with a loss asks; `--fork` clears the divergence;
   `--drop-superseded` of 1 of 2 payloads holds the brake without
@@ -1632,8 +1920,8 @@ Acceptance lines in an entry add to this.
   a replaceable part), ADR 0015, ADR 0019.
 - Owns: `src/select.rs` (extract `SelectionStrategy`), `src/pack/mod.rs`
   (packager lookup by `package_format`, with a clear error for an
-  unknown format), `src/remote/mod.rs` (opening by URL form), new ADRs
-  through `adrs new --no-edit`.
+  unknown format), `src/remote/mod.rs` (refactor of the opening that I23
+  and I28 built; no new arm), new ADRs through `adrs new --no-edit`.
 - Must not touch: behaviour; every existing test passes unchanged.
 - Depends on: I05, I06, I23, I28, and the end of wave 9, since the
   refactor touches modules that waves 6 to 9 call.
@@ -1657,7 +1945,10 @@ Acceptance lines in an entry add to this.
   `reconcile --prune` through the brake) on the path remote, on the
   loopback shim, against the local sshd (opt-in) and against a Linux
   container with sshd and rsync 3.x (opt-in); `cargo test` inside a
-  Linux container, including the non-UTF-8 name tests.
+  Linux container as a non-root user with 4 GB of memory and
+  `RUST_TEST_THREADS=4`, including the non-UTF-8 name tests; a check on
+  the NAS share that the path remote's read-back checksum reads the
+  server's data (R8).
 - Depends on: every item except I40.
 - Docs: README (what v1 does, how to set up a remote), spec status line
   ("Draft") per the lead.
@@ -1677,18 +1968,22 @@ Acceptance lines in an entry add to this.
 
 ## 6. Dependency graph and waves
 
+The added dependency edges (I04 for I08, I09 and I17; I03 for I10; I28
+for I32 and I33) all point at earlier waves, so the waves are unchanged.
+I01 lands in two merges; wave 2 starts after part B.
+
 | Item | Depends on | Wave |
 |---|---|---|
-| I01 | none | 1 |
+| I01 | none | 1 (parts A and B) |
 | I02, I03, I04, I05, I06, I07 | I01 | 2 |
-| I08, I09 | I02, I03 | 3 |
-| I10 | I04, I05 | 3 |
+| I08, I09 | I01, I02, I03, I04 | 3 |
+| I10 | I03, I04, I05 | 3 |
 | I11 | I02, I03, I04, I05 | 3 |
 | I12 | I05, I06 | 3 |
 | I13, I14 | I06 (I14 also I05) | 3 |
 | I15 | I08, I09 | 4 |
 | I16 | I04, I05, I08, I09, I10 | 4 |
-| I17 | I03, I08, I09, I12 | 4 |
+| I17 | I03, I04, I08, I09, I12 | 4 |
 | I18 | I10, I15, I17 | 5 |
 | I19 | I02, I06, I07, I08, I09, I10, I12, I13, I15, I17 | 5 |
 | I20 | I08, I09, I12, I13, I15, I17 | 5 |
@@ -1705,8 +2000,8 @@ Acceptance lines in an entry add to this.
 | I34 | I20, I22, I23, I29 | 8 |
 | I35 | I18, I23, I27 | 8 |
 | I31 | I26, I30 | 9 |
-| I32 | I14, I30 | 9 |
-| I33 | I30 | 9 |
+| I32 | I14, I28, I30 | 9 |
+| I33 | I28, I30 | 9 |
 | I37 | I31, I34, I35 | 10 |
 | I38 | I05, I06, I23, I28; after wave 9 | 10 |
 | I39 | all but I40 | 11 |
@@ -1716,16 +2011,16 @@ Waves and the files that keep them apart:
 
 | Wave | Items | Shared files and how they stay apart |
 |---|---|---|
-| 1 | I01 | creates every file |
-| 2 | I02 to I07 | disjoint modules |
-| 3 | I08 to I14 | disjoint modules; only I13 may edit `Cargo.toml` |
+| 1 | I01 | creates every file; two merges |
+| 2 | I02 to I07 | disjoint modules; I02 adds functions to I01's `relpath.rs` and `id.rs` without touching the types |
+| 3 | I08 to I14 | disjoint modules; I08 adds functions to I01's `meta.rs`; only I13 edits `Cargo.toml` |
 | 4 | I15, I16, I17 | disjoint; README only in I16 |
-| 5 | I18 to I21 | own `ops` and `cli::cmd` files; spec JSON placeholders per command |
+| 5 | I18 to I21 | own `ops` and `cli::cmd` files; one spec "JSON output" paragraph per command |
 | 6 | I22 to I25 | disjoint; I23 fills the `remote::probe_state` stub, no edit of `status.rs` |
-| 7 | I26 to I29, I36 | I26 owns `ops/archive/mod.rs` routing; I28 the SSH branch of `ops/remote.rs`; I36 the only `Cargo.toml` editor |
-| 8 | I30, I34, I35 | `ops/sync/*` to I30, `ops/unearth/*` to I34, `ops/reconcile.rs` and `ops/remote.rs` to I35 |
-| 9 | I31, I32, I33 | one sync phase file each, behind I30's stubs |
-| 10 | I37, I38 | I37 in `ops/resolve/`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs` |
+| 7 | I26 to I29, I36 | I26 edits I19's `ops/archive/mod.rs` routing and `cli/cmd/archive.rs`; I28 edits I23's `remote/mod.rs` arm, `ops/remote.rs` and `cli/cmd/remote.rs`; I36 edits I18's `cli/cmd/find.rs` and is the only `Cargo.toml` editor |
+| 8 | I30, I34, I35 | `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
+| 9 | I31, I32, I33 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs` |
+| 10 | I37, I38 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs` |
 | 11 | I39 | |
 
 The longest chain is I01, I03, I08, I17, I23, I27, I30, I31, I37,
@@ -1738,35 +2033,39 @@ plan keeps them in wave 6.
 ## 7. Risks
 
 - R1 ADR window. The first code that lands closes the in-place rewrite
-  of ADRs. Text fixes worth making before I01 merges: ADR 0045 ends with
-  "No archive on the remote is deleted except when a newer, verified and
-  committed version of the same ID replaces it", while its own decision
-  and spec "Safety" also allow the explicit drop of a superseded
-  version; ADR 0039 names the sources `birth`, `oldest-mtime` and
-  `import`, while the spec adds `fork`. Recommendation: fix both in
-  place before I01 merges.
-- R2 Gaps that block items. T1 blocks I08; T3 blocks I06; T10 blocks
-  I05; U1 blocks the search part of I15 and I18; U5 touches I11; U6
-  blocks the network check in I29. Recommendation: settle them while
-  wave 1 runs.
+  of ADRs. Decided: before I01 part A merges, ADR 0045's last sentence
+  gains the explicit `resolve --drop-superseded` case that spec
+  "Safety" has, and ADR 0039's source list gains `fork` and `minted`
+  (T2), in place.
+- R2 Gaps that block items. U1 blocks the search part of I15 and I18;
+  U5 touches I11; U6 blocks the comparison of the network check in I29;
+  U7 confirms the brake set of `resolve --drop-superseded` in I35.
+  Recommendation: settle them while wave 1 runs.
 - R3 Long paths. On macOS, 44 members of a 1,300-byte path failed past
   `PATH_MAX` of 1,024 with the `tar` crate (names research), and spec
-  "unearth" extracts such paths directory by directory. The walk, the
-  strict verify and the delete helper read the same trees, so they also
-  need dirfd-relative calls (rustix `fs`) instead of full paths.
-  Recommendation: build that into I05 and I03 from the start, with a
-  deep-path test in each.
+  "unearth" extracts such paths directory by directory. Every consumer
+  that reads or writes those trees therefore goes through I01's
+  `TreeRoot`: the walk (I05), the delete helper (I03), packing (I06),
+  verify (I12), extraction (I13), live packing (I14), the trash re-walk
+  (I19) and unearthing (I20), each with a test past 1,024 bytes.
 - R4 Terminal in tests. Measured: the agent sandbox has no controlling
   terminal. A binary test that spawns antiq without `setsid()` passes
   here and blocks on a prompt when the user runs `cargo test` in a
-  terminal. Recommendation: the `tests/support` command builder always
-  detaches (I01), and no test spawns the binary another way.
-- R5 Slow tests. Level 19 with a 128 MiB window took 17.7 s for a 150 MB
-  input (compression research). Recommendation: fixtures of kilobytes;
-  any test above a few seconds gets the opt-in mark.
+  terminal. The `tests/support` command builder always detaches (I01),
+  and no test spawns the binary another way.
+- R5 Slow and large tests. Level 19 with a 128 MiB window took 17.7 s
+  for a 150 MB input (compression research), and a level-19 encoder
+  reached about 150 MB of resident memory even for a 10 KB input
+  (measured in the review), so parallel tests can run a container out
+  of memory. Fixtures stay at kilobytes, library tests share one
+  process-wide pool (I07), `scripts/test-linux.sh` gives the container
+  4 GB and sets `RUST_TEST_THREADS=4`, and any test above a few seconds
+  gets the opt-in mark.
 - R6 zstd pin. The golden-hash test of ADR 0052 fails when the bundled
   zstd changes; `cargo update` cannot move zstd-sys past the exact pin
   `=2.1.2+zstd.1.5.7`, so only a deliberate change of the pin does.
+  With its default features off, the pin does not switch `legacy` back
+  on (O1).
 - R7 rsync on the far side. The loopback and sshd layers run the far
   side's rsync on this Mac, where the login shell finds openrsync
   (measured); tests set `machine.remote_rsync`. The real NAS's rsync
@@ -1777,140 +2076,97 @@ plan keeps them in wave 6.
 - R8 SMB semantics. Exclusive create and locking from two machines on
   smbfs were not tested, and whether a successful `fsync` there reaches
   the server's disk is unknown (filesystem research, "Not verified").
-  The commit protocol leans on exclusive create (ADR 0030).
+  The commit protocol leans on exclusive create (ADR 0030). A read-back
+  of a file just written over SMB may come from the client's cache, not
+  from the server, which would weaken the check of ADR 0043 on the path
+  remote; I23 reads past the cache and I39 checks it on the NAS share.
 - R9 Size of the `sync` items. I30 and I31 sit at the top of L.
   Recommendation: the lead splits I30 at item-plan time if its plan
   exceeds about 1,500 lines (for example uploads apart from pull and
   commit).
 - R10 Parallel merges of docs. Spec and README edits collide when
-  items merge one after another. The per-command placeholders and the
+  items merge one after another. The per-command paragraphs and the
   README milestones reduce this; the lead rebases trivial conflicts.
 - R11 Static Linux builds. Under musl, std's `created()` returns
   `Unsupported`; `rustix::fs::statx` gives the birth time (filesystem
   research, Linux). Only relevant if a static build is made.
+- R12 File descriptors under launchd. The soft limit there is 256 (measured
+  in the review with `launchctl limit`), so a scheduled run can hit
+  `EMFILE`. `main` raises the soft limit (I01), and `EMFILE` fails the
+  run instead of marking pieces unreadable (I05).
 
-## 8. Open technical questions for the lead
+## 8. Technical decisions
 
-Each with a recommendation.
-
-- T1 Where a recorded, uncommitted metadata change lives (section 2.9).
-  Recommendation: `objects/<ulid>/meta.pending`, promoted to
-  `meta.<N+1>` after the commit; an ADR from I08.
-- T2 ID time when every time is before 1990 or none is available. The
-  spec and ADR 0039 give no fallback and none of the four sources fits.
-  Recommendation: the time of minting, with a warning, and a decision
-  on the source value (possibly a new value, which changes the spec's
-  `created_source` list).
-- T3 Member layout of antiq's own archives: whether members carry the
-  piece's folder name as one top-level directory. Imported archives
-  have exactly one top-level folder (ADR 0055), and the 313 `archive.sh`
-  archives each have one named after the unit (tar research). The spec
-  does not say for archives `archive` makes. Recommendation: one
-  top-level directory named after the folder, so both kinds share one
-  shape under `tar+zstd/1`; recorded in spec "Packaging".
-- T4 Retention of old `meta.<N>` files and of listings. ADR 0030 removes
-  "old metadata files" after the grace period; the spec's cleanup list
-  does not say which versions are retained. Recommendation: keep the
-  highest committed version; remove older ones once a higher version
-  exists and they are older than the grace period; listings follow the
-  payload they describe. Also the listing file name prefix:
-  recommendation, the SHA-256 prefix of its payload, so they pair. And
-  the listing's zstd settings, which the spec does not give:
-  recommendation, level 3 with the content checksum, read through the
-  decoder with the 128 MiB window limit.
-- T5 Where the live manifest is stored. Spec layout: `tracking/<ulid>.json`
-  holds "tracking entries, and live manifests". Recommendation: a
-  separate `tracking/<ulid>.manifest.json`, so a large manifest does not
-  rewrite with every tracking change.
-- T6 The archive's commit time for the remote-only tier (ADR 0042). The
-  metadata tables have no commit time. Recommendation: the history entry
-  written with the committing version carries the commit time; the
-  tier reads it from there.
-- T7 `--dry-run` and the lock, and `--dry-run` of `sync`. The spec says
-  read-only commands take no lock and `--dry-run` never touches the
-  run directories, not whether a dry run takes the lock.
-  Recommendation: no lock, the same note as `status` when one is held;
-  a dry `sync` reads the remote but writes nothing on either side.
-- T8 Usage errors under `--json`. clap prints text and exits 2.
-  Recommendation: when `--json` is in the arguments, print the JSON
-  envelope with kind `usage` and exit 2.
-- T9 The channel of JSON errors. Recommendation: stdout, as data, since
-  the envelope is the command's output; messages in plain text to
-  stderr.
-- T10 `collection.exclude` semantics. The spec calls them "paths that
-  are never pieces" and `init` proposes excluding `archive/`.
-  Recommendation: literal relative paths; nothing below an excluded path
-  is a piece.
-- T11 Unicode collisions (ADR 0054). The names research left the volume
-  probe unbuilt and no crate was researched for normalisation or case
-  folding. Recommendation: probe the staging volume for
-  case-insensitivity and normalisation-insensitivity with two test
-  files each, then compare names folded with `unicode-normalization`
-  (NFD) and `str::to_lowercase`, leaving the strict verify as the
-  backstop the ADR names.
-- T12 RAM size for the memory budget, not researched. Recommendation:
-  `libc::sysconf(_SC_PHYS_PAGES)` times the page size, present on macOS
-  (libc 0.2.191 defines `_SC_PHYS_PAGES` for Apple) and Linux.
-- T13 Read-only commands with a missing or stale index, and the lock
-  note. Recommendation: compute in memory without writing; detect a
-  running run by reading the lock file and testing the pid, since a
-  `try_lock` probe would take the lock for a moment and make a starting
-  run fail.
-- T14 Classifying "Connection refused". ssh research requirement 6
-  makes away "no route, timeout" and broken "answers but refuses". A
-  refused TCP connection fits neither cleanly. Recommendation: away, so
-  a NAS whose sshd is still starting does not fail scheduled runs.
-- T15 Timestamp format. jiff writes as many fractional digits as the
-  value needs (foundations §5). Recommendation: a custom serializer
-  with whole seconds for metadata and history times, which matches the
-  listing's whole seconds; ID times keep milliseconds inside the ULID.
-- T16 Coverage of terminal glue (raw mode, `/dev/tty`). Recommendation:
-  a small pty harness with rustix's `pty` functions in I36 for one
-  picker run and one prompt; if it turns out fragile, the remaining
-  lines are listed as accepted exceptions.
-- T17 Seams versus opt-in tests for devices, free space and `ENOTSUP`.
-  Recommendation: seams for `cargo test`; an opt-in macOS test with a
-  disk image (`hdiutil`) for the device boundary only if the lead wants
-  one.
-- T18 `tar` without its default `xattr` feature. antiq writes no
-  extended attributes (ADR 0050). Recommendation: `default-features =
-  false` if it builds and the tests pass.
-- T19 ULID text case. The crate writes upper case; the todo vault's file
-  names use upper case. Recommendation: upper case in metadata, file
-  names and JSON; references accept either.
-- T20 Where the binary's modules live. ADR 0003 and `CLAUDE.md` name
-  `src/main.rs`. Recommendation: keep `src/main.rs` and put its modules
-  under `src/cli/`, with no module of that name in the library.
-- T21 One generic `Question` type in the library instead of one trait
-  method per decision. Recommendation: accept (section 2.6).
-- T22 Proof tokens for removing a folder and dropping a local archive
-  (section 2.8). Recommendation: accept, with `compile_fail` doctests.
-- T23 SSH test layers (section 4.4). Recommendation: loopback shim in
-  `cargo test`, real sshd and Linux container opt-in, both run before
-  v1 is called done (I39).
-- T24 Where the time the remote was last reachable is kept, for
-  `away_warn_days`. Recommendation: `.antiq/remote-state.json` through
-  the atomic write, added to the spec's local layout.
-- T25 `resolve <piece>` without an answer flag. ADR 0025 and the spec
-  define `resolve` alone and `resolve <piece> <answer>`. Recommendation:
-  the interactive walk restricted to that piece; without a terminal it
-  lists that piece's decisions and exits 3. This edges into behaviour;
-  the lead may pass it to the user.
+- T1 Uncommitted metadata lives in `objects/<ulid>/meta.pending`,
+  promoted after the commit with the number the ADR 0030 protocol gives;
+  tracking says `pending` until I30 rewrites it (section 2.9). I08
+  records it as a new ADR.
+- T2 When no time from 1990 on exists, the ID time is the time of
+  minting, with a warning, and the source is `minted`; added to the
+  spec's `created_source` list and to ADR 0039 in place before I01
+  merges.
+- T3 Archives hold one top-level container; listings, verify and
+  reclaim compare the paths below it (F5).
+- T4 The highest committed `meta.<N>` is kept; older ones are removed
+  once a higher version exists and they are older than the grace
+  period; listings follow their payload. Listing names are the spec's;
+  listings are zstd level 3 with the content checksum, read with the
+  128 MiB window limit.
+- T5 The live manifest is `tracking/<ulid>.manifest.json`.
+- T6 The history entry of the committing version carries the commit
+  time; the remote-only tier reads it.
+- T7 A dry run takes no lock and prints the lock note; a dry `sync`
+  reads the remote and writes nothing on either side, not even the
+  clock's probe file; age-dependent cleanup reports "age unknown".
+- T8 With `--json` in the arguments, a usage error prints the envelope
+  with kind `usage` and exits 2.
+- T9 JSON errors go to stdout, plain messages to stderr.
+- T10 `collection.exclude` entries are literal relative paths; nothing
+  below them is a piece.
+- T11 The staging volume is probed for case and normalisation
+  insensitivity, behind a seam; names are compared after NFD
+  (`unicode-normalization`) and `str::to_lowercase`; the strict verify
+  stays the backstop.
+- T12 RAM is `sysconf(_SC_PHYS_PAGES)` times the page size.
+- T13 Read-only commands compute a missing index in memory without
+  writing it; a running run is detected from the lock file's pid, with
+  no `try_lock` probe.
+- T14 "Connection refused" means away only in the "ssh: connect to host
+  ... Connection refused" form (I24).
+- T15 Metadata and history times are written in whole seconds.
+- T16 The terminal glue is covered by the pty harness of 4.5 in I36.
+- T17 Devices, free space, filesystem type, `ENOTSUP`, the volume's name
+  rules and the network check go through seams; no disk-image test.
+- T18 `tar` without its default features.
+- T19 ULIDs are written in upper case; references accept either case.
+- T20 The binary stays `src/main.rs`, its modules under `src/cli/`.
+- T21 One generic `Question` type in the library.
+- T22 Proof tokens `DurableArchive`, `ConfirmedRemoteCopy` and
+  `UserDecision` (section 2.8), each with `compile_fail` doctests.
+- T23 SSH tests: loopback shim in `cargo test`; real sshd (harness of
+  4.4) and Linux container opt-in, both run before v1 is called done
+  (I39).
+- T24 The time the remote was last reachable is kept in
+  `.antiq/remote-state.json`.
+- T25 `resolve <piece>` without an answer walks that piece's decisions
+  interactively; without a terminal it lists them and exits 3.
+- O12 A piece whose top directory is on another device than the
+  collection root counts as containing a mount point (a reading of spec
+  "Walks"); I05 records it in the spec.
 
 ## 9. Questions for the user
 
 Behaviour, look and taste that the spec and ADRs leave open. Each with
 a recommendation.
 
-- U1 What `find <query>` matches, and what it lists. The spec says
-  `find` "lists and searches all objects" and the scope names an index
-  of each archive's contents. Open: whether the query matches the
-  name and path only or also member paths in listings; fuzzy (as the
-  picker) or substring; whether new pieces without an ID appear; and
-  which size the JSON `size` field carries. Recommendation: name and
-  path, matched the same way as the picker; objects only; `size` the
-  current payload's size; contents search together with the contents
-  view (U4).
+- U1 Whether `find <query>` searches member paths in v1. The spec's
+  scope names "an index of each archive's contents" and "searching the
+  archives"; spec "find" says it "lists and searches all objects".
+  Recommendation: yes, the query also matches member paths from the
+  listings. Also open: fuzzy matching (as the picker) or substring;
+  whether new pieces without an ID appear; which size the JSON `size`
+  field carries. Recommendation: the picker's fuzzy matching; objects
+  only; `size` the current payload's size.
 - U2 Console look of `status`, `archive`, `sync` and the other commands,
   including progress during long runs. Recommendation: plain grouped
   text first (the rudimentary CLI), reviewed once real output exists.
@@ -1935,10 +2191,20 @@ a recommendation.
   - The exit code of `status` when it shows problems. Recommendation: 0
     unless the command itself fails.
 - U6 What `machine.network_check` compares. The spec says "router
-  address of the home network". Open: the default gateway's IP address
-  or its hardware (MAC) address; private gateway IPs such as
-  `192.168.1.1` repeat across networks. Recommendation: the gateway's
-  MAC address. Blocks the network check in I29.
+  address of the home network". The default gateway's IP address is
+  simple to read, but private addresses such as `192.168.1.1` repeat
+  across networks, so another network can pass as home. Its hardware
+  (MAC) address tells networks apart, but comes from the ARP cache,
+  whose entries expire (20 minutes on macOS, measured as `max_age`
+  1200 s), and the lookup differs per system. Either way, when antiq
+  cannot determine the network, it tries to connect. Blocks the
+  comparison in I29.
+- U7 `resolve --drop-superseded` and the brake. With the brake's set
+  being the ID's archive payloads, dropping a superseded payload removes
+  at least half of the set while one current payload exists, so every
+  `--drop-superseded` holds the brake at the default 20 %: it always
+  asks on a terminal and needs `--force` without one. Recommendation:
+  keep it so.
 
 ## 10. Coverage of the spec and the ADRs
 
@@ -1951,20 +2217,20 @@ Spec sections:
 | Collections and pieces (marker, discovery, `-C`) | I04 |
 | Collections and pieces (`init`) | I11 |
 | Selection | I05; counts shown by I16 |
-| Walks | I05; delete helper I03 |
+| Walks | I01 (`TreeRoot`), I05; delete helper I03 |
 | Idle | I10 |
 | Pins | I10; commands I18 |
-| Objects (IDs, ID time, ownership) | I02; minting in I19, I21, I22, I30; ownership in I09, I19, I32, I34 |
+| Objects (IDs, ID time, ownership) | I02; minting in I19, I21, I22, I32; ownership in I09, I19, I32, I34 |
 | Versions | I08 (payload version), I27 (metadata version) |
-| Metadata | I08 |
+| Metadata | I01 (types), I08 (IO) |
 | Listing | I08 (format), I06 (generation), I12 (comparison) |
 | Local state | I09 |
 | States | I09 (derivation), I16 (display) |
-| Metadata changes | I19 (`archive`), I26 (reclaiming), I20 (`unearth`), I22 (`fork`), I30 to I33 (`sync`), I21 (`import`), I26, I31, I37 (`resolve`); `pin` none (I18) |
+| Metadata changes | I19 (`archive`), I26 (reclaiming), I20 (`unearth`), I22 and I26 (`fork`), I30 to I33 (`sync`), I21 (`import`), I26, I31, I37 (`resolve`); `pin` none (I18) |
 | Storage (local layout, remote layout, payload names, atomic write) | I01, I04, I11 (local layout), I23 (remote layout), I02 and I08 (names), I03 (atomic write) |
-| Storage (index) | I15 |
+| Storage (index, listings fetched incrementally) | I15; I30 and I34 fetch listings |
 | Config | I04; written by I11, I23, I25 |
-| Committing a version | I27 |
+| Committing a version | I27; unparsable highest version reported by I16 and I35 |
 | Remotes | I23; SSH probes I28; brake on `remote remove` I35; `remote_jobs` I30; `away_warn_days` I29 |
 | Path remote | I23 |
 | SSH remote | I24, I28 |
@@ -1977,7 +2243,7 @@ Spec sections:
 | archive | I19, I26 |
 | sync | I30, I31, I32, I33 |
 | unearth | I20, I34; names and staging I13 |
-| fork | I22; fork while unearthing I34 |
+| fork | I22; old live package I32; fork while unearthing I34 |
 | import | I21 |
 | reconcile | I18 (local), I35 (remote) |
 | status | I16 |
@@ -1985,8 +2251,8 @@ Spec sections:
 | Command line (table, flags, references) | I01, I15 |
 | Command line (console, interactive rule, `find`, picker) | I01, I18, I36, I40 |
 | Decisions | I26 (framework, replacing with loss), I31 (version conflict), I37 (diverged, superseded) |
-| Dry runs, scheduling, exit codes | I01 (codes), I17 (plans), I29 (`--if-reachable`) |
-| JSON output | I01 (envelope, errors), I16 (`status`), I18 (`find`), each command item for its payload |
+| Dry runs, scheduling, exit codes | I01 (codes), I17 (plans), I29 (`--if-reachable`), I30 (exit test) |
+| JSON output | I01 (envelope, errors, kinds), I16 (`status`), I18 (`find`), each command item for its payload |
 
 ADRs:
 
@@ -2030,11 +2296,11 @@ ADRs:
 | 0036 Ask before replacing with loss | I26 |
 | 0037 Idle clock from unearthing | I10, I20 |
 | 0038 Pieces without files left alone | I10 |
-| 0039 ID time from oldest birth or modification time | I02 |
+| 0039 ID time from oldest birth or modification time | I02 (with `minted`, T2) |
 | 0040 Other machines' live pieces, fork only | I16, I19, I32, I34 |
 | 0041 Nothing outside pieces backed up | non-goal; selection (I05) never makes loose files a piece |
 | 0042 Remote-only tier from the commit | I33 |
-| 0043 Local archive deleted after remote confirmation | I33 |
+| 0043 Local archive deleted after remote confirmation | I23 (read-back past the cache), I33 |
 | 0044 Missing entries kept until `reconcile --prune` | I35 |
 | 0045 The 20 % brake | I35; exemptions I19, I32, I33 |
 | 0046 `--dry-run` everywhere | I01, I17, every state-changing item |
@@ -2043,8 +2309,8 @@ ADRs:
 | 0049 rsync 3.1 or later | I25, I28 |
 | 0050 Tar in process with hand-built headers | I06, I13 |
 | 0051 zstd 19, 128 MiB window | I06, I07 |
-| 0052 Live packages at a pinned zstd | I14 |
-| 0053 Versioned JSON metadata keeping unknown fields | I08 |
+| 0052 Live packages at a pinned zstd | I01 (pin), I14 |
+| 0053 Versioned JSON metadata keeping unknown fields | I01, I08 |
 | 0054 Name checks before unearthing, warnings when archiving | I13, I19, I20, I21 |
 | 0055 `import` | I21 |
 | 0056 Console output and the picker | I01, I36 |
