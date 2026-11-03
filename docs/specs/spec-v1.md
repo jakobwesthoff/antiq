@@ -249,7 +249,10 @@ Each archive payload has a listing in its own zstd-compressed file next
 to the metadata: JSON Lines, a first line `{"format":1}`, then one line
 per entry with path (escaped form), type, size, modification time in
 whole seconds, mode, link target and SHA-256. Paths are relative to the
-archive's top-level directory (see "Packaging"). The listing is the
+archive's top-level directory (see "Packaging"), which has no line of
+its own. Each line holds what the archive stores for the member: the
+size is 0 for directories, symlinks and hard links, and a modification
+time before 1970 is listed as 0. The listing is the
 manifest that reclaiming compares against, for archived and imported
 pieces alike. Listings are compressed with zstd at level 3 with the
 content checksum and read with the same 128 MiB window limit as every
@@ -264,7 +267,7 @@ An entry line is a JSON object with these keys, in this order:
 | `size` | integer | bytes |
 | `mtime` | integer | modification time in whole seconds since the epoch |
 | `mode` | integer | permission bits |
-| `link` | string | the target in the escaped form; for `symlink` and `hardlink` only |
+| `link` | string | the target in the escaped form, for a `hardlink` the path of the file it links to; for `symlink` and `hardlink` only |
 | `sha256` | string | lower-case hex; for `file` only |
 
 ### Local state
@@ -628,14 +631,20 @@ permission bits, uid and gid 0, empty owner names, the modification time
 in whole seconds (the floor of the file's time, times before 1970
 clamped to 0 and reported), no extended attributes, entries sorted by
 path bytes, hard links stored as links, special files skipped and
-reported. Each file is read through a reader limited to the size in its
+reported. Members follow the byte order of their paths below the
+top-level directory, without the trailing slash of directories. A hard
+link names the first path in that order that holds the same file as its
+target. A symlink's target is stored as the bytes the filesystem holds.
+Each file is read through a reader limited to the size in its
 header; a short read is padded with zeros and marks the file as changed.
 Each file's SHA-256 is computed in the same read and written to the
 listing. Sparse files are stored in full; `archive` warns when a piece's
 apparent size exceeds its allocated size by more than 1 GiB. (ADR 0050)
 
 An archive holds one top-level directory, named after the folder when it
-was packed, with the piece's entries below it. Listings, the strict
+was packed, with the piece's entries below it. That directory is the
+first member and has the mode and modification time of the piece's top
+directory. Listings, the strict
 verify and reclaiming compare the paths below it, so neither that name
 nor the folder's current name counts: a piece renamed by `fork --name`,
 unearthed with `--to` or imported with `--path` compares like any

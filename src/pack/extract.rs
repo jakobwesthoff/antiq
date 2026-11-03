@@ -3,3 +3,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Extracting a package into staging.
+
+use super::{PackError, TargetRules, Unpacked};
+use crate::fsx::tree::TreeRoot;
+use std::path::Path;
+
+/// Unpacks `package` below `staging`.
+pub fn unpack(
+    _package: &Path,
+    _staging: &TreeRoot,
+    _rules: &TargetRules,
+) -> Result<Unpacked, PackError> {
+    Err(PackError::NotImplemented("unpacking a package"))
+}

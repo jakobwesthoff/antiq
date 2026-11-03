@@ -73,6 +73,8 @@ pub fn encoder<W: Write>(out: W, settings: &ZstdSettings) -> io::Result<Encoder<
     match settings.preset {
         Preset::Archive => {
             encoder.long_distance_matching(true)?;
+            // Long-distance matching already defaults the window to 2^27;
+            // setting it states the size the archives are meant to have.
             encoder.window_log(ARCHIVE_WINDOW_LOG)?;
         }
         Preset::Live => {
