@@ -1048,17 +1048,60 @@ mod tests {
     }
 
     #[test]
-    fn times_and_owner_fields_come_from_the_stat() {
+    fn the_time_of_a_file_is_the_one_it_was_given() {
         let mut tree = Tree::new();
         tree.file_with("file", "x", 0o600, 1_000_000_000);
         let entry = root_of(&tree).lstat(&path("file")).expect("stat");
         assert_eq!(entry.mtime_ns, 1_000_000_000_i128 * 1_000_000_000);
-        assert!(
-            entry.ctime_ns > entry.mtime_ns,
-            "ctime is the time of the change just made"
+    }
+
+    /// Every field of the entry at `relative` against what the standard
+    /// library reports for the same path.
+    fn assert_matches_std(tree: &Tree, relative: &str) {
+        let full = tree.path(relative);
+        let std = std::fs::symlink_metadata(&full).expect("std stats the entry");
+        let entry = root_of(tree).lstat(&path(relative)).expect("stat");
+        let nanoseconds =
+            |seconds: i64, nanos: i64| i128::from(seconds) * NANOS_PER_SECOND + i128::from(nanos);
+        assert_eq!(entry.mode, std.mode(), "{relative}: mode");
+        assert_eq!(entry.size, std.len(), "{relative}: size");
+        assert_eq!(entry.allocated, std.blocks() * 512, "{relative}: allocated");
+        assert_eq!(entry.inode, std.ino(), "{relative}: inode");
+        assert_eq!(entry.device, std.dev(), "{relative}: device");
+        assert_eq!(entry.nlink, std.nlink(), "{relative}: nlink");
+        assert_eq!(
+            entry.mtime_ns,
+            nanoseconds(std.mtime(), std.mtime_nsec()),
+            "{relative}: mtime"
         );
-        assert!(entry.inode > 0);
-        assert!(entry.device > 0);
+        assert_eq!(
+            entry.ctime_ns,
+            nanoseconds(std.ctime(), std.ctime_nsec()),
+            "{relative}: ctime"
+        );
+        // Where the filesystem has no birth time, std has none either.
+        let created = std.created().ok().map(|time| {
+            let since_epoch = time.duration_since(std::time::UNIX_EPOCH);
+            let nanos = since_epoch.expect("a birth time after 1970").as_nanos();
+            i128::try_from(nanos).expect("fits")
+        });
+        assert!(
+            created.is_none() || entry.birth_ns == created,
+            "{relative}: birth"
+        );
+    }
+
+    #[test]
+    fn every_field_of_a_stat_is_the_one_std_reports() {
+        let mut tree = Tree::new();
+        tree.file_with("file", "some content", 0o640, 1_000_000_000);
+        tree.dir("dir/inner");
+        tree.symlink("link", "file");
+        tree.hard_link("file", "hard");
+        tree.sparse("hole", 1 << 20);
+        for relative in ["file", "dir", "dir/inner", "link", "hard", "hole", ""] {
+            assert_matches_std(&tree, relative);
+        }
     }
 
     #[cfg(target_os = "macos")]
