@@ -188,6 +188,54 @@ impl<'de> Deserialize<'de> for RelPath {
     }
 }
 
+/// Most bytes the name part of a payload file name takes.
+pub const NAME_PART_LIMIT: usize = 64;
+
+/// Most bytes the machine part of an upload temp name takes.
+pub const MACHINE_PART_LIMIT: usize = 32;
+
+/// The part of a payload file name that stands for the piece's name. The
+/// real name is only in the metadata.
+pub fn name_part(name: &Name) -> String {
+    escape_part(name.as_bytes(), NAME_PART_LIMIT)
+}
+
+/// The part of an upload temp name that stands for the machine.
+pub fn machine_part(machine: &str) -> String {
+    escape_part(machine.as_bytes(), MACHINE_PART_LIMIT)
+}
+
+/// The name an upload is written under until it is complete:
+/// `.<final name>.<machine part>.part`.
+pub fn temp_name(final_name: &Name, machine: &str) -> Name {
+    let mut bytes = vec![b'.'];
+    bytes.extend_from_slice(final_name.as_bytes());
+    bytes.push(b'.');
+    bytes.extend_from_slice(machine_part(machine).as_bytes());
+    bytes.extend_from_slice(b".part");
+    Name::from_bytes(bytes)
+        .expect("a name that starts with `.` and is longer than it is not `.` or `..`")
+}
+
+/// Writes every byte outside `[A-Za-z0-9._-]` as `%XX` and stops before the
+/// first byte or escape that would take the result past `limit`. A cut can
+/// fall between the two escapes of one character but never inside one.
+fn escape_part(bytes: &[u8], limit: usize) -> String {
+    let mut part = String::new();
+    for &byte in bytes {
+        let unit = if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            char::from(byte).to_string()
+        } else {
+            format!("%{byte:02X}")
+        };
+        if part.len() + unit.len() > limit {
+            break;
+        }
+        part.push_str(&unit);
+    }
+    part
+}
+
 /// Errors of paths and names.
 #[derive(Debug, thiserror::Error)]
 pub enum RelPathError {
@@ -345,5 +393,133 @@ mod tests {
     fn path_errors_are_failures_without_a_kind_of_their_own() {
         let error: Error = RelPath::parse("../x").expect_err("invalid").into();
         assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    fn name(bytes: &[u8]) -> Name {
+        Name::from_bytes(bytes.to_vec()).expect("a valid name")
+    }
+
+    /// `count` plain bytes, then `tail`.
+    fn padded(count: usize, tail: &str) -> Vec<u8> {
+        let mut bytes = vec![b'a'; count];
+        bytes.extend_from_slice(tail.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_plain_name_is_its_own_part() {
+        assert_eq!(name_part(&name(b"photos-2020_v1.0")), "photos-2020_v1.0");
+    }
+
+    #[test]
+    fn bytes_outside_the_safe_set_become_escapes() {
+        assert_eq!(name_part(&name(b"a b\xc3\xa9\xff")), "a%20b%C3%A9%FF");
+    }
+
+    #[test]
+    fn a_percent_sign_becomes_25() {
+        assert_eq!(name_part(&name(b"100%")), "100%25");
+    }
+
+    #[test]
+    fn a_name_of_70_plain_bytes_is_cut_at_64() {
+        assert_eq!(name_part(&name(&padded(70, ""))), "a".repeat(64));
+    }
+
+    #[test]
+    fn an_escape_across_byte_64_is_cut_before_it() {
+        let bytes = padded(62, "ébbbbbb");
+        assert_eq!(bytes.len(), 70);
+        assert_eq!(name_part(&name(&bytes)), "a".repeat(62));
+    }
+
+    #[test]
+    fn a_cut_may_fall_between_the_escapes_of_one_character() {
+        let part = name_part(&name(&padded(61, "é")));
+        assert_eq!(part, format!("{}%C3", "a".repeat(61)));
+    }
+
+    #[test]
+    fn a_part_of_exactly_64_bytes_stays_whole() {
+        assert_eq!(name_part(&name(&padded(64, ""))), "a".repeat(64));
+    }
+
+    #[test]
+    fn the_65th_byte_is_cut() {
+        assert_eq!(name_part(&name(&padded(65, ""))), "a".repeat(64));
+    }
+
+    #[test]
+    fn a_machine_part_is_cut_at_32() {
+        assert_eq!(machine_part(&"m".repeat(40)), "m".repeat(32));
+    }
+
+    #[test]
+    fn an_escape_across_byte_32_is_cut_before_it() {
+        let machine = format!("{}ébbb", "m".repeat(30));
+        assert_eq!(machine_part(&machine), "m".repeat(30));
+    }
+
+    #[test]
+    fn a_machine_name_is_escaped_like_a_name_part() {
+        assert_eq!(machine_part("Jakob's MacBook"), "Jakob%27s%20MacBook");
+    }
+
+    #[test]
+    fn a_temp_name_wraps_the_final_name() {
+        let temp = temp_name(&name(b"0123abcd-photos.tar.zst"), "mac book");
+        assert_eq!(temp.as_bytes(), b".0123abcd-photos.tar.zst.mac%20book.part");
+    }
+
+    #[test]
+    fn a_temp_name_keeps_non_utf8_bytes_of_the_final_name() {
+        let temp = temp_name(&name(b"x\xff"), "m");
+        assert_eq!(temp.as_bytes(), b".x\xff.m.part");
+    }
+
+    /// Reads `%XX` escapes back; a scanner of its own, since `unescape`
+    /// refuses spellings that `escape` would not write.
+    fn decode_part(part: &str) -> Vec<u8> {
+        let source = part.as_bytes();
+        let mut bytes = Vec::new();
+        let mut index = 0;
+        while index < source.len() {
+            if source[index] == b'%' {
+                let digits = std::str::from_utf8(&source[index + 1..index + 3])
+                    .expect("an escape has two hex digits");
+                assert!(
+                    digits
+                        .bytes()
+                        .all(|digit| digit.is_ascii_digit() || (b'A'..=b'F').contains(&digit)),
+                    "{part:?} has a bad escape"
+                );
+                bytes.push(u8::from_str_radix(digits, 16).expect("two hex digits"));
+                index += 3;
+            } else {
+                assert!(
+                    source[index].is_ascii_alphanumeric() || b"._-".contains(&source[index]),
+                    "{part:?} keeps an unsafe byte"
+                );
+                bytes.push(source[index]);
+                index += 1;
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_cut_part_never_ends_inside_an_escape() {
+        let mut inputs: Vec<Vec<u8>> = (0..=255u8).map(|byte| vec![byte]).collect();
+        inputs.extend((0..=100).map(|count| "é".repeat(count).into_bytes()));
+        inputs.extend((0..=100).map(|count| vec![0xff; count]));
+        for limit in [NAME_PART_LIMIT, MACHINE_PART_LIMIT] {
+            for input in &inputs {
+                let part = escape_part(input, limit);
+                assert!(part.len() <= limit, "{part:?} is over {limit}");
+                assert_eq!(part.is_empty(), input.is_empty(), "{input:?} gave {part:?}");
+                let decoded = decode_part(&part);
+                assert!(input.starts_with(&decoded), "{part:?} is not a prefix");
+            }
+        }
     }
 }
