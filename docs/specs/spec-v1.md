@@ -220,7 +220,9 @@ A payload object has, in this order:
 | `encoder` | object | zstd version and parameters (live packages, ADR 0052) |
 
 `listing`, `verified`, `superseded` and `encoder` are left out where they
-do not apply. Times are RFC 3339 UTC in whole seconds, sizes in bytes.
+do not apply; `verified` is `null` where it applies and the remote copy
+was never checked. Times are RFC 3339 UTC in whole seconds, sizes in
+bytes.
 The history entry that a version adds carries the time that version was
 committed, not the time the change was recorded locally; the
 remote-only tier is measured from it.
