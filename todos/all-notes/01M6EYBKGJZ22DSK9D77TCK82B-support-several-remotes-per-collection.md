@@ -1,14 +1,14 @@
 ---
-title: "Support several remotes per managed folder"
+title: "Support several remotes per collection"
 kind: feature
 component: lib
 horizon: someday
 origin: discussion
 tags: [config, architecture]
 ---
-# Support several remotes per managed folder
+# Support several remotes per collection
 
-A managed folder has exactly one remote in the first version (business
+A collection has exactly one remote in the first version (business
 logic design round, 2026-11-02). Several remotes per folder, along the
 lines of git remotes, may come later: for example a NAS and a cloud store
 for the same folder.
@@ -22,4 +22,4 @@ for the same folder.
 
 ## Revisit when
 
-A second backup target for the same managed folder is wanted.
+A second backup target for the same collection is wanted.

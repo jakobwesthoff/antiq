@@ -1,17 +1,17 @@
 ---
-title: "Back up content outside every unit as a root live package"
+title: "Back up content outside every piece as a root live package"
 kind: feature
 component: lib
 horizon: someday
 origin: review
 ---
-# Back up content outside every unit as a root live package
+# Back up content outside every piece as a root live package
 
-Units are selected by glob patterns (default `*`). Loose files at the top
-of a managed folder belong to no unit, so v1 neither archives nor backs
+Pieces are selected by glob patterns (default `*`). Loose files at the top
+of a collection belong to no piece, so v1 neither archives nor backs
 them up; the spec states this. `timecapsule-sync.sh`, which antiq
 replaces, mirrored the whole playground, loose files included. A "root"
-live package could cover everything outside every unit.
+live package could cover everything outside every piece.
 
 In `~/playground` on 2026-11-02 the only loose entries were `.DS_Store`,
 `.gitignore` and the symlinks `archive.sh` and `timecapsule-sync.sh`
@@ -24,4 +24,4 @@ into the dotfiles repository.
 
 ## Revisit when
 
-A managed folder holds loose files worth backing up.
+A collection holds loose files worth backing up.

@@ -60,10 +60,12 @@ Settled decisions live in ADR 0002 to ADR 0057 and in
 
 - 2026-11-03, user: the remote-only tier (ADR 0007) is part of the
   first version.
-- 2026-11-03, user: next comes a full adversarial review of the spec
-  together with all ADRs (Fable, Opus, Sonnet and Haiku), once the Linux
-  filesystem tests and the SQLite archive question are researched and
-  folded in.
+- 2026-11-03, user: the old `.tar.xz` archives (313 on 2026-11-02,
+  15 GB, all paired with a listing) are recompressed once with zstd,
+  outside antiq, and then registered with `antiq import` (ADR 0019,
+  ADR 0055); antiq reads no xz.
+- 2026-11-03, user: until implementation starts, ADRs may be rewritten
+  in place.
 - 2026-11-02, user: the design goes in this order, each step open to
   change later: a rudimentary CLI first to get a feeling for what is
   needed, then the business-logic parts, then the extension points
@@ -82,13 +84,14 @@ evidence and outcome) and `plans/open-questions.md` (the questions and
 the user's answers of 2026-11-03). The agreed fixes, the answers
 and the research choices are in ADR 0030 to ADR 0053 and the spec.
 
+A second adversarial review (2026-11-03) of the spec together with all
+ADRs (Fable, Opus, Sonnet and Haiku, 85 findings) is in
+`plans/adversarial-ledger-2.md` of the same logbook; its fixes and the
+user's answers (remote-only tier after 180 days, the brake only on
+deletions without a per-item check) are in the spec and the ADRs.
+
 ## Open questions
 
 - **Several machines, live folders.** Bringing one live folder together
   across machines stays out of v1 (ADR 0008); a shared remote for
   archives is in (ADR 0017).
-- **Migration** (2026-11-03, user: the old archives are recompressed
-  once, outside antiq, when they are imported; antiq reads no xz,
-  ADR 0019) of the existing `.tar.xz` archives and their listings
-  (313 on 2026-11-02, 15 GB, all paired with a listing), then registered
-  with `antiq import` (ADR 0055).
