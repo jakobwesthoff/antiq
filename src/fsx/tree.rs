@@ -29,8 +29,8 @@ use crate::tree::{EntryKind, TreeEntry};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, RawMode, RenameFlags, Timespec, Timestamps, UTIME_OMIT, chmodat,
-    linkat, mkdirat, open, openat, readlinkat, renameat, renameat_with, statat, symlinkat,
-    unlinkat, utimensat,
+    fcntl_getfl, fcntl_setfl, fstat, linkat, mkdirat, open, openat, readlinkat, renameat,
+    renameat_with, statat, symlinkat, unlinkat, utimensat,
 };
 use rustix::io::Errno;
 use std::fs::File;
@@ -158,20 +158,31 @@ impl TreeRoot {
             }
             let name = Name::from_bytes(bytes.to_vec())
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let kind = EntryKind::from_mode(RawMode::from(entry.file_type().as_raw_mode()).into());
+            let kind = EntryKind::from_mode(mode_of(entry.file_type().as_raw_mode()));
             let path = directory.join(&name);
             entries.push(DirEntry { name, path, kind });
         }
         Ok(entries)
     }
 
-    /// Opens the file at `path`, relative to this root, for reading. The
-    /// open never waits for a writer, so a
-    /// fifo that replaced the file cannot stall it; a symlink is refused.
+    /// Opens the regular file at `path`, relative to this root, for
+    /// reading. Anything else is refused: a symlink by the filesystem, any
+    /// other kind of entry with [`TreeError::NotRegular`]. The open itself
+    /// never waits, so a fifo that replaced the file cannot stall it, and
+    /// the file it returns blocks like any other.
     pub fn open_read(&self, path: &RelPath) -> io::Result<File> {
         let (dir, name) = self.split(path)?;
-        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
-        Ok(File::from(openat(dir.as_fd(), name, flags, Mode::empty())?))
+        // `NOCTTY` keeps a terminal device from becoming the controlling
+        // terminal of the process.
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+        let file = File::from(openat(dir.as_fd(), name, flags, Mode::empty())?);
+        let kind = EntryKind::from_mode(mode_of(fstat(&file)?.st_mode));
+        if kind != EntryKind::File {
+            return Err(TreeError::NotRegular(kind).into());
+        }
+        fcntl_setfl(&file, fcntl_getfl(&file)? - OFlags::NONBLOCK)?;
+        Ok(file)
     }
 
     /// Creates the directory `path`, relative to this root.
@@ -322,6 +333,40 @@ impl TreeRoot {
 
 fn mode_bits(mode: u32) -> Mode {
     Mode::from_bits_truncate(mode as RawMode)
+}
+
+#[allow(
+    clippy::useless_conversion,
+    reason = "`st_mode` is 16 bits wide on macOS and 32 on Linux"
+)]
+fn mode_of(mode: RawMode) -> u32 {
+    u32::from(mode)
+}
+
+/// What a [`TreeRoot`] reports about an entry that its caller can tell
+/// apart from an error of the filesystem. It travels inside an
+/// `io::Error`; [`TreeError::of`] finds it there.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TreeError {
+    /// The entry changed while it was being read, twice in a row.
+    #[error("the entry changed while it was read")]
+    Changed,
+    /// An entry that is not a regular file was opened for reading.
+    #[error("only a regular file can be read, not a {0:?}")]
+    NotRegular(EntryKind),
+}
+
+impl TreeError {
+    /// The tree error inside `error`, if it holds one.
+    pub fn of(error: &io::Error) -> Option<&TreeError> {
+        error.get_ref()?.downcast_ref()
+    }
+}
+
+impl From<TreeError> for io::Error {
+    fn from(error: TreeError) -> io::Error {
+        io::Error::other(error)
+    }
 }
 
 /// A rename that fails instead of replacing an existing target.
@@ -662,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_fifo_does_not_wait_for_a_writer() {
+    fn a_fifo_is_refused_at_once_and_not_waited_for() {
         let mut tree = Tree::new();
         tree.fifo("queue");
         let root = root_of(&tree);
@@ -674,7 +719,41 @@ mod tests {
         let result = receiver
             .recv_timeout(Duration::from_secs(5))
             .expect("opening a fifo blocks");
-        result.expect("the fifo opens");
+        let error = result.expect_err("a fifo is not read");
+        assert_eq!(
+            TreeError::of(&error),
+            Some(&TreeError::NotRegular(EntryKind::Fifo))
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_opened_for_reading() {
+        let mut tree = Tree::new();
+        tree.dir("dir");
+        let error = root_of(&tree)
+            .open_read(&path("dir"))
+            .expect_err("a directory is not read");
+        assert_eq!(
+            TreeError::of(&error),
+            Some(&TreeError::NotRegular(EntryKind::Directory))
+        );
+    }
+
+    #[test]
+    fn a_file_opened_for_reading_blocks_like_any_other() {
+        let mut tree = Tree::new();
+        tree.file("file", "x");
+        let file = root_of(&tree)
+            .open_read(&path("file"))
+            .expect("the file opens");
+        let flags = rustix::fs::fcntl_getfl(&file).expect("the flags are read");
+        assert!(!flags.contains(OFlags::NONBLOCK), "{flags:?}");
+    }
+
+    #[test]
+    fn errors_of_the_filesystem_are_not_tree_errors() {
+        let error = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(TreeError::of(&error), None);
     }
 
     #[test]
