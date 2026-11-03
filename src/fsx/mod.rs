@@ -18,8 +18,10 @@ pub mod remove;
 pub mod space;
 pub mod tree;
 
+use crate::relpath::RelPath;
 use std::io;
 use std::path::Path;
+use tree::TreeRoot;
 
 /// Errors of the filesystem primitives.
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +50,26 @@ pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Err
         path,
         source,
     }
+}
+
+/// An I/O failure of `action` on `path`, named relative to the original
+/// root the `root` handle descends from.
+pub(crate) fn failure(
+    action: &'static str,
+    root: &TreeRoot,
+    path: &RelPath,
+) -> impl FnOnce(io::Error) -> FsxError {
+    let path = shown(root, path);
+    move |source| FsxError::Io {
+        action,
+        path,
+        source,
+    }
+}
+
+/// How an error names `path`, below `root`.
+pub(crate) fn shown(root: &TreeRoot, path: &RelPath) -> String {
+    root.prefix().concat(path).to_string()
 }
 
 /// Gives directories their owner permissions back when a test ends, so

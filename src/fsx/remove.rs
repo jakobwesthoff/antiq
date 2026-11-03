@@ -10,7 +10,7 @@
 // callers; until they land the library has none.
 #![allow(dead_code)]
 
-use super::{FsxError, io_error};
+use super::{FsxError, failure, io_error, shown};
 use crate::fsx::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
@@ -178,24 +178,9 @@ fn skip_if_missing<T>(result: io::Result<T>) -> io::Result<Option<T>> {
     }
 }
 
-/// An I/O failure of `action` on `path`, named relative to the original
-/// root the `root` handle descends from.
-fn failure(
-    action: &'static str,
-    root: &TreeRoot,
-    path: &RelPath,
-) -> impl FnOnce(io::Error) -> FsxError {
-    let shown = root.prefix().concat(path).to_string();
-    move |source| FsxError::Io {
-        action,
-        path: shown,
-        source,
-    }
-}
-
 fn foreign_device(root: &TreeRoot, path: &RelPath) -> FsxError {
     FsxError::ForeignDevice {
-        path: root.prefix().concat(path).to_string(),
+        path: shown(root, path),
     }
 }
 
