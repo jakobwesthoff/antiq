@@ -48,7 +48,8 @@ Not in version 1:
 A managed folder is called a collection, and each unit in it a piece.
 (ADR 0022)
 
-A collection is marked by `.antiq/` at its top. Commands find it by
+A collection is marked by `.antiq/` at its top. A `.antiq` that is a
+file or a symlink does not mark a collection. Commands find it by
 searching upwards from the current directory, or from the path given
 with `-C`, and fail outside a collection. `.antiq/` holds the
 collection's config, metadata, index and local archives. (ADR 0011)
