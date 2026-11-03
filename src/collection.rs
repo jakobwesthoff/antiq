@@ -7,6 +7,18 @@
 use crate::error::{ErrorKind, HasKind};
 use std::path::PathBuf;
 
+/// A collection.
+#[derive(Debug)]
+pub struct Collection;
+
+#[cfg(test)]
+impl Collection {
+    /// A collection for tests that only need a value to pass around.
+    pub fn for_tests() -> Self {
+        Collection
+    }
+}
+
 /// Errors of finding a collection.
 #[derive(Debug, thiserror::Error)]
 pub enum CollectionError {
