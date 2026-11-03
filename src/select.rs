@@ -4,7 +4,7 @@
 
 //! Selecting pieces.
 
-use crate::fsx::tree::TreeRoot;
+use crate::fsx::tree::{DirEntry, TreeRoot};
 use crate::relpath::{RelPath, escape};
 use crate::tree::EntryKind;
 use crate::walk::{Call, Hooks, RealFs, is_out_of_descriptors};
@@ -44,6 +44,8 @@ impl crate::error::HasKind for SelectError {}
 pub struct Rules {
     patterns: Vec<Vec<Part>>,
     exclude: HashSet<RelPath>,
+    /// `(device, inode)` of the exclude entries that exist; see `bind`.
+    identities: HashSet<(u64, u64)>,
 }
 
 /// One `/`-separated component of a pattern.
@@ -82,7 +84,55 @@ impl Rules {
         Ok(Rules {
             patterns,
             exclude: exclude.iter().cloned().collect(),
+            identities: HashSet::new(),
         })
+    }
+
+    /// Looks up the exclude entries that exist in `collection`, so that
+    /// they are recognised by the directory they are and not only by their
+    /// spelling.
+    pub fn bind(self, collection: &TreeRoot) -> Result<Rules, SelectError> {
+        self.bind_with(collection, &RealFs)
+    }
+
+    pub(crate) fn bind_with(
+        mut self,
+        collection: &TreeRoot,
+        hooks: &dyn Hooks,
+    ) -> Result<Rules, SelectError> {
+        for path in &self.exclude {
+            let result = match hooks.fault(path, Call::Stat) {
+                Some(error) => Err(error),
+                None => collection.lstat(path),
+            };
+            match result {
+                Ok(entry) => {
+                    self.identities.insert((entry.device, entry.inode));
+                }
+                Err(error) if is_out_of_descriptors(&error) => {
+                    return Err(SelectError::OutOfDescriptors {
+                        path: path.clone(),
+                        source: error,
+                    });
+                }
+                // An exclude entry that does not exist matches by its
+                // spelling only, and nothing can be at a path that is not
+                // there.
+                Err(_) => {}
+            }
+        }
+        Ok(self)
+    }
+
+    /// Whether the entry at `path`, relative to the collection root, with
+    /// this `device` and `inode`, is on the exclude list.
+    pub(crate) fn excludes(&self, path: &RelPath, device: u64, inode: u64) -> bool {
+        self.exclude.contains(path) || self.identities.contains(&(device, inode))
+    }
+
+    /// Whether the exclude list has any entry.
+    pub(crate) fn has_exclusions(&self) -> bool {
+        !self.exclude.is_empty()
     }
 
     /// Whether a pattern selects `path`.
@@ -273,7 +323,6 @@ pub(crate) fn select_with(
     let mut selector = Selector {
         rules,
         hooks,
-        identities: Vec::new(),
         selection: Selection {
             pieces: Vec::new(),
             skipped_symlinks: 0,
@@ -282,33 +331,49 @@ pub(crate) fn select_with(
         },
     };
 
-    // On a volume that ignores case or Unicode form, an exclude entry can
-    // name a directory under a spelling the listing does not use. A path
-    // that exists is therefore also recognised by the directory it is.
-    let mut excluded: Vec<&RelPath> = rules.exclude.iter().collect();
-    excluded.sort();
-    for path in excluded {
-        let looked_up = selector.call(path, Call::Stat, || collection.lstat(path))?;
-        if let Ok(entry) = looked_up {
-            selector.identities.push((entry.device, entry.inode));
-        }
+    // One directory is open per level, so the levels are kept in a list
+    // of their own and not on the call stack: a deep tree costs no deep
+    // recursion, and the cap on the depth keeps the open directories few.
+    let mut levels = Vec::new();
+    levels.extend(selector.open_level(Directory::Borrowed(collection), RelPath::root())?);
+    while !levels.is_empty() {
+        selector.step(&mut levels)?;
     }
-
-    selector.list(collection, &RelPath::root())?;
     selector.selection.pieces.sort();
     selector.selection.unreadable.sort();
     Ok(selector.selection)
 }
 
+/// The collection root is borrowed, the directories below it are opened
+/// and owned.
+enum Directory<'a> {
+    Borrowed(&'a TreeRoot),
+    Owned(TreeRoot),
+}
+
+impl Directory<'_> {
+    fn root(&self) -> &TreeRoot {
+        match self {
+            Directory::Borrowed(root) => root,
+            Directory::Owned(root) => root,
+        }
+    }
+}
+
+/// A directory being looked through: what is left of its listing.
+struct Level<'a> {
+    directory: Directory<'a>,
+    at: RelPath,
+    children: std::vec::IntoIter<DirEntry>,
+}
+
 struct Selector<'a> {
     rules: &'a Rules,
     hooks: &'a dyn Hooks,
-    /// `(device, inode)` of the exclude entries that exist.
-    identities: Vec<(u64, u64)>,
     selection: Selection,
 }
 
-impl Selector<'_> {
+impl<'a> Selector<'a> {
     /// Makes one filesystem call on behalf of `path`, unless the hook
     /// makes it fail. A descriptor shortage ends the run; any other
     /// failure is handed back for the caller to judge.
@@ -337,75 +402,109 @@ impl Selector<'_> {
         }
     }
 
-    /// Looks through `directory`, which lies at `at`, for pieces and for
-    /// directories worth looking through. A match is a piece and is not
-    /// looked into: the shallowest match wins.
-    fn list(&mut self, directory: &TreeRoot, at: &RelPath) -> Result<(), SelectError> {
-        let listing = self.call(at, Call::List, || directory.read_dir(&RelPath::root()))?;
+    /// Lists `directory`, which lies at `at`. A directory that cannot be
+    /// listed is reported and skipped, except the collection root, which
+    /// fails the run.
+    fn open_level(
+        &mut self,
+        directory: Directory<'a>,
+        at: RelPath,
+    ) -> Result<Option<Level<'a>>, SelectError> {
+        let listing = self.call(&at, Call::List, || {
+            directory.root().read_dir(&RelPath::root())
+        })?;
         let mut listing = match listing {
             Ok(listing) => listing,
             Err(source) if at.is_root() => return Err(SelectError::Unreadable { source }),
             Err(_) => {
-                self.mark_unreadable(at);
-                return Ok(());
+                self.mark_unreadable(&at);
+                return Ok(None);
             }
         };
         listing.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(Level {
+            directory,
+            at,
+            children: listing.into_iter(),
+        }))
+    }
 
-        for listed in listing {
-            let child = at.join(&listed.name);
-            if (at.is_root() && listed.name.as_bytes() == b".antiq")
-                || self.rules.exclude.contains(&child)
-            {
-                continue;
+    /// Looks at the next entry of the innermost directory, for pieces and
+    /// for directories worth looking through. A match is a piece and is
+    /// not looked into: the shallowest match wins.
+    fn step(&mut self, levels: &mut Vec<Level<'a>>) -> Result<(), SelectError> {
+        let depth = levels.len();
+        let level = levels
+            .last_mut()
+            .expect("selection steps only while a level is open");
+        let Some(listed) = level.children.next() else {
+            levels.pop();
+            return Ok(());
+        };
+        let directory = level.directory.root();
+        let at = &level.at;
+        let child = at.join(&listed.name);
+        if (at.is_root() && listed.name.as_bytes() == b".antiq")
+            || self.rules.exclude.contains(&child)
+        {
+            return Ok(());
+        }
+        let single = RelPath::from_bytes(listed.name.as_bytes().to_vec())
+            .expect("a listed name is a valid path of one component");
+
+        // The kind a listing reports can be missing, and the identity of
+        // a directory needs a stat.
+        let mut kind = self.hooks.listed_kind(&child, listed.kind);
+        let must_stat = kind == EntryKind::Unknown
+            || (kind == EntryKind::Directory && !self.rules.identities.is_empty());
+        if must_stat {
+            match self.call(&child, Call::Stat, || directory.lstat(&single))? {
+                Ok(entry) => {
+                    if self.rules.identities.contains(&(entry.device, entry.inode)) {
+                        return Ok(());
+                    }
+                    kind = entry.kind;
+                }
+                // Deleted since it was listed: nothing left to select.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(_) => {
+                    let parent = at.clone();
+                    self.mark_unreadable(&parent);
+                    return Ok(());
+                }
             }
-            let single = RelPath::from_bytes(listed.name.as_bytes().to_vec())
-                .expect("a listed name is a valid path of one component");
+        }
 
-            // The kind a listing reports can be missing, and the identity
-            // of a directory needs a stat.
-            let mut kind = listed.kind;
-            let must_stat = kind == EntryKind::Unknown
-                || (kind == EntryKind::Directory && !self.identities.is_empty());
-            if must_stat {
-                match self.call(&child, Call::Stat, || directory.lstat(&single))? {
-                    Ok(entry) => {
-                        if self.identities.contains(&(entry.device, entry.inode)) {
-                            continue;
+        match kind {
+            EntryKind::Symlink => {
+                if self.rules.matches(&child) {
+                    self.selection.skipped_symlinks += 1;
+                }
+            }
+            EntryKind::Directory => {
+                if self.rules.matches(&child) {
+                    self.selection.pieces.push(child);
+                } else if self.rules.can_descend(&child) {
+                    if depth > self.hooks.max_depth() {
+                        self.mark_unreadable(&child);
+                        return Ok(());
+                    }
+                    match self.call(&child, Call::Open, || directory.sub(&single))? {
+                        Ok(inner) => {
+                            let opened = self.open_level(Directory::Owned(inner), child)?;
+                            levels.extend(opened);
                         }
-                        kind = entry.kind;
+                        // Deleted since it was listed: nothing left to select.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(_) => self.mark_unreadable(&child),
                     }
-                    // Deleted since it was listed: nothing left to select.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => {
-                        self.mark_unreadable(at);
-                        continue;
-                    }
+                } else if self.rules.matches_without_dot_rule(&child)
+                    || self.rules.can_descend_without_dot_rule(&child)
+                {
+                    self.selection.skipped_dot_entries += 1;
                 }
             }
-
-            match kind {
-                EntryKind::Symlink => {
-                    if self.rules.matches(&child) {
-                        self.selection.skipped_symlinks += 1;
-                    }
-                }
-                EntryKind::Directory => {
-                    if self.rules.matches(&child) {
-                        self.selection.pieces.push(child);
-                    } else if self.rules.can_descend(&child) {
-                        match self.call(&child, Call::Open, || directory.sub(&single))? {
-                            Ok(inner) => self.list(&inner, &child)?,
-                            Err(_) => self.mark_unreadable(&child),
-                        }
-                    } else if self.rules.matches_without_dot_rule(&child)
-                        || self.rules.can_descend_without_dot_rule(&child)
-                    {
-                        self.selection.skipped_dot_entries += 1;
-                    }
-                }
-                _ => {}
-            }
+            _ => {}
         }
         Ok(())
     }
@@ -439,7 +538,10 @@ mod tests {
 
     fn select_in(tree: &Tree, patterns: &[&str], exclude: &[&str]) -> Selection {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        select(&root, &rules(patterns, exclude)).expect("the selection succeeds")
+        let rules = rules(patterns, exclude)
+            .bind(&root)
+            .expect("the exclude list binds");
+        select(&root, &rules).expect("the selection succeeds")
     }
 
     fn pieces(selection: &Selection) -> Vec<String> {
@@ -677,10 +779,13 @@ mod tests {
         tree.dir("other");
         let root = TreeRoot::open(tree.root()).expect("the root opens");
         // An exclude entry that exists makes every directory get stat'd.
-        let all = rules(&["*/*/*"], &["other"]);
+        let all = rules(&["*/*/*"], &["other"])
+            .bind(&root)
+            .expect("the exclude list binds");
         for (call, code, unreadable) in [
             (Call::Stat, Errno::NOENT, None),
             (Call::Stat, Errno::ACCESS, Some("sub")),
+            (Call::Open, Errno::NOENT, None),
             (Call::Open, Errno::ACCESS, Some("sub/dir")),
         ] {
             let hooks = Failing {
@@ -886,6 +991,121 @@ mod tests {
         let engine = rules(&[composed], &[]);
         assert!(engine.matches(&path(composed)));
         assert!(!engine.matches(&path(decomposed)));
+    }
+
+    /// Several faults at once, a listing that reports no kinds, and a depth
+    /// cap.
+    #[derive(Default)]
+    struct Scripted {
+        faults: Vec<(RelPath, Call, Errno)>,
+        unknown_kinds: bool,
+        depth: Option<usize>,
+    }
+
+    impl Hooks for Scripted {
+        fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+            self.faults
+                .iter()
+                .find(|(at, kind, _)| at == path && *kind == call)
+                .map(|(_, _, code)| io::Error::from_raw_os_error(code.raw_os_error()))
+        }
+
+        fn listed_kind(&self, _path: &RelPath, reported: EntryKind) -> EntryKind {
+            [reported, EntryKind::Unknown][usize::from(self.unknown_kinds)]
+        }
+
+        fn max_depth(&self) -> usize {
+            self.depth.unwrap_or(crate::walk::MAX_DEPTH)
+        }
+    }
+
+    #[test]
+    fn a_listing_that_reports_no_kinds_gives_the_same_selection() {
+        let mut tree = Tree::new();
+        tree.dir("a/inner");
+        tree.file("f", "x");
+        tree.symlink("l", "a");
+        tree.dir(".d");
+        tree.dir("other");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        for exclude in [&[][..], &["other"][..]] {
+            let all = rules(&["*"], exclude).bind(&root).expect("binds");
+            let known = select(&root, &all).expect("the selection succeeds");
+            let unknown = Scripted {
+                unknown_kinds: true,
+                ..Scripted::default()
+            };
+            let guessed = select_with(&root, &all, &unknown).expect("the selection succeeds");
+            assert_eq!(guessed, known, "{exclude:?}");
+            assert_eq!(known.skipped_symlinks(), 1);
+            assert_eq!(known.skipped_dot_entries(), 1);
+        }
+    }
+
+    #[test]
+    fn several_unreadable_children_list_their_directory_once() {
+        let mut tree = Tree::new();
+        tree.dir("sub/a");
+        tree.dir("sub/b");
+        tree.dir("other");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let all = rules(&["*/*/*"], &["other"]).bind(&root).expect("binds");
+        let hooks = Scripted {
+            faults: vec![
+                (path("sub/a"), Call::Stat, Errno::ACCESS),
+                (path("sub/b"), Call::Stat, Errno::ACCESS),
+            ],
+            ..Scripted::default()
+        };
+        let selection = select_with(&root, &all, &hooks).expect("the selection succeeds");
+        assert_eq!(selection.unreadable(), [path("sub")]);
+    }
+
+    #[test]
+    fn directories_below_the_depth_cap_are_reported_not_entered() {
+        let mut tree = Tree::new();
+        tree.dir("a/b/c");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let all = rules(&["*/*/*"], &[]);
+        let capped = Scripted {
+            depth: Some(1),
+            ..Scripted::default()
+        };
+        let selection = select_with(&root, &all, &capped).expect("the selection succeeds");
+        assert_eq!(selection.pieces(), []);
+        assert_eq!(selection.unreadable(), [path("a/b")]);
+
+        let roomy = Scripted {
+            depth: Some(2),
+            ..Scripted::default()
+        };
+        let selection = select_with(&root, &all, &roomy).expect("the selection succeeds");
+        assert_eq!(pieces(&selection), ["a/b/c"]);
+        assert!(selection.unreadable().is_empty());
+    }
+
+    #[test]
+    fn running_out_of_descriptors_while_binding_the_exclude_list_ends_the_run() {
+        let mut tree = Tree::new();
+        tree.dir("other");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let hooks = Failing {
+            at: path("other"),
+            call: Call::Stat,
+            code: Errno::MFILE,
+        };
+        let error = rules(&["*"], &["other"])
+            .bind_with(&root, &hooks)
+            .expect_err("a shortage ends the run");
+        assert!(
+            matches!(&error, SelectError::OutOfDescriptors { path: p, .. } if p == &path("other")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_default_depth_cap_is_512_levels() {
+        assert_eq!(RealFs.max_depth(), 512);
     }
 
     #[cfg(target_os = "linux")]

@@ -87,11 +87,12 @@ skipped symlink is one that a pattern selects, a skipped dot entry a
 directory that a pattern would select, or look below, if the dot rule did
 not keep it out.
 
-A pattern is matched one path component at a time. A wildcard (`*`, `?`,
-a bracket class) never matches the start of a component that begins with
-a dot. `**` stands for any number of directories without a leading dot,
-none included, and for one or more at the end of a pattern, so `a/**`
-selects what is below `a` and not `a`. A pattern is refused if it has an
+A pattern is matched one path component at a time. A component that
+begins with a dot is matched only by a pattern component that begins with
+a literal dot; no other pattern component, `*.txt` included, and no `**`
+matches it. `**` stands for any number of directories without a leading
+dot, none included, and for one or more at the end of a pattern, so
+`a/**` selects what is below `a` and not `a`. A pattern is refused if it has an
 empty component (a trailing `/` included), a `.` or `..` component, or a
 `/` inside a bracket class, which never matches a separator.
 
@@ -108,7 +109,14 @@ A directory that selection has to look into and cannot read is skipped
 and reported. A path at or below it is neither new
 nor gone in that run. When the collection root itself cannot be listed,
 the run fails. Running out of file descriptors fails the run as it does
-in a walk. An entry deleted while selection runs is skipped.
+in a walk. An entry deleted while selection runs is skipped. Selection
+looks no more than 512 levels deep; a deeper directory is not entered and
+is reported like one it cannot read.
+
+An exclude entry that exists, found below a selected piece, is not part of
+that piece: the piece is never archived, reclaimed or packed for backup,
+and `status` lists it with the excluded path. An exclude entry that does
+not exist does not count.
 
 A folder at a path that no tracking entry claims is a new piece with a
 new ID, also when an archived piece has the same path; `status` and
@@ -127,6 +135,12 @@ compares the device of every entry with the top directory's, not only
 that of directories: an entry on another device is recorded, and a
 directory there is not entered. Mount points are found by comparing
 device numbers, so a bind mount from the same filesystem is not seen.
+The walk does not enter an excluded directory either: a piece that
+contains an existing exclude entry is treated like one that contains a
+mount point, and `status` lists it with the excluded path. A walk enters
+directories up to 512 levels below the piece's top, since each level holds
+one directory open. A deeper directory is not entered and makes the piece
+unreadable.
 The delete helper never crosses a device boundary.
 
 An entry the walk cannot read makes the piece unreadable: it is never

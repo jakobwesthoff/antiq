@@ -75,6 +75,9 @@ pub enum Problem {
     Unreadable { first: RelPath },
     /// Another device is mounted at this path inside the piece.
     MountPoint { other: RelPath },
+    /// An entry of the collection's exclude list lies at this path inside
+    /// the piece.
+    Excluded { path: RelPath },
 }
 
 /// A piece as the walk saw it.

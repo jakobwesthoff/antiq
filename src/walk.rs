@@ -4,8 +4,9 @@
 
 //! The lstat walk of a piece.
 
-use crate::fsx::tree::TreeRoot;
+use crate::fsx::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
+use crate::select::Rules;
 use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
 use rustix::io::Errno;
 use std::io;
@@ -37,7 +38,23 @@ pub(crate) trait Hooks {
     /// An error to raise instead of making the call of kind `call` that
     /// works on `path`.
     fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error>;
+
+    /// The kind to use for the entry at `path` in place of the `reported`
+    /// one, which a listing may leave as `Unknown`.
+    fn listed_kind(&self, _path: &RelPath, reported: EntryKind) -> EntryKind {
+        reported
+    }
+
+    /// How many directory levels below its start a walk or a selection
+    /// enters.
+    fn max_depth(&self) -> usize {
+        MAX_DEPTH
+    }
 }
+
+/// Each level a walk is inside holds one directory open. The cap leaves
+/// room for many walks at once under the limit of open files.
+pub(crate) const MAX_DEPTH: usize = 512;
 
 /// The kind of filesystem call a [`Hooks::fault`] can replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,28 +89,35 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// entry with the root path. Nothing is followed: every entry is read with
 /// `lstat`, and a directory is entered only while it stays on the device of
 /// the top directory. Files named in `junk` are left out; a directory
-/// with a junk name is walked like any other.
+/// with a junk name is walked like any other. An entry that is on the
+/// exclude list of `rules` is reported and, if a directory, not entered.
+/// A directory more than [`MAX_DEPTH`] levels below the top is not entered
+/// and makes the piece unreadable.
 pub fn walk_piece(
     collection: &TreeRoot,
     top: &RelPath,
     junk: &[Name],
+    rules: &Rules,
 ) -> Result<PieceTree, WalkError> {
-    walk_piece_with(collection, top, junk, &RealFs)
+    walk_piece_with(collection, top, junk, rules, &RealFs)
 }
 
 pub(crate) fn walk_piece_with(
     collection: &TreeRoot,
     top: &RelPath,
     junk: &[Name],
+    rules: &Rules,
     hooks: &dyn Hooks,
 ) -> Result<PieceTree, WalkError> {
     let mut walker = Walker {
         piece: top,
         junk,
+        rules,
         hooks,
         top_device: 0,
         entries: Vec::new(),
         mount_points: Vec::new(),
+        excluded: Vec::new(),
         first_failure: None,
     };
     let root = RelPath::root();
@@ -119,7 +143,15 @@ pub(crate) fn walk_piece_with(
             let not_a_directory = io::Error::from_raw_os_error(Errno::NOTDIR.raw_os_error());
             walker.note_failure(&root, not_a_directory)?;
         } else if let Some(directory) = walker.attempt(&root, Call::Open, || collection.sub(top))? {
-            walker.walk_directory(&directory, &root)?;
+            // One directory is open per level, so the levels are kept in
+            // a list of their own and not on the call stack: a deep tree
+            // costs no deep recursion, and the cap on the depth keeps the
+            // open directories few.
+            let mut levels = Vec::new();
+            levels.extend(walker.open_level(directory, root)?);
+            while !levels.is_empty() {
+                walker.step(&mut levels)?;
+            }
         }
     }
 
@@ -134,17 +166,33 @@ pub(crate) fn walk_piece_with(
             .into_iter()
             .map(|other| Problem::MountPoint { other }),
     );
+    walker.excluded.sort();
+    problems.extend(
+        walker
+            .excluded
+            .into_iter()
+            .map(|path| Problem::Excluded { path }),
+    );
     Ok(PieceTree::new(top.clone(), walker.entries, problems))
+}
+
+/// A directory being walked: what is left of its listing.
+struct Level {
+    directory: TreeRoot,
+    at: RelPath,
+    children: std::vec::IntoIter<DirEntry>,
 }
 
 struct Walker<'a> {
     piece: &'a RelPath,
     junk: &'a [Name],
+    rules: &'a Rules,
     hooks: &'a dyn Hooks,
     /// The device every entry of the piece has to be on, after the hook.
     top_device: u64,
     entries: Vec<TreeEntry>,
     mount_points: Vec<RelPath>,
+    excluded: Vec<RelPath>,
     /// The smallest path, in entry order, that could not be read.
     first_failure: Option<RelPath>,
 }
@@ -189,42 +237,70 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// Records the children of `directory`, which lies at `at` below the
-    /// top, and enters the ones that are directories on the top's device.
+    /// Lists `directory`, which lies at `at` below the top.
+    fn open_level(&mut self, directory: TreeRoot, at: RelPath) -> Result<Option<Level>, WalkError> {
+        let Some(mut listing) =
+            self.attempt(&at, Call::List, || directory.read_dir(&RelPath::root()))?
+        else {
+            return Ok(None);
+        };
+        listing.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(Level {
+            directory,
+            at,
+            children: listing.into_iter(),
+        }))
+    }
+
+    /// Records the next entry of the innermost directory and, if it is a
+    /// directory on the top's device, opens it as the new innermost one.
     /// Each directory is opened from its parent, so no call ever passes a
     /// path longer than one name.
-    fn walk_directory(&mut self, directory: &TreeRoot, at: &RelPath) -> Result<(), WalkError> {
-        let Some(mut listing) =
-            self.attempt(at, Call::List, || directory.read_dir(&RelPath::root()))?
+    fn step(&mut self, levels: &mut Vec<Level>) -> Result<(), WalkError> {
+        let depth = levels.len();
+        let level = levels
+            .last_mut()
+            .expect("the walk steps only while a level is open");
+        let Some(listed) = level.children.next() else {
+            levels.pop();
+            return Ok(());
+        };
+        let child = level.at.join(&listed.name);
+        let single = RelPath::from_bytes(listed.name.as_bytes().to_vec())
+            .expect("a listed name is a valid path of one component");
+        let Some(mut entry) =
+            self.attempt(&child, Call::Stat, || level.directory.lstat(&single))?
         else {
             return Ok(());
         };
-        listing.sort_by(|a, b| a.name.cmp(&b.name));
+        if entry.kind != EntryKind::Directory && self.junk.contains(&listed.name) {
+            return Ok(());
+        }
+        entry.path = child.clone();
 
-        for listed in listing {
-            let child = at.join(&listed.name);
-            let single = RelPath::from_bytes(listed.name.as_bytes().to_vec())
-                .expect("a listed name is a valid path of one component");
-            let Some(mut entry) = self.attempt(&child, Call::Stat, || directory.lstat(&single))?
-            else {
-                continue;
-            };
-            if entry.kind != EntryKind::Directory && self.junk.contains(&listed.name) {
-                continue;
-            }
-            entry.path = child.clone();
-
-            let foreign = self.hooks.device(&child, entry.device) != self.top_device;
-            if foreign {
-                self.mount_points.push(child.clone());
-            }
-            let enter = entry.kind == EntryKind::Directory && !foreign;
-            self.entries.push(entry);
-            if enter
-                && let Some(inner) = self.attempt(&child, Call::Open, || directory.sub(&single))?
-            {
-                self.walk_directory(&inner, &child)?;
-            }
+        let foreign = self.hooks.device(&child, entry.device) != self.top_device;
+        if foreign {
+            self.mount_points.push(child.clone());
+        }
+        let excluded = self.rules.has_exclusions()
+            && self
+                .rules
+                .excludes(&self.piece.concat(&child), entry.device, entry.inode);
+        if excluded {
+            self.excluded.push(child.clone());
+        }
+        let enter = entry.kind == EntryKind::Directory && !foreign && !excluded;
+        self.entries.push(entry);
+        if !enter {
+            return Ok(());
+        }
+        if depth > self.hooks.max_depth() {
+            let too_deep = io::Error::other("the directory is nested too deeply");
+            return self.note_failure(&child, too_deep);
+        }
+        if let Some(inner) = self.attempt(&child, Call::Open, || level.directory.sub(&single))? {
+            let opened = self.open_level(inner, child)?;
+            levels.extend(opened);
         }
         Ok(())
     }
@@ -244,6 +320,10 @@ mod tests {
         RelPath::parse(text).expect("valid path")
     }
 
+    fn no_rules() -> Rules {
+        Rules::new(&[], &[]).expect("no patterns are valid")
+    }
+
     fn name(text: &str) -> Name {
         Name::from_bytes(text.as_bytes().to_vec()).expect("valid name")
     }
@@ -257,9 +337,14 @@ mod tests {
     struct Staged {
         foreign: Vec<RelPath>,
         faults: Vec<(RelPath, Call, Errno)>,
+        depth: Option<usize>,
     }
 
     impl Hooks for Staged {
+        fn max_depth(&self) -> usize {
+            self.depth.unwrap_or(MAX_DEPTH)
+        }
+
         fn device(&self, path: &RelPath, reported: u64) -> u64 {
             if self.foreign.contains(path) {
                 reported + 1
@@ -287,7 +372,7 @@ mod tests {
         hooks: &dyn Hooks,
     ) -> Result<PieceTree, WalkError> {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        walk_piece_with(&root, &path(top), junk, hooks)
+        walk_piece_with(&root, &path(top), junk, &no_rules(), hooks)
     }
 
     fn paths(tree: &PieceTree) -> Vec<String> {
@@ -487,6 +572,97 @@ mod tests {
     }
 
     #[test]
+    fn mount_points_are_listed_in_entry_order() {
+        let mut tree = Tree::new();
+        tree.file("piece/dir/x", "x");
+        tree.file("piece/dir-y", "y");
+        let hooks = Staged {
+            foreign: vec![path("dir/x"), path("dir-y")],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::MountPoint {
+                    other: path("dir-y")
+                },
+                Problem::MountPoint {
+                    other: path("dir/x")
+                }
+            ]
+        );
+    }
+
+    fn walk_excluding(tree: &Tree, exclude: &[&str]) -> PieceTree {
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let exclude: Vec<RelPath> = exclude.iter().map(|p| path(p)).collect();
+        let rules = Rules::new(&[], &exclude)
+            .expect("no patterns are valid")
+            .bind(&root)
+            .expect("the exclude list binds");
+        walk_piece(&root, &path("piece"), &[], &rules).expect("the walk succeeds")
+    }
+
+    #[test]
+    fn an_existing_exclude_entry_inside_a_piece_is_reported_and_not_entered() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/keep/inner", "x");
+        tree.file("piece/sub/f", "x");
+        let walked = walk_excluding(&tree, &["piece/sub/keep"]);
+        assert_eq!(paths(&walked), ["", "sub", "sub/f", "sub/keep"]);
+        assert_eq!(
+            walked.problems(),
+            [Problem::Excluded {
+                path: path("sub/keep")
+            }]
+        );
+    }
+
+    #[test]
+    fn an_exclude_entry_that_does_not_exist_changes_nothing() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/f", "x");
+        let walked = walk_excluding(&tree, &["piece/sub/never"]);
+        assert!(walked.problems().is_empty());
+    }
+
+    #[test]
+    fn an_exclude_entry_is_found_under_another_spelling_where_the_volume_allows_it() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/keep/inner", "x");
+        let insensitive = fs::metadata(tree.path("PIECE")).is_ok();
+        let walked = walk_excluding(&tree, &["PIECE/SUB/KEEP"]);
+        let found = [Problem::Excluded {
+            path: path("sub/keep"),
+        }];
+        assert_eq!(walked.problems(), &found[..usize::from(insensitive)]);
+    }
+
+    #[test]
+    fn directories_below_the_depth_cap_make_the_piece_unreadable_and_are_not_entered() {
+        let mut tree = Tree::new();
+        tree.file("piece/a/b/c/d/f", "x");
+        let hooks = Staged {
+            depth: Some(2),
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(paths(&walked), ["", "a", "a/b", "a/b/c"]);
+        assert_eq!(
+            walked.problems(),
+            [Problem::Unreadable {
+                first: path("a/b/c")
+            }]
+        );
+    }
+
+    #[test]
+    fn the_default_depth_cap_is_512_levels() {
+        assert_eq!(RealFs.max_depth(), 512);
+    }
+
+    #[test]
     fn a_file_on_another_device_is_a_mount_point_too() {
         let mut tree = Tree::new();
         tree.file("piece/sub/f", "x");
@@ -555,7 +731,8 @@ mod tests {
             .write_all(b"x")
             .expect("the file is written");
 
-        let walked = walk_piece(&root, &path("piece"), &[]).expect("the walk succeeds");
+        let walked =
+            walk_piece(&root, &path("piece"), &[], &no_rules()).expect("the walk succeeds");
 
         assert_eq!(walked.entries().len(), 1 + 25 + 1);
         let last = walked.entries().last().expect("entries exist");
