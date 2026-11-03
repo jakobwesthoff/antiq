@@ -218,11 +218,28 @@ Options A and B need neither: rsync's ssh child joins the master socket.
 - russh becomes worth a look only where no OpenSSH client exists, and
   would still need the rsync shim.
 
+## Measured later
+
+Measured 2026-11-03 on the same Mac against an sshd started as the user
+on 127.0.0.1 (**measured**):
+
+- `ssh -M` binds the ControlPath with a suffix of 17 characters, so the
+  longest ControlPath that works is 86 bytes: 86 bytes worked, 87 failed
+  with ssh's error about the path length. This narrows the 104 bytes of
+  `sun_path` above.
+- Starting a new master on the socket of a master that had died left a
+  plain `ssh -N` process behind and the run without multiplexing.
+- "Connection refused" also appears when the control socket is stale,
+  not only when the host refuses the connection.
+- When the server refuses a session because of `MaxSessions`, ssh
+  prints a line starting with `mux_client_`.
+
 ## Not verified
 
-- No SSH server was reachable, so multiplexing, a killed master, a stale
-  socket and connection cost were not tested; points 9 and 10 rest on
-  documentation.
+- No SSH server was reachable during this research, so multiplexing, a
+  killed master, a stale socket and connection cost were not tested
+  here; points 9 and 10 rest on documentation. "Measured later" covers
+  a dead master and a stale socket; connection cost stays untested.
 - The NAS's sshd: version, algorithms, login shell and `MaxSessions`
   (OpenSSH's default is 10 sessions per connection, **read**,
   `man sshd_config`) are untested.

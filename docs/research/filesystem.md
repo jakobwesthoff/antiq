@@ -243,6 +243,11 @@ RustSec has no entries for most of these; `nix` has RUSTSEC-2021-0119
   on Linux, through `rustix` or `nix`.
 - Free space: `statvfs` through `rustix` or `fs4`, not `sysinfo`.
 
+## Measured later
+
+Measured 2026-11-03 (**measured**): `launchctl limit maxfiles` shows a
+soft limit of 256 open files for the jobs launchd starts.
+
 ## Not verified
 
 - Network mounts and x86_64 on Linux.

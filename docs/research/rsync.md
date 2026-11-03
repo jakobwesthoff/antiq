@@ -183,6 +183,13 @@ payload file per version. Neither was tested.
 - `fast_rsync` would be the library for a NAS helper of antiq's own, a
   route not needed for v1.
 
+## Measured later
+
+Measured 2026-11-03 with rsync 3.5.1 (**measured**): rsync killed hard
+during a transfer onto a temporary name `<temp>` left a file named
+`<temp>.` followed by six characters of `[A-Za-z0-9]` in the target
+directory.
+
 ## Not verified
 
 - Anything against the real NAS or over real SSH: the 3.1.x stats

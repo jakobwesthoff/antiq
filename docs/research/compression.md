@@ -177,6 +177,18 @@ which antiq does not control.
   and parameters with each package make a version change visible; a
   change means one full re-upload.
 
+## Measured later
+
+Measured 2026-11-03 (**measured**): a level-19 encoder of the `zstd`
+crate reached about 150 MB of resident memory even for an input of
+10 KB.
+
+`zstd-sys` 2.1.2 has the default features `legacy` and
+`zdict_builder`; `zstd-safe` 8.2.0 depends on it with
+`default-features = false` (**read**, their `Cargo.toml`). A direct
+dependency on `zstd-sys` with its default features switches both back
+on through feature unification.
+
 ## Not verified
 
 - Byte identity on another machine or on Linux.

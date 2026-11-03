@@ -248,6 +248,14 @@ On the test Mac `scutil --get ComputerName` printed `imperius` and
 - Machine name: `whoami::devicename()`, falling back to the hostname on
   error.
 
+## Read later
+
+Read 2026-11-03 (**read**, glob 0.3.4 `src/lib.rs`, `matches_path` and
+`matches_path_with`): both convert the path with `to_str()` and answer
+"no match" for a path that is not valid UTF-8, marked `FIXME (#9639)`
+in the source. A name that is not UTF-8 therefore never matches a
+pattern through these functions.
+
 ## Not verified
 
 - Anything on Linux.
