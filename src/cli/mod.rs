@@ -10,7 +10,9 @@ pub mod output;
 pub mod tty;
 
 use self::output::Output;
+use self::tty::TtyInteraction;
 use antiq::error::ErrorKind;
+use antiq::interact::{Interaction, NonInteractive};
 use antiq::remote::policy::{self, Outcome};
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use serde_json::Map;
@@ -291,6 +293,25 @@ pub struct Context {
     pub directory: Option<PathBuf>,
 }
 
+#[allow(
+    dead_code,
+    reason = "each command asks through the interaction it needs"
+)]
+impl Context {
+    /// Whom a command asks. `--json` never asks. Otherwise the controlling
+    /// terminal answers, also when the output is redirected; without one
+    /// nobody does.
+    pub fn interaction(&self) -> Box<dyn Interaction> {
+        if self.json {
+            return Box::new(NonInteractive);
+        }
+        match TtyInteraction::open() {
+            Ok(tty) => Box::new(tty),
+            Err(_) => Box::new(NonInteractive),
+        }
+    }
+}
+
 /// Runs the command line `args` (starting with the program name), writes
 /// its output through `out` and returns the exit code.
 pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
@@ -502,6 +523,35 @@ mod tests {
         let capture = Capture::default();
         let code = finish(cli, result, &mut capture.output(false), policy::outcome);
         (code, capture.stdout(), capture.stderr())
+    }
+
+    fn question() -> antiq::interact::Question {
+        antiq::interact::Question {
+            title: "Replace the archive?".into(),
+            details: vec![],
+            choices: vec![antiq::interact::Choice::new("skip", "Skip")],
+            default: 0,
+        }
+    }
+
+    #[test]
+    fn json_never_asks() {
+        let ctx = Context {
+            json: true,
+            directory: None,
+        };
+        assert_eq!(ctx.interaction().choose(&question()), None);
+    }
+
+    #[test]
+    fn without_json_the_terminal_is_asked_if_there_is_one() {
+        let ctx = Context {
+            json: false,
+            directory: None,
+        };
+        // Asking would wait for a keypress where a terminal exists, so
+        // this only checks that either kind of interaction is made.
+        let _interaction = ctx.interaction();
     }
 
     #[test]
