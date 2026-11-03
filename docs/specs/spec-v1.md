@@ -99,12 +99,19 @@ the piece's top directory. A piece that contains another device (a
 mount point or a btrfs subvolume) is never archived, reclaimed or packed
 for backup; `status` lists it with the path of the mount point. A piece
 whose top directory is itself on another device than the collection
-root counts as containing a mount point, at its own path. The delete
-helper never crosses a device boundary.
+root counts as containing a mount point, at its own path. The walk
+compares the device of every entry with the top directory's, not only
+that of directories: an entry on another device is recorded, and a
+directory there is not entered. Mount points are found by comparing
+device numbers, so a bind mount from the same filesystem is not seen.
+The delete helper never crosses a device boundary.
 
 An entry the walk cannot read makes the piece unreadable: it is never
 idle, never archived, its live package is not refreshed, and `status`
-lists it with the first entry that failed. Running out of file
+lists it with the first entry that failed. That is the smallest path
+among the failed entries, in the byte order the entries are sorted by.
+An entry that has vanished since its directory was listed counts as one
+the walk cannot read. Running out of file
 descriptors (`EMFILE`, `ENFILE`) is not an unreadable entry: it fails
 the run. antiq raises its soft limit of open files at start, since
 launchd starts jobs with a soft limit of 256.
@@ -127,7 +134,8 @@ activity. (ADR 0013, ADR 0029)
 
 A junk list, by default `.DS_Store`, is left out of the idle check,
 packages, listings and verification. Junk files are not packed into
-archives or live packages. The junk list is separate from the ignore
+archives or live packages. Only entries that are not directories are
+junk: a directory with a junk name is walked like any other. The junk list is separate from the ignore
 rules.
 
 For an unearthed piece, the idle clock starts at the later of its newest
