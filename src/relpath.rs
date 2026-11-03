@@ -163,6 +163,20 @@ impl RelPath {
         RelPath(bytes)
     }
 
+    /// `other` below this path.
+    pub fn concat(&self, other: &RelPath) -> RelPath {
+        match (self.is_root(), other.is_root()) {
+            (_, true) => self.clone(),
+            (true, false) => other.clone(),
+            (false, false) => {
+                let mut bytes = self.0.clone();
+                bytes.push(b'/');
+                bytes.extend_from_slice(&other.0);
+                RelPath(bytes)
+            }
+        }
+    }
+
     /// The names of the path, from the top. The root has none.
     pub fn components(&self) -> impl Iterator<Item = &[u8]> {
         self.0
@@ -408,6 +422,18 @@ mod tests {
         assert_eq!(components, [&b"a"[..], b"b", b"c"]);
         assert_eq!(RelPath::root().join(&name).as_bytes(), b"c");
         assert!(!path.is_root());
+    }
+
+    #[test]
+    fn a_path_is_appended_to_another_with_a_single_slash() {
+        let (a, b) = (
+            RelPath::parse("a").expect("valid"),
+            RelPath::parse("b/c").expect("valid"),
+        );
+        assert_eq!(a.concat(&b).as_bytes(), b"a/b/c");
+        assert_eq!(a.concat(&RelPath::root()), a);
+        assert_eq!(RelPath::root().concat(&b), b);
+        assert!(RelPath::root().concat(&RelPath::root()).is_root());
     }
 
     #[test]

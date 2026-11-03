@@ -11,6 +11,18 @@
 //! time, each relative to the previous one, so no call ever sees more than
 //! one name. Every component is opened with `O_NOFOLLOW`, so a symlink
 //! inside the tree is never traversed.
+//!
+//! Each call opens all the directories above its entry again, so its cost
+//! grows with the depth of the path. A walker that goes down a tree
+//! descends with [`TreeRoot::sub`], which holds the directory it has
+//! reached open, and passes only the names below it.
+//!
+//! Two path conventions hold for every method. The paths a method takes
+//! are relative to the root it is called on. The paths a method returns
+//! ([`TreeEntry::path`], [`DirEntry::path`]) are relative to the root the
+//! chain of `sub` calls started from, so that the same entry has the same
+//! path wherever it was reached from. [`TreeRoot::prefix`] is the path of
+//! a root below that original root.
 
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
@@ -37,12 +49,18 @@ const DIRECTORY: OFlags = OFlags::RDONLY
 #[derive(Debug)]
 pub struct TreeRoot {
     fd: OwnedFd,
+    /// Where this root lies below the root the chain of `sub` calls
+    /// started from; the root path for a root made by `open`.
+    prefix: RelPath,
 }
 
 /// One entry of a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
     pub name: Name,
+    /// The path of the entry, relative to the original root (see the
+    /// module documentation).
+    pub path: RelPath,
     /// The kind the directory reports; `Unknown` when it reports none.
     pub kind: EntryKind,
 }
@@ -70,18 +88,32 @@ impl TreeRoot {
     pub fn open(path: &Path) -> io::Result<TreeRoot> {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
         let fd = open(path, flags, Mode::empty())?;
-        Ok(TreeRoot { fd })
-    }
-
-    /// The directory at `path` as a root of its own.
-    pub fn sub(&self, path: &RelPath) -> io::Result<TreeRoot> {
         Ok(TreeRoot {
-            fd: self.open_dir(path)?,
+            fd,
+            prefix: RelPath::root(),
         })
     }
 
-    /// `lstat` of the entry, with the target of a symlink. The root path
-    /// stands for the root directory.
+    /// The directory at `path`, relative to this root, as a root of its
+    /// own. It holds that directory open, so what it reaches costs nothing
+    /// for the directories above, and it keeps working when they can no
+    /// longer be entered.
+    pub fn sub(&self, path: &RelPath) -> io::Result<TreeRoot> {
+        Ok(TreeRoot {
+            fd: self.open_dir(path)?,
+            prefix: self.prefix.concat(path),
+        })
+    }
+
+    /// Where this root lies below the root the chain of `sub` calls
+    /// started from; the root path for a root made by `open`.
+    pub fn prefix(&self) -> &RelPath {
+        &self.prefix
+    }
+
+    /// `lstat` of the entry at `path`, relative to this root, with the
+    /// target of a symlink. The root path stands for the root directory
+    /// itself. The returned `path` is relative to the original root.
     pub fn lstat(&self, path: &RelPath) -> io::Result<TreeEntry> {
         let (dir, name) = self.split_or_root(path)?;
         let raw = read_stat(dir.as_fd(), name)?;
@@ -91,7 +123,7 @@ impl TreeRoot {
             _ => None,
         };
         Ok(TreeEntry {
-            path: path.clone(),
+            path: self.prefix.concat(path),
             kind,
             size: raw.size,
             allocated: raw.allocated,
@@ -106,13 +138,17 @@ impl TreeRoot {
         })
     }
 
+    /// The target of the symlink at `path`, relative to this root.
     pub fn read_link(&self, path: &RelPath) -> io::Result<Vec<u8>> {
         let (dir, name) = self.split(path)?;
         Ok(readlinkat(dir.as_fd(), name, Vec::new())?.into_bytes())
     }
 
-    /// The entries of a directory, in the order the filesystem gives them.
+    /// The entries of the directory at `path`, relative to this root, in
+    /// the order the filesystem gives them. Each entry's `path` is
+    /// relative to the original root.
     pub fn read_dir(&self, path: &RelPath) -> io::Result<Vec<DirEntry>> {
+        let directory = self.prefix.concat(path);
         let mut entries = Vec::new();
         for entry in Dir::new(self.open_dir(path)?)? {
             let entry = entry?;
@@ -123,12 +159,14 @@ impl TreeRoot {
             let name = Name::from_bytes(bytes.to_vec())
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             let kind = EntryKind::from_mode(RawMode::from(entry.file_type().as_raw_mode()).into());
-            entries.push(DirEntry { name, kind });
+            let path = directory.join(&name);
+            entries.push(DirEntry { name, path, kind });
         }
         Ok(entries)
     }
 
-    /// Opens a file for reading. The open never waits for a writer, so a
+    /// Opens the file at `path`, relative to this root, for reading. The
+    /// open never waits for a writer, so a
     /// fifo that replaced the file cannot stall it; a symlink is refused.
     pub fn open_read(&self, path: &RelPath) -> io::Result<File> {
         let (dir, name) = self.split(path)?;
@@ -136,12 +174,14 @@ impl TreeRoot {
         Ok(File::from(openat(dir.as_fd(), name, flags, Mode::empty())?))
     }
 
+    /// Creates the directory `path`, relative to this root.
     pub fn create_dir(&self, path: &RelPath, mode: u32) -> io::Result<()> {
         let (dir, name) = self.split(path)?;
         Ok(mkdirat(dir.as_fd(), name, mode_bits(mode))?)
     }
 
-    /// Creates a file for writing; fails if the name exists.
+    /// Creates the file `path`, relative to this root, for writing; fails
+    /// if the name exists.
     pub fn create_file(&self, path: &RelPath, mode: u32) -> io::Result<File> {
         let (dir, name) = self.split(path)?;
         let flags =
@@ -154,13 +194,15 @@ impl TreeRoot {
         )?))
     }
 
-    /// Creates a symlink holding `target` as given.
+    /// Creates the symlink `path`, relative to this root, holding `target`
+    /// as given.
     pub fn create_symlink(&self, path: &RelPath, target: &[u8]) -> io::Result<()> {
         let (dir, name) = self.split(path)?;
         Ok(symlinkat(target, dir.as_fd(), name)?)
     }
 
-    /// Gives the file at `existing` a second name, `new`.
+    /// Gives the file at `existing` a second name, `new`; both are
+    /// relative to this root.
     pub fn hard_link(&self, existing: &RelPath, new: &RelPath) -> io::Result<()> {
         let (from, from_name) = self.split(existing)?;
         let (to, to_name) = self.split(new)?;
@@ -169,7 +211,8 @@ impl TreeRoot {
         Ok(())
     }
 
-    /// Sets the permission bits of a file or directory. A symlink is
+    /// Sets the permission bits of the file or directory at `path`,
+    /// relative to this root. A symlink is
     /// refused: Linux has no way to change a symlink's mode.
     pub fn set_mode(&self, path: &RelPath, mode: u32) -> io::Result<()> {
         let (dir, name) = self.split_or_root(path)?;
@@ -187,8 +230,8 @@ impl TreeRoot {
     }
 
     /// Sets the modification time, in nanoseconds since the epoch, of the
-    /// entry itself: the time of a symlink is its own, not its target's.
-    /// The access time stays.
+    /// entry at `path`, relative to this root: the time of a symlink is
+    /// its own, not its target's. The access time stays.
     pub fn set_times(&self, path: &RelPath, mtime_ns: i128) -> io::Result<()> {
         let (dir, name) = self.split_or_root(path)?;
         let seconds = i64::try_from(mtime_ns.div_euclid(NANOS_PER_SECOND))
@@ -209,9 +252,9 @@ impl TreeRoot {
         Ok(())
     }
 
-    /// Moves the entry at `from` to `to` in `to_root`, which may be this
-    /// root. An existing target is never replaced: the rename fails with
-    /// `AlreadyExists`.
+    /// Moves the entry at `from` to `to` in `to_root`, each relative to its
+    /// own root. `to_root` may be this root. An existing target is never
+    /// replaced: the rename fails with `AlreadyExists`.
     ///
     /// The refusal is atomic with the rename where the filesystem supports
     /// a no-replace rename. On one that does not (smbfs, for example) the
@@ -230,14 +273,14 @@ impl TreeRoot {
         )
     }
 
-    /// Removes a file, a symlink or any other entry that is not a
-    /// directory.
+    /// Removes the file, symlink or other non-directory entry at `path`,
+    /// relative to this root.
     pub fn remove_file(&self, path: &RelPath) -> io::Result<()> {
         let (dir, name) = self.split(path)?;
         Ok(unlinkat(dir.as_fd(), name, AtFlags::empty())?)
     }
 
-    /// Removes an empty directory.
+    /// Removes the empty directory at `path`, relative to this root.
     pub fn remove_dir(&self, path: &RelPath) -> io::Result<()> {
         let (dir, name) = self.split(path)?;
         Ok(unlinkat(dir.as_fd(), name, AtFlags::REMOVEDIR)?)
@@ -399,14 +442,27 @@ mod tests {
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;
     use rustix::io::Errno;
+    use std::fs::Permissions;
     use std::io::{Read, Write};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
     fn path(text: &str) -> RelPath {
         RelPath::parse(text).expect("valid path")
+    }
+
+    /// Restores the permissions of directories a test locked.
+    struct Unlock(Vec<std::path::PathBuf>);
+
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::set_permissions(path, Permissions::from_mode(0o755));
+            }
+        }
     }
 
     fn name(text: &str) -> Name {
@@ -772,6 +828,69 @@ mod tests {
             sub.lstat(&path("file")).expect("stat").kind,
             EntryKind::File
         );
+    }
+
+    #[test]
+    fn a_sub_root_takes_paths_relative_to_itself_and_reports_paths_relative_to_the_original() {
+        let mut tree = Tree::new();
+        tree.file("a/b/f", "x");
+        let root = root_of(&tree);
+        assert!(root.prefix().is_root());
+        let sub = root.sub(&path("a/b")).expect("the subtree opens");
+        assert_eq!(sub.prefix(), &path("a/b"));
+        assert_eq!(sub.lstat(&path("f")).expect("stat").path, path("a/b/f"));
+    }
+
+    #[test]
+    fn the_root_of_a_sub_root_is_reported_as_the_path_it_was_opened_at() {
+        let mut tree = Tree::new();
+        tree.dir("a/b");
+        let sub = root_of(&tree).sub(&path("a/b")).expect("the subtree opens");
+        let entry = sub.lstat(&RelPath::root()).expect("stat");
+        assert_eq!(entry.path, path("a/b"));
+        assert_eq!(entry.kind, EntryKind::Directory);
+    }
+
+    #[test]
+    fn a_sub_root_of_a_sub_root_carries_both_prefixes() {
+        let mut tree = Tree::new();
+        tree.file("a/b/c/f", "x");
+        let root = root_of(&tree);
+        let inner = root
+            .sub(&path("a"))
+            .and_then(|a| a.sub(&path("b/c")))
+            .expect("the subtrees open");
+        assert_eq!(inner.prefix(), &path("a/b/c"));
+        assert_eq!(inner.lstat(&path("f")).expect("stat").path, path("a/b/c/f"));
+    }
+
+    #[test]
+    fn a_listing_through_a_sub_root_names_each_entry_relative_to_the_original() {
+        let mut tree = Tree::new();
+        tree.file("a/b/x", "1");
+        let sub = root_of(&tree).sub(&path("a")).expect("the subtree opens");
+        let listed = sub.read_dir(&path("b")).expect("listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_bytes(), b"x");
+        assert_eq!(listed[0].path, path("a/b/x"));
+        let from_root = root_of(&tree).read_dir(&RelPath::root()).expect("listed");
+        assert_eq!(from_root[0].path, path("a"));
+    }
+
+    #[test]
+    fn a_sub_root_stays_usable_when_an_ancestor_can_no_longer_be_entered() {
+        let mut tree = Tree::new();
+        tree.file("a/b/c/f", "x");
+        let sub = root_of(&tree).sub(&path("a/b")).expect("the subtree opens");
+        let ancestor = tree.path("a");
+        let _unlock = Unlock(vec![ancestor.clone()]);
+        std::fs::set_permissions(&ancestor, Permissions::from_mode(0o000)).expect("mode is set");
+        assert!(
+            std::fs::metadata(ancestor.join("b")).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+        let entry = sub.lstat(&path("c/f")).expect("the file is still reached");
+        assert_eq!(entry.path, path("a/b/c/f"));
     }
 
     #[test]
