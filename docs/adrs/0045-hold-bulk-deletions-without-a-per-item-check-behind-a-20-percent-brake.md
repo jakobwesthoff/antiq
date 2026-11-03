@@ -28,7 +28,8 @@ would hold. Removing live packages and moving archives to the
 remote-only tier do not go through the brake.
 
 No archive on the remote is deleted except when a newer, verified and
-committed version of the same ID replaces it.
+committed version of the same ID replaces it, or by an explicit drop of
+a superseded version.
 
 ## Consequences
 

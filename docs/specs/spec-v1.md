@@ -132,11 +132,13 @@ previous one as the current archive. Forking gives an object a new ID.
 
 The ID time is the earliest of the directory's birth time and the birth
 and modification times of every entry inside it, ignoring times before
-1990. Its source (`birth`, `oldest-mtime`, `import`, `fork`) is stored
-with it. The ID is minted once and never recomputed. (ADR 0039) `archive`
-and `sync` mint IDs for new pieces, `fork` for the fork (source `fork`,
-the time of the fork), `import` for each archive (source `import`).
-`status` shows a piece without an ID as new.
+1990; when no such time remains, it is the time of minting, with a
+warning. Its source (`birth`, `oldest-mtime`, `import`, `fork`,
+`minted`) is stored with it. The ID is minted once and never
+recomputed. (ADR 0039) `archive` and `sync` mint IDs for new pieces,
+`fork` for the fork (source `fork`, the time of the fork), `import` for
+each archive (source `import`). `status` shows a piece without an ID as
+new.
 
 A live folder's package and its later archive are the same object.
 (ADR 0018)
@@ -173,7 +175,7 @@ are written in this order:
 | `path` | string | relative path in the collection, escaped form |
 | `name` | string | the folder's name, escaped form |
 | `created` | string | ID time, RFC 3339 UTC |
-| `created_source` | string | `birth`, `oldest-mtime`, `import` or `fork` |
+| `created_source` | string | `birth`, `oldest-mtime`, `import`, `fork` or `minted` |
 | `lifecycle` | string | `live` or `archived` |
 | `payloads` | array | payload objects, below |
 | `history` | array | append-only, entries `{time, machine, action}` |
