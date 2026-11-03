@@ -227,6 +227,10 @@ bytes.
 The history entry that a version adds carries the time that version was
 committed, not the time the change was recorded locally; the
 remote-only tier is measured from it.
+`file` and `listing` name files in the object's directory, so each is one
+plain name: not empty, without `/` or NUL, not starting with a dot. In
+format 1 they have the names of the remote layout under "Storage". A
+document that breaks either rule is refused when it is read.
 Unknown fields are kept on rewrite. A file with a higher `format` is
 read-only and any write to it fails with a clear error. (ADR 0053)
 
