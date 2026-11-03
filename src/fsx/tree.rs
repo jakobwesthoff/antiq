@@ -16,9 +16,11 @@ use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{
-    AtFlags, Dir, Mode, OFlags, RawMode, Timespec, Timestamps, UTIME_OMIT, chmodat, linkat,
-    mkdirat, open, openat, readlinkat, symlinkat, unlinkat, utimensat,
+    AtFlags, Dir, Mode, OFlags, RawMode, RenameFlags, Timespec, Timestamps, UTIME_OMIT, chmodat,
+    linkat, mkdirat, open, openat, readlinkat, renameat, renameat_with, statat, symlinkat,
+    unlinkat, utimensat,
 };
+use rustix::io::Errno;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -207,6 +209,27 @@ impl TreeRoot {
         Ok(())
     }
 
+    /// Moves the entry at `from` to `to` in `to_root`, which may be this
+    /// root. An existing target is never replaced: the rename fails with
+    /// `AlreadyExists`.
+    ///
+    /// The refusal is atomic with the rename where the filesystem supports
+    /// a no-replace rename. On one that does not (smbfs, for example) the
+    /// target is looked at first and renamed to afterwards, and in the
+    /// window between the two another process could create it. antiq
+    /// moves entries under the run lock.
+    pub fn rename(&self, from: &RelPath, to_root: &TreeRoot, to: &RelPath) -> io::Result<()> {
+        let (source, source_name) = self.split(from)?;
+        let (target, target_name) = to_root.split(to)?;
+        rename_no_replace(
+            source.as_fd(),
+            source_name,
+            target.as_fd(),
+            target_name,
+            renameat_no_replace,
+        )
+    }
+
     /// Removes a file, a symlink or any other entry that is not a
     /// directory.
     pub fn remove_file(&self, path: &RelPath) -> io::Result<()> {
@@ -256,6 +279,46 @@ impl TreeRoot {
 
 fn mode_bits(mode: u32) -> Mode {
     Mode::from_bits_truncate(mode as RawMode)
+}
+
+/// A rename that fails instead of replacing an existing target.
+type RenameAttempt = fn(BorrowedFd<'_>, &[u8], BorrowedFd<'_>, &[u8]) -> io::Result<()>;
+
+fn renameat_no_replace(
+    from: BorrowedFd<'_>,
+    from_name: &[u8],
+    to: BorrowedFd<'_>,
+    to_name: &[u8],
+) -> io::Result<()> {
+    let flags = RenameFlags::NOREPLACE;
+    Ok(renameat_with(from, from_name, to, to_name, flags)?)
+}
+
+/// Renames with `attempt`; on a filesystem that cannot refuse to replace
+/// (`ENOTSUP`, `EINVAL` for the flag), looks at the target and renames
+/// plainly if it is not there.
+fn rename_no_replace(
+    from: BorrowedFd<'_>,
+    from_name: &[u8],
+    to: BorrowedFd<'_>,
+    to_name: &[u8],
+    attempt: RenameAttempt,
+) -> io::Result<()> {
+    let error = match attempt(from, from_name, to, to_name) {
+        Err(error) => error,
+        done => return done,
+    };
+    let flag_unsupported = [Errno::NOTSUP, Errno::INVAL]
+        .iter()
+        .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()));
+    if !flag_unsupported {
+        return Err(error);
+    }
+    match statat(to, to_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+        Err(Errno::NOENT) => Ok(renameat(from, from_name, to, to_name)?),
+        Err(other) => Err(other.into()),
+    }
 }
 
 /// The fields of an `lstat`, in the units a [`TreeEntry`] uses.
@@ -709,6 +772,149 @@ mod tests {
             sub.lstat(&path("file")).expect("stat").kind,
             EntryKind::File
         );
+    }
+
+    #[test]
+    fn an_entry_is_renamed_from_one_root_into_another() {
+        let mut tree = Tree::new();
+        tree.file("from/dir/file", "x");
+        tree.dir("to");
+        let from = TreeRoot::open(&tree.path("from")).expect("the root opens");
+        let to = TreeRoot::open(&tree.path("to")).expect("the root opens");
+        from.rename(&path("dir"), &to, &path("moved"))
+            .expect("the directory is moved");
+        assert!(from.lstat(&path("dir")).is_err());
+        assert_eq!(
+            to.lstat(&path("moved/file")).expect("stat").kind,
+            EntryKind::File
+        );
+    }
+
+    #[test]
+    fn an_existing_target_is_not_replaced() {
+        let mut tree = Tree::new();
+        tree.file("one", "first");
+        tree.file("two", "second");
+        let root = root_of(&tree);
+        let error = root
+            .rename(&path("one"), &root, &path("two"))
+            .expect_err("the target exists");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(tree.path("two")).expect("readable"),
+            "second"
+        );
+        assert!(tree.path("one").exists());
+    }
+
+    #[test]
+    fn an_entry_can_be_renamed_at_depth() {
+        let tree = Tree::new();
+        let root = root_of(&tree);
+        let deep = create_chain(&root, 25);
+        let before = deep.join(&name("before"));
+        let after = deep.join(&name("after"));
+        root.create_file(&before, 0o644)
+            .expect("the file is created");
+        root.rename(&before, &root, &after)
+            .expect("the file is renamed");
+        assert!(root.lstat(&before).is_err());
+        assert_eq!(root.lstat(&after).expect("stat").kind, EntryKind::File);
+    }
+
+    /// `rename_no_replace` of `from` to `to` in one root, with `attempt`
+    /// in place of the real no-replace rename.
+    fn seamed_rename(
+        root: &TreeRoot,
+        from: &str,
+        to: &str,
+        attempt: RenameAttempt,
+    ) -> io::Result<()> {
+        let (from, to) = (path(from), path(to));
+        let (dir, from_name) = root.split(&from).expect("the source splits");
+        let (_, to_name) = root.split(&to).expect("the target splits");
+        rename_no_replace(dir.as_fd(), from_name, dir.as_fd(), to_name, attempt)
+    }
+
+    /// What a filesystem without no-replace renames answers.
+    fn flag_not_supported(
+        _from: BorrowedFd<'_>,
+        _from_name: &[u8],
+        _to: BorrowedFd<'_>,
+        _to_name: &[u8],
+    ) -> io::Result<()> {
+        Err(Errno::NOTSUP.into())
+    }
+
+    /// An error that has nothing to do with the flag.
+    fn denied(
+        _from: BorrowedFd<'_>,
+        _from_name: &[u8],
+        _to: BorrowedFd<'_>,
+        _to_name: &[u8],
+    ) -> io::Result<()> {
+        Err(Errno::ACCESS.into())
+    }
+
+    #[test]
+    fn without_no_replace_support_a_missing_target_is_checked_for_and_renamed_to() {
+        let mut tree = Tree::new();
+        tree.file("one", "x");
+        let root = root_of(&tree);
+        seamed_rename(&root, "one", "two", flag_not_supported).expect("the file is renamed");
+        assert!(root.lstat(&path("one")).is_err());
+        assert!(root.lstat(&path("two")).is_ok());
+    }
+
+    #[test]
+    fn without_no_replace_support_an_existing_target_is_still_refused() {
+        let mut tree = Tree::new();
+        tree.file("one", "x");
+        tree.symlink("two", "nowhere");
+        let root = root_of(&tree);
+        let error = seamed_rename(&root, "one", "two", flag_not_supported)
+            .expect_err("the target exists, also as a dangling symlink");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(root.lstat(&path("one")).is_ok());
+    }
+
+    #[test]
+    fn without_no_replace_support_a_target_that_cannot_be_looked_at_is_an_error() {
+        let mut tree = Tree::new();
+        tree.file("one", "x");
+        let not_a_directory = std::fs::File::open(tree.path("one")).expect("opens");
+        let root = root_of(&tree);
+        let one = path("one");
+        let (dir, from_name) = root.split(&one).expect("the source splits");
+        let error = rename_no_replace(
+            dir.as_fd(),
+            from_name,
+            not_a_directory.as_fd(),
+            b"two",
+            flag_not_supported,
+        )
+        .expect_err("a file has no entries");
+        assert_eq!(error.raw_os_error(), Some(Errno::NOTDIR.raw_os_error()));
+    }
+
+    #[test]
+    fn another_error_of_the_rename_is_not_mistaken_for_a_missing_flag() {
+        let mut tree = Tree::new();
+        tree.file("one", "x");
+        let root = root_of(&tree);
+        let error = seamed_rename(&root, "one", "two", denied).expect_err("the error is passed on");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(root.lstat(&path("two")).is_err());
+    }
+
+    #[test]
+    fn the_root_itself_cannot_be_renamed() {
+        let tree = Tree::new();
+        let root = root_of(&tree);
+        let error = root
+            .rename(&RelPath::root(), &root, &path("elsewhere"))
+            .expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
