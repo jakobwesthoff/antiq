@@ -65,10 +65,9 @@ These bind every item.
   `compile_fail` doctest proves it, one error condition per doctest,
   with the reason written next to it, checked once through a temporary
   example that shows the expected compiler error.
-- ADRs may be rewritten in place until implementation starts; once code
-  lands, a changed decision becomes a new ADR. The merge of I01 part A
-  is the first code. The in-place ADR fixes of section 8 (T2, R1) land
-  before it.
+- ADRs may be rewritten in place until the first release is being
+  built, which is announced when it starts; after that, a changed
+  decision becomes a new ADR.
 - Nothing is pushed.
 - An item edits only the files it owns plus the shared edits its entry
   names. I01 creates every file of the module tree as a stub, including
@@ -286,7 +285,9 @@ parts that vary through these traits:
   (ADR 0056). Data goes to stdout, messages to stderr; colour only on a
   terminal (spec "Dry runs, scheduling, exit codes").
 - All output goes through functions returning `io::Result`; a
-  `BrokenPipe` on stdout ends the command with exit 0. Clippy's
+  `BrokenPipe` on stdout stops the output without a panic and the run
+  keeps its own exit code (lead decision on the I01 plan, 2026-11-03,
+  replacing an earlier "exit 0"). Clippy's
   `print_stdout` and `print_stderr` lints are denied in the binary, so
   no `println!` can panic on a closed pipe (O13).
 - Every JSON output is one object `{"format": 1, "command": "<name>",
@@ -657,8 +658,9 @@ its finishing commit. Acceptance lines in an entry add to this.
   `ListingEntry` key names and type values go into spec "Listing" with
   part B; a generic error kind `other` for failures without a specific
   kind; raising the soft `RLIMIT_NOFILE` in
-  `main` (O11); output through `io::Result` with `BrokenPipe` mapped to
-  exit 0 and the print lints denied (O13).
+  `main` (O11); output through `io::Result`, a `BrokenPipe` on stdout
+  stopping the output while the run keeps its exit code, and the print
+  lints denied (O13).
 - Must not touch: any behaviour beyond parsing, the envelope and the
   shared types.
 - Depends on: none.
@@ -833,10 +835,10 @@ its finishing commit. Acceptance lines in an entry add to this.
   allocated size below its size; a tree deeper than 1,024 bytes walks
   completely; an `EMFILE` from the seam fails the run; on Linux, a
   non-UTF-8 name is selected through its escaped form.
-- Docs: spec "Selection" (exclude semantics; non-UTF-8 names match
-  through their escaped form, where a `%` of the name reads `%25`),
-  "Walks" (a piece whose top directory is on another device counts as
-  containing a mount point).
+- Docs: keep spec "Selection" true (exclude semantics; non-UTF-8 names
+  match through their escaped form, where a `%` of the name reads
+  `%25`) and keep spec "Walks" true (a piece whose top directory is on
+  another device counts as containing a mount point).
 - Acceptance: one walk API used by idle, packing, verify, change
   detection.
 - Size: L.
@@ -879,8 +881,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   size 1 GiB above the allocated size and not below; a reader that
   returns fewer bytes than the header size pads and marks the file
   changed; a file past 1,024 bytes of path packs.
-- Docs: spec "Packaging" and "Listing" (the container; listing paths
-  below it).
+- Docs: keep spec "Packaging" and "Listing" true (the container;
+  listing paths below it).
 - Acceptance: listing entries equal what I12 reads back.
 - Size: L.
 
@@ -906,7 +908,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   budget below one worker one worker is still granted and a warning
   given; a lease waits until another is dropped (thread test with a
   timeout); a piece below one job gets one worker.
-- Docs: spec "Packaging" (the one-worker floor).
+- Docs: keep spec "Packaging" true (the one-worker floor).
 - Size: S.
 
 ### Wave 3
@@ -945,9 +947,9 @@ its finishing commit. Acceptance lines in an entry add to this.
   unparsable one; promoting `meta.pending` gives `meta.<N>`; putting
   different bytes under an existing payload name fails; a `compile_fail`
   doctest shows a store write without a `RunLock`.
-- Docs: spec "Listing" (key names, compression settings), "Metadata"
-  (history action names, whole seconds), a new ADR for section 2.9
-  (T1).
+- Docs: spec "Listing" (key names; keep the compression settings
+  true), "Metadata" (history action names; keep whole seconds true);
+  keep ADR 0058 true (section 2.9, T1).
 - Size: L.
 
 #### I09 Tracking entries and derived states
@@ -973,7 +975,7 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Tests: one case per row of the states table (first failure: stub);
   round trip with `pending` as version taken out; `written` set on each
   write; a write without `RunLock` does not compile.
-- Docs: spec "Local state" (the added fields).
+- Docs: keep spec "Local state" true (the added fields).
 - Size: M.
 
 #### I10 Idle check and pins
@@ -1124,7 +1126,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   vanished file is dropped; the manifest diff reports a touched file and
   a new directory; repacking unchanged content reports the same
   SHA-256; the encoder record names zstd 1.5.7 and the parameters.
-- Docs: spec "Change detection" (manifest file name).
+- Docs: keep spec "Storage" true (manifest file name).
 - Size: L.
 
 ### Wave 4
@@ -1220,8 +1222,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   the entry's `written` time; one with a differing folder is dropped and
   the folder reported as new; a folder of an own archived ID becomes
   unearthed; a dry-run touches nothing.
-- Docs: spec "Operations" (the repair order: `removing` entries before
-  emptying the trash).
+- Docs: keep spec "Operations" true (the repair order: `removing`
+  entries before emptying the trash).
 - Size: L.
 
 ### Wave 5
@@ -1473,8 +1475,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   script runs with arguments, `set -C` refuses a second create, a dead
   master is replaced by the restart sequence; opt-in: the same against
   the real sshd, plus `kill -9` of the master followed by the restart.
-- Docs: spec "SSH remote" (the 86-byte limit and the ControlPath
-  directory).
+- Docs: keep spec "SSH remote" true (the 86-byte limit and the
+  ControlPath directory).
 - Size: M.
 
 #### I25 rsync resolution, probe and command line
@@ -1586,8 +1588,9 @@ its finishing commit. Acceptance lines in an entry add to this.
   `format: 2` file is left alone and reported; an old `meta.<N>` is
   removed per T4; an own `<temp>.Ab12Cd` is removed early and another
   machine's only after the grace period.
-- Docs: spec "Committing a version" (retention per T4, the rsync
-  leftover names, the commit time per T6).
+- Docs: keep spec "Committing a version" true (retention per T4, the
+  rsync leftover names) and keep spec "Metadata" true (the commit time
+  per T6).
 - Size: L.
 
 #### I28 The SSH remote
@@ -1640,7 +1643,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   (first failure: stub); away for eight days with pending work gives
   `remote_away` under `--if-reachable` and a `status` warning; broken
   stays an error.
-- Docs: the local layout in spec "Storage" (`remote-state.json`).
+- Docs: keep the local layout in spec "Storage" true
+  (`remote-state.json`).
 - Size: M.
 
 #### I36 The picker for `find`
@@ -1737,8 +1741,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   unearths only as a fork with a new ID, and its metadata is unchanged;
   a fork of a live piece without a package fails with a clear error
   (F8); a stale package warns.
-- Docs: spec "unearth" (the fetched archive kept within the local
-  tier); spec "JSON output" (`unearth` additions).
+- Docs: keep spec "unearth" true (the fetched archive kept within the
+  local tier); spec "JSON output" (`unearth` additions).
 - Size: L.
 
 #### I35 The brake, remote `reconcile` and detaching
@@ -1778,8 +1782,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   upload is never pruned; `remote remove` with remote-only pieces goes
   through the brake; a commit by another machine is reported; an
   unparsable highest version is reported.
-- Docs: spec "Safety" (the set of each brake step); spec "JSON output"
-  (`reconcile` additions).
+- Docs: keep spec "Safety" true (the set of each brake step); spec
+  "JSON output" (`reconcile` additions).
 - Size: L.
 
 ### Wave 9
@@ -1818,8 +1822,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   machine's commit is rebased, not a conflict; a remote version from
   another machine marks the unearthed folder diverged and `archive`
   refuses it.
-- Docs: spec "Several machines" (the rebase of metadata-only changes);
-  JSON additions.
+- Docs: keep spec "Several machines" true (the rebase of metadata-only
+  changes); JSON additions.
 - Size: L.
 
 #### I32 Live backups in `sync`
@@ -1850,8 +1854,8 @@ its finishing commit. Acceptance lines in an entry add to this.
   piece is deleted only after the archive's commit; after a fork, the
   old ID's live package is deleted; the first sync after unearthing
   packs once.
-- Docs: spec "sync" (IDs and payload-less metadata with `backup_live =
-  false`).
+- Docs: keep spec "sync" true (IDs and payload-less metadata with
+  `backup_live = false`).
 - Size: L.
 
 #### I33 Tiers and local archive retention
@@ -2031,11 +2035,10 @@ plan keeps them in wave 6.
 
 ## 7. Risks
 
-- R1 ADR window. The first code that lands closes the in-place rewrite
-  of ADRs. Decided: before I01 part A merges, ADR 0045's last sentence
-  gains the explicit `resolve --drop-superseded` case that spec
-  "Safety" has, and ADR 0039's source list gains `fork` and `minted`
-  (T2), in place.
+- R1 ADR window. ADRs may be rewritten in place until the first
+  release is being built. Decided: ADR 0045's last sentence gains the
+  explicit `resolve --drop-superseded` case that spec "Safety" has, and
+  ADR 0039's source list gains `fork` and `minted` (T2), in place.
 - R2 Console snapshots. The design pictures fix the look; the command
   items' insta snapshots are reviewed against them before acceptance.
 - R3 Long paths. On macOS, 44 members of a 1,300-byte path failed past
