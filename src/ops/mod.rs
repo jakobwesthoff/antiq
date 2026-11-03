@@ -1,0 +1,18 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! One module per command.
+
+pub mod archive;
+pub mod find;
+pub mod fork;
+pub mod import;
+pub mod init;
+pub mod pin;
+pub mod reconcile;
+pub mod remote;
+pub mod resolve;
+pub mod status;
+pub mod sync;
+pub mod unearth;
