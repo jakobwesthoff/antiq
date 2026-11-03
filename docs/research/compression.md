@@ -191,7 +191,10 @@ two, 1002 MiB with four, about 430 MiB per encoder plus 140 MiB per
 worker. The fixed part is the round buffer zstd allocates once per
 encoder with long-distance matching, `MAX(windowSize, n*jobSize) +
 3*jobSize`, 320 MiB for one or two workers (**read**,
-`lib/compress/zstdmt_compress.c` of zstd 1.5.7).
+`lib/compress/zstdmt_compress.c` of zstd 1.5.7). One macOS machine and
+one synthetic input (75 % from a 10-letter alphabet, 25 % random bytes)
+were measured; small inputs peak lower (150 MB to 300 MB above), so the
+figures are a ceiling for large pieces, not a typical value.
 
 `zstd-sys` 2.1.2 has the default features `legacy` and
 `zdict_builder`; `zstd-safe` 8.2.0 depends on it with
