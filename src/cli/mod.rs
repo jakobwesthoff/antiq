@@ -422,8 +422,30 @@ fn finish(
         out.plain_error(&description.root, &description.contexts)
     };
     match outcome {
+        // A run that was partial before the remote stopped it stays partial.
+        Outcome::TreatAsSuccess
+            if error
+                .downcast_ref::<RemoteStop>()
+                .is_some_and(|stop| stop.partial) =>
+        {
+            3
+        }
         Outcome::TreatAsSuccess => 0,
         Outcome::Fail => kind.exit_code(),
+    }
+}
+
+/// The context of an error that stopped a run at its remote part, after
+/// its local part was done. `partial` is whether that local part left
+/// something out.
+#[derive(Debug)]
+pub struct RemoteStop {
+    pub partial: bool,
+}
+
+impl std::fmt::Display for RemoteStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("use the remote")
     }
 }
 

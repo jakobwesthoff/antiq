@@ -2232,6 +2232,10 @@ changes nothing.
 | 3 | partial: some objects skipped (needing a decision, stale backup, no space, a failed transfer) |
 | 4 | remote away |
 
+A `reconcile` whose local part skipped an object and whose remote is
+away exits 3 under `--if-reachable`, not 0, and still reports the away
+remote.
+
 Colour is used only on a terminal. Data goes to stdout, messages to
 stderr. Under `--json` an error is data: its JSON goes to stdout, like
 any other JSON output, and a usage error, too, prints the JSON envelope

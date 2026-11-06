@@ -6,7 +6,7 @@
 
 use crate::cli::cmd::status::sanitize;
 use crate::cli::output::Output;
-use crate::cli::{Context, ReconcileArgs};
+use crate::cli::{Context, ReconcileArgs, RemoteStop};
 use antiq::brake::BrakeInput;
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -42,6 +42,7 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
     match reconciled {
         Reconciled::Done(mut report) => {
             let stop = report.stop.take();
+            let partial = report.partial();
             // A run that stopped at the remote tells it by the error alone
             // under `--json`, as the envelope is the one document it prints.
             if ctx.json && stop.is_none() {
@@ -51,9 +52,9 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
                 print_report(&report, out)?;
             }
             if let Some(stop) = stop {
-                return Err(anyhow::Error::new(stop).context("use the remote"));
+                return Err(anyhow::Error::new(stop).context(RemoteStop { partial }));
             }
-            Ok(if report.partial() { 3 } else { 0 })
+            Ok(if partial { 3 } else { 0 })
         }
         Reconciled::Planned {
             plan,
@@ -75,7 +76,7 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
                 }
             }
             if let Some(stop) = stop {
-                return Err(anyhow::Error::new(stop).context("use the remote"));
+                return Err(anyhow::Error::new(stop).context(RemoteStop { partial: false }));
             }
             Ok(0)
         }

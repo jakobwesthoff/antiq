@@ -1111,3 +1111,30 @@ fn a_piece_whose_folder_cannot_be_looked_at_is_kept_with_a_note() {
     let warnings = run.json()["warnings"].to_string();
     assert!(warnings.contains("dir/alpha"), "{warnings}");
 }
+
+// ---------------------------------------------------------
+// A partial local part and a remote that is away
+// ---------------------------------------------------------
+
+#[test]
+fn if_reachable_with_a_fresh_away_remote_keeps_the_exit_code_of_a_partial_index() {
+    let world = world();
+    world.archived(1, "alpha", Archive::Remote);
+    for item in fs::read_dir(world.local_dir(1)).expect("the object directory") {
+        let item = item.expect("an item");
+        if item.file_name().to_string_lossy().contains("listing") {
+            fs::write(item.path(), b"not a listing").expect("a damaged listing");
+        }
+    }
+    world.take_remote_away();
+    world.away_since(1);
+
+    let run = world.reconcile(&["--if-reachable"]);
+
+    assert_eq!(run.code(), 3, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("while attempting to use the remote"),
+        "{}",
+        run.stderr
+    );
+}
