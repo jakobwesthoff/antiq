@@ -964,6 +964,16 @@ mod tests {
             doubled.to_string(),
             "2 files for the listing: `a--s.sha256.zst`, `b--s.sha256.zst`"
         );
+        for (kind, slot) in [(Archive, "archive"), (Checksum, "checksum file")] {
+            let doubled = Damage::Doubled {
+                kind,
+                files: vec!["a".into(), "b".into()],
+            };
+            assert_eq!(
+                doubled.to_string(),
+                format!("2 files for the {slot}: `a`, `b`")
+            );
+        }
         assert_eq!(Damage::NoListing.to_string(), "the listing is missing");
         assert_eq!(
             Damage::NoChecksum.to_string(),
