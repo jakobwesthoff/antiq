@@ -344,6 +344,20 @@ Concept rounds 3 to 7 (asqr 01M6K6Z625AFW27THQM1V2BDWW,
 - Go for the adversarial review of the concept (fable, opus, sonnet,
   haiku).
 
+Adversarial review round 1 of the concept (fable, opus, sonnet,
+haiku; 2026-11-04; ledger in the logbook,
+`plans/concept-review-ledger.md`): 77 findings, all settled without
+disagreement, applied to the concept. User decisions during the review:
+
+- `list` and `grep` show local time in text output and UTC in JSON
+  (chat, 2026-11-04).
+- The user wants rendered display examples before the `list` output is
+  decided (chat, 2026-11-04).
+
+Open for the user after round 1: the name of `.antiq-unearthed`, which
+`fork` now writes too; the layout of `list`, `grep` and `status` from
+rendered examples.
+
 ## Presented
 
 - The grep study was presented in round 8
