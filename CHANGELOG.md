@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-06
+
 ### Added
 
 - `import` shows a progress card on a terminal, as `archive` does. A pipe,
@@ -57,5 +59,6 @@ target.
   terminal with 24-bit colour, and the plain version in a pipe
 - macOS and Linux
 
-[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jakobwesthoff/antiq/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jakobwesthoff/antiq/releases/tag/v1.0.0
