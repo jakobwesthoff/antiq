@@ -8,6 +8,7 @@ mod support;
 
 use antiq::clock::SystemClock;
 use antiq::commands::push::{PushOutcome, PushRequest, push_observed};
+use antiq::external::RunLog;
 use antiq::progress::{Event, Observer};
 use std::fs;
 use std::sync::Mutex;
@@ -140,7 +141,13 @@ fn push_result(
         if_reachable: false,
         dry_run,
     };
-    push_observed(&collection, &request, &SystemClock, observer)
+    push_observed(
+        &collection,
+        &request,
+        &SystemClock,
+        &RunLog::discard(),
+        observer,
+    )
 }
 
 fn push_with(world: &World, dry_run: bool, observer: &Lines) -> PushOutcome {

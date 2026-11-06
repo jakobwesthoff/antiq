@@ -90,6 +90,7 @@ fn path_without_real_ssh(home: &Path) -> std::ffi::OsString {
 pub fn make_hermetic(command: &mut Command) {
     for name in [
         "NO_COLOR",
+        "XDG_STATE_HOME",
         "CLICOLOR",
         "CLICOLOR_FORCE",
         "CI",

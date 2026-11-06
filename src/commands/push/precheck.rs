@@ -1065,6 +1065,7 @@ mod tests {
     // An ssh target
     // -----------------------------------------------------
 
+    use crate::external::RunLog;
     use crate::target::rsync::{Options, Outcome};
     use crate::testing::fake_rsync::FakeRsync;
     use std::cell::RefCell;
@@ -1141,11 +1142,7 @@ mod tests {
     }
 
     fn outcome(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
-        Outcome {
-            code,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        }
+        Outcome::finished(code, stdout, stderr)
     }
 
     impl Script {
@@ -1185,7 +1182,7 @@ mod tests {
 
     fn ssh() -> Ssh {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("the stand-in passes");
+        let rsync = Rsync::probe(&fake.path(), &RunLog::discard()).expect("the stand-in passes");
         Ssh {
             _fake: fake,
             rsync,

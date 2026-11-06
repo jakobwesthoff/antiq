@@ -566,6 +566,7 @@ fn a_test_run_does_not_inherit_colour_and_locale_settings_of_the_developer() {
         "CLICOLOR",
         "CLICOLOR_FORCE",
         "CI",
+        "XDG_STATE_HOME",
         "LC_CTYPE",
         "LANG",
     ] {

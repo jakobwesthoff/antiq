@@ -242,6 +242,7 @@ pub(super) fn run_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external::RunLog;
     use crate::target::rsync::{Call, Outcome, RsyncError};
     use crate::testing::fake_rsync::FakeRsync;
     use std::cell::RefCell;
@@ -267,7 +268,7 @@ mod tests {
 
     fn fixture() -> Fixture {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("the stand-in passes");
+        let rsync = Rsync::probe(&fake.path(), &RunLog::discard()).expect("the stand-in passes");
         Fixture {
             _fake: fake,
             rsync,
@@ -303,11 +304,7 @@ mod tests {
     }
 
     fn answer(code: Option<i32>, stderr: &str) -> Result<Outcome, RsyncError> {
-        Ok(Outcome {
-            code,
-            stdout: Vec::new(),
-            stderr: stderr.into(),
-        })
+        Ok(Outcome::finished(code, Vec::new(), stderr))
     }
 
     #[test]
@@ -440,11 +437,7 @@ mod tests {
     }
 
     fn outcome_of(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
-        Outcome {
-            code,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        }
+        Outcome::finished(code, stdout, stderr)
     }
 
     fn mirror_error(outcome: Outcome) -> String {

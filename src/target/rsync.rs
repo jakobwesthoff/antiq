@@ -4,14 +4,16 @@
 
 //! The rsync executable.
 
-use std::borrow::Cow;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+use crate::external::{self, RunLog};
+pub use crate::external::{Outcome, Segments};
 
 use super::marker;
 use super::url::TargetUrl;
@@ -144,19 +146,22 @@ pub struct Rsync {
 impl Rsync {
     /// Runs `<path> --version` and accepts the executable when it reports
     /// rsync 3.2.4 or later. openrsync, the macOS default, is refused.
-    pub(crate) fn probe(path: &Path) -> Result<Rsync, RsyncError> {
+    pub(crate) fn probe(path: &Path, log: &RunLog) -> Result<Rsync, RsyncError> {
         let mut command = scrub_environment(Command::new(path), inherited_names());
-        command.arg("--version").stdin(Stdio::null());
-        let output = command.output().map_err(|cause| RsyncError::Spawn {
-            path: path.to_path_buf(),
-            cause,
-        })?;
+        command.arg("--version");
+        let output =
+            external::run(command, log, &mut |segment| Some(segment.into())).map_err(|cause| {
+                RsyncError::Spawn {
+                    path: path.to_path_buf(),
+                    cause,
+                }
+            })?;
         let refuse = |reason| RsyncError::Refused {
             path: path.to_path_buf(),
             reason,
         };
-        if !output.status.success() {
-            return Err(refuse(Refusal::NotSuccessful(output.status.to_string())));
+        if output.code != Some(0) {
+            return Err(refuse(Refusal::NotSuccessful(status_text(&output))));
         }
         let text = String::from_utf8_lossy(&output.stdout);
         let first_line = text.lines().next().unwrap_or_default();
@@ -171,8 +176,12 @@ impl Rsync {
     /// configured path when there is one, else the first of the `PATH`
     /// directories, `/opt/homebrew/bin` and `/usr/local/bin` that holds an
     /// rsync passing the probe.
-    pub fn resolve(configured: Option<&Path>, path_var: &OsStr) -> Result<Rsync, RsyncError> {
-        resolve_in(configured, &search_dirs(path_var))
+    pub fn resolve(
+        configured: Option<&Path>,
+        path_var: &OsStr,
+        log: &RunLog,
+    ) -> Result<Rsync, RsyncError> {
+        resolve_in(configured, &search_dirs(path_var), log)
     }
 
     /// The absolute path of the rsync that passed the probe.
@@ -382,24 +391,11 @@ pub fn quiet_option(args: &[String]) -> Option<&str> {
     None
 }
 
-/// What [`Call::run_observed`] hands the segments of the output to: it
-/// returns what the standard output of the outcome keeps of a segment.
-pub type Segments<'a> = dyn FnMut(&[u8]) -> Option<Cow<[u8]>> + 'a;
-
 /// One prepared rsync call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
     program: PathBuf,
     args: Vec<OsString>,
-}
-
-/// What a finished rsync call left.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Outcome {
-    /// The exit status; `None` when a signal ended rsync.
-    pub code: Option<i32>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
 }
 
 impl Call {
@@ -418,102 +414,30 @@ impl Call {
 
     /// Runs the call and returns what it left, whatever the exit status:
     /// the caller reads the status and the texts of 23, 24, 30 and 255.
-    pub fn run(&self) -> Result<Outcome, RsyncError> {
-        self.run_observed(&mut |segment| Some(segment.into()))
+    pub fn run(&self, log: &RunLog) -> Result<Outcome, RsyncError> {
+        self.run_observed(log, &mut |segment| Some(segment.into()))
     }
 
     /// [`run`](Call::run), handing the standard output to `on_segment` in
-    /// segments while rsync still runs. A segment ends after a newline,
-    /// which it keeps, or before a carriage return, which starts the next
-    /// segment: the progress updates rsync writes begin with one, so each
-    /// reaches `on_segment` as soon as the update after it starts, also in
-    /// the middle of a large file. What `on_segment` returns is appended to
-    /// the standard output of the outcome, `None` leaves the segment out.
-    ///
-    /// Standard error is read on a thread of its own: a full pipe would
-    /// otherwise stop rsync while this one waits for a line.
-    pub fn run_observed(&self, on_segment: &mut Segments) -> Result<Outcome, RsyncError> {
-        let spawn_error = |cause| RsyncError::Spawn {
+    /// segments while rsync still runs (see [`external::run`]).
+    pub fn run_observed(
+        &self,
+        log: &RunLog,
+        on_segment: &mut Segments,
+    ) -> Result<Outcome, RsyncError> {
+        external::run(self.command(), log, on_segment).map_err(|cause| RsyncError::Spawn {
             path: self.program.clone(),
             cause,
-        };
-        let mut command = self.command();
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(spawn_error)?;
-        let mut stderr = child.stderr.take().expect("stderr was piped");
-        let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
-
-        let (stdout_bytes, stderr_bytes, read_failure) = std::thread::scope(|scope| {
-            let drain = scope.spawn(move || {
-                let mut bytes = Vec::new();
-                let read = stderr.read_to_end(&mut bytes);
-                (bytes, read)
-            });
-            let mut bytes = Vec::new();
-            let mut segment: Vec<u8> = Vec::new();
-            let mut failure = None;
-            let mut hand_over = |segment: &mut Vec<u8>, bytes: &mut Vec<u8>| {
-                if let Some(kept) = on_segment(segment) {
-                    bytes.extend_from_slice(&kept);
-                }
-                segment.clear();
-            };
-            loop {
-                let buffer = match stdout.fill_buf() {
-                    Ok(buffer) => buffer,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => {
-                        failure = Some(error);
-                        break;
-                    }
-                };
-                if buffer.is_empty() {
-                    break;
-                }
-                // Up to the next byte that ends or starts a segment.
-                let at = buffer.iter().position(|byte| matches!(byte, b'\n' | b'\r'));
-                match at {
-                    None => {
-                        segment.extend_from_slice(buffer);
-                        let length = buffer.len();
-                        stdout.consume(length);
-                    }
-                    Some(at) if buffer[at] == b'\n' => {
-                        segment.extend_from_slice(&buffer[..=at]);
-                        stdout.consume(at + 1);
-                        hand_over(&mut segment, &mut bytes);
-                    }
-                    Some(at) => {
-                        segment.extend_from_slice(&buffer[..at]);
-                        stdout.consume(at + 1);
-                        if !segment.is_empty() {
-                            hand_over(&mut segment, &mut bytes);
-                        }
-                        segment.push(b'\r');
-                    }
-                }
-            }
-            if !segment.is_empty() {
-                hand_over(&mut segment, &mut bytes);
-            }
-            let (err_bytes, err_read) = drain.join().expect("the stderr reader does not panic");
-            (bytes, err_bytes, failure.or(err_read.err()))
-        });
-        if let Some(cause) = read_failure {
-            // A pipe that failed to read leaves rsync blocked on a full one.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(spawn_error(cause));
-        }
-        let status = child.wait().map_err(spawn_error)?;
-        Ok(Outcome {
-            code: status.code(),
-            stdout: stdout_bytes,
-            stderr: stderr_bytes,
         })
+    }
+}
+
+/// How a call ended, in the words `std::process::ExitStatus` uses.
+fn status_text(outcome: &Outcome) -> String {
+    match (outcome.code, outcome.signal) {
+        (Some(code), _) => format!("exit status: {code}"),
+        (None, Some(signal)) => format!("signal: {signal}"),
+        (None, None) => "an unknown end".to_string(),
     }
 }
 
@@ -541,17 +465,21 @@ fn search_dirs(path_var: &OsStr) -> Vec<PathBuf> {
     dirs
 }
 
-fn resolve_in(configured: Option<&Path>, dirs: &[PathBuf]) -> Result<Rsync, RsyncError> {
+fn resolve_in(
+    configured: Option<&Path>,
+    dirs: &[PathBuf],
+    log: &RunLog,
+) -> Result<Rsync, RsyncError> {
     // A path the user configured is the user's choice: when it fails the
     // probe the run reports that, instead of quietly using another rsync.
     if let Some(path) = configured {
         require_absolute(path)?;
-        return Rsync::probe(path);
+        return Rsync::probe(path, log);
     }
     let mut refusals = Vec::new();
     for dir in dirs {
         let candidate = dir.join("rsync");
-        match Rsync::probe(&candidate) {
+        match Rsync::probe(&candidate, log) {
             Ok(rsync) => return Ok(rsync),
             // Most directories on a `PATH` hold no rsync at all.
             Err(RsyncError::Spawn { cause, .. }) if cause.kind() == io::ErrorKind::NotFound => {}
@@ -645,7 +573,7 @@ mod tests {
 
     fn probed(text: &str) -> Result<Rsync, RsyncError> {
         let fake = FakeRsync::new(text);
-        Rsync::probe(&fake.path())
+        Rsync::probe(&fake.path(), &RunLog::discard())
     }
 
     fn refusal(text: &str) -> Refusal {
@@ -677,7 +605,7 @@ mod tests {
     #[test]
     fn probe_keeps_the_path_it_was_given() {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        let rsync = Rsync::probe(&fake.path(), &RunLog::discard()).expect("3.5.1 passes");
         assert_eq!(rsync.path(), fake.path());
     }
 
@@ -719,14 +647,17 @@ mod tests {
     #[test]
     fn a_refused_rsync_is_reported_with_its_path_and_the_config_key() {
         let fake = FakeRsync::new(OPENRSYNC);
-        let error = Rsync::probe(&fake.path()).expect_err("openrsync is refused");
+        let error =
+            Rsync::probe(&fake.path(), &RunLog::discard()).expect_err("openrsync is refused");
         let text = error.to_string();
         assert!(text.contains(&fake.path().display().to_string()), "{text}");
         assert!(text.contains("openrsync"), "{text}");
         assert!(text.contains("`[target] rsync`"), "{text}");
         assert!(text.contains("3.2.4"), "{text}");
         let old = FakeRsync::new(&line("3.1.0"));
-        let text = Rsync::probe(&old.path()).expect_err("3.1.0").to_string();
+        let text = Rsync::probe(&old.path(), &RunLog::discard())
+            .expect_err("3.1.0")
+            .to_string();
         assert!(
             text.contains("3.1.0") && text.contains("`[target] rsync`"),
             "{text}"
@@ -787,7 +718,7 @@ mod tests {
     fn probe_refuses_a_failing_version_call() {
         let fake = FakeRsync::new(RSYNC_3_5_1);
         fake.version_exit(3);
-        match Rsync::probe(&fake.path()).expect_err("the probe refuses") {
+        match Rsync::probe(&fake.path(), &RunLog::discard()).expect_err("the probe refuses") {
             RsyncError::Refused {
                 reason: Refusal::NotSuccessful(status),
                 ..
@@ -800,7 +731,7 @@ mod tests {
     fn probe_reports_a_missing_executable() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let missing = dir.path().join("rsync");
-        match Rsync::probe(&missing).expect_err("nothing to run") {
+        match Rsync::probe(&missing, &RunLog::discard()).expect_err("nothing to run") {
             RsyncError::Spawn { path, .. } => assert_eq!(path, missing),
             other => panic!("expected a spawn error, got {other:?}"),
         }
@@ -809,7 +740,8 @@ mod tests {
     #[test]
     fn a_spawn_error_names_the_io_error_once_in_its_rendered_chain() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let error = Rsync::probe(&dir.path().join("rsync")).expect_err("nothing to run");
+        let error = Rsync::probe(&dir.path().join("rsync"), &RunLog::discard())
+            .expect_err("nothing to run");
 
         let mut rendered = error.to_string();
         let mut link = std::error::Error::source(&error);
@@ -824,7 +756,7 @@ mod tests {
     #[test]
     fn probe_runs_version_with_one_argument_in_a_scrubbed_environment() {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        Rsync::probe(&fake.path(), &RunLog::discard()).expect("3.5.1 passes");
         assert_eq!(fake.calls(), [["version", "--version"]]);
         let env = String::from_utf8(fake.read("env.log")).expect("text");
         assert_eq!(env, "LC_ALL=C\n");
@@ -883,7 +815,12 @@ mod tests {
     fn resolve_prefers_the_configured_path() {
         let configured = FakeRsync::new(RSYNC_3_5_1);
         let searched = FakeRsync::new("rsync  version 3.2.7  protocol version 32\n");
-        let rsync = resolve_in(Some(&configured.path()), &[searched.dir()]).expect("it resolves");
+        let rsync = resolve_in(
+            Some(&configured.path()),
+            &[searched.dir()],
+            &RunLog::discard(),
+        )
+        .expect("it resolves");
         assert_eq!(rsync.path(), configured.path());
     }
 
@@ -891,7 +828,13 @@ mod tests {
     fn resolve_does_not_fall_back_when_the_configured_path_fails() {
         let configured = FakeRsync::new(OPENRSYNC);
         let searched = FakeRsync::new(RSYNC_3_5_1);
-        match resolve_in(Some(&configured.path()), &[searched.dir()]).expect_err("it is refused") {
+        match resolve_in(
+            Some(&configured.path()),
+            &[searched.dir()],
+            &RunLog::discard(),
+        )
+        .expect_err("it is refused")
+        {
             RsyncError::Refused { path, reason } => {
                 assert_eq!(path, configured.path());
                 assert_eq!(reason, Refusal::OpenRsync);
@@ -902,7 +845,9 @@ mod tests {
 
     #[test]
     fn resolve_refuses_a_relative_configured_path() {
-        match resolve_in(Some(Path::new("bin/rsync")), &[]).expect_err("it is refused") {
+        match resolve_in(Some(Path::new("bin/rsync")), &[], &RunLog::discard())
+            .expect_err("it is refused")
+        {
             error @ RsyncError::RelativePath(_) => {
                 assert!(error.to_string().contains("`[target] rsync`"), "{error}");
             }
@@ -916,7 +861,7 @@ mod tests {
         let first = FakeRsync::new(RSYNC_3_5_1);
         let second = FakeRsync::new("rsync  version 3.2.7  protocol version 32\n");
         let dirs = [openrsync.dir(), first.dir(), second.dir()];
-        let rsync = resolve_in(None, &dirs).expect("it resolves");
+        let rsync = resolve_in(None, &dirs, &RunLog::discard()).expect("it resolves");
         assert_eq!(rsync.path(), first.path());
         assert_eq!(rsync.version(), version(3, 5, 1));
     }
@@ -926,7 +871,7 @@ mod tests {
         let empty = tempfile::tempdir().expect("a temporary directory");
         let fake = FakeRsync::new(RSYNC_3_5_1);
         let dirs = [empty.path().to_path_buf(), fake.dir()];
-        let rsync = resolve_in(None, &dirs).expect("it resolves");
+        let rsync = resolve_in(None, &dirs, &RunLog::discard()).expect("it resolves");
         assert_eq!(rsync.path(), fake.path());
     }
 
@@ -935,7 +880,7 @@ mod tests {
         let openrsync = FakeRsync::new(OPENRSYNC);
         let old = FakeRsync::new("rsync  version 3.0.9  protocol version 30\n");
         let dirs = [openrsync.dir(), old.dir()];
-        match resolve_in(None, &dirs).expect_err("none passes") {
+        match resolve_in(None, &dirs, &RunLog::discard()).expect_err("none passes") {
             RsyncError::NoneFound { refusals } => {
                 assert_eq!(refusals.len(), 2);
                 assert_eq!(refusals[0].0, openrsync.path());
@@ -959,7 +904,9 @@ mod tests {
         fs::write(&candidate, "#!/bin/sh\n").expect("the directory is writable");
         fs::set_permissions(&candidate, fs::Permissions::from_mode(0o644))
             .expect("the file is ours");
-        match resolve_in(None, &[dir.path().to_path_buf()]).expect_err("none passes") {
+        match resolve_in(None, &[dir.path().to_path_buf()], &RunLog::discard())
+            .expect_err("none passes")
+        {
             RsyncError::NoneFound { refusals } => {
                 assert_eq!(refusals.len(), 1);
                 assert_eq!(refusals[0].0, candidate);
@@ -1023,7 +970,8 @@ mod tests {
     #[test]
     fn resolve_searches_the_path_variable_first() {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        let rsync = Rsync::resolve(None, fake.dir().as_os_str()).expect("it resolves");
+        let rsync =
+            Rsync::resolve(None, fake.dir().as_os_str(), &RunLog::discard()).expect("it resolves");
         assert_eq!(rsync.path(), fake.path());
     }
 
@@ -1048,7 +996,7 @@ mod tests {
     /// An rsync that passed the probe; the fake stays alive with it.
     fn probed_fake() -> (FakeRsync, Rsync) {
         let fake = FakeRsync::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        let rsync = Rsync::probe(&fake.path(), &RunLog::discard()).expect("3.5.1 passes");
         (fake, rsync)
     }
 
@@ -1351,7 +1299,7 @@ mod tests {
     fn run_with(fake: &FakeRsync, rsync: &Rsync) -> Outcome {
         rsync
             .list(&options(), &nas())
-            .run()
+            .run(&RunLog::discard())
             .unwrap_or_else(|error| panic!("{error} ({})", fake.path().display()))
     }
 
@@ -1421,14 +1369,17 @@ mod tests {
             program: "/nonexistent/rsync".into(),
             args: Vec::new(),
         };
-        assert!(matches!(call.run(), Err(RsyncError::Spawn { .. })));
+        assert!(matches!(
+            call.run(&RunLog::discard()),
+            Err(RsyncError::Spawn { .. })
+        ));
     }
 
     #[test]
     fn a_call_runs_the_probed_program_with_its_argv_and_lc_all_c() {
         let (fake, rsync) = probed_fake();
         let call = rsync.list(&options(), &nas());
-        call.run().expect("the fake runs");
+        call.run(&RunLog::discard()).expect("the fake runs");
         let calls = fake.calls();
         assert_eq!(calls.len(), 2, "the probe and the call");
         assert_eq!(calls[1][0], "transfer");
@@ -1447,7 +1398,7 @@ mod tests {
         let mut arrivals = Vec::new();
 
         let outcome = call
-            .run_observed(&mut |line| {
+            .run_observed(&RunLog::discard(), &mut |line| {
                 arrivals.push((line.to_vec(), started.elapsed()));
                 Some(line.into())
             })
@@ -1478,11 +1429,15 @@ mod tests {
         let call = rsync.list(&options(), &nas());
 
         let observed = call
-            .run_observed(&mut |segment| Some(segment.into()))
+            .run_observed(&RunLog::discard(), &mut |segment| Some(segment.into()))
             .expect("the fake runs");
-        let plain = call.run().expect("the fake runs");
+        let plain = call.run(&RunLog::discard()).expect("the fake runs");
 
-        assert_eq!(observed, plain);
+        // The durations differ, the rest is what the run left.
+        assert_eq!(
+            (observed.code, &observed.stdout, &observed.stderr),
+            (plain.code, &plain.stdout, &plain.stderr)
+        );
         assert_eq!(observed.code, Some(24));
         assert_eq!(observed.stderr.len(), 300_000);
     }
@@ -1494,7 +1449,7 @@ mod tests {
             args: Vec::new(),
         };
         assert!(matches!(
-            call.run_observed(&mut |_| None),
+            call.run_observed(&RunLog::discard(), &mut |_| None),
             Err(RsyncError::Spawn { .. })
         ));
     }
@@ -1510,7 +1465,7 @@ mod tests {
     fn segments_of(call: &Call) -> (Vec<Vec<u8>>, Outcome) {
         let mut segments = Vec::new();
         let outcome = call
-            .run_observed(&mut |segment| {
+            .run_observed(&RunLog::discard(), &mut |segment| {
                 segments.push(segment.to_vec());
                 Some(segment.into())
             })
@@ -1553,7 +1508,7 @@ mod tests {
         ));
         let mut seen_before_the_newline = false;
 
-        call.run_observed(&mut |segment| {
+        call.run_observed(&RunLog::discard(), &mut |segment| {
             if segment == b"\r first" {
                 seen_before_the_newline = !open.exists();
                 std::fs::write(&open, "").expect("the gate opens");
@@ -1571,7 +1526,9 @@ mod tests {
         let call = script(r"printf 'keep\n\r drop\nkeep too\n'");
 
         let outcome = call
-            .run_observed(&mut |segment| (!segment.starts_with(b"\r")).then(|| segment.into()))
+            .run_observed(&RunLog::discard(), &mut |segment| {
+                (!segment.starts_with(b"\r")).then(|| segment.into())
+            })
             .expect("the shell runs");
 
         assert_eq!(outcome.stdout, b"keep\nkeep too\n");
@@ -1582,7 +1539,12 @@ mod tests {
     // =========================================================
 
     fn real_rsync() -> Rsync {
-        Rsync::resolve(None, &env::var_os("PATH").expect("PATH is set")).expect(
+        Rsync::resolve(
+            None,
+            &env::var_os("PATH").expect("PATH is set"),
+            &RunLog::discard(),
+        )
+        .expect(
             "these tests need rsync 3.2.4 or newer on PATH, /opt/homebrew/bin or /usr/local/bin",
         )
     }
@@ -1594,7 +1556,7 @@ mod tests {
     }
 
     fn run_ok(call: &Call) -> Outcome {
-        let outcome = call.run().expect("rsync starts");
+        let outcome = call.run(&RunLog::discard()).expect("rsync starts");
         assert_eq!(
             outcome.code,
             Some(0),

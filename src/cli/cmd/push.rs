@@ -15,9 +15,10 @@ use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::{numeric_header, pad, sanitize, thousands};
 use crate::cli::{Context, PushArgs};
-use antiq::clock::SystemClock;
+use antiq::clock::{Clock, SystemClock};
 use antiq::collection::Collection;
 use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push, push_observed};
+use antiq::external::Logs;
 use antiq::progress::Operation;
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
@@ -64,6 +65,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };
+    let log = Logs::platform().open("push", collection.root(), SystemClock.now());
     // On a terminal that moves the cursor the whole mirror shows as one
     // card, and the table of the pieces replaces the report's lines.
     let mut description = Description::new(COUNTS);
@@ -79,12 +81,12 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
             // Without cursor movement nothing would draw the card, so the
             // pieces get their lines at the end.
             if cursor {
-                push_observed(&collection, &request, &SystemClock, observer)
+                push_observed(&collection, &request, &SystemClock, &log, observer)
             } else {
-                push(&collection, &request, &SystemClock)
+                push(&collection, &request, &SystemClock, &log)
             }
         },
-        || push(&collection, &request, &SystemClock),
+        || push(&collection, &request, &SystemClock, &log),
         |result| match result {
             Ok(PushOutcome::Report(report)) if !cursor => progress::push_pieces(report),
             _ => Vec::new(),

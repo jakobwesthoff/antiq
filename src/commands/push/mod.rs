@@ -8,6 +8,7 @@ use crate::clock::Clock;
 use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
+use crate::external::RunLog;
 use crate::machine::MachineError;
 use crate::plan::{HeldDryRun, Plan};
 use crate::progress::Observer;
@@ -240,9 +241,10 @@ pub fn push_observed(
     collection: &Collection,
     request: &PushRequest,
     clock: &dyn Clock,
+    log: &RunLog,
     observer: &dyn Observer,
 ) -> Result<PushOutcome, PushError> {
-    push_watched(collection, request, clock, Some(observer))
+    push_watched(collection, request, clock, log, Some(observer))
 }
 
 /// Pushes the collection to its target.
@@ -250,14 +252,16 @@ pub fn push(
     collection: &Collection,
     request: &PushRequest,
     clock: &dyn Clock,
+    log: &RunLog,
 ) -> Result<PushOutcome, PushError> {
-    push_watched(collection, request, clock, None)
+    push_watched(collection, request, clock, log, None)
 }
 
 fn push_watched(
     collection: &Collection,
     request: &PushRequest,
     clock: &dyn Clock,
+    log: &RunLog,
     observer: Option<&dyn Observer>,
 ) -> Result<PushOutcome, PushError> {
     // Everything that needs no lock is checked first, so that a push without
@@ -303,7 +307,7 @@ fn push_watched(
     notes.extend(warnings);
     let warnings = notes;
 
-    let rsync = local_rsync(collection)?;
+    let rsync = local_rsync(collection, log)?;
     let identity = identity(collection, crate::machine::detect())?;
     let flags = precheck::Flags {
         init: request.init,
@@ -337,7 +341,7 @@ fn push_watched(
                     shown: &shown,
                     scratch: &scratch,
                 },
-                &|call| call.run(),
+                &|call| call.run(log),
             )?;
             (probe, url.clone(), None)
         }
@@ -389,7 +393,7 @@ fn push_watched(
                 before: &|| recheck_directory(&call_url, directory),
             },
             &marker,
-            &|call| call.run(),
+            &|call| call.run(log),
         )?;
     }
 
@@ -410,11 +414,11 @@ fn push_watched(
     let mirrored = mirror::run_mirror(
         &mirror_job,
         &|call| match &progress {
-            Some(progress) if first.replace(false) => call.run_observed(&mut |segment| {
+            Some(progress) if first.replace(false) => call.run_observed(log, &mut |segment| {
                 progress.borrow_mut().segment(segment);
                 plain_listing(segment).map(Cow::Owned)
             }),
-            _ => call.run(),
+            _ => call.run(log),
         },
         request.dry_run,
         progress.is_some(),
@@ -467,9 +471,10 @@ fn identity(
 /// The rsync that runs the push: `[target] rsync`, else the first good one
 /// on `PATH` or in the usual install directories. The error names the
 /// executable it refused and the key that overrides the search.
-fn local_rsync(collection: &Collection) -> Result<Rsync, PushError> {
+fn local_rsync(collection: &Collection, log: &RunLog) -> Result<Rsync, PushError> {
     let path_var = std::env::var_os("PATH").unwrap_or_default();
-    Rsync::resolve(collection.config().target.rsync.as_deref(), &path_var).map_err(PushError::Rsync)
+    Rsync::resolve(collection.config().target.rsync.as_deref(), &path_var, log)
+        .map_err(PushError::Rsync)
 }
 
 /// The parsed `[target] url`.

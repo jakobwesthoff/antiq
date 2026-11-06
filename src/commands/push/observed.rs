@@ -438,13 +438,14 @@ mod tests {
     // Real rsync
     // =========================================================
 
+    use crate::external::RunLog;
     use crate::target::rsync::{Options, Rsync};
     use crate::target::url::TargetUrl;
     use std::path::Path;
 
     fn real_rsync() -> Rsync {
         let path_var = std::env::var_os("PATH").expect("PATH is set");
-        Rsync::resolve(None, &path_var).expect(
+        Rsync::resolve(None, &path_var, &RunLog::discard()).expect(
             "these tests need rsync 3.2.4 or newer on PATH or in the usual install directories",
         )
     }
@@ -476,7 +477,7 @@ mod tests {
         let mut sent = 0;
         let outcome = rsync
             .mirror_observed(&plain_options(rsync_args), from, &url)
-            .run_observed(&mut |bytes| {
+            .run_observed(&RunLog::discard(), &mut |bytes| {
                 if let Segment::Entry(entry) = segment(bytes) {
                     sent += entry.sent_bytes;
                 }
@@ -503,7 +504,7 @@ mod tests {
         };
         let plain = rsync
             .mirror(&plain_options(&[]), &from, &url, false)
-            .run()
+            .run(&RunLog::discard())
             .expect("rsync runs");
 
         // A format of the user's, which the observed run must not follow.
@@ -537,7 +538,7 @@ mod tests {
         };
         let outcome = rsync
             .mirror(&plain_options(rsync_args), from, &url, false)
-            .run()
+            .run(&RunLog::discard())
             .expect("rsync runs");
         assert_eq!(outcome.code, Some(0));
         outcome.stdout
