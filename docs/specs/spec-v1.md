@@ -754,10 +754,11 @@ Cleanup:
   machine's, and a name that fits no split is never removed. The temp
   name of an upload that is still pending on this machine is never
   removed, in the object directory or in `.antiq-partial`, since the next
-  run resumes it. An own metadata temp name stays while the claim of its
-  version exists above the highest committed version, as it marks the
-  claim as this machine's. Every other temp name and partial file, own
-  or not, is removed once it is older than the grace period. A dry run
+  run resumes it. An own metadata temp name is not removed early while
+  the claim of its version exists above the highest committed version, as
+  it marks the claim as this machine's. Every other temp name and partial
+  file, own or not, and that temp name as well, is removed once it is
+  older than the grace period. A dry run
   lists the early removals as removals.
 - Ages are measured on the remote's clock: over SSH against `date +%s`
   printed by the same command, on a path remote against the modification

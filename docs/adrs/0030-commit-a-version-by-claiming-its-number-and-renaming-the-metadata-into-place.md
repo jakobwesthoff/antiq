@@ -46,7 +46,10 @@ version is committed, so a version number is never used twice. The highest
 committed version is retained; an older metadata file is removed once a
 higher version is committed and it is older than the grace period.
 Payloads that no metadata version references are removed once they are
-older than the grace period. Ages are measured on the remote's clock.
+older than the grace period and no claim younger than the grace period
+exists in the object's directory. Cleanup lists the directory again
+before the first deletion and deletes nothing if a version, a claim or a
+metadata temp name has appeared. Ages are measured on the remote's clock.
 
 A change recorded locally waits as a pending file until a sync commits
 it (ADR 0058); the protocol gives it its version number.

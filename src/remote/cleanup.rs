@@ -1619,6 +1619,19 @@ mod tests {
     }
 
     #[test]
+    fn an_own_metadata_temp_name_beside_its_claim_goes_after_the_grace_period() {
+        let world = owned();
+        world.put(1, ".meta.2.laptop.part", b"half", 1);
+        world.put(1, "meta.2.claim", b"", 1);
+        world.age(1, ".meta.2.laptop.part", 25 * HOUR);
+        world.age(1, "meta.2.claim", 25 * HOUR);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, ".meta.2.laptop.part", What::TempFile)]
+        );
+    }
+
+    #[test]
     fn an_own_metadata_temp_name_beside_a_claim_below_the_highest_is_removed() {
         let world = owned();
         world.version(1, 3, &[], 1);

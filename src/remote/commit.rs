@@ -1291,10 +1291,11 @@ mod tests {
     }
 
     #[test]
-    fn an_own_claim_without_our_temp_still_blocks() {
+    fn a_claim_beside_our_temp_of_another_number_still_blocks() {
         let world = World::new();
         world.put(CLAIM, b"");
         world.age(CLAIM, 60);
+        world.put(".meta.2.laptop.part", b"half");
         let outcome = world.committed(0, &metadata("a", true));
         assert_eq!(outcome, refused(Refusal::ClaimOpen { number: 1 }));
     }
