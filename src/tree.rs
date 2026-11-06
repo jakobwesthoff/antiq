@@ -8,7 +8,7 @@
 //! following a link. Everything that reads a piece afterwards (idle check,
 //! packing, verification, change detection) works from this record.
 
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use rustix::fs::FileType;
 
 /// What kind of file system object an entry is.
@@ -41,6 +41,20 @@ impl EntryKind {
     }
 }
 
+/// What the rules and the control files make of an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    /// Packed and counted for the idle time.
+    Counted,
+    /// Packed, not counted for the idle time.
+    Timeless,
+    /// Neither packed nor counted: an ignore rule matches it, or the
+    /// directory it lies in.
+    Ignored,
+    /// A control file of antiq: a rule file, or a marker at the top.
+    Control,
+}
+
 /// One entry of a piece as `lstat` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
@@ -69,6 +83,15 @@ pub struct TreeEntry {
     /// `device`, this also holds for a bind mount or a firmlink, which
     /// share the device of the directory they appear in.
     pub mount_root: bool,
+    /// The owner of the entry.
+    pub uid: u32,
+    /// The entry is immutable or append-only, so it can be neither removed
+    /// nor moved by its owner. Always false where the platform has no such
+    /// flags.
+    pub flag_locked: bool,
+    /// Set by the walk; an entry that did not come from a walk is
+    /// `Counted`.
+    pub class: Class,
 }
 
 /// Something about a piece that the walk could not handle silently. Paths
@@ -85,6 +108,20 @@ pub enum Problem {
     /// A collection of its own lies inside the piece: the directory at
     /// this path holds a `.antiq` directory, the marker of a collection.
     NestedCollection { root: RelPath },
+    /// The entry at this path is immutable or append-only, or a directory
+    /// the user neither owns nor can write.
+    Locked { path: RelPath },
+    /// The directory that holds the top of the piece is locked, so the
+    /// piece cannot be removed or moved. The path is relative to the
+    /// collection.
+    LockedParent { path: RelPath },
+    /// The rule file at this path cannot be used. `line` is the line where
+    /// a rule is at fault, and `None` for a file that cannot be read or is
+    /// no text.
+    RuleFile { path: RelPath, line: Option<usize> },
+    /// The marker of this name lies at the top of the piece as something
+    /// other than a file.
+    MarkerNotAFile { name: Name },
 }
 
 /// A piece as the walk saw it.
@@ -119,6 +156,17 @@ impl PieceTree {
     pub fn problems(&self) -> &[Problem] {
         &self.problems
     }
+
+    /// The entries that reach the archive: everything the rules do not
+    /// ignore, and not the `.antiq-restored` marker of the top, which
+    /// records the piece's history and is no part of its content.
+    pub fn packed_entries(&self) -> impl Iterator<Item = &TreeEntry> {
+        self.entries.iter().filter(|entry| {
+            let restored = entry.class == Class::Control
+                && entry.path.as_bytes() == crate::markers::RESTORED_FILE.as_bytes();
+            entry.class != Class::Ignored && !restored
+        })
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +188,9 @@ mod tests {
             link_target: None,
             birth_ns: None,
             mount_root: false,
+            uid: 0,
+            flag_locked: false,
+            class: Class::Counted,
         }
     }
 

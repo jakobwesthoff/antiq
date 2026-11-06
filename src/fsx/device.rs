@@ -359,12 +359,19 @@ mod tests {
         let root = TreeRoot::open(tree.root()).expect("opens");
         let rules = Rules::new(&[], &[]).expect("no patterns are valid");
         let path = |text: &str| RelPath::parse(text).expect("valid path");
-        let inside = walk_piece(&root, &path("p"), &[], &rules).expect("walks");
+        let inside = walk_piece(&root, &path("p"), &rules, &crate::rules::PieceRules::none())
+            .expect("walks");
         assert_eq!(
             inside.problems(),
             [Problem::MountPoint { other: path("mnt") }]
         );
-        let as_piece = walk_piece(&root, &path("bound"), &[], &rules).expect("walks");
+        let as_piece = walk_piece(
+            &root,
+            &path("bound"),
+            &rules,
+            &crate::rules::PieceRules::none(),
+        )
+        .expect("walks");
         assert_eq!(
             as_piece.problems(),
             [Problem::MountPoint {
@@ -391,7 +398,8 @@ mod tests {
         let root = TreeRoot::open(tree.root()).expect("opens");
         let rules = Rules::new(&[], &[]).expect("no patterns are valid");
         let piece = RelPath::parse("proj/x").expect("valid path");
-        let walked = walk_piece(&root, &piece, &[], &rules).expect("walks");
+        let walked =
+            walk_piece(&root, &piece, &rules, &crate::rules::PieceRules::none()).expect("walks");
         assert_eq!(
             walked.problems(),
             [Problem::MountPoint {

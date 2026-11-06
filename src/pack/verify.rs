@@ -228,8 +228,7 @@ fn verify_strict_observed(
         }
     }
 
-    let members = without_junk(&package.entries, rules);
-    let mut differences = differences_from(&members, &folder, rules.staged);
+    let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
     // and time. A staging root keeps the mode its maker gave it until the
@@ -350,7 +349,7 @@ const OWNER_READ_SEARCH: u32 = 0o500;
 
 /// Compares the tree below `root` with `listing`: path, type, size,
 /// modification time, mode, link target and content hash. Directory
-/// modification times, symlink modes and junk files do not count.
+/// modification times and symlink modes do not count.
 pub fn compare_with_listing(
     listing: &[ListingEntry],
     root: &TreeRoot,
@@ -376,7 +375,7 @@ fn compare_with_listing_observed(
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Compared, PackError> {
     let folder = read_folder(root, rules, observe, &HashMap::new())?;
-    let mut differences = differences_from(&without_junk(listing, rules), &folder, false);
+    let mut differences = differences_from(listing, &folder, false);
     differences.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(Compared {
         differences,
@@ -425,7 +424,7 @@ fn read_folder(
     modes: &HashMap<RelPath, u32>,
 ) -> Result<Folder, PackError> {
     let no_rules = Rules::new(&[], &[]).expect("no patterns are valid");
-    let walked = walk_piece(root, &RelPath::root(), &rules.junk, &no_rules)?;
+    let walked = walk_piece(root, &RelPath::root(), &no_rules, &rules.rules)?;
     // Packing refuses a walk with a problem, so no package holds such a
     // folder.
     if let Some(problem) = walked.problems().first() {
@@ -441,8 +440,7 @@ fn read_folder(
     // Directories that were granted access are described by the mode they
     // had before.
     let entries: Vec<TreeEntry> = walked
-        .entries()
-        .iter()
+        .packed_entries()
         .cloned()
         .map(|mut entry| {
             if let Some(mode) = modes.get(&entry.path) {
@@ -580,24 +578,6 @@ fn is_recorded(file: &Metadata, entry: &TreeEntry) -> bool {
         && nanoseconds(file.ctime(), file.ctime_nsec()) == entry.ctime_ns
 }
 
-/// The lines of a package or listing that the walk of a folder would not
-/// meet: a junk name is junk when it is not a directory.
-fn without_junk(lines: &[ListingEntry], rules: &WalkRules) -> Vec<ListingEntry> {
-    let is_junk = |line: &ListingEntry| {
-        line.kind != ListingType::Dir
-            && line
-                .path
-                .components()
-                .last()
-                .is_some_and(|name| rules.junk.iter().any(|junk| junk.as_bytes() == name))
-    };
-    lines
-        .iter()
-        .filter(|line| !is_junk(line))
-        .cloned()
-        .collect()
-}
-
 /// The differences between two sets of lines, in path order. `left` is
 /// the package or listing, `right` the folder.
 pub(super) fn compare(
@@ -666,6 +646,7 @@ fn differing(then: &ListingEntry, now: &ListingEntry, directory_times: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::PieceRules;
     use crate::testing::package::{RawMember, compress, on_disk, pack_piece, raw_tar};
     use crate::testing::tree::Tree;
     use crate::tree::Problem;
@@ -899,9 +880,9 @@ mod tests {
         assert_eq!(compare(&tree, &listing), []);
     }
 
-    fn junk_rules() -> WalkRules {
+    fn ds_store_rules() -> WalkRules {
         WalkRules {
-            junk: vec![crate::relpath::Name::from_bytes(b".DS_Store".to_vec()).expect("a name")],
+            rules: PieceRules::new(&[".DS_Store".to_string()], &[]).expect("valid rules"),
             staged: false,
         }
     }
@@ -919,38 +900,25 @@ mod tests {
     }
 
     #[test]
-    fn junk_on_disk_does_not_count() {
-        use crate::testing::package::pack_piece_without;
+    fn ignored_entries_on_disk_do_not_count() {
+        use crate::testing::package::pack_piece_with;
         let mut tree = mixed();
-        let listing = pack_piece_without(&tree, "proj", &junk_rules().junk)
+        let listing = pack_piece_with(&tree, "proj", &ds_store_rules().rules)
             .packed
             .listing;
         tree.file("proj/src/.DS_Store", "x");
-        assert_eq!(compare_with_rules(&tree, &listing, &junk_rules()), []);
+        tree.file("proj/.DS_Store/inside", "x");
+        assert_eq!(compare_with_rules(&tree, &listing, &ds_store_rules()), []);
     }
 
     #[test]
-    fn junk_in_the_listing_does_not_count() {
+    fn an_entry_the_listing_holds_and_the_rules_ignore_is_missing() {
         let mut tree = mixed();
         tree.file("proj/src/.DS_Store", "x");
         let listing = packed(&tree);
-        assert!(
-            listing
-                .iter()
-                .any(|line| line.path == path("src/.DS_Store"))
-        );
-        std::fs::remove_file(tree.path("proj/src/.DS_Store")).expect("the file is removed");
-        assert_eq!(compare_with_rules(&tree, &listing, &junk_rules()), []);
-    }
-
-    #[test]
-    fn a_directory_named_like_junk_is_compared() {
-        let mut tree = mixed();
-        let listing = packed(&tree);
-        tree.dir("proj/.DS_Store");
         assert_eq!(
-            compare_with_rules(&tree, &listing, &junk_rules()),
-            [Difference::Added(path(".DS_Store"))]
+            compare_with_rules(&tree, &listing, &ds_store_rules()),
+            [Difference::Removed(path("src/.DS_Store"))]
         );
     }
 
@@ -1411,16 +1379,23 @@ mod tests {
     }
 
     #[test]
-    fn junk_on_disk_and_in_the_package_is_left_out() {
-        use crate::testing::package::pack_piece_without;
+    fn ignored_entries_on_disk_are_left_out_of_a_strict_verify() {
+        use crate::testing::package::pack_piece_with;
         let mut tree = mixed();
-        let without = pack_piece_without(&tree, "proj", &junk_rules().junk);
+        let packaged = pack_piece_with(&tree, "proj", &ds_store_rules().rules);
         tree.file("proj/src/.DS_Store", "x");
-        verify_with(&tree, &without.bytes, &junk_rules()).expect("junk on disk is left out");
+        tree.file("proj/.DS_Store/inside", "x");
+        verify_with(&tree, &packaged.bytes, &ds_store_rules())
+            .expect("ignored entries are left out");
+    }
 
-        let with = pack_piece(&tree, "proj");
-        std::fs::remove_file(tree.path("proj/src/.DS_Store")).expect("removed");
-        verify_with(&tree, &with.bytes, &junk_rules()).expect("junk in the package is left out");
+    #[test]
+    fn a_staged_tree_is_verified_with_no_rules() {
+        let mut tree = mixed();
+        tree.file("proj/.DS_Store", "x");
+        tree.file("proj/node_modules/dep", "x");
+        let packaged = pack_piece(&tree, "proj");
+        verify_with(&tree, &packaged.bytes, &staged()).expect("a staged tree has no rules");
     }
 
     #[test]

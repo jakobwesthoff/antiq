@@ -20,6 +20,7 @@ use tempfile::TempDir;
 pub struct Tree {
     root: TempDir,
     unreadable: Vec<PathBuf>,
+    immutable: Vec<PathBuf>,
 }
 
 impl Tree {
@@ -27,6 +28,7 @@ impl Tree {
         Tree {
             root: tempfile::tempdir().expect("the temp dir is writable"),
             unreadable: Vec::new(),
+            immutable: Vec::new(),
         }
     }
 
@@ -120,10 +122,56 @@ impl Tree {
         self.unreadable.push(path.clone());
         path
     }
+
+    /// Sets the user immutable flag on the file or directory at
+    /// `relative`, and checks that it took. The flag is cleared when the
+    /// tree is dropped, also when a test panics, so the temp directory can
+    /// be removed.
+    #[cfg(target_os = "macos")]
+    pub fn immutable(&mut self, relative: &str) -> PathBuf {
+        use std::os::macos::fs::MetadataExt;
+        const UF_IMMUTABLE: u32 = 0x2;
+        let path = self.path(relative);
+        let status = Command::new("chflags")
+            .arg("uchg")
+            .arg(&path)
+            .status()
+            .expect("the chflags executable exists");
+        assert!(status.success(), "chflags failed for {}", path.display());
+        self.immutable.push(path.clone());
+        let flags = fs::symlink_metadata(&path)
+            .expect("the entry can be read")
+            .st_flags();
+        assert!(flags & UF_IMMUTABLE != 0, "the flag did not take");
+        path
+    }
+
+    /// Records that the immutable entry is about to be moved to `relative`,
+    /// so the flag is cleared there when the tree is dropped, also after a
+    /// panic.
+    #[cfg(target_os = "macos")]
+    pub fn immutable_moves_to(&mut self, relative: &str) {
+        self.immutable.push(self.path(relative));
+    }
+
+    /// A unix socket bound at `relative`.
+    pub fn socket(&mut self, relative: &str) -> PathBuf {
+        let path = self.path(relative);
+        fs::create_dir_all(path.parent().expect("a socket has a parent"))
+            .expect("the parent can be created");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("the socket binds");
+        // The socket file stays after the listener closes.
+        drop(listener);
+        path
+    }
 }
 
 impl Drop for Tree {
     fn drop(&mut self) {
+        for path in &self.immutable {
+            // Best effort: the entry may be gone already.
+            let _ = Command::new("chflags").arg("nouchg").arg(path).status();
+        }
         for path in &self.unreadable {
             // Best effort: the directory may be gone already.
             let _ = fs::set_permissions(path, Permissions::from_mode(0o755));

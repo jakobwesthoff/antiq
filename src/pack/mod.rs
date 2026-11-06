@@ -17,6 +17,7 @@ pub mod zstd;
 use crate::fsx::tree::TreeRoot;
 use crate::listing::ListingEntry;
 use crate::relpath::{Name, RelPath};
+use crate::rules::PieceRules;
 use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
 use hashing::HashingWriter;
 use std::fmt;
@@ -106,9 +107,10 @@ pub struct Packed {
 /// Rules for comparing a package or a listing with a tree.
 #[derive(Debug, Default)]
 pub struct WalkRules {
-    /// Files with these names are left out on both sides, as the walk
-    /// leaves them out when packing.
-    pub junk: Vec<Name>,
+    /// The ignore and timeless rules the walk of a user's folder applies,
+    /// so that the folder is compared with what packing it would archive.
+    /// The default holds none, which is right for a staged tree.
+    pub rules: PieceRules,
     /// The tree is antiq's own staging, where the extraction's final pass
     /// may have left a directory whose mode keeps its owner out. Only then
     /// does the strict verify give such a directory owner access for the
@@ -249,7 +251,7 @@ impl Packager for TarZstd {
         let mut writer = TarWriter::new(encoder, container);
         let mut directories = DirectoryStack::new(root);
         let mut content = |entry: &TreeEntry| directories.open(entry);
-        for entry in tree.entries() {
+        for entry in tree.packed_entries() {
             writer.add(entry, &mut content)?;
         }
         let (encoder, listing, notes) = writer.finish()?;
@@ -444,6 +446,32 @@ mod pack_tests {
             .pack(&root, &walked, &fast(), &mut out)
             .expect("the piece packs");
         (out, packed)
+    }
+
+    #[test]
+    fn ignored_entries_and_the_restored_marker_do_not_reach_the_archive() {
+        use crate::testing::package::pack_piece_with;
+        let mut tree = Tree::new();
+        tree.file("proj/keep", "k");
+        tree.file("proj/node_modules/dep/index.js", "x");
+        tree.file("proj/.antiq-restored", "r");
+        tree.file("proj/.antiqignore", "# nothing\n");
+        let rules = PieceRules::new(&["node_modules/".to_string()], &[]).expect("valid rules");
+
+        let packaged = pack_piece_with(&tree, "proj", &rules);
+
+        let listed: Vec<String> = packaged
+            .packed
+            .listing
+            .iter()
+            .map(|line| line.path.to_string())
+            .collect();
+        assert_eq!(listed, [".antiqignore", "keep"]);
+        let names: Vec<String> = members(&packaged.bytes)
+            .into_iter()
+            .map(|member| member.0)
+            .collect();
+        assert_eq!(names, ["proj/", "proj/.antiqignore", "proj/keep"]);
     }
 
     /// (path, type, link name, data) of every member of a package.

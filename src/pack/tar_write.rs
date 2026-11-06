@@ -474,7 +474,7 @@ pub struct SparseWarning {
 fn size_sums(tree: &PieceTree) -> (u64, u64) {
     let mut seen = HashSet::new();
     let (mut apparent, mut allocated) = (0u64, 0u64);
-    for entry in tree.entries() {
+    for entry in tree.packed_entries() {
         if entry.kind != EntryKind::File {
             continue;
         }
@@ -537,6 +537,9 @@ mod tests {
             link_target: None,
             birth_ns: None,
             mount_root: false,
+            uid: 0,
+            flag_locked: false,
+            class: crate::tree::Class::Counted,
         }
     }
 
@@ -1156,6 +1159,15 @@ mod tests {
                 allocated: 4096
             })
         );
+    }
+
+    #[test]
+    fn an_ignored_sparse_file_does_not_feed_the_warning() {
+        let mut ignored = sparse_file("a", 2 * GIB, 0);
+        ignored.class = crate::tree::Class::Ignored;
+        let tree = tree_of(vec![ignored]);
+        assert_eq!(sparse_excess(&tree), 0);
+        assert_eq!(sparse_warning(&tree), None);
     }
 
     #[test]

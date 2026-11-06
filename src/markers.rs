@@ -6,6 +6,10 @@
 
 use crate::error::HasKind;
 
+/// The marker at the top of a piece that records its unearthing. It is
+/// antiq's own bookkeeping and does not go into the archive.
+pub const RESTORED_FILE: &str = ".antiq-restored";
+
 /// Why a marker operation failed. Nothing in it can fail yet.
 #[derive(Debug, thiserror::Error)]
 pub enum MarkerError {}

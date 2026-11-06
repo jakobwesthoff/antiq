@@ -8,6 +8,7 @@ use crate::fsx::tree::TreeRoot;
 use crate::pack::zstd::{ZstdSettings, encoder};
 use crate::pack::{PackSettings, Packager, Packed, TarZstd};
 use crate::relpath::RelPath;
+use crate::rules::PieceRules;
 use crate::select::Rules;
 use crate::testing::tree::Tree;
 use crate::walk::walk_piece;
@@ -20,17 +21,17 @@ pub struct Packaged {
 }
 
 /// Packs the directory `piece` of `tree`, walked the way the real walk
-/// does, with no junk list.
+/// does, with no ignore or timeless rules.
 pub fn pack_piece(tree: &Tree, piece: &str) -> Packaged {
-    pack_piece_without(tree, piece, &[])
+    pack_piece_with(tree, piece, &PieceRules::none())
 }
 
-/// Like [`pack_piece`], leaving files named in `junk` out.
-pub fn pack_piece_without(tree: &Tree, piece: &str, junk: &[crate::relpath::Name]) -> Packaged {
+/// Like [`pack_piece`], walking with `piece_rules`.
+pub fn pack_piece_with(tree: &Tree, piece: &str, piece_rules: &PieceRules) -> Packaged {
     let collection = TreeRoot::open(tree.root()).expect("the tree opens");
     let top = RelPath::parse(piece).expect("a valid piece path");
     let rules = Rules::new(&[], &[]).expect("no patterns are valid");
-    let walked = walk_piece(&collection, &top, junk, &rules).expect("the walk succeeds");
+    let walked = walk_piece(&collection, &top, &rules, piece_rules).expect("the walk succeeds");
     let root = collection.sub(&top).expect("the piece opens");
     let settings = PackSettings {
         zstd: ZstdSettings::fast(),

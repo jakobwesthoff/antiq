@@ -25,7 +25,7 @@
 //! a root below that original root.
 
 use crate::relpath::{Name, RelPath};
-use crate::tree::{EntryKind, TreeEntry};
+use crate::tree::{Class, EntryKind, TreeEntry};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, RawMode, RenameFlags, Timespec, Timestamps, UTIME_OMIT, chmodat,
@@ -161,6 +161,9 @@ impl TreeRoot {
             link_target,
             birth_ns: raw.birth_ns,
             mount_root: raw.mount_root,
+            uid: raw.uid,
+            flag_locked: raw.flag_locked,
+            class: Class::Counted,
         })
     }
 
@@ -573,6 +576,8 @@ struct RawStat {
     nlink: u64,
     birth_ns: Option<i128>,
     mount_root: bool,
+    uid: u32,
+    flag_locked: bool,
 }
 
 fn nanoseconds(seconds: i64, nanos: u32) -> i128 {
@@ -602,6 +607,11 @@ fn read_stat(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<RawStat> {
         birth_ns: has_birth_time
             .then(|| nanoseconds(stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)),
         mount_root: mount_root_from_attributes(stat.stx_attributes_mask, stat.stx_attributes),
+        uid: stat.stx_uid,
+        flag_locked: locked_from_attributes(
+            stat.stx_attributes_mask.bits(),
+            stat.stx_attributes.bits(),
+        ),
     })
 }
 
@@ -625,7 +635,41 @@ fn read_stat(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<RawStat> {
         nlink: u64::from(stat.st_nlink),
         birth_ns: birth_time(&stat),
         mount_root,
+        uid: stat.st_uid,
+        flag_locked: locked_from_flags(&stat),
     })
+}
+
+/// `STATX_ATTR_IMMUTABLE` and `STATX_ATTR_APPEND`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const STATX_LOCKING: u64 = 0x10 | 0x20;
+
+/// Whether the attributes `statx` reported say the entry is immutable or
+/// append-only. `mask` lists the attributes the kernel knows, and one it
+/// did not report says nothing: only a flag that is both known and set
+/// locks the entry.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn locked_from_attributes(mask: u64, attributes: u64) -> bool {
+    mask & attributes & STATX_LOCKING != 0
+}
+
+/// `UF_IMMUTABLE`, `UF_APPEND`, `SF_IMMUTABLE` and `SF_APPEND` of
+/// `st_flags`.
+#[cfg(not(target_os = "linux"))]
+const ST_FLAGS_LOCKING: u32 = 0x2 | 0x4 | 0x2_0000 | 0x4_0000;
+
+/// Whether the `st_flags` of an entry make it immutable or append-only.
+#[cfg(not(target_os = "linux"))]
+fn locked_from_flags(stat: &rustix::fs::Stat) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        stat.st_flags & ST_FLAGS_LOCKING != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = stat;
+        false
+    }
 }
 
 /// Whether the attributes `statx` reported say the entry is the root of a
@@ -1194,6 +1238,8 @@ mod tests {
             nlink: 1,
             birth_ns: None,
             mount_root: false,
+            uid: 0,
+            flag_locked: false,
         }
     }
 
@@ -1811,5 +1857,50 @@ mod tests {
             .read_dir(&path("file"))
             .expect_err("not a directory");
         assert_eq!(raw_error(&error), Some(Errno::NOTDIR.raw_os_error()));
+    }
+
+    #[test]
+    fn only_an_attribute_the_kernel_reports_and_sets_locks_an_entry() {
+        const IMMUTABLE: u64 = 0x10;
+        const APPEND: u64 = 0x20;
+        const OTHER: u64 = 0x800;
+        let table = [
+            (IMMUTABLE | OTHER, IMMUTABLE, true),
+            (APPEND, APPEND, true),
+            (IMMUTABLE | APPEND, IMMUTABLE | APPEND, true),
+            (IMMUTABLE | APPEND, 0, false),
+            (OTHER, IMMUTABLE | APPEND, false),
+            (0, IMMUTABLE, false),
+            (IMMUTABLE | OTHER, OTHER, false),
+        ];
+        for (mask, attributes, locked) in table {
+            assert_eq!(
+                locked_from_attributes(mask, attributes),
+                locked,
+                "mask {mask:x} attributes {attributes:x}"
+            );
+        }
+    }
+
+    #[test]
+    fn lstat_reports_the_owner_and_no_lock_for_an_ordinary_file() {
+        let mut tree = Tree::new();
+        tree.file("a", "x");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let entry = root.lstat(&path("a")).expect("lstat succeeds");
+        assert_eq!(entry.uid, rustix::process::geteuid().as_raw());
+        assert!(!entry.flag_locked);
+        assert_eq!(entry.class, Class::Counted);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lstat_reports_a_file_with_the_user_immutable_flag_as_locked() {
+        let mut tree = Tree::new();
+        tree.file("a", "x");
+        tree.immutable("a");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let entry = root.lstat(&path("a")).expect("lstat succeeds");
+        assert!(entry.flag_locked, "uchg must show in lstat");
     }
 }

@@ -249,8 +249,10 @@ everything below it, and a `!` rule cannot bring back a path inside it. An
 ignored directory's rule files are not read. Only a regular file named
 `.antiqignore` or `.antiq-timeless` is read as a rule file. A rule that is
 not valid, a file that is not UTF-8 text and a file that cannot be read
-each refuse the piece, with the file and line named ("rule file:
-<path>:<line>"), so a piece with broken rules is never called due.
+each refuse the piece, with the file named and, where a rule is at
+fault, its line ("rule file: <path>:<line>"), so a piece with broken rules
+is never called due. A path that an ignore rule and a timeless rule both
+match is ignored.
 
 **Ignored subtrees are still checked.** The walk before packing enters
 ignored paths too, without hashing them, for mount points, nested

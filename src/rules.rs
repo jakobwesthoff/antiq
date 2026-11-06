@@ -16,6 +16,10 @@ use std::path::Path;
 /// The name of the file that holds ignore rules, in any directory of a piece.
 pub const IGNORE_FILE: &[u8] = b".antiqignore";
 
+/// The name of the file that holds timeless rules, in any directory of a
+/// piece.
+pub const TIMELESS_FILE: &[u8] = b".antiq-timeless";
+
 /// Why a rule or a rule file failed.
 #[derive(Debug, thiserror::Error)]
 pub enum RulesError {
@@ -26,9 +30,76 @@ pub enum RulesError {
     /// `line` counts from 1; 0 stands for a failure of the whole rule set.
     #[error("line {line} is not a valid rule: {message}")]
     BadLine { line: usize, message: String },
+    /// A line of the `collection.ignore` or `collection.timeless` setting.
+    #[error("{key} line {line} is not a valid rule: {message}")]
+    BadConfigRule {
+        key: &'static str,
+        line: usize,
+        message: String,
+    },
 }
 
 impl HasKind for RulesError {}
+
+/// The rules every piece of a collection answers to: the lines of the
+/// `collection.ignore` and `collection.timeless` settings, compiled once
+/// per run. The rule files inside a piece come on top of them.
+#[derive(Debug, Clone)]
+pub struct PieceRules {
+    ignore: Gitignore,
+    timeless: Gitignore,
+    /// Whether the walk reads the rule files it meets. A staged tree is
+    /// checked with `none()`, which reads none.
+    read_files: bool,
+}
+
+impl PieceRules {
+    /// `ignore` and `timeless` are the lines of the two settings, in
+    /// gitignore syntax. A line that is no valid rule is an error.
+    pub fn new(ignore: &[String], timeless: &[String]) -> Result<PieceRules, RulesError> {
+        let compile_setting = |key: &'static str, lines: &[String]| {
+            compile(lines.iter().map(String::as_str)).map_err(|error| match error {
+                RulesError::BadLine { line, message } => {
+                    RulesError::BadConfigRule { key, line, message }
+                }
+                other => other,
+            })
+        };
+        Ok(PieceRules {
+            ignore: compile_setting("collection.ignore", ignore)?,
+            timeless: compile_setting("collection.timeless", timeless)?,
+            read_files: true,
+        })
+    }
+
+    /// Whether the walk reads the rule files it meets.
+    pub(crate) fn reads_files(&self) -> bool {
+        self.read_files
+    }
+
+    /// A fresh scope per rule kind, holding the settings' lines.
+    pub(crate) fn scopes(&self) -> (Scope, Scope) {
+        (
+            Scope::new(self.ignore.clone()),
+            Scope::new(self.timeless.clone()),
+        )
+    }
+
+    /// No rules at all, and no rule files read.
+    pub fn none() -> PieceRules {
+        PieceRules {
+            ignore: Gitignore::empty(),
+            timeless: Gitignore::empty(),
+            read_files: false,
+        }
+    }
+}
+
+impl Default for PieceRules {
+    fn default() -> PieceRules {
+        PieceRules::none()
+    }
+}
 
 /// Builds one matcher from rule lines. Paths are matched relative to the
 /// directory the rules belong to, so the builder's root is `.`: any other
@@ -143,6 +214,22 @@ mod tests {
 
     fn rules(text: &str) -> Gitignore {
         parse_rule_file(text.as_bytes().to_vec()).expect("valid rules")
+    }
+
+    #[test]
+    fn a_broken_config_line_names_its_setting_and_line() {
+        let broken = ["ok".to_string(), "bad\\".to_string()];
+        for (ignore, timeless, key) in [
+            (&broken[..], &[][..], "collection.ignore"),
+            (&[][..], &broken[..], "collection.timeless"),
+        ] {
+            match PieceRules::new(ignore, timeless) {
+                Err(RulesError::BadConfigRule {
+                    key: found, line, ..
+                }) => assert_eq!((found, line), (key, 2)),
+                other => panic!("expected a bad config rule, got {other:?}"),
+            }
+        }
     }
 
     #[test]

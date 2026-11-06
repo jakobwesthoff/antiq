@@ -41,6 +41,10 @@ pub enum FsxError {
     /// A removal met a directory nested deeper than it descends.
     #[error("{path} is nested more than {limit} levels below the tree being removed")]
     TooDeep { path: String, limit: usize },
+    /// A removal or a move met an entry that is immutable or append-only,
+    /// or a directory the user neither owns nor can write.
+    #[error("{path} is locked")]
+    Locked { path: String },
     #[error("cannot move {from} to {to}: they are on different devices")]
     CrossesDevices { from: String, to: String },
 }
@@ -123,7 +127,9 @@ mod tests {
             deep.to_string(),
             "t/d is nested more than 512 levels below the tree being removed"
         );
-        for error in [io, foreign, crossing, deep] {
+        let locked = FsxError::Locked { path: "t/f".into() };
+        assert_eq!(locked.to_string(), "t/f is locked");
+        for error in [io, foreign, crossing, deep, locked] {
             assert_eq!(error.kind(), ErrorKind::Other);
         }
     }

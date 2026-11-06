@@ -6,16 +6,9 @@
 
 use crate::fsx::tree::TreeRoot;
 use crate::pin::{self, PinError};
-use crate::relpath::{Name, RelPath};
-use crate::rules::{self, IGNORE_FILE, RulesError, Scope};
-use crate::tree::{EntryKind, PieceTree};
-use ignore::gitignore::Gitignore;
+use crate::relpath::RelPath;
+use crate::tree::{Class, EntryKind, PieceTree};
 use jiff::Timestamp;
-use std::collections::HashSet;
-use std::io::{self, Read};
-
-/// Names whose changes are no activity, at any level of a piece.
-const MARKER_NAMES: [&[u8]; 2] = [IGNORE_FILE, pin::PIN_FILE.as_bytes()];
 
 /// A day, in nanoseconds. Idle time is counted in 24-hour days.
 const DAY_NS: i128 = 86_400_000_000_000;
@@ -27,39 +20,17 @@ pub enum IdleError {
     Problems,
     #[error(transparent)]
     Pin(#[from] PinError),
-    #[error("cannot read the ignore file {path}: {source}")]
-    IgnoreFile {
-        path: RelPath,
-        #[source]
-        source: io::Error,
-    },
-    #[error("the ignore file {path} is not UTF-8 text")]
-    NotUtf8 { path: RelPath },
-    #[error("{} line {line} is not a valid ignore rule: {message}", rule_source(.file))]
-    BadRule {
-        /// The ignore file, or `None` for the `collection.ignore` setting.
-        file: Option<RelPath>,
-        line: usize,
-        message: String,
-    },
 }
 
 impl crate::error::HasKind for IdleError {}
-
-fn rule_source(file: &Option<RelPath>) -> String {
-    match file {
-        Some(file) => file.to_string(),
-        None => "collection.ignore".to_string(),
-    }
-}
 
 /// What the idle check makes of a piece.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleVerdict {
     /// The piece carries a pin; nothing else is looked at.
     Pinned,
-    /// No file counts, after the ignore rules, the marker files and the
-    /// junk list.
+    /// No file counts: the ignore and timeless rules and the control files
+    /// leave none.
     Empty,
     /// Files count only by name: all their times lie too far ahead.
     OnlyFuture,
@@ -83,44 +54,17 @@ pub struct IdleCheck {
     pub future: Vec<RelPath>,
 }
 
-/// What the check reads from the config.
+/// What the check reads from the config. The ignore and timeless rules are
+/// the walk's: the check counts the entries the walk classified as
+/// [`Class::Counted`].
 #[derive(Debug, Clone)]
 pub struct Settings {
     idle_days: u32,
-    /// The `collection.ignore` rules, matched against paths relative to the
-    /// top of the piece.
-    config_rules: Gitignore,
 }
 
 impl Settings {
-    /// `ignore_lines` are the lines of `collection.ignore`, in gitignore
-    /// syntax. A line that is no valid rule is an error.
-    pub fn new(idle_days: u32, ignore_lines: &[String]) -> Result<Settings, IdleError> {
-        let config_rules = rules::compile(ignore_lines.iter().map(String::as_str))
-            .map_err(|error| rule_error(None, error))?;
-        Ok(Settings {
-            idle_days,
-            config_rules,
-        })
-    }
-}
-
-/// Maps a failure of a rule file, or of the config when `file` is `None`.
-fn rule_error(file: Option<&RelPath>, error: RulesError) -> IdleError {
-    match (error, file) {
-        (RulesError::BadLine { line, message }, _) => IdleError::BadRule {
-            file: file.cloned(),
-            line,
-            message,
-        },
-        (RulesError::Unreadable(source), Some(path)) => IdleError::IgnoreFile {
-            path: path.clone(),
-            source,
-        },
-        (RulesError::NotUtf8, Some(path)) => IdleError::NotUtf8 { path: path.clone() },
-        (RulesError::Unreadable(_) | RulesError::NotUtf8, None) => {
-            unreachable!("config lines are text and are not read from disk")
-        }
+    pub fn new(idle_days: u32) -> Settings {
+        Settings { idle_days }
     }
 }
 
@@ -129,8 +73,8 @@ fn rule_error(file: Option<&RelPath>, error: RulesError) -> IdleError {
 ///
 /// `unearthed` is the time the piece was last unearthed, if it was. The
 /// pin is looked up on disk, not in `tree`, so that the answer is the one
-/// `pin::is_pinned` gives to the `pin` commands, whatever the junk list
-/// left out of the walk. A piece the walk could not fully read has no
+/// `pin::is_pinned` gives to the `pin` commands, whatever an ignore
+/// rule made of it in the walk. A piece the walk could not fully read has no
 /// verdict.
 pub fn check(
     collection: &TreeRoot,
@@ -153,25 +97,11 @@ pub fn check(
     // lie outside what a `Timestamp` holds.
     let now_ns = now.as_nanosecond();
     let latest_counted = now_ns + DAY_NS;
-    let mut rules = Rules::new(collection, tree, settings);
     let mut candidates = 0usize;
     let mut future = Vec::new();
     let mut newest: Option<i128> = None;
     for entry in tree.entries() {
-        match entry.kind {
-            EntryKind::Directory => {
-                rules.enter_directory(&entry.path)?;
-                continue;
-            }
-            EntryKind::File => {}
-            _ => continue,
-        }
-        let is_marker = entry
-            .path
-            .components()
-            .last()
-            .is_some_and(|name| MARKER_NAMES.contains(&name));
-        if is_marker || rules.ignores(&entry.path, false) {
+        if entry.kind != EntryKind::File || entry.class != Class::Counted {
             continue;
         }
         candidates += 1;
@@ -215,84 +145,10 @@ fn timestamp(ns: i128) -> Timestamp {
     Timestamp::from_nanosecond(ns).unwrap_or(Timestamp::MIN)
 }
 
-// =========================================================
-// Ignore rules
-// =========================================================
-
-/// The rules that apply while the entries of a piece are walked top down.
-///
-/// A directory comes before everything below it, so by the time an entry is
-/// judged its ancestors are decided: an ignored directory ignores
-/// everything below it, whatever the rules inside say, and the
-/// `.antiqignore` of a directory is read only once the directory is known
-/// not to be ignored.
-struct Rules<'a> {
-    collection: &'a TreeRoot,
-    top: &'a RelPath,
-    scope: Scope,
-    /// Directories, as path bytes, that hold a regular `.antiqignore`.
-    with_ignore_file: HashSet<&'a [u8]>,
-}
-
-impl<'a> Rules<'a> {
-    fn new(collection: &'a TreeRoot, tree: &'a PieceTree, settings: &'a Settings) -> Rules<'a> {
-        let with_ignore_file = tree
-            .entries()
-            .iter()
-            .filter(|entry| entry.kind == EntryKind::File)
-            .filter_map(|entry| {
-                let (parent, name) = rules::split_last(entry.path.as_bytes());
-                (name == IGNORE_FILE).then_some(parent)
-            })
-            .collect();
-        Rules {
-            collection,
-            top: tree.top(),
-            scope: Scope::new(settings.config_rules.clone()),
-            with_ignore_file,
-        }
-    }
-
-    /// Notes whether the directory at `path` is ignored and, if it is not,
-    /// reads its `.antiqignore`.
-    fn enter_directory(&mut self, path: &'a RelPath) -> Result<(), IdleError> {
-        // The top of the piece is never ignored.
-        if !path.is_root() && self.scope.decide(path, true) {
-            return Ok(());
-        }
-        if self.with_ignore_file.contains(path.as_bytes()) {
-            let rules = self.read_ignore_file(path)?;
-            self.scope.add_file(path, rules);
-        }
-        Ok(())
-    }
-
-    fn ignores(&mut self, path: &RelPath, is_dir: bool) -> bool {
-        self.scope.decide(path, is_dir)
-    }
-
-    /// Reads and compiles the `.antiqignore` in the directory at `directory`.
-    fn read_ignore_file(&self, directory: &RelPath) -> Result<Gitignore, IdleError> {
-        let name = Name::from_bytes(IGNORE_FILE.to_vec()).expect("the ignore file name is valid");
-        let path = directory.join(&name);
-        let read = || -> io::Result<Vec<u8>> {
-            let mut content = Vec::new();
-            self.collection
-                .sub(self.top)?
-                .open_read(&path)?
-                .read_to_end(&mut content)?;
-            Ok(content)
-        };
-        let content =
-            read().map_err(|source| rule_error(Some(&path), RulesError::Unreadable(source)))?;
-        rules::parse_rule_file(content).map_err(|error| rule_error(Some(&path), error))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relpath::Name;
+    use crate::rules::PieceRules;
     use crate::select::Rules;
     use crate::testing::tree::Tree;
     use crate::tree::{EntryKind, TreeEntry};
@@ -319,16 +175,21 @@ mod tests {
     }
 
     fn settings(idle_days: u32) -> Settings {
-        Settings::new(idle_days, &[]).expect("no rules to refuse")
+        Settings::new(idle_days)
     }
 
-    fn walk(root: &TreeRoot) -> PieceTree {
-        let rules = Rules::new(&[], &[])
+    fn walk_ruled(root: &TreeRoot, ignore: &[&str]) -> PieceTree {
+        let ignore: Vec<String> = ignore.iter().map(|rule| rule.to_string()).collect();
+        let piece_rules = PieceRules::new(&ignore, &[]).expect("valid rules");
+        let select = Rules::new(&[], &[])
             .expect("no patterns")
             .bind(root)
             .expect("binds");
-        let junk = [Name::from_bytes(b".DS_Store".to_vec()).expect("valid name")];
-        walk_piece(root, &path("piece"), &junk, &rules).expect("the walk succeeds")
+        walk_piece(root, &path("piece"), &select, &piece_rules).expect("the walk succeeds")
+    }
+
+    fn walk(root: &TreeRoot) -> PieceTree {
+        walk_ruled(root, &[".DS_Store"])
     }
 
     fn run_with(tree: &Tree, unearthed: Option<Timestamp>, idle_days: u32) -> IdleCheck {
@@ -412,24 +273,18 @@ mod tests {
     }
 
     #[test]
-    fn a_junk_list_that_names_the_pin_file_does_not_unpin() {
+    fn an_ignore_rule_that_names_the_pin_file_does_not_unpin() {
         let mut tree = Tree::new();
         tree.file("piece/.antiq-pin", "");
         file(&mut tree, "old", -100 * DAY);
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        let rules = Rules::new(&[], &[])
-            .expect("no patterns")
-            .bind(&root)
-            .expect("binds");
-        let junk = [Name::from_bytes(b".antiq-pin".to_vec()).expect("valid name")];
-        let walked = walk_piece(&root, &path("piece"), &junk, &rules).expect("the walk succeeds");
-        assert!(
-            walked
-                .entries()
-                .iter()
-                .all(|entry| !entry.path.to_string().ends_with(".antiq-pin")),
-            "the walk leaves the pin out"
-        );
+        let walked = walk_ruled(&root, &[".antiq-pin"]);
+        let pin = walked
+            .entries()
+            .iter()
+            .find(|entry| entry.path.to_string() == ".antiq-pin")
+            .expect("the walk records the pin");
+        assert_eq!(pin.class, Class::Control);
 
         let checked =
             check(&root, &walked, None, &settings(14), at(0)).expect("the check succeeds");
@@ -475,10 +330,11 @@ mod tests {
     }
 
     #[test]
-    fn a_piece_of_markers_and_junk_is_empty() {
+    fn a_piece_of_control_files_and_junk_is_empty() {
         let mut tree = Tree::new();
         file(&mut tree, ".antiqignore", -100 * DAY);
-        file(&mut tree, "sub/.antiq-pin", -100 * DAY);
+        file(&mut tree, ".antiq-restored", -100 * DAY);
+        file(&mut tree, "sub/.antiq-timeless", -100 * DAY);
         file(&mut tree, "sub/.antiqignore", -100 * DAY);
         file(&mut tree, ".DS_Store", -100 * DAY);
         file(&mut tree, "sub/.DS_Store", -100 * DAY);
@@ -518,14 +374,43 @@ mod tests {
     }
 
     #[test]
-    fn newer_marker_files_are_no_activity() {
+    fn newer_control_files_are_no_activity() {
         let mut tree = Tree::new();
         file(&mut tree, "old", -100 * DAY);
         file(&mut tree, ".antiqignore", -DAY);
-        file(&mut tree, "sub/.antiq-pin", -DAY);
+        file(&mut tree, ".antiq-restored", -DAY);
+        file(&mut tree, "sub/.antiq-timeless", -DAY);
         file(&mut tree, "sub/.antiqignore", -DAY);
 
         assert_eq!(run(&tree), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn a_pin_file_below_the_top_is_an_ordinary_file() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "sub/.antiq-pin", -DAY);
+
+        assert_eq!(run(&tree), active(-DAY));
+    }
+
+    #[test]
+    fn timeless_files_are_no_activity() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, ".git/HEAD", -DAY);
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let timeless = vec![".git/".to_string()];
+        let piece_rules = PieceRules::new(&[], &timeless).expect("valid rules");
+        let select = Rules::new(&[], &[])
+            .expect("no patterns")
+            .bind(&root)
+            .expect("binds");
+        let walked = walk_piece(&root, &path("piece"), &select, &piece_rules).expect("walks");
+
+        let checked = check(&root, &walked, None, &settings(14), at(0)).expect("checks");
+
+        assert_eq!(checked, idle(-100 * DAY));
     }
 
     #[test]
@@ -653,6 +538,9 @@ mod tests {
             link_target: None,
             birth_ns: None,
             mount_root: false,
+            uid: 0,
+            flag_locked: false,
+            class: crate::tree::Class::Counted,
         };
         let walked = PieceTree::new(path("piece"), vec![ancient], vec![]);
 
@@ -738,6 +626,9 @@ mod tests {
             link_target: None,
             birth_ns: None,
             mount_root: false,
+            uid: 0,
+            flag_locked: false,
+            class: crate::tree::Class::Counted,
         };
         let walked = PieceTree::new(path("piece"), vec![far], vec![]);
 
@@ -835,15 +726,10 @@ mod tests {
     // Ignore rules
     // =========================================================
 
-    fn lines(rules: &[&str]) -> Vec<String> {
-        rules.iter().map(|rule| rule.to_string()).collect()
-    }
-
     /// Runs the check with `collection.ignore` set to `rules`.
     fn run_ruled(tree: &Tree, rules: &[&str]) -> Result<IdleCheck, IdleError> {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        let settings = Settings::new(14, &lines(rules))?;
-        check(&root, &walk(&root), None, &settings, at(0))
+        check(&root, &walk_ruled(&root, rules), None, &settings(14), at(0))
     }
 
     fn ignore_file(tree: &mut Tree, relative: &str, content: impl AsRef<[u8]>) {
@@ -1122,98 +1008,6 @@ mod tests {
         assert_eq!(
             run_ruled(&tree, &["vendor/"]).expect("checks"),
             idle(-100 * DAY)
-        );
-    }
-
-    #[test]
-    fn a_bad_rule_in_an_ignore_file_is_reported_with_its_line() {
-        let mut tree = Tree::new();
-        file(&mut tree, "old", -100 * DAY);
-        ignore_file(&mut tree, "sub/.antiqignore", "fine\nbroken\\\n");
-
-        let error = run_ruled(&tree, &[]).expect_err("the rule is refused");
-
-        assert!(
-            matches!(&error, IdleError::BadRule { file: Some(file), line: 2, .. } if file.to_string() == "sub/.antiqignore"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn a_bad_rule_in_the_config_is_reported_with_its_line() {
-        let mut tree = Tree::new();
-        tree.dir("piece");
-
-        let error = run_ruled(&tree, &["fine", "broken\\"]).expect_err("the rule is refused");
-
-        assert!(
-            matches!(
-                &error,
-                IdleError::BadRule {
-                    file: None,
-                    line: 2,
-                    ..
-                }
-            ),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn an_ignore_file_that_is_not_text_is_reported() {
-        let mut tree = Tree::new();
-        file(&mut tree, "old", -100 * DAY);
-        ignore_file(&mut tree, ".antiqignore", b"*.log\n\xff\xfe\n");
-
-        let error = run_ruled(&tree, &[]).expect_err("the file is refused");
-
-        assert!(
-            matches!(&error, IdleError::NotUtf8 { path } if path.to_string() == ".antiqignore"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn an_ignore_file_that_cannot_be_read_is_reported() {
-        let mut tree = Tree::new();
-        file(&mut tree, "old", -100 * DAY);
-        ignore_file(&mut tree, ".antiqignore", "*.log\n");
-        let locked = tree.path("piece/.antiqignore");
-        fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
-            .expect("the mode is set");
-        assert!(
-            fs::read(&locked).is_err(),
-            "the test needs a user that mode 000 locks out"
-        );
-
-        let error = run_ruled(&tree, &[]).expect_err("the file is refused");
-
-        assert!(
-            matches!(&error, IdleError::IgnoreFile { path, .. } if path.to_string() == ".antiqignore"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn a_bad_rule_names_where_it_came_from() {
-        let from_config = IdleError::BadRule {
-            file: None,
-            line: 2,
-            message: "dangling".to_string(),
-        };
-        let from_file = IdleError::BadRule {
-            file: Some(path("sub/.antiqignore")),
-            line: 7,
-            message: "dangling".to_string(),
-        };
-
-        assert_eq!(
-            from_config.to_string(),
-            "collection.ignore line 2 is not a valid ignore rule: dangling"
-        );
-        assert_eq!(
-            from_file.to_string(),
-            "sub/.antiqignore line 7 is not a valid ignore rule: dangling"
         );
     }
 }

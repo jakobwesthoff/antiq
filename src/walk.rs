@@ -5,11 +5,14 @@
 //! The lstat walk of a piece.
 
 use crate::fsx::tree::{DirEntry, TreeRoot};
+use crate::markers::RESTORED_FILE;
+use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
+use crate::rules::{IGNORE_FILE, PieceRules, RulesError, Scope, TIMELESS_FILE, parse_rule_file};
 use crate::select::Rules;
-use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
+use crate::tree::{Class, EntryKind, PieceTree, Problem, TreeEntry};
 use rustix::io::Errno;
-use std::io;
+use std::io::{self, Read};
 
 /// Errors of the piece walk.
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +81,8 @@ pub(crate) enum Call {
     Open,
     /// Listing the directory.
     List,
+    /// Reading a rule file.
+    Read,
 }
 
 /// The real filesystem: no device is replaced, no call fails.
@@ -102,9 +107,8 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// entry with the root path. Nothing is followed: every entry is read with
 /// `lstat`, and a directory is entered only while it stays on the device of
 /// the top directory and is no mount root. A top below a mount root of the
-/// collection counts as a mount point at its own path. Files named in `junk` are left out; a directory
-/// with a junk name is walked like any other. An entry that is on the
-/// exclude list of `rules` is reported and, if a directory, not entered. A
+/// collection counts as a mount point at its own path. An entry that is on
+/// the exclude list of `select` is reported and, if a directory, not entered. A
 /// directory named `.antiq` marks a collection of its own: the directory
 /// that holds it is reported, and the walk goes on.
 /// A directory more than [`MAX_DEPTH`] levels below the top is not entered
@@ -112,29 +116,33 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 pub fn walk_piece(
     collection: &TreeRoot,
     top: &RelPath,
-    junk: &[Name],
-    rules: &Rules,
+    select: &Rules,
+    rules: &PieceRules,
 ) -> Result<PieceTree, WalkError> {
-    walk_piece_with(collection, top, junk, rules, &RealFs)
+    walk_piece_with(collection, top, select, rules, &RealFs)
 }
 
 pub(crate) fn walk_piece_with(
     collection: &TreeRoot,
     top: &RelPath,
-    junk: &[Name],
-    rules: &Rules,
+    select: &Rules,
+    rules: &PieceRules,
     hooks: &dyn Hooks,
 ) -> Result<PieceTree, WalkError> {
+    let (ignore, timeless) = rules.scopes();
     let mut walker = Walker {
         piece: top,
-        junk,
-        rules,
+        select,
+        read_rule_files: rules.reads_files(),
+        ignore,
+        timeless,
         hooks,
         top_device: 0,
         entries: Vec::new(),
         mount_points: Vec::new(),
         excluded: Vec::new(),
         nested_collections: Vec::new(),
+        rule_files: Vec::new(),
         first_failure: None,
     };
     let root = RelPath::root();
@@ -174,7 +182,7 @@ pub(crate) fn walk_piece_with(
             // costs no deep recursion, and the cap on the depth keeps the
             // open directories few.
             let mut levels = Vec::new();
-            levels.extend(walker.open_level(directory, root)?);
+            levels.extend(walker.open_level(directory, root, false)?);
             while !levels.is_empty() {
                 walker.step(&mut levels)?;
             }
@@ -206,6 +214,13 @@ pub(crate) fn walk_piece_with(
             .into_iter()
             .map(|root| Problem::NestedCollection { root }),
     );
+    walker.rule_files.sort();
+    problems.extend(
+        walker
+            .rule_files
+            .into_iter()
+            .map(|(path, line)| Problem::RuleFile { path, line }),
+    );
     Ok(PieceTree::new(top.clone(), walker.entries, problems))
 }
 
@@ -228,13 +243,18 @@ fn directories_above(top: &RelPath) -> Vec<RelPath> {
 struct Level {
     directory: TreeRoot,
     at: RelPath,
+    /// The directory is ignored, so its rule files do not count.
+    ignored: bool,
     children: std::vec::IntoIter<DirEntry>,
 }
 
 struct Walker<'a> {
     piece: &'a RelPath,
-    junk: &'a [Name],
-    rules: &'a Rules,
+    select: &'a Rules,
+    /// Whether rule files are read.
+    read_rule_files: bool,
+    ignore: Scope,
+    timeless: Scope,
     hooks: &'a dyn Hooks,
     /// The device every entry of the piece has to be on, after the hook.
     top_device: u64,
@@ -244,6 +264,8 @@ struct Walker<'a> {
     /// The directories that hold a `.antiq` directory, the marker of a
     /// collection of its own.
     nested_collections: Vec<RelPath>,
+    /// The rule files that cannot be used, with the line at fault.
+    rule_files: Vec<(RelPath, Option<usize>)>,
     /// The smallest path, in entry order, that could not be read.
     first_failure: Option<RelPath>,
 }
@@ -289,18 +311,122 @@ impl Walker<'_> {
     }
 
     /// Lists `directory`, which lies at `at` below the top.
-    fn open_level(&mut self, directory: TreeRoot, at: RelPath) -> Result<Option<Level>, WalkError> {
+    fn open_level(
+        &mut self,
+        directory: TreeRoot,
+        at: RelPath,
+        ignored: bool,
+    ) -> Result<Option<Level>, WalkError> {
         let Some(mut listing) =
             self.attempt(&at, Call::List, || directory.read_dir(&RelPath::root()))?
         else {
             return Ok(None);
         };
         listing.sort_by(|a, b| a.name.cmp(&b.name));
+        // The rules of a directory have to be known before any of its
+        // entries is judged. A directory that is ignored is deleted with
+        // its piece whatever its rules say, so they are not even read.
+        if self.read_rule_files && !ignored {
+            for file_name in [IGNORE_FILE, TIMELESS_FILE] {
+                if listing
+                    .iter()
+                    .any(|listed| listed.name.as_bytes() == file_name)
+                {
+                    self.read_rule_file(&directory, &at, file_name)?;
+                }
+            }
+        }
         Ok(Some(Level {
             directory,
             at,
+            ignored,
             children: listing.into_iter(),
         }))
+    }
+
+    /// Reads the rule file `file_name` of the directory at `at`, unless it
+    /// is something other than a regular file, and adds its rules to the
+    /// scope of its kind. A file that cannot be used refuses the piece.
+    fn read_rule_file(
+        &mut self,
+        directory: &TreeRoot,
+        at: &RelPath,
+        file_name: &[u8],
+    ) -> Result<(), WalkError> {
+        let name = Name::from_bytes(file_name.to_vec()).expect("a rule file name is valid");
+        let single = RelPath::from_bytes(file_name.to_vec()).expect("a rule file name is a path");
+        let path = at.join(&name);
+        let Some(stat) = self.attempt(&path, Call::Stat, || directory.lstat(&single))? else {
+            return Ok(());
+        };
+        if stat.kind != EntryKind::File {
+            return Ok(());
+        }
+        let read = || -> io::Result<Vec<u8>> {
+            let mut content = Vec::new();
+            directory.open_read(&single)?.read_to_end(&mut content)?;
+            Ok(content)
+        };
+        let result = match self.hooks.fault(&path, Call::Read) {
+            Some(error) => Err(error),
+            None => read(),
+        };
+        let content = match result {
+            Ok(content) => content,
+            Err(error) if is_out_of_descriptors(&error) => {
+                return Err(WalkError::OutOfDescriptors {
+                    piece: self.piece.clone(),
+                    path,
+                    source: error,
+                });
+            }
+            Err(_) => {
+                self.rule_files.push((path, None));
+                return Ok(());
+            }
+        };
+        match parse_rule_file(content) {
+            Ok(rules) if file_name == IGNORE_FILE => self.ignore.add_file(at, rules),
+            Ok(rules) => self.timeless.add_file(at, rules),
+            Err(error) => {
+                // Line 0 stands for a failure of the rule set as a whole.
+                let line = match error {
+                    RulesError::BadLine { line, .. } => Some(line).filter(|line| *line > 0),
+                    _ => None,
+                };
+                self.rule_files.push((path, line));
+            }
+        }
+        Ok(())
+    }
+
+    /// What the rules and the control files make of the entry `listed` in
+    /// the directory `level`.
+    fn classify(&mut self, level: &Level, listed: &DirEntry, entry: &TreeEntry) -> Class {
+        let is_dir = entry.kind == EntryKind::Directory;
+        // Both scopes see every entry: a directory that matches has to be
+        // remembered for what lies below it.
+        let ignored = self.ignore.decide(&entry.path, is_dir);
+        let timeless = self.timeless.decide(&entry.path, is_dir);
+        let name = listed.name.as_bytes();
+        let regular = entry.kind == EntryKind::File;
+        let rule_file = self.read_rule_files
+            && regular
+            && !level.ignored
+            && (name == IGNORE_FILE || name == TIMELESS_FILE);
+        let marker = level.at.is_root()
+            && ((regular && name == RESTORED_FILE.as_bytes())
+                || (name == PIN_FILE.as_bytes()
+                    && matches!(entry.kind, EntryKind::File | EntryKind::Symlink)));
+        if rule_file || marker {
+            Class::Control
+        } else if ignored {
+            Class::Ignored
+        } else if timeless {
+            Class::Timeless
+        } else {
+            Class::Counted
+        }
     }
 
     /// Records the next entry of the innermost directory and, if it is a
@@ -324,10 +450,8 @@ impl Walker<'_> {
         else {
             return Ok(());
         };
-        if entry.kind != EntryKind::Directory && self.junk.contains(&listed.name) {
-            return Ok(());
-        }
         entry.path = child.clone();
+        entry.class = self.classify(level, &listed, &entry);
         if entry.kind == EntryKind::Directory && listed.name.as_bytes() == b".antiq" {
             self.nested_collections.push(level.at.clone());
         }
@@ -337,14 +461,15 @@ impl Walker<'_> {
         if foreign {
             self.mount_points.push(child.clone());
         }
-        let excluded = self.rules.has_exclusions()
+        let excluded = self.select.has_exclusions()
             && self
-                .rules
+                .select
                 .excludes(&self.piece.concat(&child), entry.device, entry.inode);
         if excluded {
             self.excluded.push(child.clone());
         }
         let enter = entry.kind == EntryKind::Directory && !foreign && !excluded;
+        let ignored = entry.class == Class::Ignored;
         self.entries.push(entry);
         if !enter {
             return Ok(());
@@ -354,7 +479,7 @@ impl Walker<'_> {
             return self.note_failure(&child, too_deep);
         }
         if let Some(inner) = self.attempt(&child, Call::Open, || level.directory.sub(&single))? {
-            let opened = self.open_level(inner, child)?;
+            let opened = self.open_level(inner, child, ignored)?;
             levels.extend(opened);
         }
         Ok(())
@@ -366,16 +491,17 @@ mod tests {
     use super::*;
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;
-    use crate::tree::{EntryKind, Problem};
+    use crate::tree::{Class, EntryKind, Problem};
     use rustix::io::Errno;
     use std::fs;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     fn path(text: &str) -> RelPath {
         RelPath::parse(text).expect("valid path")
     }
 
-    fn no_rules() -> Rules {
+    fn no_selection() -> Rules {
         Rules::new(&[], &[]).expect("no patterns are valid")
     }
 
@@ -427,17 +553,17 @@ mod tests {
     }
 
     fn walk(tree: &Tree, top: &str) -> PieceTree {
-        walk_with(tree, top, &[], &RealFs).expect("the walk succeeds")
+        walk_with(tree, top, &PieceRules::none(), &RealFs).expect("the walk succeeds")
     }
 
     fn walk_with(
         tree: &Tree,
         top: &str,
-        junk: &[Name],
+        rules: &PieceRules,
         hooks: &dyn Hooks,
     ) -> Result<PieceTree, WalkError> {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        walk_piece_with(&root, &path(top), junk, &no_rules(), hooks)
+        walk_piece_with(&root, &path(top), &no_selection(), rules, hooks)
     }
 
     fn paths(tree: &PieceTree) -> Vec<String> {
@@ -449,6 +575,299 @@ mod tests {
             fs::read_dir(directory).is_err(),
             "the test needs a user that mode 000 locks out"
         );
+    }
+
+    fn walk_ruled(tree: &Tree, ignore: &[&str], timeless: &[&str]) -> PieceTree {
+        walk_ruled_with(tree, ignore, timeless, &RealFs).expect("the walk succeeds")
+    }
+
+    fn walk_ruled_with(
+        tree: &Tree,
+        ignore: &[&str],
+        timeless: &[&str],
+        hooks: &dyn Hooks,
+    ) -> Result<PieceTree, WalkError> {
+        let lines = |lines: &[&str]| {
+            lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+        };
+        let rules = PieceRules::new(&lines(ignore), &lines(timeless)).expect("valid rules");
+        walk_with(tree, "piece", &rules, hooks)
+    }
+
+    fn class_of(tree: &PieceTree, entry: &str) -> Class {
+        tree.entries()
+            .iter()
+            .find(|candidate| candidate.path.to_string() == entry)
+            .unwrap_or_else(|| panic!("{entry} is recorded"))
+            .class
+    }
+
+    fn packed(tree: &PieceTree) -> Vec<String> {
+        tree.packed_entries()
+            .map(|entry| entry.path.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_ignored_directory_stays_in_the_record_but_does_not_reach_the_archive() {
+        let mut tree = Tree::new();
+        tree.file("piece/node_modules/dep/index.js", "x");
+        tree.file("piece/keep", "x");
+        let walked = walk_ruled(&tree, &["node_modules/"], &[]);
+        assert_eq!(class_of(&walked, "node_modules"), Class::Ignored);
+        assert_eq!(
+            class_of(&walked, "node_modules/dep/index.js"),
+            Class::Ignored
+        );
+        assert_eq!(class_of(&walked, "keep"), Class::Counted);
+        assert_eq!(class_of(&walked, ""), Class::Counted);
+        assert_eq!(packed(&walked), ["", "keep"]);
+        assert_eq!(walked.entries().len(), 5);
+    }
+
+    #[test]
+    fn an_ignored_subtree_is_checked_for_what_refuses_a_piece() {
+        let mut tree = Tree::new();
+        tree.dir("piece/skip/nested/.antiq");
+        tree.dir("piece/skip/mount");
+        tree.dir("piece/skip/excluded");
+        let locked = tree.unreadable_dir("piece/skip/unreadable");
+        assert_cannot_read(&locked);
+        let hooks = Staged {
+            mount_roots: vec![path("skip/mount")],
+            ..Staged::default()
+        };
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let select = Rules::new(&[], &[path("piece/skip/excluded")])
+            .expect("no patterns are valid")
+            .bind(&root)
+            .expect("the exclude list binds");
+        let rules = PieceRules::new(&["skip/".to_string()], &[]).expect("valid rules");
+        let walked =
+            walk_piece_with(&root, &path("piece"), &select, &rules, &hooks).expect("walks");
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::Unreadable {
+                    first: path("skip/unreadable")
+                },
+                Problem::MountPoint {
+                    other: path("skip/mount")
+                },
+                Problem::Excluded {
+                    path: path("skip/excluded")
+                },
+                Problem::NestedCollection {
+                    root: path("skip/nested")
+                },
+            ]
+        );
+        assert_eq!(class_of(&walked, "skip"), Class::Ignored);
+        assert_eq!(class_of(&walked, "skip/nested/.antiq"), Class::Ignored);
+    }
+
+    #[test]
+    fn a_timeless_directory_is_still_packed() {
+        let mut tree = Tree::new();
+        tree.file("piece/.git/HEAD", "x");
+        tree.file("piece/src/main.rs", "x");
+        let walked = walk_ruled(&tree, &[], &[".git/"]);
+        assert_eq!(class_of(&walked, ".git"), Class::Timeless);
+        assert_eq!(class_of(&walked, ".git/HEAD"), Class::Timeless);
+        assert_eq!(class_of(&walked, "src/main.rs"), Class::Counted);
+        assert_eq!(packed(&walked).len(), 5);
+    }
+
+    #[test]
+    fn a_rule_file_applies_below_its_directory_and_the_nearest_one_wins() {
+        let mut tree = Tree::new();
+        tree.file("piece/a/.antiqignore", "docs/*.log\n");
+        tree.file("piece/a/docs/x.log", "x");
+        tree.file("piece/a/b/docs/x.log", "x");
+        tree.file("piece/sibling/docs/x.log", "x");
+        tree.file("piece/.antiqignore", "*.tmp\n");
+        tree.file("piece/a/b/.antiqignore", "!keep.tmp\n");
+        tree.file("piece/a/b/keep.tmp", "x");
+        tree.file("piece/a/drop.tmp", "x");
+        let walked = walk_ruled(&tree, &["*.cfg"], &[]);
+        assert_eq!(class_of(&walked, "a/docs/x.log"), Class::Ignored);
+        assert_eq!(class_of(&walked, "a/b/docs/x.log"), Class::Counted);
+        assert_eq!(class_of(&walked, "sibling/docs/x.log"), Class::Counted);
+        assert_eq!(class_of(&walked, "a/b/keep.tmp"), Class::Counted);
+        assert_eq!(class_of(&walked, "a/drop.tmp"), Class::Ignored);
+    }
+
+    #[test]
+    fn a_negation_does_not_bring_back_what_an_ignored_directory_holds() {
+        let mut tree = Tree::new();
+        tree.file("piece/cache/.antiqignore", "!x\n");
+        tree.file("piece/cache/x", "x");
+        let walked = walk_ruled(&tree, &["cache/"], &[]);
+        assert_eq!(class_of(&walked, "cache/x"), Class::Ignored);
+    }
+
+    #[test]
+    fn ignored_wins_where_an_ignore_and_a_timeless_rule_match() {
+        let mut tree = Tree::new();
+        tree.file("piece/both.log", "x");
+        tree.file("piece/only.log", "x");
+        let walked = walk_ruled(&tree, &["both.*"], &["*.log"]);
+        assert_eq!(class_of(&walked, "both.log"), Class::Ignored);
+        assert_eq!(class_of(&walked, "only.log"), Class::Timeless);
+    }
+
+    #[test]
+    fn a_name_in_the_default_ignore_list_matches_files_and_directories() {
+        let mut tree = Tree::new();
+        tree.file("piece/.DS_Store", "x");
+        tree.file("piece/dir/.DS_Store", "x");
+        tree.file("piece/other/.DS_Store/inside", "x");
+        tree.file("piece/dir/keep", "x");
+        let walked = walk_ruled(&tree, &[".DS_Store"], &[]);
+        assert_eq!(packed(&walked), ["", "dir", "dir/keep", "other"]);
+        assert_eq!(class_of(&walked, "other/.DS_Store/inside"), Class::Ignored);
+    }
+
+    #[test]
+    fn rule_files_are_control_files_whatever_the_rules_say() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiqignore", "*\n");
+        tree.file("piece/data", "x");
+        let walked = walk_ruled(&tree, &[], &[]);
+        assert_eq!(class_of(&walked, ".antiqignore"), Class::Control);
+        assert_eq!(class_of(&walked, "data"), Class::Ignored);
+        assert_eq!(packed(&walked), ["", ".antiqignore"]);
+
+        let mut tree = Tree::new();
+        tree.file("piece/sub/.antiq-timeless", "x\n");
+        tree.file("piece/sub/.antiqignore", "x\n");
+        let walked = walk_ruled(&tree, &[".antiq*"], &["sub/"]);
+        assert_eq!(class_of(&walked, "sub/.antiq-timeless"), Class::Control);
+        assert_eq!(class_of(&walked, "sub/.antiqignore"), Class::Control);
+    }
+
+    #[test]
+    fn a_rule_file_inside_an_ignored_directory_is_ignored_and_not_read() {
+        let mut tree = Tree::new();
+        tree.file("piece/skip/.antiqignore", [0xff, 0xfe]);
+        tree.file("piece/skip/.antiq-timeless", "bad\\\n");
+        let unreadable = tree.file("piece/skip/inner/.antiqignore", "x");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("the mode can be set");
+        let walked = walk_ruled(&tree, &["skip/"], &[]);
+        assert_eq!(class_of(&walked, "skip/.antiqignore"), Class::Ignored);
+        assert_eq!(class_of(&walked, "skip/.antiq-timeless"), Class::Ignored);
+        assert_eq!(walked.problems(), []);
+    }
+
+    #[test]
+    fn what_is_not_a_regular_file_is_no_rule_file() {
+        let mut tree = Tree::new();
+        tree.file("outside", "*\n");
+        tree.symlink("piece/.antiqignore", tree.path("outside"));
+        tree.fifo("piece/sub/.antiq-timeless");
+        tree.file("piece/data", "x");
+        let walked = walk_ruled(&tree, &[], &[]);
+        assert_eq!(class_of(&walked, ".antiqignore"), Class::Counted);
+        assert_eq!(class_of(&walked, "sub/.antiq-timeless"), Class::Counted);
+        assert_eq!(class_of(&walked, "data"), Class::Counted);
+        assert_eq!(walked.problems(), []);
+    }
+
+    #[test]
+    fn a_broken_rule_file_refuses_the_piece_naming_file_and_line() {
+        let mut tree = Tree::new();
+        tree.file("piece/a/.antiqignore", "fine\nbad\\\n");
+        tree.file("piece/b/.antiq-timeless", "bad\\");
+        tree.file("piece/c/.antiqignore", [0xff, 0xfe]);
+        let hidden = tree.file("piece/d/.antiq-timeless", "x");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000))
+            .expect("the mode can be set");
+        assert!(fs::read(&hidden).is_err(), "mode 000 locks the user out");
+        let walked = walk_ruled(&tree, &[], &[]);
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::RuleFile {
+                    path: path("a/.antiqignore"),
+                    line: Some(2)
+                },
+                Problem::RuleFile {
+                    path: path("b/.antiq-timeless"),
+                    line: Some(1)
+                },
+                Problem::RuleFile {
+                    path: path("c/.antiqignore"),
+                    line: None
+                },
+                Problem::RuleFile {
+                    path: path("d/.antiq-timeless"),
+                    line: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn running_out_of_descriptors_while_reading_a_rule_file_ends_the_run() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiqignore", "x\n");
+        let hooks = Staged {
+            faults: vec![(path(".antiqignore"), Call::Read, Errno::MFILE)],
+            ..Staged::default()
+        };
+        let error = walk_ruled_with(&tree, &[], &[], &hooks).expect_err("the run fails");
+        assert!(matches!(
+            error,
+            WalkError::OutOfDescriptors { path: ref at, .. } if at == &path(".antiqignore")
+        ));
+    }
+
+    #[test]
+    fn a_read_error_other_than_a_shortage_makes_the_rule_file_a_problem() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiqignore", "x\n");
+        let hooks = Staged {
+            faults: vec![(path(".antiqignore"), Call::Read, Errno::IO)],
+            ..Staged::default()
+        };
+        let walked = walk_ruled_with(&tree, &[], &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            walked.problems(),
+            [Problem::RuleFile {
+                path: path(".antiqignore"),
+                line: None
+            }]
+        );
+    }
+
+    #[test]
+    fn markers_at_the_top_are_control_files_below_it_they_are_ordinary() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiq-restored", "x");
+        tree.file("piece/.antiq-pin", "x");
+        tree.file("piece/sub/.antiq-restored", "x");
+        tree.file("piece/sub/.antiq-pin", "x");
+        let walked = walk_ruled(&tree, &[".antiq-*"], &[]);
+        assert_eq!(class_of(&walked, ".antiq-restored"), Class::Control);
+        assert_eq!(class_of(&walked, ".antiq-pin"), Class::Control);
+        assert_eq!(class_of(&walked, "sub/.antiq-restored"), Class::Ignored);
+        assert_eq!(packed(&walked), ["", ".antiq-pin", "sub"]);
+    }
+
+    #[test]
+    fn a_staged_tree_is_walked_with_no_rules_at_all() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiqignore", "*\n");
+        tree.file("piece/.DS_Store", "x");
+        tree.file("piece/data", "x");
+        let walked = walk(&tree, "piece");
+        assert_eq!(class_of(&walked, "data"), Class::Counted);
+        assert_eq!(class_of(&walked, ".DS_Store"), Class::Counted);
+        assert_eq!(class_of(&walked, ".antiqignore"), Class::Counted);
     }
 
     #[test]
@@ -508,28 +927,6 @@ mod tests {
     }
 
     #[test]
-    fn junk_files_are_left_out_and_junk_named_directories_are_not() {
-        let mut tree = Tree::new();
-        tree.file("piece/.DS_Store", "x");
-        tree.file("piece/dir/.DS_Store", "x");
-        tree.file("piece/dir/keep", "x");
-        tree.file("piece/other/.DS_Store/inside", "x");
-        let walked =
-            walk_with(&tree, "piece", &[name(".DS_Store")], &RealFs).expect("the walk succeeds");
-        assert_eq!(
-            paths(&walked),
-            [
-                "",
-                "dir",
-                "dir/keep",
-                "other",
-                "other/.DS_Store",
-                "other/.DS_Store/inside"
-            ]
-        );
-    }
-
-    #[test]
     fn an_unreadable_directory_makes_the_piece_unreadable_and_stays_an_entry() {
         let mut tree = Tree::new();
         tree.file("piece/readable", "x");
@@ -564,7 +961,8 @@ mod tests {
             ],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             walked.problems(),
             [Problem::Unreadable {
@@ -626,7 +1024,8 @@ mod tests {
             foreign: vec![path("sub/mnt")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(paths(&walked), ["", "sub", "sub/f", "sub/mnt"]);
         assert_eq!(
             walked.problems(),
@@ -645,7 +1044,8 @@ mod tests {
             mount_roots: vec![path("sub/mnt")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(paths(&walked), ["", "sub", "sub/f", "sub/mnt"]);
         assert_eq!(
             walked.problems(),
@@ -663,7 +1063,8 @@ mod tests {
             mount_roots: vec![path("bound")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             walked.problems(),
             [Problem::MountPoint {
@@ -680,7 +1081,8 @@ mod tests {
             mount_roots: vec![RelPath::root()],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             paths(&walked),
             ["", "sub", "sub/f"],
@@ -703,7 +1105,8 @@ mod tests {
             mount_roots: vec![RelPath::root()],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             walked.problems(),
             [Problem::MountPoint {
@@ -761,7 +1164,8 @@ mod tests {
             foreign: vec![path("mnt")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             walked.problems(),
             [
@@ -781,7 +1185,8 @@ mod tests {
                 above_mount_roots: vec![path(above)],
                 ..Staged::default()
             };
-            let walked = walk_with(&tree, "proj/deeper/piece", &[], &hooks).expect("walks");
+            let walked =
+                walk_with(&tree, "proj/deeper/piece", &PieceRules::none(), &hooks).expect("walks");
             assert_eq!(
                 walked.problems(),
                 [Problem::MountPoint {
@@ -810,7 +1215,8 @@ mod tests {
             foreign: vec![path("dir/x"), path("dir-y")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             walked.problems(),
             [
@@ -831,7 +1237,7 @@ mod tests {
             .expect("no patterns are valid")
             .bind(&root)
             .expect("the exclude list binds");
-        walk_piece(&root, &path("piece"), &[], &rules).expect("the walk succeeds")
+        walk_piece(&root, &path("piece"), &rules, &PieceRules::none()).expect("the walk succeeds")
     }
 
     #[test]
@@ -877,12 +1283,47 @@ mod tests {
             depth: Some(2),
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(paths(&walked), ["", "a", "a/b", "a/b/c"]);
         assert_eq!(
             walked.problems(),
             [Problem::Unreadable {
                 first: path("a/b/c")
+            }]
+        );
+    }
+
+    #[test]
+    fn the_depth_cap_applies_inside_an_ignored_directory() {
+        let mut tree = Tree::new();
+        tree.file("piece/skip/a/b/c/f", "x");
+        let hooks = Staged {
+            depth: Some(2),
+            ..Staged::default()
+        };
+        let walked = walk_ruled_with(&tree, &["skip/"], &[], &hooks).expect("walks");
+        assert_eq!(class_of(&walked, "skip/a/b"), Class::Ignored);
+        assert_eq!(
+            walked.problems(),
+            [Problem::Unreadable {
+                first: path("skip/a/b")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_broken_rule_file_below_a_timeless_directory_refuses_the_piece() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/.antiqignore", "bad\\\n");
+        tree.file("piece/sub/data", "x");
+        let walked = walk_ruled(&tree, &[], &["sub/"]);
+        assert_eq!(class_of(&walked, "sub/data"), Class::Timeless);
+        assert_eq!(
+            walked.problems(),
+            [Problem::RuleFile {
+                path: path("sub/.antiqignore"),
+                line: Some(1)
             }]
         );
     }
@@ -900,7 +1341,8 @@ mod tests {
             foreign: vec![path("sub/f")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(paths(&walked), ["", "sub", "sub/f"]);
         assert_eq!(
             walked.problems(),
@@ -918,7 +1360,8 @@ mod tests {
             foreign: vec![RelPath::root(), path("sub"), path("sub/f")],
             ..Staged::default()
         };
-        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        let walked =
+            walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("the walk succeeds");
         assert_eq!(
             paths(&walked),
             ["", "sub", "sub/f"],
@@ -961,8 +1404,8 @@ mod tests {
             .write_all(b"x")
             .expect("the file is written");
 
-        let walked =
-            walk_piece(&root, &path("piece"), &[], &no_rules()).expect("the walk succeeds");
+        let walked = walk_piece(&root, &path("piece"), &no_selection(), &PieceRules::none())
+            .expect("the walk succeeds");
 
         assert_eq!(walked.entries().len(), 1 + 25 + 1);
         let last = walked.entries().last().expect("entries exist");
@@ -988,7 +1431,7 @@ mod tests {
                 faults: vec![(at.clone(), call, Errno::MFILE)],
                 ..Staged::default()
             };
-            let error = walk_with(&tree, "piece", &[], &hooks)
+            let error = walk_with(&tree, "piece", &PieceRules::none(), &hooks)
                 .expect_err("a descriptor shortage fails the run");
             let WalkError::OutOfDescriptors {
                 piece,
@@ -1010,7 +1453,8 @@ mod tests {
                     faults: vec![(path("sub/dir"), call, code)],
                     ..Staged::default()
                 };
-                let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+                let walked = walk_with(&tree, "piece", &PieceRules::none(), &hooks)
+                    .expect("the walk succeeds");
                 assert_eq!(
                     walked.problems(),
                     [Problem::Unreadable {
