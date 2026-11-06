@@ -17,7 +17,7 @@ use serde_json::Map;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Archive what you no longer touch, find it when you need it.
+/// Your idle folders, kept like antiques.
 #[derive(Debug, Parser)]
 #[command(version, about, disable_help_subcommand = true)]
 pub struct Cli {

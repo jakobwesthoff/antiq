@@ -1,6 +1,6 @@
 # antiq
 
-Archive what you no longer touch, find it when you need it. One Rust
+Your idle folders, kept like antiques. One Rust
 crate with a library (`src/lib.rs`) and a command-line binary
 (`src/main.rs`). Version 1 is implemented and not yet released; the
 specification is `docs/specs/spec-v1.md`. Architecture decisions live

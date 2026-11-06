@@ -7,7 +7,7 @@
 
 # antiq
 
-Archive what you no longer touch, find it when you need it.
+Your idle folders, kept like antiques.
 
 antiq is a command-line tool written in Rust for directories where
 working folders pile up, such as `~/playground`. It archives the folders
