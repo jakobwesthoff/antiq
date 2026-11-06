@@ -325,18 +325,15 @@ fn own_live<'m>(metadata: &'m Metadata, machine: &str) -> Option<&'m Payload> {
 }
 
 /// Whether the live package of `metadata` no longer holds what the walk
-/// `tree` sees, and the manifest of that walk when so. A piece is
-/// unchanged when the manifest on disk was written for the package the
-/// metadata names and the walk differs from it in nothing. A manifest that
-/// is missing or cannot be read counts as different, so the next package
-/// is made again.
-fn outdated(
-    collection: &Collection,
-    machine: &str,
-    metadata: &Metadata,
-    tree: &PieceTree,
-) -> Option<Manifest> {
-    let fresh = manifest_of(tree, &collection.config().collection.live_exclude)?;
+/// `tree` sees. A piece is unchanged when the manifest on disk was written
+/// for the package the metadata names and the walk differs from it in
+/// nothing. A manifest that is missing or cannot be read counts as
+/// different, so the next package is made again. A piece without a live
+/// package is not outdated.
+fn outdated(collection: &Collection, machine: &str, metadata: &Metadata, tree: &PieceTree) -> bool {
+    let Some(fresh) = manifest_of(tree, &collection.config().collection.live_exclude) else {
+        return false;
+    };
     let recorded = Manifest::read_recorded(&collection.manifest_path(metadata.id))
         .ok()
         .flatten();
@@ -347,7 +344,7 @@ fn outdated(
         }
         _ => false,
     };
-    (!unchanged).then_some(fresh)
+    !unchanged
 }
 
 /// What backing up the pieces of one run works with.
@@ -408,11 +405,11 @@ impl Backup<'_> {
         if !config.backup_live || manifest_of(&tree, &config.live_exclude).is_none() {
             return self.no_longer_refreshed(entry, metadata);
         }
-        let Some(fresh) = outdated(ctx.collection, ctx.machine, metadata, &tree) else {
+        if !outdated(ctx.collection, ctx.machine, metadata, &tree) {
             self.clear_stale(entry)?;
             return Ok(());
-        };
-        self.pack(report, current, base, entry, path, tree, fresh)
+        }
+        self.pack(report, current, base, entry, path, tree)
     }
 
     /// A package that nothing refreshes any more is marked stale from the
@@ -448,8 +445,9 @@ impl Backup<'_> {
         Ok(())
     }
 
-    /// Packs the piece and records the package in the metadata.
-    #[allow(clippy::too_many_arguments)]
+    /// Packs the piece and records the package in the metadata. The manifest
+    /// written beside it is that of the tree the package was made from,
+    /// which differs from the first walk after a restart.
     fn pack(
         &self,
         report: &mut SyncReport,
@@ -458,7 +456,6 @@ impl Backup<'_> {
         entry: TrackingEntry,
         path: &RelPath,
         tree: PieceTree,
-        fresh: Manifest,
     ) -> Result<(), Stopped> {
         let ctx = self.ctx;
         let collection = ctx.collection;
@@ -540,7 +537,9 @@ impl Backup<'_> {
             // Only the stat data of the files moved: the package that
             // would be uploaded is the one that is there.
             remove_quietly(&tmp);
-            fresh.write_recorded(&manifest_path, &package.sha256)?;
+            package
+                .manifest
+                .write_recorded(&manifest_path, &package.sha256)?;
             return self.clear_stale(entry);
         }
 
@@ -574,7 +573,9 @@ impl Backup<'_> {
             let dropped: Vec<FileName> = dropped.into_iter().filter(|old| *old != file).collect();
             remove_unshared(&store, id, &dropped, base.as_ref());
         }
-        fresh.write_recorded(&manifest_path, &package.sha256)?;
+        package
+            .manifest
+            .write_recorded(&manifest_path, &package.sha256)?;
         self.clear_stale(entry)
     }
 
@@ -727,9 +728,7 @@ pub(super) fn plan(
         let Ok(tree) = walking.walk(&piece.path) else {
             continue;
         };
-        if !tree.problems().is_empty()
-            || outdated(collection, machine, &current.metadata, &tree).is_none()
-        {
+        if !tree.problems().is_empty() || !outdated(collection, machine, &current.metadata, &tree) {
             continue;
         }
         plan.push(SyncAction::PackLive {
@@ -1605,7 +1604,11 @@ mod tests {
         mount: Option<RelPath>,
         emfile: bool,
         corrupt: bool,
+        /// Touches the file in the first attempt only, so the restart packs
+        /// a tree that differs from the first walk.
+        first_attempt_only: bool,
         touched: std::cell::Cell<bool>,
+        walks: std::cell::Cell<u32>,
     }
 
     impl Scripted {
@@ -1622,7 +1625,14 @@ mod tests {
             self
         }
 
-        fn after_read(&self, _entry: &crate::tree::TreeEntry, _attempt: u32) {
+        fn after_walk(&self, _attempt: u32, _tree: &crate::tree::PieceTree) {
+            self.walks.set(self.walks.get() + 1);
+        }
+
+        fn after_read(&self, _entry: &crate::tree::TreeEntry, attempt: u32) {
+            if self.first_attempt_only && attempt > 1 {
+                return;
+            }
             if let Some(file) = &self.touch {
                 let mut file = fs::OpenOptions::new()
                     .append(true)
@@ -1694,6 +1704,25 @@ mod tests {
         anna.sync();
         assert_eq!(anna.entry(id).stale_backup_since, None);
         assert_eq!(live_payloads(&anna, id)[0].version, 2);
+    }
+
+    #[test]
+    fn a_restarted_pack_records_the_manifest_of_the_tree_it_packed() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        let hooks = Scripted {
+            first_attempt_only: true,
+            ..Scripted::racing(&folder)
+        };
+        refresh_under_lock(&anna, false, &hooks, &mut Default::default());
+        assert!(hooks.touched.get(), "the first attempt met a change");
+        assert_eq!(hooks.walks.get(), 2, "the restart packed again");
+
+        let again = Scripted::default();
+        refresh_under_lock(&anna, false, &again, &mut Default::default());
+
+        assert_eq!(again.walks.get(), 0, "the piece is packed a second time");
     }
 
     #[test]
