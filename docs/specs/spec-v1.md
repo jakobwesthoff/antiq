@@ -2184,12 +2184,12 @@ A piece that is working has a card of two lines. The first has a mark that
 turns, the piece in bold, its size and the operation: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
-`unearth`. The second has a bar, the percentage and a count: `N/M files`,
-`N/M created` and `N/M deleted` for the storing and removing of `push`,
-`N/M entries` for the removing of `archive`, and sizes such as
-`412 MB/1.2 GB` for the operations whose count is the content bytes of the
-piece: the `packing` and `verifying` of `archive` and the `verifying` of
-`unearth`. A count shows numbers only in units that match the card (its
+`unearth`, `extracting` and `verifying` for `fork`. The second has a bar,
+the percentage and a count: `N/M files`, `N/M entries` for the removing of
+`archive`, and sizes such as `412 MB/1.2 GB` for the operations whose count
+is the content bytes of the piece: the `packing` and `verifying` of
+`archive` and the `verifying` of `unearth` and `fork`. A `push` has a card
+of its own kind, described below. A count shows numbers only in units that match the card (its
 size, files, entries). The bar of `packing` follows the content bytes of
 the files among the bytes of the tar stream that the compressor has
 consumed, against the size of the files; the headers and the padding of the
@@ -2197,10 +2197,10 @@ stream count for nothing. The bar of the `verifying` of `archive` follows the
 content bytes of the members as the archive hands them out and those of the
 files of the folder as they are read, against twice the size of the files;
 its count shows both numbers halved, in the units of the size. The bar of
-the `verifying` of an `unearth` follows the content bytes of the files
-compared with the listing, against the same size. An operation
-whose total is not known yet, and the `verifying` of an `unearth` whose
-files hold no bytes, has a bar with a moving lit part and no percentage or
+the `verifying` of an `unearth` or a `fork` follows the content bytes of
+the files compared with the listing, against the same size. An operation
+whose total is not known yet, and the `verifying` of an `unearth` or a
+`fork` whose files hold no bytes, has a bar with a moving lit part and no percentage or
 count. The percentage is rounded and stays at 99 until the operation is
 done.
 
