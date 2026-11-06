@@ -12,13 +12,16 @@ use crate::fsx::{FsxError, atomic, moves, remove};
 use crate::id::ObjectId;
 use crate::listing::{self, ListingEntry, ListingType};
 use crate::lock::RunLock;
-use crate::meta::{Payload, PayloadKind};
+use crate::machine::MachineError;
+use crate::meta::{Lifecycle, Payload, PayloadKind};
 use crate::pack::WalkRules;
-use crate::pack::verify::{Difference, Field, compare_with_listing};
+use crate::pack::verify::{Compared, Difference, Field, compare_with_listing};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
-use crate::store::Store;
-use crate::tracking::{self, EntryState, TrackingEntry, TrackingError};
+use crate::store::{Source, Store, StoreError};
+use crate::tracking::{
+    self, EntryState, LocalPayload, TrackingEntry, TrackingError, VersionTakenOut,
+};
 use crate::tree::EntryKind;
 use jiff::Timestamp;
 use std::collections::HashSet;
@@ -33,6 +36,10 @@ use std::path::Path;
 pub enum RepairError {
     #[error(transparent)]
     Tracking(#[from] TrackingError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Machine(#[from] MachineError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -45,6 +52,8 @@ impl crate::error::HasKind for RepairError {
     fn kind(&self) -> crate::error::ErrorKind {
         match self {
             RepairError::Tracking(error) => error.kind(),
+            RepairError::Store(error) => error.kind(),
+            RepairError::Machine(error) => error.kind(),
             RepairError::Io { .. } => crate::error::ErrorKind::Other,
         }
     }
@@ -71,6 +80,12 @@ pub(crate) trait Effects {
         lock: &RunLock,
         clock: &dyn Clock,
         entry: &mut TrackingEntry,
+    ) -> Result<(), TrackingError>;
+    fn remove_entry(
+        &self,
+        collection: &Collection,
+        lock: &RunLock,
+        id: ObjectId,
     ) -> Result<(), TrackingError>;
 }
 
@@ -116,6 +131,15 @@ impl Effects for RealEffects {
     ) -> Result<(), TrackingError> {
         tracking::write(collection, lock, clock, entry)
     }
+
+    fn remove_entry(
+        &self,
+        collection: &Collection,
+        lock: &RunLock,
+        id: ObjectId,
+    ) -> Result<(), TrackingError> {
+        tracking::remove(collection, lock, id)
+    }
 }
 
 /// Runs the repairs in the order of spec "Operations". The lock proves
@@ -131,6 +155,7 @@ pub(crate) fn run(
     effects: &dyn Effects,
 ) -> Result<Vec<Warning>, RepairError> {
     let root = TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
+    let machine = collection.machine_name()?;
     let tracked = tracking::read_all(collection)?;
     let mut repairs = Repairs {
         collection,
@@ -138,6 +163,7 @@ pub(crate) fn run(
         clock,
         effects,
         root,
+        machine,
         entries: tracked.entries,
         protected: HashSet::new(),
         unreadable: tracked.damaged.iter().map(|damaged| damaged.id).collect(),
@@ -160,6 +186,9 @@ pub(crate) fn run(
     repairs.finish_removals()?;
     repairs.empty_run_directories();
     repairs.remove_write_leftovers();
+    repairs.settle_unearthing()?;
+    repairs.catch_up_with_archives()?;
+    repairs.restore_missing_entries()?;
     repairs.remove_orphan_manifests();
     Ok(repairs.warnings)
 }
@@ -216,6 +245,8 @@ struct Repairs<'a> {
     clock: &'a dyn Clock,
     effects: &'a dyn Effects,
     root: TreeRoot,
+    /// The name of this machine, as payloads and history name their writer.
+    machine: String,
     /// The entries as they stand now: updated with every write.
     entries: Vec<TrackingEntry>,
     /// Trees in the trash that the emptying must leave alone.
@@ -246,8 +277,9 @@ impl Repairs<'_> {
     fn write(&mut self, mut entry: TrackingEntry) -> Result<(), RepairError> {
         self.effects
             .write_entry(self.collection, self.lock, self.clock, &mut entry)?;
-        if let Some(known) = self.entries.iter_mut().find(|known| known.id == entry.id) {
-            *known = entry;
+        match self.entries.iter_mut().find(|known| known.id == entry.id) {
+            Some(known) => *known = entry,
+            None => self.entries.push(entry),
         }
         Ok(())
     }
@@ -488,17 +520,9 @@ impl Repairs<'_> {
             Ok(payload) => payload,
             Err(reason) => return Verdict::Differs(reason),
         };
-        let listing = match self.read_listing(entry.id, &payload) {
-            Ok(listing) => listing,
+        let (listing, compared) = match self.compare(entry.id, &payload, tree) {
+            Ok(both) => both,
             Err(reason) => return Verdict::Differs(reason),
-        };
-        let rules = WalkRules {
-            junk: self.junk_names(&listing),
-            staged: false,
-        };
-        let compared = match compare_with_listing(&listing, tree, &rules) {
-            Ok(compared) => compared,
-            Err(error) => return Verdict::Differs(error.to_string()),
         };
         match compared
             .differences()
@@ -508,6 +532,23 @@ impl Repairs<'_> {
             None => Verdict::Nothing,
             Some(difference) => Verdict::Differs(difference.to_string()),
         }
+    }
+
+    /// The listing of `payload` and what differs between it and `tree`.
+    fn compare(
+        &self,
+        id: ObjectId,
+        payload: &Payload,
+        tree: &TreeRoot,
+    ) -> Result<(Vec<ListingEntry>, Compared), String> {
+        let listing = self.read_listing(id, payload)?;
+        let rules = WalkRules {
+            junk: self.junk_names(&listing),
+            staged: false,
+        };
+        let compared =
+            compare_with_listing(&listing, tree, &rules).map_err(|error| error.to_string())?;
+        Ok((listing, compared))
     }
 
     /// The archive payload that a `removing` entry names.
@@ -562,6 +603,205 @@ impl Repairs<'_> {
             .filter(|junk| !archived.contains(junk.as_bytes()))
             .filter_map(|junk| Name::from_bytes(junk.as_bytes().to_vec()).ok())
             .collect()
+    }
+
+    // =========================================================
+    // `unearthing` entries
+    // =========================================================
+
+    /// An `unearthing` entry whose folder is the tree of the archive it
+    /// names becomes `live`, unearthed when the entry was written. Any other
+    /// goes back to what it was before the unearth, and a folder at its path
+    /// is a new piece.
+    fn settle_unearthing(&mut self) -> Result<(), RepairError> {
+        let unearthing: Vec<ObjectId> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state == EntryState::Unearthing)
+            .map(|entry| entry.id)
+            .collect();
+        for id in unearthing {
+            let mut entry = self.entry(id);
+            let present = self.folder_in_place(&entry);
+            if present && !self.held_by_other(&entry.path, id) && self.is_unearthed_tree(&entry) {
+                entry.state = EntryState::Live;
+                entry.unearthed = Some(entry.written);
+                self.write(entry)?;
+                continue;
+            }
+            if present {
+                self.warn(format!(
+                    "`{}` is not the unearthed tree of {id}; it is a new piece",
+                    entry.path
+                ));
+            }
+            self.drop_unearthing(entry)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the folder at the entry's path equals the listing of the
+    /// archive payload version that the entry was unearthed from.
+    fn is_unearthed_tree(&self, entry: &TrackingEntry) -> bool {
+        let Some(version) = entry.unearthed_payload_version else {
+            return false;
+        };
+        let Ok(Some(current)) = Store::new(self.collection).current(entry.id) else {
+            return false;
+        };
+        // Two machines can both make version N; the one this machine holds
+        // is the one it was unearthing.
+        let Some(payload) = current
+            .metadata
+            .payloads
+            .iter()
+            .filter(|payload| payload.kind == PayloadKind::Archive && payload.version == version)
+            .max_by_key(|payload| entry.local_payloads.iter().any(|l| l.file == payload.file))
+        else {
+            return false;
+        };
+        let Ok(tree) = self.root.sub(&entry.path) else {
+            return false;
+        };
+        self.compare(entry.id, payload, &tree)
+            .is_ok_and(|(_, compared)| compared.differences().is_empty())
+    }
+
+    /// Takes the entry back to `gone` when it holds what an archived piece
+    /// keeps, and removes it otherwise.
+    fn drop_unearthing(&mut self, mut entry: TrackingEntry) -> Result<(), RepairError> {
+        if entry.local_payloads.is_empty() && entry.committed_versions.is_empty() {
+            self.effects
+                .remove_entry(self.collection, self.lock, entry.id)?;
+            self.entries.retain(|known| known.id != entry.id);
+            return Ok(());
+        }
+        entry.unearthed = None;
+        entry.unearthed_payload_version = None;
+        self.set_gone(entry)
+    }
+
+    // =========================================================
+    // Entries that lag behind the metadata
+    // =========================================================
+
+    /// A `live` entry with a folder whose metadata is archived and owned
+    /// here, and whose newest archive payload from this machine is newer
+    /// than the entry's unearthing, is an archive that died after its
+    /// metadata and before its `removing` entry: the folder is what was
+    /// archived, so it is unearthed from that payload, now.
+    fn catch_up_with_archives(&mut self) -> Result<(), RepairError> {
+        let live: Vec<ObjectId> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state == EntryState::Live)
+            .map(|entry| entry.id)
+            .collect();
+        let store = Store::new(self.collection);
+        for id in live {
+            let mut entry = self.entry(id);
+            if !self.folder_in_place(&entry) {
+                continue;
+            }
+            let Ok(Some(current)) = store.current(id) else {
+                continue;
+            };
+            let metadata = &current.metadata;
+            if metadata.lifecycle != Lifecycle::Archived
+                || metadata.collection != self.collection.id()
+            {
+                continue;
+            }
+            let newest = metadata
+                .payloads
+                .iter()
+                .filter(|payload| {
+                    payload.kind == PayloadKind::Archive
+                        && !payload.superseded
+                        && payload.machine == self.machine
+                })
+                .max_by_key(|payload| (payload.created, payload.version));
+            let Some(payload) = newest.filter(|payload| {
+                entry
+                    .unearthed
+                    .is_none_or(|unearthed| payload.created > unearthed)
+                    && Some(payload.version) != entry.unearthed_payload_version
+            }) else {
+                continue;
+            };
+
+            entry.unearthed_payload_version = Some(payload.version);
+            entry.unearthed = Some(self.now());
+            entry.version_taken_out = taken_out(current.source);
+            let held = entry
+                .local_payloads
+                .iter()
+                .any(|local| local.file == payload.file);
+            if !held && store.file_path(id, &payload.file).exists() {
+                entry.local_payloads.push(LocalPayload {
+                    kind: PayloadKind::Archive,
+                    version: payload.version,
+                    file: payload.file.clone(),
+                });
+            }
+            self.write(entry)?;
+        }
+        Ok(())
+    }
+
+    // =========================================================
+    // Metadata without an entry
+    // =========================================================
+
+    /// Writes the entry of an object that this collection owns, whose
+    /// metadata says live and which has none: the run died between the
+    /// metadata of a new ID and its entry. The folder is in place, or the
+    /// piece is gone.
+    fn restore_missing_entries(&mut self) -> Result<(), RepairError> {
+        let store = Store::new(self.collection);
+        for id in store.objects()? {
+            if self.entries.iter().any(|entry| entry.id == id) || self.unreadable.contains(&id) {
+                continue;
+            }
+            let current = match store.current(id) {
+                Ok(Some(current)) => current,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.warn(format!("cannot read the metadata of {id}: {error}"));
+                    continue;
+                }
+            };
+            let metadata = &current.metadata;
+            if metadata.collection != self.collection.id() || metadata.lifecycle != Lifecycle::Live
+            {
+                continue;
+            }
+            let present = self
+                .root
+                .lstat(&metadata.path)
+                .is_ok_and(|found| found.kind == EntryKind::Directory);
+            if present && self.held_by_other(&metadata.path, id) {
+                self.warn(format!(
+                    "`{}` belongs to another tracking entry; {id} gets none",
+                    metadata.path
+                ));
+                continue;
+            }
+            let state = if present {
+                EntryState::Live
+            } else {
+                EntryState::Gone
+            };
+            let entry = TrackingEntry::new(
+                id,
+                metadata.path.clone(),
+                state,
+                taken_out(current.source),
+                self.now(),
+            );
+            self.write(entry)?;
+        }
+        Ok(())
     }
 
     // =========================================================
@@ -697,6 +937,13 @@ fn manifest_id(name: &OsStr) -> Option<ObjectId> {
     (name == format!("{id}.manifest.json")).then_some(id)
 }
 
+fn taken_out(source: Source) -> VersionTakenOut {
+    match source {
+        Source::Pending => VersionTakenOut::Pending,
+        Source::Committed(number) => VersionTakenOut::Committed(number),
+    }
+}
+
 /// Whether a difference between a listing and a tree is a path that is
 /// missing, or a directory whose mode is the listed one with owner access
 /// added, which is what removing the contents of a locked directory leaves.
@@ -747,6 +994,8 @@ mod tests {
     const OTHER_ID: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
     const ARCHIVED_AT: &str = "2026-11-03T10:00:00Z";
     const NOW: &str = "2026-11-04T12:00:00Z";
+    /// When the entries of the scenarios were last written.
+    const WRITTEN: &str = "2026-11-04T09:00:00Z";
     const NOW_STAMP: &str = "20261104T120000Z";
     const FILE_TIME: i64 = 1_000_000_000;
 
@@ -913,6 +1162,51 @@ mod tests {
             entry
         }
 
+        /// Changes the committed metadata document of `object`.
+        fn edit_meta(&self, object: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+            let path = self.collection.object_dir(id(object)).join("meta.1");
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
+            edit(&mut document);
+            fs::write(&path, serde_json::to_vec(&document).expect("json")).expect("written");
+        }
+
+        /// A further archive payload in the metadata, as a later archive
+        /// leaves it. Its file exists in the object's directory.
+        fn add_archive(&self, object: &str, version: u32, machine: &str, created: &str) -> String {
+            let file = format!("{version:016x}-a.tar.zst");
+            self.edit_meta(object, |document| {
+                let mut payload = document["payloads"][0].clone();
+                payload["version"] = serde_json::json!(version);
+                payload["file"] = serde_json::json!(file);
+                payload["machine"] = serde_json::json!(machine);
+                payload["created"] = serde_json::json!(created);
+                document["payloads"]
+                    .as_array_mut()
+                    .expect("payloads")
+                    .push(payload);
+            });
+            fs::write(
+                self.collection.object_dir(id(object)).join(&file),
+                "payload",
+            )
+            .expect("the payload file");
+            file
+        }
+
+        /// An entry in state `state` for `piece`, stored.
+        fn entry_in(&self, object: &str, piece: &str, state: EntryState) -> TrackingEntry {
+            let entry = TrackingEntry::new(
+                id(object),
+                path(piece),
+                state,
+                VersionTakenOut::Committed(1),
+                time(WRITTEN),
+            );
+            self.store_entry(&entry);
+            entry
+        }
+
         /// Archive step 3's rename.
         fn to_trash(&self, object: &str, piece: &str) {
             fs::rename(self.at(piece), self.trash(object)).expect("the folder moves to the trash");
@@ -1013,6 +1307,26 @@ mod tests {
                 });
             }
             RealEffects.write_entry(collection, lock, clock, entry)
+        }
+
+        fn remove_entry(
+            &self,
+            collection: &Collection,
+            lock: &RunLock,
+            id: ObjectId,
+        ) -> Result<(), TrackingError> {
+            let subject = id.to_string();
+            self.log
+                .borrow_mut()
+                .push(format!("remove_entry {subject}"));
+            if (self.fails)("remove_entry", &subject) {
+                return Err(TrackingError::Io {
+                    action: "remove",
+                    path: subject,
+                    source: io::Error::other("refused by the test"),
+                });
+            }
+            RealEffects.remove_entry(collection, lock, id)
         }
     }
 
@@ -1671,6 +1985,601 @@ mod tests {
 
         assert!(mentions(&warnings, "tmp"), "{warnings:?}");
         assert!(!mentions(&warnings, "staging"), "{warnings:?}");
+    }
+
+    // =====================================================================
+    // `unearthing` entries
+    // =====================================================================
+
+    /// An `unearthing` entry for `piece` that names payload version 1.
+    fn unearthing(world: &World, object: &str, piece: &str) -> TrackingEntry {
+        let mut entry = world.entry_in(object, piece, EntryState::Unearthing);
+        entry.unearthed_payload_version = Some(1);
+        world.store_entry(&entry);
+        entry
+    }
+
+    #[test]
+    fn an_unearthing_entry_whose_folder_matches_the_listing_becomes_live_at_the_time_it_was_written()
+     {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.unearthed, Some(time(WRITTEN)));
+        assert_eq!(entry.unearthed_payload_version, Some(1));
+    }
+
+    #[test]
+    fn an_unearthing_entry_whose_folder_differs_is_dropped_and_the_folder_is_a_new_piece() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::write(world.at("projects/a/notes.txt"), "HELLO").expect("an edit");
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+        assert!(world.at("projects/a/notes.txt").exists(), "untouched");
+    }
+
+    #[test]
+    fn an_unearthing_entry_without_a_folder_is_dropped_quietly() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unearthing_entry_from_a_live_package_has_no_listing_and_is_dropped() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.unearthed_payload_version = None;
+        world.store_entry(&entry);
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unearthing_entry_whose_listing_is_missing_is_dropped() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        for item in fs::read_dir(world.collection.object_dir(id(ID))).expect("lists") {
+            let item = item.expect("an item").path();
+            if item.to_string_lossy().ends_with(".listing.zst") {
+                fs::remove_file(item).expect("removed");
+            }
+        }
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unearthing_entry_without_metadata_is_dropped() {
+        let mut world = World::new();
+        world.tree().file("projects/a/f", "x");
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unearthing_entry_naming_a_version_the_metadata_lacks_is_dropped() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.unearthed_payload_version = Some(7);
+        world.store_entry(&entry);
+
+        world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+    }
+
+    #[test]
+    fn an_unearthing_folder_that_cannot_be_entered_is_not_recognised() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        let folder = world.at("projects/a");
+        fs::set_permissions(&folder, Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(&folder).is_err(),
+            "this test needs a user that mode 000 locks out"
+        );
+
+        let warnings = world.run();
+        fs::set_permissions(&folder, Permissions::from_mode(0o755)).expect("chmod back");
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_entry_is_removed_through_the_effects() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        unearthing(&world, ID, "projects/a");
+        let effects = Scripted::new(&never);
+
+        world.run_with(&effects).expect("runs");
+
+        assert!(effects.log().contains(&format!("remove_entry {ID}")));
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+    }
+
+    #[test]
+    fn a_dropped_unearthing_goes_back_to_gone_when_the_entry_holds_a_local_archive() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.local_payloads = vec![LocalPayload {
+            kind: PayloadKind::Archive,
+            version: 1,
+            file: archive.payload.clone(),
+        }];
+        entry.committed_versions = vec![1];
+        entry.unearthed = Some(time(NOW));
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.unearthed, None);
+        assert_eq!(entry.unearthed_payload_version, None);
+        assert_eq!(entry.local_payloads.len(), 1);
+        assert_eq!(entry.committed_versions, vec![1]);
+        let metadata = Store::new(&world.collection)
+            .current(id(ID))
+            .expect("reads")
+            .expect("metadata")
+            .metadata;
+        assert_eq!(
+            tracking::derive_state(Some(&entry), Some(&metadata), false, id(COLLECTION_ID))
+                .expect("derives"),
+            tracking::PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn a_dropped_unearthing_goes_back_to_gone_when_it_only_has_committed_versions() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.committed_versions = vec![1];
+        world.store_entry(&entry);
+
+        world.run();
+
+        assert_eq!(world.entry(ID).state, EntryState::Gone);
+    }
+
+    #[test]
+    fn an_unearthing_whose_path_belongs_to_another_entry_is_dropped() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        world.entry_in(OTHER_ID, "projects/a", EntryState::Live);
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert_eq!(world.entry(OTHER_ID).state, EntryState::Live);
+        assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    // =====================================================================
+    // Entries that lag behind the metadata
+    // =====================================================================
+
+    /// A `live` entry that has not caught up with the archive.
+    fn lagging(world: &World, object: &str, piece: &str) -> TrackingEntry {
+        world.entry_in(object, piece, EntryState::Live)
+    }
+
+    #[test]
+    fn a_live_entry_of_an_archived_piece_with_a_folder_is_unearthed_now() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        fs::write(
+            world
+                .collection
+                .object_dir(id(ID))
+                .join(archive.payload.as_str()),
+            "payload",
+        )
+        .expect("the payload file");
+        lagging(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.unearthed_payload_version, Some(1));
+        assert_eq!(entry.unearthed, Some(time(NOW)));
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+        assert_eq!(
+            entry.local_payloads,
+            vec![LocalPayload {
+                kind: PayloadKind::Archive,
+                version: 1,
+                file: archive.payload,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_second_run_changes_a_caught_up_entry_no_more() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        lagging(&world, ID, "projects/a");
+        world.run();
+        let first = fs::read(world.collection.tracking_path(id(ID))).expect("reads");
+
+        world.run();
+
+        assert_eq!(
+            fs::read(world.collection.tracking_path(id(ID))).expect("reads"),
+            first
+        );
+    }
+
+    #[test]
+    fn a_change_that_is_still_pending_is_taken_out_as_pending() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        let object = world.collection.object_dir(id(ID));
+        fs::rename(object.join("meta.1"), object.join("meta.pending")).expect("pending");
+        lagging(&world, ID, "projects/a");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).version_taken_out, VersionTakenOut::Pending);
+    }
+
+    #[test]
+    fn a_payload_whose_file_is_not_in_the_store_is_not_added_to_the_local_ones() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        // The payload file itself was never put in place by the fixture.
+        assert!(
+            !world
+                .collection
+                .object_dir(id(ID))
+                .join(archive.payload.as_str())
+                .exists()
+        );
+        lagging(&world, ID, "projects/a");
+
+        world.run();
+
+        assert!(world.entry(ID).local_payloads.is_empty());
+        assert_eq!(world.entry(ID).unearthed_payload_version, Some(1));
+    }
+
+    #[test]
+    fn an_unearthed_piece_archived_again_catches_up_with_the_new_payload() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        let second = world.add_archive(ID, 2, "imperius", "2026-11-03T11:00:00Z");
+        let mut entry = lagging(&world, ID, "projects/a");
+        entry.unearthed = Some(time("2026-11-02T00:00:00Z"));
+        entry.unearthed_payload_version = Some(1);
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.unearthed_payload_version, Some(2));
+        assert_eq!(entry.unearthed, Some(time(NOW)));
+        assert!(
+            entry
+                .local_payloads
+                .iter()
+                .any(|payload| payload.file == second.as_str())
+        );
+    }
+
+    #[test]
+    fn an_unearth_of_an_older_version_that_died_before_its_metadata_is_left_alone() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.add_archive(ID, 2, "imperius", "2026-11-03T11:00:00Z");
+        let mut entry = lagging(&world, ID, "projects/a");
+        entry.unearthed = Some(time("2026-11-03T12:00:00Z"));
+        entry.unearthed_payload_version = Some(1);
+        world.store_entry(&entry);
+        let before = fs::read(world.collection.tracking_path(id(ID))).expect("reads");
+
+        world.run();
+
+        assert_eq!(
+            fs::read(world.collection.tracking_path(id(ID))).expect("reads"),
+            before
+        );
+    }
+
+    #[test]
+    fn payloads_of_other_machines_and_superseded_ones_do_not_count() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.add_archive(ID, 2, "laptop", "2026-11-03T11:00:00Z");
+        world.add_archive(ID, 3, "imperius", "2026-11-03T12:00:00Z");
+        world.edit_meta(ID, |document| {
+            document["payloads"][2]["superseded"] = serde_json::json!(true);
+        });
+        let mut entry = lagging(&world, ID, "projects/a");
+        entry.unearthed = Some(time("2026-11-02T00:00:00Z"));
+        entry.unearthed_payload_version = Some(1);
+        world.store_entry(&entry);
+        let before = fs::read(world.collection.tracking_path(id(ID))).expect("reads");
+
+        world.run();
+
+        assert_eq!(
+            fs::read(world.collection.tracking_path(id(ID))).expect("reads"),
+            before
+        );
+    }
+
+    #[test]
+    fn the_newest_payload_of_this_machine_wins() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.add_archive(ID, 2, "imperius", "2026-11-03T11:00:00Z");
+        world.add_archive(ID, 3, "imperius", "2026-11-03T12:00:00Z");
+        lagging(&world, ID, "projects/a");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).unearthed_payload_version, Some(3));
+    }
+
+    #[test]
+    fn metadata_of_another_collection_or_a_live_piece_is_not_caught_up_with() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.edit_meta(ID, |document| {
+            document["collection"] = serde_json::json!(OTHER_ID);
+        });
+        lagging(&world, ID, "projects/a");
+        world.archived(OTHER_ID, "projects/b", &[("f", "x")]);
+        world.edit_meta(OTHER_ID, |document| {
+            document["lifecycle"] = serde_json::json!("live");
+        });
+        lagging(&world, OTHER_ID, "projects/b");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).unearthed_payload_version, None);
+        assert_eq!(world.entry(OTHER_ID).unearthed_payload_version, None);
+    }
+
+    #[test]
+    fn a_live_entry_without_a_folder_or_without_metadata_is_left_alone() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("no folder");
+        lagging(&world, ID, "projects/a");
+        lagging(&world, OTHER_ID, "projects/b");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).unearthed, None);
+        assert_eq!(world.entry(OTHER_ID).unearthed, None);
+    }
+
+    // =====================================================================
+    // Own live metadata without an entry
+    // =====================================================================
+
+    fn own_live(world: &mut World, object: &str, piece: &str) {
+        world.archived(object, piece, FILES);
+        world.edit_meta(object, |document| {
+            document["lifecycle"] = serde_json::json!("live");
+        });
+    }
+
+    #[test]
+    fn own_live_metadata_with_a_folder_gets_its_live_entry() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.path, path("projects/a"));
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+        assert_eq!(entry.written, time(NOW));
+    }
+
+    #[test]
+    fn a_change_not_committed_yet_gives_a_pending_entry() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+        let object = world.collection.object_dir(id(ID));
+        fs::rename(object.join("meta.1"), object.join("meta.pending")).expect("pending");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).version_taken_out, VersionTakenOut::Pending);
+    }
+
+    #[test]
+    fn own_live_metadata_without_a_folder_gets_a_gone_entry() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+        fs::remove_dir_all(world.at("projects/a")).expect("no folder");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert!(entry.local_payloads.is_empty());
+        let metadata = Store::new(&world.collection)
+            .current(id(ID))
+            .expect("reads")
+            .expect("metadata")
+            .metadata;
+        assert_eq!(
+            tracking::derive_state(Some(&entry), Some(&metadata), false, id(COLLECTION_ID))
+                .expect("derives"),
+            tracking::PieceState::Gone
+        );
+    }
+
+    #[test]
+    fn own_live_metadata_whose_path_another_entry_holds_gets_no_entry() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+        world.entry_in(OTHER_ID, "projects/a", EntryState::Live);
+
+        let warnings = world.run();
+
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(mentions(&warnings, "another"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_path_given_to_another_id_by_this_run_is_not_given_twice() {
+        let mut world = World::new();
+        let archive = world.archived(OTHER_ID, "projects/a", FILES);
+        world.removing(OTHER_ID, "projects/a", &archive);
+        fs::write(world.at("projects/a/notes.txt"), "HELLO").expect("an edit");
+        own_live(&mut world, ID, "projects/b");
+        world.edit_meta(ID, |document| {
+            document["path"] = serde_json::json!("projects/a");
+            document["name"] = serde_json::json!("a");
+        });
+
+        world.run();
+
+        assert_eq!(world.entry(OTHER_ID).state, EntryState::Live);
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+    }
+
+    #[test]
+    fn metadata_that_needs_no_entry_gets_none() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        own_live(&mut world, OTHER_ID, "projects/b");
+        world.edit_meta(OTHER_ID, |document| {
+            document["collection"] = serde_json::json!("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        });
+        fs::write(world.collection.tracking_path(id(ID)), "not json").expect("damaged");
+        let third = "01BX5ZZKBKACTAV9WEVGEMMVS0";
+        world.archived(third, "projects/c", FILES);
+
+        world.run();
+
+        assert!(
+            !world.collection.tracking_path(id(OTHER_ID)).exists(),
+            "not ours"
+        );
+        assert!(
+            !world.collection.tracking_path(id(third)).exists(),
+            "archived"
+        );
+        assert_eq!(
+            fs::read(world.collection.tracking_path(id(ID))).expect("reads"),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn an_object_without_metadata_is_skipped_with_a_warning_when_it_cannot_be_read() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+        fs::write(
+            world.collection.object_dir(id(ID)).join("meta.1"),
+            "not json",
+        )
+        .expect("damaged");
+        fs::create_dir_all(world.collection.object_dir(id(OTHER_ID))).expect("an empty object");
+
+        let warnings = world.run();
+
+        assert!(mentions(&warnings, ID), "{warnings:?}");
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(!world.collection.tracking_path(id(OTHER_ID)).exists());
+    }
+
+    #[test]
+    fn an_objects_directory_that_cannot_be_listed_stops_the_run() {
+        let world = World::new();
+        let objects = world.at(".antiq/objects");
+        fs::set_permissions(&objects, Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(&objects).is_err(),
+            "this test needs a user that mode 000 locks out"
+        );
+
+        let result = world.run_with(&RealEffects);
+        fs::set_permissions(&objects, Permissions::from_mode(0o755)).expect("chmod back");
+
+        let error = result.expect_err("the objects cannot be listed");
+        assert!(matches!(error, RepairError::Store(_)), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn a_machine_without_a_name_cannot_repair() {
+        let world = World::new();
+        let mut config = Config::new(id(COLLECTION_ID));
+        config.machine.name = Some(String::new());
+        let collection = Collection::new(world.temp.root().to_path_buf(), config);
+
+        let error =
+            run(&collection, &world.lock, &world.clock, &RealEffects).expect_err("no machine name");
+
+        assert!(matches!(error, RepairError::Machine(_)), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_removed_stops_the_run() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        let fails = |what: &str, _: &str| what == "remove_entry";
+        let effects = Scripted::new(&fails);
+
+        let error = world.run_with(&effects).expect_err("the entry stays");
+
+        assert!(matches!(error, RepairError::Tracking(_)), "{error}");
+        assert_eq!(world.entry(ID).state, EntryState::Unearthing);
     }
 
     // =====================================================================

@@ -1039,16 +1039,31 @@ Every state-changing run, right after taking the lock, in this order:
 - removes the temp files an interrupted atomic write left in `.antiq/`
   and below it, outside `.antiq/recovered/`: regular files named
   `.<name>.<pid>.<n>.tmp`;
+- turns an `unearthing` entry whose folder equals the listing of the
+  archive payload version the entry records into `live`, with the time
+  the entry was written (recorded in the entry) as its unearthing time.
+  Any other `unearthing` entry is dropped: it goes back to `gone` when it
+  holds local payloads or committed versions, and is removed otherwise. A
+  folder at its path that it does not recognise, or that another entry
+  holds, becomes a new piece, reported once. An entry made while
+  unearthing from a live package records no payload version and has no
+  listing to match, so it is always dropped;
+- treats a present folder of an ID this machine committed as archived as
+  unearthed at that version, unearthed now: a `live` entry whose folder is
+  in place and whose metadata is archived and owned by this collection,
+  when this machine's newest archive payload that is not superseded is
+  newer than the entry's unearthing, or the entry has none, and is not
+  the version the entry records. The payload is added to the entry's
+  local payloads when its file is present, and the version taken out
+  follows the metadata (`pending` while a recorded change is not
+  committed);
+- writes the missing entry of an object that this collection owns and
+  whose metadata says live: `live` when a folder is at the metadata's
+  path and no other entry holds it, `gone` without local payloads when
+  there is no folder;
 - removes a live manifest whose ID has no tracking entry file, and keeps
   one whose entry file exists but cannot be read, which the run reports
-  with a warning;
-- turns an `unearthing` entry whose folder matches the version's listing
-  into `live`, with the time the entry was written (recorded in the
-  entry) as its unearthing time, and drops any other `unearthing`
-  entry; a folder it does not recognise becomes a new piece, reported
-  once;
-- treats a present folder of an ID this machine committed as archived as
-  unearthed at that version, unearthed now.
+  with a warning.
 
 Read-only commands and `--dry-run` never touch these directories.
 `.antiq/recovered/` is never emptied.
