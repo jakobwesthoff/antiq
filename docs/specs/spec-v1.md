@@ -853,11 +853,13 @@ and unearthing never writes through a symlink. (ADR 0027)
 ### Verifying
 
 A strict verify gates archiving and unearthing. It reads the stream to
-its end and checks its integrity. A cut or corrupt stream, data after
-the end of the archive, a member outside the top-level directory, a path
-that occurs twice, a hard link that does not name a file listed before
-it and a member that is neither file, directory, symlink nor hard link
-make the package damaged.
+its end and checks its integrity. A cut or corrupt stream, nonzero data
+after the end of the archive, an empty archive, a first member that is
+not a directory, a member outside the top-level directory, a member path
+that is not a plain relative path, a path that occurs twice, a hard link
+that does not name a file listed before it, a member that is neither
+file, directory, symlink nor hard link and a modification time beyond 64
+bits make the package damaged.
 
 Then it compares every member with the tree on disk (type, size,
 content hash, modification time in whole seconds with the same clamp,
@@ -894,9 +896,11 @@ of the listing side too, and the symlink modes are not compared (Linux
 cannot set a symlink's mode). The top-level directory has no line in the
 listing and is not compared. A file that is replaced, resized or touched
 while it is read is reported as changed while read. A folder whose walk
-finds a problem (an unreadable entry, a mount point, an excluded path) is
-refused. The comparison also hands back the lstat record of the folder
-that the deletion steps compare against. It requires a local
+finds a problem (an unreadable entry, a mount point) is refused. The
+comparison applies no exclude entries, so the caller walks the folder
+with the collection's rules first and refuses a piece that contains an
+excluded path. The comparison also hands back the lstat record of the
+folder that the deletion steps compare against. It requires a local
 archive that passes the stream check or a remote copy whose check is
 recorded; otherwise the piece is not reclaimed and is listed as pending
 remote work. (ADR 0033, ADR 0035)

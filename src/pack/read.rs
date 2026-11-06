@@ -122,7 +122,13 @@ pub(super) fn read_package(package: &Path) -> Result<Package, PackError> {
                 io::copy(&mut reader, &mut io::sink()).map_err(damaged)?;
                 (ListingType::File, None, Some(reader.sha256()))
             }
-            EntryType::Symlink => (ListingType::Symlink, link.map(LinkTarget::from_bytes), None),
+            // The crate reports an empty link name as none, and macOS
+            // allows a symlink with an empty target.
+            EntryType::Symlink => (
+                ListingType::Symlink,
+                Some(LinkTarget::from_bytes(link.unwrap_or_default())),
+                None,
+            ),
             EntryType::Link => {
                 let target = link
                     .as_deref()
@@ -328,6 +334,16 @@ mod tests {
             RawMember::link(b"proj/queue", b'6', b""),
         ]);
         assert!(reason.contains("type"), "{reason}");
+    }
+
+    #[test]
+    fn a_symlink_with_an_empty_target_lists_with_that_target() {
+        let (_dir, path) = on_disk(&compress(&raw_tar(&[
+            RawMember::dir(b"proj/"),
+            RawMember::link(b"proj/l", b'2', b""),
+        ])));
+        let listed = list(&path).expect("lists");
+        assert_eq!(listed[0].link, Some(LinkTarget::from_bytes(Vec::new())));
     }
 
     #[test]

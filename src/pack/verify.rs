@@ -103,6 +103,13 @@ pub struct LstatRecord {
 }
 
 impl LstatRecord {
+    /// Whether `other` describes the same entry in the same state, ctime
+    /// aside.
+    fn same_but_for_ctime(&self, other: &LstatRecord) -> bool {
+        (self.kind, self.size, self.mtime_ns, self.inode)
+            == (other.kind, other.size, other.mtime_ns, other.inode)
+    }
+
     fn of(entry: &TreeEntry) -> LstatRecord {
         LstatRecord {
             path: entry.path.clone(),
@@ -116,16 +123,32 @@ impl LstatRecord {
 }
 
 /// The outcome of comparing a folder with a listing.
+///
+/// ```compile_fail
+/// // The differences are only read: a caller that could edit them could
+/// // get a `Verified` for a folder that differs.
+/// fn forge(mut compared: antiq::pack::verify::Compared) {
+///     compared.differences.clear();
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Compared {
-    /// In path order; empty when the folder equals the listing.
-    pub differences: Vec<Difference>,
-    /// The `lstat` of every entry of the folder, in path order.
-    pub record: Vec<LstatRecord>,
+    differences: Vec<Difference>,
+    record: Vec<LstatRecord>,
     listing: Vec<ListingEntry>,
 }
 
 impl Compared {
+    /// In path order; empty when the folder equals the listing.
+    pub fn differences(&self) -> &[Difference] {
+        &self.differences
+    }
+
+    /// The `lstat` of every entry of the folder, in path order.
+    pub fn record(&self) -> &[LstatRecord] {
+        &self.record
+    }
+
     /// The proof that the folder equals the listing, or the differences.
     pub fn into_verified(self) -> Result<Verified, Vec<Difference>> {
         if self.differences.is_empty() {
@@ -145,6 +168,15 @@ pub fn verify_strict(
     root: &TreeRoot,
     rules: &WalkRules,
 ) -> Result<Verified, PackError> {
+    verify_strict_observed(package, root, rules, &mut |_, _| {})
+}
+
+fn verify_strict_observed(
+    package: &Path,
+    root: &TreeRoot,
+    rules: &WalkRules,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Verified, PackError> {
     // The stream is read to its end first, so a damaged package never
     // reaches the folder.
     let package = read_package(package)?;
@@ -152,21 +184,27 @@ pub fn verify_strict(
     if rules.staged {
         granted.grant();
     }
-    let mut folder = read_folder(root, rules, &mut |_, _| {}, &granted.modes())?;
+    let mut folder = read_folder(root, rules, observe, &granted.modes())?;
     let restored = granted.restore()?;
-    // Restoring a mode changes the directory's ctime, so the record is
-    // taken again for those directories: it describes the folder as it is
-    // left.
-    for fresh in restored {
+    // Restoring a mode changes the directory's ctime, so the record takes
+    // the ctime from the directory as it is left. Anything else that
+    // differs from what the walk recorded changed under the verify.
+    let mut moved = Vec::new();
+    for (path, now) in restored {
         let index = folder
             .record
-            .binary_search_by(|recorded| recorded.path.cmp(&fresh.path))
+            .binary_search_by(|recorded| recorded.path.cmp(&path))
             .expect("the walk recorded every directory it read");
-        folder.record[index] = fresh;
+        let walked = &mut folder.record[index];
+        match now.map(|now| LstatRecord::of(&now)) {
+            Some(now) if now.same_but_for_ctime(walked) => walked.ctime_ns = now.ctime_ns,
+            _ => moved.push(path),
+        }
     }
 
     let members = without_junk(&package.entries, rules);
     let mut differences = differences_from(&members, &folder, rules.staged);
+    differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
     // and time. A staging root keeps the mode its maker gave it until the
     // piece is moved into place, but gets the time from the package.
@@ -247,25 +285,23 @@ impl<'a> Granted<'a> {
     }
 
     /// Puts the modes back, children first, and returns the directories it
-    /// touched. Every mode is tried; the first failure is returned.
-    fn restore(&mut self) -> Result<Vec<LstatRecord>, PackError> {
+    /// touched, each with its `lstat` taken right after its mode is back,
+    /// while the directories above it still allow that; `None` where that
+    /// `lstat` failed. Every mode is tried; the first failure is returned.
+    #[allow(clippy::type_complexity, reason = "one pair of a path and its lstat")]
+    fn restore(&mut self) -> Result<Vec<(RelPath, Option<TreeEntry>)>, PackError> {
         let mut restored = Vec::new();
         let mut failure = None;
         while let Some((directory, mode)) = self.changed.pop() {
-            // Each directory is looked at again right after its mode is
-            // back, while the directories above it still allow that.
-            let restored_now = self
-                .root
-                .set_mode(&directory, mode)
-                .and_then(|()| self.root.lstat(&directory));
-            match restored_now {
-                Ok(now) => restored.push(LstatRecord {
-                    path: directory,
-                    ..LstatRecord::of(&now)
-                }),
+            match self.root.set_mode(&directory, mode) {
+                Ok(()) => {
+                    let now = self.root.lstat(&directory).ok();
+                    restored.push((directory, now));
+                }
                 Err(source) => {
-                    failure.get_or_insert(PackError::Read {
+                    failure.get_or_insert(PackError::RestoreMode {
                         path: directory,
+                        mode: mode & 0o7777,
                         source,
                     });
                 }
@@ -605,7 +641,8 @@ mod tests {
         let root = TreeRoot::open(dir).expect("the folder opens");
         compare_with_listing(listing, &root, &WalkRules::default())
             .expect("the comparison runs")
-            .differences
+            .differences()
+            .to_vec()
     }
 
     fn compare(tree: &Tree, listing: &[ListingEntry]) -> Vec<Difference> {
@@ -834,7 +871,8 @@ mod tests {
         let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
         compare_with_listing(listing, &root, rules)
             .expect("the comparison runs")
-            .differences
+            .differences()
+            .to_vec()
     }
 
     #[test]
@@ -969,7 +1007,11 @@ mod tests {
         let root = TreeRoot::open(&tree.path("proj")).expect("opens");
         let compared = compare_with_listing(&listing, &root, &WalkRules::default())
             .expect("the comparison runs");
-        let paths: Vec<String> = compared.record.iter().map(|r| r.path.to_string()).collect();
+        let paths: Vec<String> = compared
+            .record()
+            .iter()
+            .map(|r| r.path.to_string())
+            .collect();
         assert_eq!(
             paths,
             [
@@ -982,7 +1024,7 @@ mod tests {
                 "src/main.rs"
             ]
         );
-        for recorded in &compared.record {
+        for recorded in compared.record() {
             let seen = root.lstat(&recorded.path).expect("the entry exists");
             assert_eq!(
                 (
@@ -1043,7 +1085,7 @@ mod tests {
 
     fn only_changed_while_read(compared: Compared, expected: &str) {
         assert_eq!(
-            compared.differences,
+            compared.differences(),
             [Difference::ChangedWhileRead(path(expected))]
         );
     }
@@ -1092,7 +1134,7 @@ mod tests {
         })
         .expect("runs");
         assert_eq!(
-            compared.differences,
+            compared.differences(),
             [
                 changed("a.txt", &[Field::Mode]),
                 Difference::ChangedWhileRead(path("notes.txt")),
@@ -1680,9 +1722,55 @@ mod tests {
         std::fs::remove_dir(tree.path("proj/a")).expect("removed");
         let error = granted.restore().expect_err("the directory is gone");
         assert!(
-            matches!(&error, PackError::Read { path, .. } if path.to_string() == "a"),
+            matches!(&error, PackError::RestoreMode { path, mode: 0, .. } if path.to_string() == "a"),
             "{error:?}"
         );
+        assert!(error.to_string().contains("keeps owner read and search"));
+    }
+
+    #[test]
+    fn a_staged_verify_that_cannot_read_a_file_still_restores_the_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tree, package, _unlock) = staging_with_locked_directory(0o000);
+        let secret = tree.path("proj/secret");
+        std::fs::write(&secret, "x").expect("written");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let unreadable = std::fs::File::open(&secret).is_err();
+        let result = verify_with(&tree, &package, &staged());
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(unreadable, "the test needs a user that mode 000 locks out");
+        let error = result.expect_err("the file cannot be read");
+        assert!(
+            matches!(&error, PackError::Read { path, .. } if path.to_string() == "secret"),
+            "{error:?}"
+        );
+        assert_eq!(mode_of(&tree.path("proj/a")), 0);
+    }
+
+    #[test]
+    fn a_granted_directory_that_changed_during_the_verify_is_changed_while_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tree, package, _unlock) = staging_with_locked_directory(0o000);
+        let (_dir, file) = on_disk(&package);
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let mut observe = |stage: Stage, seen: &RelPath| {
+            if stage == Stage::AfterRead && seen.to_string() == "a/f" {
+                // The directory is granted read and search only; the test
+                // lets itself write and adds a file.
+                let directory = tree.path("proj/a");
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .expect("chmod");
+                std::fs::write(directory.join("g"), "new").expect("written");
+            }
+        };
+        let error = verify_strict_observed(&file, &root, &staged(), &mut observe)
+            .expect_err("the directory changed");
+        assert!(
+            matches!(&error, PackError::Differs(found)
+                if found == &[Difference::ChangedWhileRead(path("a"))]),
+            "{error:?}"
+        );
+        assert_eq!(mode_of(&tree.path("proj/a")), 0, "the mode is back");
     }
 
     #[test]

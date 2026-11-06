@@ -2705,8 +2705,12 @@ Notes for the items that call the strict verify and the listing comparison
 - `Verified::listing()` is the package's own member list, read from the
   stream. I19 stores it as the listing, or refuses when it differs from the
   `Packed.listing` of the pack.
-- The verify walk applies no exclude entries (they are spelled relative to
-  the collection); I19 walks with the bound rules before it packs.
+- The verify walk and the listing comparison apply no exclude entries (they
+  are spelled relative to the collection); I19 walks with the bound rules
+  before it packs, and I26 before it compares an unearthed folder with its
+  listing, and both refuse a piece with `Problem::Excluded`.
+- `Compared` and `Verified` are read through accessors; the fields are
+  private so that a proof cannot be made from an edited difference list.
 
 ## Relations
 

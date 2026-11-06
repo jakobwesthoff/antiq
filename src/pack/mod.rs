@@ -284,6 +284,13 @@ pub enum PackError {
     OpenPackage(#[source] std::io::Error),
     #[error("the package is damaged: {0}")]
     Damaged(String),
+    #[error("cannot put the mode of `{path}` back to {mode:o}, so it keeps owner read and search")]
+    RestoreMode {
+        path: RelPath,
+        mode: u32,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the folder differs from the package: {}", verify::describe(.0))]
     Differs(Vec<verify::Difference>),
 }
