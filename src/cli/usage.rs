@@ -307,7 +307,7 @@ mod tests {
         let lines = rich(&["antiq", "import", "dir", "--time"]);
         assert_eq!(lines[0], " ✖ ERROR");
         assert!(
-            lines[1].starts_with("▌ a value is required for '--time <TIME>'"),
+            lines[1].starts_with("▌ A value is required for '--time <TIME>'"),
             "{lines:?}"
         );
     }
@@ -342,7 +342,7 @@ mod tests {
         let lines = block_for(&error, &[]).render(&Env::new(true, false, true, 100));
         assert_eq!(
             lines[1],
-            "▌ the argument '--init' cannot be used with another"
+            "▌ The argument '--init' cannot be used with another"
         );
     }
 
@@ -397,7 +397,7 @@ mod tests {
             fallback(rendered).render(&Env::new(true, false, true, 100)),
             [
                 " ✖ ERROR",
-                "▌ bad value",
+                "▌ Bad value",
                 "▌",
                 "▌ How to fix it",
                 "▌   tip: try this",

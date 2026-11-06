@@ -106,7 +106,7 @@ fn the_candidates_come_before_the_lines_naming_what_the_run_was_doing() {
     assert_eq!(
         lines,
         [
-            "error: cannot find the piece: `scan` matches 2 pieces",
+            "error: `scan` matches 2 pieces",
             "    candidate: projects/scanner",
             "    candidate: tools/scan-old",
             "  while attempting to unearth the version",

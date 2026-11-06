@@ -12,8 +12,12 @@ Errors arise in the library and are reported by the binary.
 
 ## Decision
 
-The library defines its errors as types with `thiserror`. The binary
-propagates errors with `anyhow` and adds context to each.
+The library defines its errors as types with `thiserror` and derives
+`miette::Diagnostic` on each of them. The message of an error is its
+`thiserror` text, the fix is the `help` of the diagnostic, and a stable
+`code` names the errors that scripts or readers treat differently. The
+binary propagates errors with `anyhow`, adds context to each, and renders
+the diagnostics; it uses miette without the `fancy` feature.
 
 ## Consequences
 

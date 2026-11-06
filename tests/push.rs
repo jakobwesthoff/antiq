@@ -117,8 +117,8 @@ fn a_config_without_a_target_table_is_no_target() {
 
     assert_eq!(run.code(), 1, "{}", run.stdout);
     assert_eq!(run.error_kind(), "no_target");
-    let message = run.error_message();
-    assert!(message.contains("[target] url"), "{message}");
+    let message = run.error_text();
+    assert!(message.contains("[target]"), "{message}");
     assert!(message.contains("push --init"), "{message}");
 }
 
@@ -142,7 +142,7 @@ fn no_target_is_named_on_the_console_too() {
     assert_eq!(run.code(), 1);
     assert!(
         run.stderr
-            .starts_with("error: No push target is configured\n  why: "),
+            .starts_with("error: no push target is configured, so push has nowhere to mirror the antiq collection to\n  fix: "),
         "{}",
         run.stderr
     );
@@ -167,7 +167,13 @@ fn the_json_message_of_no_target_is_the_library_text() {
 
     assert_eq!(
         run.error_message(),
-        "no target is configured: set `[target] url` in the config, then run `antiq push --init` on an empty directory of the target"
+        "no push target is configured, so push has nowhere to mirror the antiq collection to"
+    );
+    assert!(
+        run.error_fix()
+            .contains("Then run `antiq push --init` once on an empty directory of the target"),
+        "{}",
+        run.error_fix()
     );
 }
 
@@ -428,7 +434,7 @@ fn refusal(collection: &Collection) -> String {
     let run = push(collection, &[]);
     assert_eq!(run.code(), 1, "{}", run.stdout);
     assert_eq!(run.error_kind(), "other", "{}", run.stdout);
-    run.error_message()
+    run.error_text()
 }
 
 #[test]
@@ -687,7 +693,7 @@ fn unreachable_reason(run: &Run) -> String {
 /// Asserts that a push was refused with exit 1 and returns the message.
 fn refused_message(run: &Run) -> String {
     assert_eq!(run.code(), 1, "{}", run.stdout);
-    run.error_message()
+    run.error_text()
 }
 
 fn passes_the_precheck(run: &Run) {

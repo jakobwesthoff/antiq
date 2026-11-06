@@ -12,6 +12,7 @@ extern crate self as antiq;
 
 pub mod archive;
 pub mod clock;
+pub mod code_span;
 pub mod collection;
 pub mod commands;
 pub mod config;

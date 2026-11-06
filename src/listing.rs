@@ -1029,8 +1029,11 @@ pub enum ListingError {
     Io { source: io::Error },
     #[error("the listing does not start with a line `# antiq listing <number>`")]
     InvalidHeader,
-    #[diagnostic(code(antiq::listing::format_too_new))]
-    #[error("the listing has format {found}, which this version of antiq cannot read")]
+    #[diagnostic(
+        code(antiq::listing::format_too_new),
+        help("Use a version of antiq that reads format {found}.")
+    )]
+    #[error("the listing has format {found}, which this antiq cannot read")]
     FormatTooNew { found: u32 },
     #[error("line {number} of the listing is not valid: {reason}")]
     Line { number: usize, reason: String },

@@ -19,7 +19,10 @@ const CURRENT: u64 = 1;
 pub enum MarkerError {
     #[error("the marker {FILE_NAME} cannot be read: {reason}")]
     Invalid { reason: String },
-    #[diagnostic(code(antiq::target::marker_too_new))]
+    #[diagnostic(
+        code(antiq::target::marker_too_new),
+        help("Use a version of antiq that reads the newer format.")
+    )]
     #[error("the marker {FILE_NAME} has format {found}, written by a newer antiq than this one")]
     TooNew { found: u64 },
 }

@@ -678,7 +678,7 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     assert_eq!(
         run.stderr,
         " ✖ ERROR\n\
-         ▌ projects/scanner: --all-versions needs --force\n\
+         ▌ Projects/scanner: --all-versions needs --force\n\
          ▌\n\
          ▌ Why it happened\n\
          ▌   --all-versions deletes every stored version of the piece, damaged and\n\

@@ -93,7 +93,10 @@ pub enum RestoreError {
         stamp: String,
         files: Vec<String>,
     },
-    #[diagnostic(code(antiq::restore::format_too_new))]
+    #[diagnostic(
+        code(antiq::restore::format_too_new),
+        help("Use a version of antiq that reads the newer format.")
+    )]
     #[error("version {stamp} of {piece} has a listing of a newer format than this antiq reads")]
     FormatTooNew { piece: String, stamp: String },
     #[error("version {stamp} of {piece} holds `{name}` at its top, and it is not a file")]

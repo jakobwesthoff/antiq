@@ -2023,7 +2023,7 @@ with a symbol and a word:
 
 | Kind | Badge | Colour | Form |
 |------|-------|--------|------|
-| error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "Why it happened", "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out |
+| error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out. The first letter of the title is upper case |
 | warning | `⚠ WARNING` | yellow | badge and bold title on one line, then a bar with the text and a `→` line that says how to fix it |
 | info | `ℹ INFO` | cyan | the form of a warning; one line when there is only a title |
 | hint | `→ HINT` | cyan | badge and text on one line, wrapped text hangs under the text, no bar |
@@ -2062,13 +2062,17 @@ info blocks on a rich stderr and `note: <text>` lines on a pipe.
 
 An error on a rich stderr is an error block. Its title is the error and
 its causes joined with `: `, unless the error has an explanation of its own.
-These errors have one, with a title in the words of the console and the
-sections "Why it happened" and "How to fix it" where they have content:
-outside an antiq collection, `push` without a target, `push` refused for a
-damaged or incomplete store, a target marker that names another host or
-path, a held run lock, a listing of a newer format, and a path outside the
-antiq collection. The `message` of the JSON error is the text it was
-before. The steps the run was in are listed innermost first under "What
+An explanation is the innermost error in the chain that has a code; its
+message is the title, with the first letter in upper case, and its help
+is the section "How to fix it". A help of several paragraphs separates
+them by an empty line, and a paragraph whose lines start with two spaces
+is shown as written. These errors have an explanation: outside an antiq
+collection, `push` without a target, `push` refused for a damaged or
+incomplete store, a target marker that names another host or path, a held
+run lock, a listing, a version listing or a target marker of a newer
+format, and a path outside the antiq collection. The `message` of the JSON
+error is the chain text of the whole error, and its `fix` is the help of
+the explanation. The steps the run was in are listed innermost first under "What
 antiq was doing". A reference that matches several pieces or versions, or
 no piece, adds a table and an info after the block (see "Piece references").
 A usage error of the command line parser is a block too. An
@@ -2084,8 +2088,8 @@ exits 2. Help, version and the usage errors of a stream that is not a
 terminal are plain text, whatever `CLICOLOR_FORCE` says.
 
 On a pipe the error is plain lines. An error line gives the title,
-prefixed `error:`; it is followed by a `  why:` and a `  fix:` line where
-the error has those sections, one `    candidate: <path>` line per
+prefixed `error:`, with the message as written, in lower case and with its
+backticks; it is followed by a `  fix:` line where the error has a help, one `    candidate: <path>` line per
 candidate of an ambiguous reference (for an ambiguous version, one per
 matching stamp) and one
 `  while attempting to <action>` line per context, the innermost first. The

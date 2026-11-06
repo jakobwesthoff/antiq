@@ -26,21 +26,49 @@ impl Rich {
         Rich::default()
     }
 
-    /// Reads text where a backtick pair marks a command or path.
+    /// Reads text where a code span marks a command or path.
     ///
-    /// Only literals written in the source go through here. Text from
-    /// the user's files can hold backticks and goes through the builder
-    /// methods instead.
+    /// A span opens with a run of backticks and ends at the next run of
+    /// exactly as many, as in CommonMark, and a single space inside each
+    /// edge of a span that has one on both sides is dropped. Text from
+    /// the user's files can hold backticks, so the library fences it with
+    /// [`antiq::code_span::CodeSpan`]; an opening run without a closing
+    /// one is plain text.
     pub fn parse(markup: &str) -> Rich {
         let mut rich = Rich::new();
-        for (index, piece) in markup.split('`').enumerate() {
-            rich = if index % 2 == 1 {
-                rich.cmd(piece)
-            } else {
-                rich.text(piece)
+        let mut rest = markup;
+        while let Some(open) = rest.find('`') {
+            let run = rest[open..].chars().take_while(|c| *c == '`').count();
+            let after = &rest[open + run..];
+            let mut search = 0;
+            let close = loop {
+                let Some(found) = after[search..].find('`') else {
+                    break None;
+                };
+                let start = search + found;
+                let len = after[start..].chars().take_while(|c| *c == '`').count();
+                if len == run {
+                    break Some(start);
+                }
+                search = start + len;
             };
+            match close {
+                Some(close) => {
+                    let code = &after[..close];
+                    let code = match (code.strip_prefix(' '), code.strip_suffix(' ')) {
+                        (Some(_), Some(_)) if code.trim() != "" => &code[1..code.len() - 1],
+                        _ => code,
+                    };
+                    rich = rich.text(&rest[..open]).cmd(code);
+                    rest = &after[close + run..];
+                }
+                None => {
+                    rich = rich.text(&rest[..open + run]);
+                    rest = after;
+                }
+            }
         }
-        rich
+        rich.text(rest)
     }
 
     fn push(mut self, role: Role, text: &str) -> Rich {
@@ -60,6 +88,18 @@ impl Rich {
 
     pub fn path(self, text: &str) -> Rich {
         self.push(Role::Strong, text)
+    }
+
+    /// The text with its first letter in upper case, for the title of a
+    /// block whose words come from a message that starts in lower case.
+    pub fn capitalised(mut self) -> Rich {
+        if let Some((_, first)) = self.spans.first_mut() {
+            let mut letters = first.chars();
+            if let Some(letter) = letters.next() {
+                *first = letter.to_uppercase().chain(letters).collect();
+            }
+        }
+        self
     }
 
     pub fn is_empty(&self) -> bool {

@@ -283,6 +283,23 @@ impl Run {
     }
 
     /// The `message` of the error object of a `--json` run.
+    /// The `fix` of the JSON error object: the help of the explanation.
+    pub fn error_fix(&self) -> String {
+        self.json()["error"]["fix"]
+            .as_str()
+            .expect("the error object has a fix")
+            .to_string()
+    }
+
+    /// The message of the JSON error object and, when it has one, its fix
+    /// below it.
+    pub fn error_text(&self) -> String {
+        match self.json()["error"]["fix"].as_str() {
+            Some(fix) => format!("{}\n{fix}", self.error_message()),
+            None => self.error_message(),
+        }
+    }
+
     pub fn error_message(&self) -> String {
         self.json()["error"]["message"]
             .as_str()

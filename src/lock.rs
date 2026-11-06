@@ -23,12 +23,22 @@ use std::path::Path;
 /// Errors of the run lock.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum LockError {
-    #[diagnostic(code(antiq::lock::held))]
-    #[error("another run holds the lock (pid {pid}, started {started})")]
+    #[diagnostic(
+        code(antiq::lock::held),
+        help("Wait until that run ends, then run the command again.")
+    )]
+    #[error(
+        "another antiq run holds the lock (pid {pid}, started {started}), and runs that change an antiq collection take turns"
+    )]
     Held { pid: u32, started: Timestamp },
     /// Another run holds the lock but has not written who it is yet.
-    #[diagnostic(code(antiq::lock::held_unknown))]
-    #[error("another run holds the lock")]
+    #[diagnostic(
+        code(antiq::lock::held_unknown),
+        help("Wait until that run ends, then run the command again.")
+    )]
+    #[error(
+        "another antiq run holds the lock but has not written who it is yet, and runs that change an antiq collection take turns"
+    )]
     HeldUnknown,
     #[error("cannot {action} {path}: {source}")]
     Io {

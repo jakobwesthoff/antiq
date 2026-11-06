@@ -254,10 +254,8 @@ the command:
 ```console
 $ antiq push
  ✖ ERROR
-▌ Push refused: the store holds versions that are damaged or incomplete
-▌
-▌ Why it happened
-▌   push copies the store as it is, so it only runs on a store without damage.
+▌ Push is refused: the antiq collection holds versions that are damaged or incomplete, and push
+▌ copies them as they are
 ▌
 ▌ How to fix it
 ▌   Repair or remove these versions first:

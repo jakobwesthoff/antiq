@@ -4,6 +4,7 @@
 
 //! Piece references.
 
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
@@ -46,8 +47,15 @@ pub enum ReferenceError {
         "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
     )]
     OnlyIncomplete { reference: String, piece: String },
-    #[diagnostic(code(antiq::reference::outside))]
-    #[error("`{path}` is outside the collection at `{root}`")]
+    #[diagnostic(
+        code(antiq::reference::outside),
+        help("Name a path below {}.", CodeSpan(.root))
+    )]
+    #[error(
+        "{} is outside the antiq collection at {}",
+        CodeSpan(.path),
+        CodeSpan(.root)
+    )]
     Outside { path: String, root: String },
     #[error("cannot look at the collection root {path}: {source}")]
     Root { path: String, source: io::Error },

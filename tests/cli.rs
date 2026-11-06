@@ -423,10 +423,15 @@ fn a_json_run_prints_one_error_envelope() {
     assert_eq!(json["format"], 1);
     assert_eq!(json["command"], "status");
     assert_eq!(json["error"]["kind"], "not_a_collection");
+    assert_eq!(json["error"]["code"], "antiq::collection::not_a_collection");
+    assert_eq!(
+        json["error"]["fix"],
+        "Change into your collection, or create one here with `antiq init`."
+    );
     assert_eq!(
         json["error"]["message"],
         format!(
-            "{} is not inside a collection",
+            "`{}` is not inside an antiq collection, which has an `.antiq/` folder and none of its parent directories has one",
             fs::canonicalize(dir.path())
                 .expect("the dir exists")
                 .display()
@@ -443,8 +448,7 @@ fn a_plain_run_prints_its_error_to_stderr() {
     assert_eq!(
         run.stderr,
         format!(
-            "error: {} is not inside an antiq collection\n  \
-                 why: antiq works in a directory that holds an antiq collection, which has an .antiq/ folder. None of the parent directories has one.\n  \
+            "error: `{}` is not inside an antiq collection, which has an `.antiq/` folder and none of its parent directories has one\n  \
                  fix: Change into your collection, or create one here with antiq init.\n  \
                  while attempting to find the antiq collection\n",
             fs::canonicalize(dir.path())

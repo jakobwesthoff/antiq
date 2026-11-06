@@ -278,7 +278,7 @@ fn words_of_one_style_share_one_run_per_line() {
         block.render(&env),
         [
             "\x1b[30m\x1b[41m ✖ ERROR \x1b[0m".to_string(),
-            format!("{bar} \x1b[1malpha beta gamma delta epsilon zeta eta\x1b[0m"),
+            format!("{bar} \x1b[1mAlpha beta gamma delta epsilon zeta eta\x1b[0m"),
             format!("{bar} \x1b[1mtheta iota kappa\x1b[0m"),
         ]
     );
@@ -431,4 +431,34 @@ fn a_group_on_a_pipe_keeps_the_plain_lines_of_its_blocks_only() {
         render_parts(&parts, &Env::pipe()),
         ["error: Ambiguous", "    candidate: projects/scanner"]
     );
+}
+
+// =========================================================
+// Code spans and titles
+// =========================================================
+
+#[test]
+fn a_span_with_a_longer_fence_holds_backticks() {
+    let parsed = Rich::parse("piece ``a`b`` is `x`");
+    assert_eq!(
+        parsed,
+        Rich::new().text("piece ").cmd("a`b").text(" is ").cmd("x")
+    );
+    let padded = Rich::parse("`` `a `` end");
+    assert_eq!(padded, Rich::new().cmd("`a").text(" end"));
+}
+
+#[test]
+fn a_run_of_backticks_without_a_closing_run_is_plain_text() {
+    assert_eq!(Rich::parse("a ``b` c").to_plain(), "a ``b` c");
+}
+
+#[test]
+fn the_title_of_an_error_block_starts_with_a_capital_in_the_rich_form_only() {
+    let block = Block::error(Rich::new().text("cannot read ").path("a.toml"));
+    assert_eq!(block.render(&bare(80))[1], "▌ Cannot read a.toml");
+    assert_eq!(block.render_plain()[0], "error: cannot read a.toml");
+    let warning = Block::warning(Rich::new().text("unknown key"));
+    assert_eq!(warning.render(&bare(80))[0], " ⚠ WARNING  unknown key");
+    assert_eq!(Rich::new().capitalised(), Rich::new());
 }

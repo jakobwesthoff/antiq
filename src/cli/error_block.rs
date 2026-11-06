@@ -7,32 +7,27 @@
 use super::Description;
 use super::console::block::{Block, Para};
 use super::console::rich::Rich;
-use antiq::collection::CollectionError;
-use antiq::commands::push::PushError;
-use antiq::listing::ListingError;
-use antiq::lock::LockError;
-use antiq::reference::ReferenceError;
-use antiq::run::RunError;
-use antiq::target::marker;
+use antiq::error::explanation;
 use antiq::versions::naming::VersionLookupError;
 
-/// The error block for `description`: the title, the sections an
-/// explanation adds, the candidates of an ambiguous reference, and the
-/// steps the run was in.
+/// The error block for `description`: the message of the diagnostic that
+/// explains the error as the title, its help as the fix, the candidates
+/// of an ambiguous reference, and the steps the run was in.
 ///
-/// Texts that come from a file or the command line go in as plain text,
-/// never as markup, because they can hold backticks.
+/// An error without an explanation shows the text of its whole chain.
 pub fn block_for(description: &Description) -> Block {
-    let explanation = description.library_error.and_then(explain);
-    let mut block = match &explanation {
-        Some(explanation) => Block::error(explanation.title.clone()),
+    let explained = description
+        .library_error
+        .and_then(|error| explanation(error));
+    let mut block = match explained {
+        Some(explained) => {
+            let message = explained.to_string();
+            Block::error(Rich::parse(&message)).message(&message)
+        }
         None => Block::error(Rich::new().text(&description.root)),
     };
-    if let Some(explanation) = explanation {
-        for paragraph in explanation.why {
-            block = block.why(paragraph);
-        }
-        for paragraph in explanation.how {
+    if let Some(help) = explained.and_then(|explained| explained.help()) {
+        for paragraph in help_paragraphs(&help.to_string()) {
             block = block.how(paragraph);
         }
     }
@@ -59,33 +54,22 @@ pub fn block_for(description: &Description) -> Block {
     block
 }
 
-/// What a terminal reader needs beyond the message of the library: a
-/// title in the words of the console, why it happened and how to fix it.
-/// The library message stays what `--json` carries.
-struct Explanation {
-    title: Rich,
-    why: Vec<Para>,
-    how: Vec<Para>,
-}
-
-impl Explanation {
-    fn new(title: Rich) -> Explanation {
-        Explanation {
-            title,
-            why: Vec::new(),
-            how: Vec::new(),
+/// The paragraphs of a help: blank lines separate them, and a paragraph
+/// whose lines all start with two spaces is a literal block, such as a
+/// piece of a config file, kept as written.
+fn help_paragraphs(help: &str) -> Vec<Para> {
+    let mut paragraphs = Vec::new();
+    for (index, block) in help.split("\n\n").enumerate() {
+        if index > 0 {
+            paragraphs.push(Para::Blank);
+        }
+        if block.lines().all(|line| line.starts_with("  ")) {
+            paragraphs.extend(block.lines().map(Para::pre));
+        } else {
+            paragraphs.push(Para::Text(Rich::parse(&block.replace('\n', " "))));
         }
     }
-
-    fn why(mut self, text: Rich) -> Explanation {
-        self.why.push(text.into());
-        self
-    }
-
-    fn how(mut self, text: Rich) -> Explanation {
-        self.how.push(text.into());
-        self
-    }
+    paragraphs
 }
 
 /// The typed error of kind `T` that `error` is or wraps. The wrappers of
@@ -101,159 +85,11 @@ pub(super) fn find<T: std::error::Error + 'static>(error: &antiq::Error) -> Opti
     None
 }
 
-/// The held lock behind `error`, whether a run error wraps it or not.
-fn held_lock(error: &antiq::Error) -> Option<&LockError> {
-    find::<LockError>(error).or_else(|| match find::<RunError>(error) {
-        Some(RunError::Lock(lock)) => Some(lock),
-        _ => None,
-    })
-}
-
-fn explain(error: &antiq::Error) -> Option<Explanation> {
-    if let Some(CollectionError::NotACollection { start }) = find(error) {
-        return Some(not_a_collection(&start.display().to_string()));
-    }
-    // A push error that has no explanation of its own may still wrap one
-    // that has, such as the held lock of the run it could not start.
-    if let Some(explanation) = find::<PushError>(error).and_then(explain_push) {
-        return Some(explanation);
-    }
-    if let Some(ReferenceError::Outside { path, root }) = find(error) {
-        return Some(outside(path, root));
-    }
-    if let Some(ListingError::FormatTooNew { found }) = find(error) {
-        return Some(
-            Explanation::new(Rich::new().text(&format!(
-                "A listing has format {found}, which this antiq cannot read"
-            )))
-            .how(Rich::new().text(&format!(
-                "Use a version of antiq that reads format {found}."
-            ))),
-        );
-    }
-    match held_lock(error) {
-        Some(LockError::Held { pid, started }) => {
-            Some(lock_held(Some((*pid, started.to_string()))))
-        }
-        Some(LockError::HeldUnknown) => Some(lock_held(None)),
-        _ => None,
-    }
-}
-
-fn not_a_collection(start: &str) -> Explanation {
-    Explanation::new(Rich::new().path(start).text(" is not inside an antiq collection"))
-        .why(Rich::parse(
-            "antiq works in a directory that holds an antiq collection, which has an `.antiq/` folder. None of the parent directories has one.",
-        ))
-        .how(Rich::parse(
-            "Change into your collection, or create one here with `antiq init`.",
-        ))
-}
-
-fn outside(path: &str, root: &str) -> Explanation {
-    Explanation::new(
-        Rich::new()
-            .path(path)
-            .text(" is outside the antiq collection"),
-    )
-    .why(
-        Rich::new()
-            .text("The antiq collection is at ")
-            .path(root)
-            .text(", and ")
-            .path(path)
-            .text(" is not below it."),
-    )
-    .how(Rich::new().text("Name a path below ").path(root).text("."))
-}
-
-fn lock_held(holder: Option<(u32, String)>) -> Explanation {
-    let turns = "Runs that change an antiq collection take turns. ";
-    let why = match holder {
-        Some((pid, started)) => Rich::new()
-            .text(turns)
-            .text(&format!(
-                "The run with pid {pid}, started {started}, holds the lock in "
-            ))
-            .cmd(".antiq/lock")
-            .text("."),
-        None => Rich::new()
-            .text(turns)
-            .text("Another run holds the lock in ")
-            .cmd(".antiq/lock")
-            .text(" but has not written who it is yet."),
-    };
-    Explanation::new(Rich::new().text("Another antiq run holds the lock"))
-        .why(why)
-        .how(Rich::new().text("Wait until that run ends, then run the command again."))
-}
-
-fn explain_push(error: &PushError) -> Option<Explanation> {
-    match error {
-        PushError::NoTarget => Some(no_target()),
-        PushError::MarkerMismatch {
-            marker_host,
-            marker_path,
-            host,
-            path,
-        } => Some(
-            Explanation::new(Rich::new().text("The target's marker names another host or path"))
-                .why(
-                    Rich::new()
-                        .text("The marker ")
-                        .cmd(marker::FILE_NAME)
-                        .text(" on the target names host ")
-                        .path(marker_host)
-                        .text(" and path ")
-                        .path(marker_path)
-                        .text(". This run is host ")
-                        .path(host)
-                        .text(" and path ")
-                        .path(path)
-                        .text("."),
-                )
-                .how(Rich::parse(
-                    "Push with `antiq push --force` to overwrite the target once, or edit the marker.",
-                )),
-        ),
-        PushError::DamagedStore { lines } => {
-            let mut explanation = Explanation::new(Rich::new().text(
-                "Push refused: the store holds versions that are damaged or incomplete",
-            ))
-            .why(Rich::new().text(
-                "push copies the store as it is, so it only runs on a store without damage.",
-            ))
-            .how(Rich::new().text("Repair or remove these versions first:"));
-            explanation.how.push(Para::Blank);
-            for line in lines {
-                explanation.how.push(Para::pre(&format!("  {line}")));
-            }
-            Some(explanation)
-        }
-        _ => None,
-    }
-}
-
-fn no_target() -> Explanation {
-    let mut explanation = Explanation::new(Rich::new().text("No push target is configured"))
-        .why(Rich::parse(
-            "`antiq push` mirrors the antiq collection to a target, a local path or an ssh host, and the config names none.",
-        ))
-        .how(Rich::parse("Add this to `.antiq/config.toml`:"));
-    explanation.how.push(Para::Blank);
-    explanation.how.push(Para::pre("  [target]"));
-    explanation
-        .how
-        .push(Para::pre("  url = \"/Volumes/nas/antiq/projects\""));
-    explanation.how.push(Para::Blank);
-    explanation.how(Rich::parse(
-        "Then run `antiq push --init` once on an empty directory of the target to claim it.",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::console::block::Para;
     use super::super::console::env::Env;
+    use super::super::console::rich::Rich;
     use super::super::describe;
     use super::block_for;
     use antiq::collection::CollectionError;
@@ -290,11 +126,8 @@ mod tests {
             rich(error, &["find the antiq collection"]),
             [
                 " ✖ ERROR",
-                "▌ /Users/jakob/Downloads is not inside an antiq collection",
-                "▌",
-                "▌ Why it happened",
-                "▌   antiq works in a directory that holds an antiq collection, which has an .antiq/ folder. None of",
-                "▌   the parent directories has one.",
+                "▌ /Users/jakob/Downloads is not inside an antiq collection, which has an .antiq/ folder and none of",
+                "▌ its parent directories has one",
                 "▌",
                 "▌ How to fix it",
                 "▌   Change into your collection, or create one here with antiq init.",
@@ -311,11 +144,7 @@ mod tests {
             rich(PushError::NoTarget, &["push the antiq collection"]),
             [
                 " ✖ ERROR",
-                "▌ No push target is configured",
-                "▌",
-                "▌ Why it happened",
-                "▌   antiq push mirrors the antiq collection to a target, a local path or an ssh host, and the config",
-                "▌   names none.",
+                "▌ No push target is configured, so push has nowhere to mirror the antiq collection to",
                 "▌",
                 "▌ How to fix it",
                 "▌   Add this to .antiq/config.toml:",
@@ -336,8 +165,7 @@ mod tests {
         assert_eq!(
             plain(PushError::NoTarget, &["push the antiq collection"]),
             [
-                "error: No push target is configured",
-                "  why: antiq push mirrors the antiq collection to a target, a local path or an ssh host, and the config names none.",
+                "error: no push target is configured, so push has nowhere to mirror the antiq collection to",
                 "  fix: Add this to .antiq/config.toml:",
                 "         [target]",
                 "         url = \"/Volumes/nas/antiq/projects\"",
@@ -367,11 +195,8 @@ mod tests {
             rich(held, &[]),
             [
                 " ✖ ERROR",
-                "▌ Another antiq run holds the lock",
-                "▌",
-                "▌ Why it happened",
-                "▌   Runs that change an antiq collection take turns. The run with pid 4242, started",
-                "▌   2026-11-03T10:00:00Z, holds the lock in .antiq/lock.",
+                "▌ Another antiq run holds the lock (pid 4242, started 2026-11-03T10:00:00Z), and runs that change an",
+                "▌ antiq collection take turns",
                 "▌",
                 "▌ How to fix it",
                 "▌   Wait until that run ends, then run the command again.",
@@ -381,11 +206,8 @@ mod tests {
             rich(LockError::HeldUnknown, &[]),
             [
                 " ✖ ERROR",
-                "▌ Another antiq run holds the lock",
-                "▌",
-                "▌ Why it happened",
-                "▌   Runs that change an antiq collection take turns. Another run holds the lock in .antiq/lock but",
-                "▌   has not written who it is yet.",
+                "▌ Another antiq run holds the lock but has not written who it is yet, and runs that change an antiq",
+                "▌ collection take turns",
                 "▌",
                 "▌ How to fix it",
                 "▌   Wait until that run ends, then run the command again.",
@@ -399,7 +221,7 @@ mod tests {
             rich(ListingError::FormatTooNew { found: 2 }, &[]),
             [
                 " ✖ ERROR",
-                "▌ A listing has format 2, which this antiq cannot read",
+                "▌ The listing has format 2, which this antiq cannot read",
                 "▌",
                 "▌ How to fix it",
                 "▌   Use a version of antiq that reads format 2.",
@@ -417,10 +239,7 @@ mod tests {
             rich(error, &["pin the piece"]),
             [
                 " ✖ ERROR",
-                "▌ /elsewhere/proj is outside the antiq collection",
-                "▌",
-                "▌ Why it happened",
-                "▌   The antiq collection is at /home/jakob/projects, and /elsewhere/proj is not below it.",
+                "▌ /elsewhere/proj is outside the antiq collection at /home/jakob/projects",
                 "▌",
                 "▌ How to fix it",
                 "▌   Name a path below /home/jakob/projects.",
@@ -443,11 +262,8 @@ mod tests {
             rich(error, &[]),
             [
                 " ✖ ERROR",
-                "▌ The target's marker names another host or path",
-                "▌",
-                "▌ Why it happened",
-                "▌   The marker .antiq-target on the target names host imperius and path /home/a/coll. This run is",
-                "▌   host workbench and path /home/b/coll.",
+                "▌ The target's marker .antiq-target names another host or path: it names host imperius and path",
+                "▌ /home/a/coll, and this run is host workbench and path /home/b/coll",
                 "▌",
                 "▌ How to fix it",
                 "▌   Push with antiq push --force to overwrite the target once, or edit the marker.",
@@ -467,10 +283,8 @@ mod tests {
             rich(error, &["push the antiq collection"]),
             [
                 " ✖ ERROR",
-                "▌ Push refused: the store holds versions that are damaged or incomplete",
-                "▌",
-                "▌ Why it happened",
-                "▌   push copies the store as it is, so it only runs on a store without damage.",
+                "▌ Push is refused: the antiq collection holds versions that are damaged or incomplete, and push",
+                "▌ copies them as they are",
                 "▌",
                 "▌ How to fix it",
                 "▌   Repair or remove these versions first:",
@@ -491,10 +305,57 @@ mod tests {
             rich(error, &["read the config file"]),
             [
                 " ✖ ERROR",
-                "▌ bad input",
+                "▌ Bad input",
                 "▌",
                 "▌ What antiq was doing",
                 "▌   Attempting to read the config file.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rich_title_of_an_explained_error_starts_with_a_capital_and_the_pipe_keeps_the_message() {
+        let lines = rich(PushError::NoTarget, &[]);
+        assert!(lines[1].starts_with("▌ No push target"), "{lines:?}");
+        let piped = plain(PushError::NoTarget, &[]);
+        assert!(piped[0].starts_with("error: no push target"), "{piped:?}");
+    }
+
+    #[test]
+    fn a_pipe_keeps_the_backticks_of_the_message_that_json_carries() {
+        let error = ReferenceError::Outside {
+            path: "/a`b".into(),
+            root: "/root".into(),
+        };
+        assert_eq!(
+            plain(error, &[])[0],
+            "error: ``/a`b`` is outside the antiq collection at `/root`"
+        );
+        assert_eq!(
+            rich(
+                ReferenceError::Outside {
+                    path: "/a`b".into(),
+                    root: "/root".into(),
+                },
+                &[]
+            )[1],
+            "▌ /a`b is outside the antiq collection at /root"
+        );
+    }
+
+    #[test]
+    fn a_help_with_a_literal_block_keeps_the_lines_of_the_block() {
+        let paragraphs =
+            super::help_paragraphs("Add this:\n\n  [target]\n  url = \"x\"\n\nThen run `antiq`.");
+        assert_eq!(
+            paragraphs,
+            [
+                Para::Text(Rich::new().text("Add this:")),
+                Para::Blank,
+                Para::pre("  [target]"),
+                Para::pre("  url = \"x\""),
+                Para::Blank,
+                Para::Text(Rich::parse("Then run `antiq`.")),
             ]
         );
     }

@@ -563,8 +563,7 @@ mod tests {
         assert_eq!(
             stderr,
             format!(
-                "error: {} is not inside an antiq collection\n  \
-                 why: antiq works in a directory that holds an antiq collection, which has an .antiq/ folder. None of the parent directories has one.\n  \
+                "error: `{}` is not inside an antiq collection, which has an `.antiq/` folder and none of its parent directories has one\n  \
                  fix: Change into your collection, or create one here with antiq init.\n  \
                  while attempting to find the antiq collection\n",
                 canonical.display()
@@ -610,7 +609,8 @@ mod tests {
         assert!(
             stdout.ends_with(
                 "\"error\":{\"kind\":\"lock_held\",\"code\":\"antiq::lock::held\",\
-                 \"message\":\"another run holds the lock (pid 4242, started 2026-11-03T10:00:00Z)\",\
+                 \"message\":\"another antiq run holds the lock (pid 4242, started 2026-11-03T10:00:00Z), and runs that change an antiq collection take turns\",\
+                 \"fix\":\"Wait until that run ends, then run the command again.\",\
                  \"pid\":4242,\"started\":\"2026-11-03T10:00:00Z\"}}\n"
             ),
             "{stdout}"
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(code, 1);
         assert_eq!(
             stderr,
-            "error: cannot find the piece: `scan` matches 2 pieces\n    \
+            "error: `scan` matches 2 pieces\n    \
              candidate: projects/scanner\n    \
              candidate: tools/scan-old\n  \
              while attempting to unearth the version\n"

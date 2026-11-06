@@ -81,7 +81,10 @@ pub enum RebuildError {
         "version {stamp} of {piece} has no archive, so rebuild cannot repair it: `antiq forget {piece} {stamp}` removes it"
     )]
     Incomplete { piece: String, stamp: String },
-    #[diagnostic(code(antiq::rebuild::format_too_new))]
+    #[diagnostic(
+        code(antiq::rebuild::format_too_new),
+        help("Use a version of antiq that reads the newer format.")
+    )]
     #[error("the listing of version {stamp} of {piece} is of a newer format than antiq reads")]
     FormatTooNew { piece: String, stamp: String },
     /// The version cannot be repaired, or its files show that it must not

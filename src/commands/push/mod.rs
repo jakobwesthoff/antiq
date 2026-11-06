@@ -5,6 +5,7 @@
 //! The `push` operation: mirrors the collection to the target.
 
 use crate::clock::Clock;
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::machine::MachineError;
@@ -31,10 +32,13 @@ mod summary;
 /// Why push failed.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PushError {
-    #[diagnostic(code(antiq::push::no_target))]
-    #[error(
-        "no target is configured: set `[target] url` in the config, then run `antiq push --init` on an empty directory of the target"
+    #[diagnostic(
+        code(antiq::push::no_target),
+        help(
+            "Add this to `.antiq/config.toml`:\n\n  [target]\n  url = \"/Volumes/nas/antiq/projects\"\n\nThen run `antiq push --init` once on an empty directory of the target to claim it."
+        )
     )]
+    #[error("no push target is configured, so push has nowhere to mirror the antiq collection to")]
     NoTarget,
     #[error("the `[target] url` is not usable")]
     Url(
@@ -85,8 +89,13 @@ pub enum PushError {
         #[source]
         source: std::io::Error,
     },
-    #[diagnostic(code(antiq::push::damaged_store))]
-    #[error("the store holds versions that are damaged or incomplete:\n{}", .lines.join("\n"))]
+    #[diagnostic(
+        code(antiq::push::damaged_store),
+        help("Repair or remove these versions first:\n\n{}", indented(.lines))
+    )]
+    #[error(
+        "push is refused: the antiq collection holds versions that are damaged or incomplete, and push copies them as they are"
+    )]
     DamagedStore { lines: Vec<String> },
     #[error(
         "`{first}` and `{second}` differ only in case or Unicode normalization, which the target's volume treats as one name"
@@ -105,10 +114,17 @@ pub enum PushError {
     #[diagnostic(code(antiq::push::unreachable))]
     #[error("{reason}")]
     Unreachable { reason: String },
-    #[diagnostic(code(antiq::push::marker_mismatch))]
+    #[diagnostic(
+        code(antiq::push::marker_mismatch),
+        help("Push with `antiq push --force` to overwrite the target once, or edit the marker.")
+    )]
     #[error(
-        "the target's marker {} names host `{marker_host}` and path `{marker_path}`, this run is host `{host}` and path `{path}`; push with --force to overwrite the target once, or edit the marker",
-        marker::FILE_NAME
+        "the target's marker {} names another host or path: it names host {} and path {}, and this run is host {} and path {}",
+        CodeSpan(marker::FILE_NAME),
+        CodeSpan(.marker_host),
+        CodeSpan(.marker_path),
+        CodeSpan(.host),
+        CodeSpan(.path)
     )]
     MarkerMismatch {
         marker_host: String,
@@ -138,6 +154,15 @@ pub enum PushError {
         #[diagnostic_source]
         MachineError,
     ),
+}
+
+/// The lines of the damaged versions as the preformatted lines of a help.
+fn indented(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl HasKind for PushError {

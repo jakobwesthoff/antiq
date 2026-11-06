@@ -4,6 +4,7 @@
 
 //! Finding a collection and its local layout.
 
+use crate::code_span::CodeSpan;
 use crate::config::{Config, ConfigError};
 use crate::error::{ErrorKind, HasKind};
 use crate::id::ObjectId;
@@ -127,8 +128,14 @@ impl Collection {
 /// Errors of finding a collection.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum CollectionError {
-    #[diagnostic(code(antiq::collection::not_a_collection))]
-    #[error("{} is not inside a collection", start.display())]
+    #[diagnostic(
+        code(antiq::collection::not_a_collection),
+        help("Change into your collection, or create one here with `antiq init`.")
+    )]
+    #[error(
+        "{} is not inside an antiq collection, which has an `.antiq/` folder and none of its parent directories has one",
+        CodeSpan(.start.display())
+    )]
     NotACollection { start: PathBuf },
     #[error("cannot look for a collection at {}: {source}", path.display())]
     Io {

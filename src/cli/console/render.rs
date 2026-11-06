@@ -210,7 +210,12 @@ impl Block {
                 } else {
                     badge.trim_end().to_string()
                 });
-                for line in flow(env, &self.title, theme::BOLD, available(env, 2)) {
+                for line in flow(
+                    env,
+                    &self.title.clone().capitalised(),
+                    theme::BOLD,
+                    available(env, 2),
+                ) {
                     lines.push(bar.line(&line));
                 }
                 self.section(env, &bar, "Why it happened", &self.why, &mut lines);
@@ -300,6 +305,12 @@ impl Block {
         }
     }
 
+    fn plain_title(&self) -> String {
+        self.message
+            .clone()
+            .unwrap_or_else(|| self.title.to_plain())
+    }
+
     /// The block as a pipe on stderr gets it: lines a script can grep.
     /// Info and hint exist only for a person at a terminal.
     pub fn render_plain(&self) -> Vec<String> {
@@ -309,7 +320,7 @@ impl Block {
         let mut lines = Vec::new();
         match self.kind {
             Kind::Error => {
-                lines.push(format!("error: {}", self.title.to_plain()));
+                lines.push(format!("error: {}", self.plain_title()));
                 labelled(&mut lines, "why", &self.why);
                 labelled(&mut lines, "fix", &self.how);
                 for candidate in &self.candidates {
@@ -320,7 +331,7 @@ impl Block {
                 }
             }
             Kind::Warning => {
-                lines.push(format!("warning: {}", self.title.to_plain()));
+                lines.push(format!("warning: {}", self.plain_title()));
                 for paragraph in &self.text {
                     if let Some(text) = plain_paragraph(paragraph) {
                         lines.push(format!("  {text}"));

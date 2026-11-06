@@ -457,7 +457,7 @@ fn an_error_on_a_stderr_pipe_stays_plain_while_stdout_is_a_terminal() {
     run.expect_code(1);
     assert_eq!(
         run.stderr,
-        "error: cannot find the piece: `no-such-piece` matches no piece\n  \
+        "error: `no-such-piece` matches no piece\n  \
          while attempting to pin the piece\n"
     );
 }

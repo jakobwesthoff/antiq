@@ -48,6 +48,7 @@ pub struct Block {
     pub(super) doing: Vec<String>,
     pub(super) candidates: Vec<String>,
     pub(super) pipe: Option<String>,
+    pub(super) message: Option<String>,
 }
 
 impl Block {
@@ -62,6 +63,7 @@ impl Block {
             doing: Vec::new(),
             candidates: Vec::new(),
             pipe: None,
+            message: None,
         }
     }
 
@@ -85,6 +87,14 @@ impl Block {
     /// read it, so it keeps the wording they match on.
     pub fn pipe(mut self, line: &str) -> Block {
         self.pipe = Some(line.to_string());
+        self
+    }
+
+    /// The text the title was parsed from. A pipe has no styles to show, so
+    /// it prints this text as written, backticks included, which is the
+    /// message that `--json` carries.
+    pub fn message(mut self, message: &str) -> Block {
+        self.message = Some(message.to_string());
         self
     }
 
