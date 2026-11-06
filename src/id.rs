@@ -19,14 +19,17 @@ use ulid::Ulid;
 pub struct ObjectId(Ulid);
 
 impl ObjectId {
+    #[cfg(test)]
     pub fn from_ulid(ulid: Ulid) -> Self {
         ObjectId(ulid)
     }
 
+    #[cfg(test)]
     pub fn ulid(self) -> Ulid {
         self.0
     }
 
+    #[cfg(test)]
     /// The time the ID was minted for, in milliseconds since the epoch.
     pub fn timestamp_ms(self) -> u64 {
         self.0.timestamp_ms()

@@ -18,9 +18,8 @@ use tempfile::TempDir;
 /// A command that runs `program` in a session of its own.
 ///
 /// Without a session the child keeps the controlling terminal of whoever
-/// runs `cargo test`, and a command that asks a question would wait for a
-/// keypress. In a session of its own, opening `/dev/tty` fails, so such a
-/// command sees no terminal on a developer machine and in CI alike.
+/// runs `cargo test`. In a session of its own, opening `/dev/tty` fails, so
+/// the command sees no terminal on a developer machine and in CI alike.
 pub fn detached(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command.stdin(Stdio::null());

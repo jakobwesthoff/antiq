@@ -19,7 +19,6 @@ pub mod error;
 pub mod filesystem;
 pub mod id;
 pub mod idle;
-pub mod interact;
 pub mod listing;
 pub mod lock;
 pub mod machine;
