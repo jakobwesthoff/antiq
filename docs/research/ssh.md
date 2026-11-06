@@ -234,6 +234,76 @@ on 127.0.0.1 (**measured**):
 - When the server refuses a session because of `MaxSessions`, ssh
   prints a line starting with `mux_client_`.
 
+## Measured for the session layer
+
+Measured 2026-11-04 on the same Mac (OpenSSH_10.3p1, LibreSSL 3.3.6)
+against an sshd started as the user on 127.0.0.1, with `LC_ALL=C`
+(**measured**). The texts are recorded as files in
+`tests/fixtures/ssh-texts/`; the host-key texts have their paths
+shortened.
+
+Failures of a command (exit status 255, nothing else printed by ssh):
+
+| Case | stderr |
+|---|---|
+| nothing listens on the port | `ssh: connect to host 127.0.0.1 port 22439: Connection refused` |
+| name does not resolve | `ssh: Could not resolve hostname no-such-host.invalid: nodename nor servname provided, or not known` |
+| address does not answer, `ConnectTimeout=3` | `ssh: connect to host 10.255.255.1 port 22431: Operation timed out` |
+| key refused | `someone@127.0.0.1: Permission denied (publickey,keyboard-interactive).`; the destination is the one resolved from the config (`HostName`, `User`), not the alias given on the command line |
+| unknown host key, `StrictHostKeyChecking=yes` | `No ED25519 host key is known for [127.0.0.1]:22431 and you have requested strict checking.` and `Host key verification failed.` |
+| changed host key, `StrictHostKeyChecking=yes` | the `@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @` block, then `Host key for [127.0.0.1]:22431 has changed and you have requested strict checking.` and `Host key verification failed.` |
+| `-J` host refuses | the connect line of the jump host, then `Connection closed by UNKNOWN port 65535` |
+| `-J` host does not resolve | the resolve line, then `Connection closed by UNKNOWN port 65535` |
+| `ProxyCommand` ends at once | only `Connection closed by UNKNOWN port 65535` |
+| `ProxyCommand` never answers | `Connection timed out during banner exchange` and `Connection to UNKNOWN port 65535 timed out` |
+
+A remote command that runs `exit 3` gives status 3; `exit 255` gives 255
+with no ssh text, so a status of 255 does not prove that ssh itself
+failed.
+
+Control socket and master:
+
+- `ssh -S <sock> -O check` or `-O exit` with no socket: status 255 and
+  `Control socket connect(<sock>): No such file or directory`. With a
+  socket left by a master killed with `-9`: status 255 and `Control
+  socket connect(<sock>): Connection refused`.
+- A command with `-S <sock> -o ControlMaster=no` and a missing socket runs
+  over a direct connection and prints nothing about the socket. With a
+  stale socket it prints the `Connection refused` line first and then runs
+  over a direct connection, with the command's own exit status.
+- `-M -N -f -S <sock>` on a path where a file exists: status 0 and
+  `ControlSocket <sock> already exists, disabling multiplexing`. The file
+  is left alone, and the backgrounded `ssh -N` stays alive past its
+  `ControlPersist` time with no master behind it.
+- A ControlPath of 87 bytes: status 255 and `unix_listener: path
+  "<path>.<16 characters>" too long for Unix domain socket`. 86 bytes
+  worked.
+- With sshd `MaxSessions 1`, a second concurrent command over the master
+  printed `mux_client_request_session: session request failed: Session
+  open refused by peer`, then ran over a direct connection with status 0.
+- With `-E <log>` on `-M`, the failures of the `-M` call itself, such as
+  the connect line, go to the log and stderr stays empty.
+- A master started with `-f` has no stderr after it detaches. With
+  `ServerAliveInterval=1` and `ServerAliveCountMax=2`, when the server
+  stopped answering while a command ran over the master, the command
+  exited 255 with an empty stderr and the master's log held `Timeout,
+  server 127.0.0.1 not responding.`
+
+Settings of the user's `~/.ssh/config` that change what a command does,
+each tried against a throwaway sshd:
+
+- `RequestTTY force`: the remote gets a terminal, the script on stdin is
+  echoed back and the command does not end. `-T` on the command line
+  wins.
+- `RemoteCommand`: every command with its own remote command fails with
+  `Cannot execute command-line and remote command.`; `-o
+  RemoteCommand=none` on the command line wins.
+- `LocalForward` with `ExitOnForwardFailure yes` and a busy port: status
+  255 with `bind [127.0.0.1]:22571: Address already in use`. `-o
+  ClearAllForwardings=yes` avoids it.
+- `LogLevel QUIET`: no message at all on any failure. `LogLevel ERROR`
+  drops the keepalive text.
+
 ## Not verified
 
 - No SSH server was reachable during this research, so multiplexing, a

@@ -743,15 +743,35 @@ configured. (ADR 0048)
 
 Every remote command runs as `/bin/sh -s` with the script and its
 quoted values on standard input, so the login shell parses nothing but
-that. Exclusive creation runs in that shell with `set -C`, never through
-rsync; `remote add` checks that a second create fails. Exit status 255
-and ssh's error text decide between away and broken. Only lines with
-ssh's own prefixes count, lines about the control socket do not, and
-failures of the master connection are told apart from the remote's
-state. "Connection refused" means away in the form "ssh: connect to
-host ... Connection refused"; a stale control socket gives the same
-words in another form. A session the server refuses through its
-`MaxSessions` limit gives one warning per run.
+that. The script is one brace group that starts by setting `LC_ALL=C`,
+so a connection that ends early runs nothing. Exclusive creation runs
+in that shell with `set -C`, never through rsync; `remote add` checks
+that a second create fails.
+
+ssh runs with `LC_ALL=C`, because its error text is matched, and with
+`LogLevel=INFO`, `ClearAllForwardings=yes` and `PermitLocalCommand=no`
+set on the command line, so that settings in the user's `~/.ssh/config`
+neither hide that text nor start forwardings or local commands. Commands
+also get `-T` and `RemoteCommand=none`, so that a configured terminal or
+remote command does not change the script's input and output.
+
+Exit status 255 and ssh's error text decide between away and broken. A
+script never exits with status 255. Only lines in ssh's own forms count.
+Lines about the control socket, the master connection or a proxy's
+`UNKNOWN port 65535` do not, and failures of the master connection are
+told apart from the remote's state. These are away: `ssh: connect to
+host <host> port <port>: <reason>` with any reason, which ssh prints
+when the connection itself fails, `ssh: Could not resolve hostname`, a
+keepalive timeout (`Timeout, server <host> not responding.`) and a
+banner exchange timeout. These are broken: a refused login, a refused
+or changed host key, and a connection the server closes or resets. A
+broken line wins over an away line. A failure with no line in these
+forms is broken. "Connection refused" means away only in the connect
+form; a stale control socket gives the same words in another form. When
+the master connection drops while a command runs, ssh reports nothing
+to the command, and antiq reads the master's log for the keepalive
+text. A session the server refuses through its `MaxSessions` limit gives
+one warning per run.
 
 After writing a run's temp files and before their renames, antiq runs
 `sync` on the NAS, and once more after the renames.
