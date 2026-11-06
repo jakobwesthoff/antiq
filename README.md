@@ -250,7 +250,7 @@ url = "/tmp/antiq-demo/target"
 antiq push --init
 ```
 
-![antiq push --init claims the target and prints one line for each piece with what was created](docs/pages/assets/shots/push.png)
+![antiq push --init claims the target and prints a table of what was created for each piece, then a closing line that starts with Claimed](docs/pages/assets/shots/push.png)
 
 `--init` wrote the marker `.antiq-target` at the target's root. It holds
 the collection ID, the machine name and the collection path, and keeps
@@ -402,7 +402,8 @@ Unearthed scan-old (version 2026-11-05T214151)
 On a terminal `unearth` shows a card, leaves the line of the piece and ends
 with `✔ Unearthed to ./scan-old   took 0:00` instead. The progress cards of `archive`,
 `push`, `unearth`, `fork` and `rebuild` appear only on a terminal. A dry
-run, `--json` and a stdout that is not a terminal print the plain lines.
+run and a stdout that is not a terminal print the plain lines, and
+`--json` prints its JSON object; none of them shows cards.
 
 `list` and `grep` print one tab-separated line per version or hit when they
 do not write to a terminal.
@@ -514,8 +515,9 @@ recommended way to reach a NAS.
 
 ### Pushing
 
-`push` runs rsync once with `-a -H -x --delete --delete-delay`, so the
-target ends up as a copy of the collection: live folders, versions and
+`push` mirrors with one rsync run of `-a -H -x --delete --delete-delay`
+(and one more pass when the first one deleted something and changes
+remain), so the target ends up as a copy of the collection: live folders, versions and
 everything else in it. Left out are antiq's temporary folders and lock
 and the macOS volume-root folders. Over ssh the run uses `BatchMode`.
 `push -n` lists what would change, per piece, and changes nothing.
