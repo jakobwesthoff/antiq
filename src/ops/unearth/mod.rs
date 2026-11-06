@@ -69,8 +69,14 @@ pub enum UnearthError {
     NoMetadata { id: ObjectId },
     #[error("`{path}` has no archive to unearth from")]
     NoArchive { path: RelPath },
-    #[error("the archive of `{path}` is not on this machine and cannot be fetched yet")]
+    #[error("`{path}` is not on this machine and no remote was given")]
     NoLocalArchive { path: RelPath },
+    #[error("`{path}` has no live package to unearth from")]
+    NoLivePackage { path: RelPath },
+    #[error(
+        "`{path}` is a live piece of another collection and has no archive versions to choose from"
+    )]
+    VersionOfLivePiece { path: RelPath },
     #[error("`{path}` has no archive of version {version}; it has {available}")]
     NoSuchVersion {
         path: RelPath,
@@ -188,7 +194,13 @@ pub enum UnearthAction {
     Unearth {
         id: ObjectId,
         path: RelPath,
-        payload_version: u32,
+        /// Left out of the JSON for a local archive, the only source
+        /// before the remote was involved.
+        #[serde(skip_serializing_if = "is_local_archive")]
+        source: UnearthSource,
+        /// Absent for a live package, which has no archive version.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        payload_version: Option<u32>,
     },
     /// The run leaves the piece as it is.
     Skip {
@@ -199,14 +211,35 @@ pub enum UnearthAction {
     },
 }
 
+fn is_local_archive(source: &UnearthSource) -> bool {
+    *source == UnearthSource::LocalArchive
+}
+
 impl PlanAction for UnearthAction {
     fn describe(&self) -> String {
         match self {
             UnearthAction::Unearth {
                 path,
+                source,
                 payload_version,
                 ..
-            } => format!("unearth {path} from archive version {payload_version}"),
+            } => {
+                // Only a live package has no archive version.
+                let version =
+                    payload_version.map_or_else(String::new, |version| version.to_string());
+                match source {
+                    UnearthSource::LocalArchive => {
+                        format!("unearth {path} from archive version {version}")
+                    }
+                    UnearthSource::RemoteArchive => {
+                        format!("fetch archive version {version} and unearth {path}")
+                    }
+                    UnearthSource::LivePackage => format!("unearth {path} from its live package"),
+                    UnearthSource::Fork => format!(
+                        "unearth {path} from the live package of another collection's piece, as a fork with a new ID"
+                    ),
+                }
+            }
             UnearthAction::Skip {
                 path,
                 why: Skipped::NoSpace { needed, available },
@@ -214,6 +247,21 @@ impl PlanAction for UnearthAction {
             } => format!("skip {path}: it needs {needed} bytes and the volume has {available}"),
         }
     }
+}
+
+/// Where the tree of an unearth comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnearthSource {
+    /// An archive this machine holds.
+    LocalArchive,
+    /// An archive only the remote holds.
+    RemoteArchive,
+    /// The live package of a piece this collection owns, which is gone.
+    LivePackage,
+    /// The live package of another collection's piece, which becomes a
+    /// new piece here.
+    Fork,
 }
 
 /// Space the extraction needs and what the volume has.
@@ -232,6 +280,7 @@ pub struct UnearthPlan {
     /// fails.
     pub(crate) entry: Option<TrackingEntry>,
     pub(crate) payload: Payload,
+    pub(crate) source: UnearthSource,
     pub(crate) target: RelPath,
     /// The sum of the sizes of the files in the listing.
     pub(crate) needed: u64,
@@ -241,6 +290,10 @@ pub struct UnearthPlan {
 impl UnearthPlan {
     pub fn target(&self) -> &RelPath {
         &self.target
+    }
+
+    pub fn source(&self) -> UnearthSource {
+        self.source
     }
 
     pub fn payload_version(&self) -> u32 {
@@ -256,7 +309,9 @@ impl UnearthPlan {
         UnearthAction::Unearth {
             id: self.id,
             path: self.target.clone(),
-            payload_version: self.payload.version,
+            source: self.source,
+            payload_version: (self.payload.kind == PayloadKind::Archive)
+                .then_some(self.payload.version),
         }
     }
 }
@@ -365,6 +420,11 @@ pub fn apply(
     guard: &RunGuard,
     clock: &dyn Clock,
 ) -> Result<UnearthReport, UnearthError> {
+    if plan.source != UnearthSource::LocalArchive {
+        return Err(UnearthError::NoLocalArchive {
+            path: plan.current.metadata.path.clone(),
+        });
+    }
     local::unearth_archive(
         collection,
         plan,
@@ -387,9 +447,21 @@ pub(crate) fn plan_with(
     request: &UnearthRequest,
     free_space: FreeSpace<'_>,
 ) -> Result<Planned, UnearthError> {
+    plan_from(collection, request, None, free_space)
+}
+
+pub(crate) fn plan_from(
+    collection: &Collection,
+    request: &UnearthRequest,
+    current: Option<Current>,
+    free_space: FreeSpace<'_>,
+) -> Result<Planned, UnearthError> {
     let id = request.id;
     let store = Store::new(collection);
-    let current = store.current(id)?.ok_or(UnearthError::NoMetadata { id })?;
+    let current = match current {
+        Some(current) => current,
+        None => store.current(id)?.ok_or(UnearthError::NoMetadata { id })?,
+    };
     let metadata = &current.metadata;
     let entry = tracking::read(collection, id)?;
     let root = TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
@@ -411,17 +483,20 @@ pub(crate) fn plan_with(
                 .map_or_else(|| metadata.path.clone(), |entry| entry.path.clone());
             return Ok(Planned::AlreadyUnearthed { id, path });
         }
-        PieceState::Archived | PieceState::RemoteOnly | PieceState::Gone => {}
-        // Those come from a live package, which is not unearthed from an
-        // archive.
-        PieceState::LiveOnAnotherMachine | PieceState::New => {
+        PieceState::Archived
+        | PieceState::RemoteOnly
+        | PieceState::Gone
+        | PieceState::LiveOnAnotherMachine => {}
+        // A piece without a folder and without an entry has nothing this
+        // collection could unearth.
+        PieceState::New => {
             return Err(UnearthError::NoArchive {
                 path: metadata.path.clone(),
             });
         }
     }
 
-    let payload = choose_payload(&store, &current, request.version)?;
+    let (payload, source) = choose_source(&store, &current, state, request.version)?;
     if !current.unreadable.is_empty() {
         let versions: Vec<String> = current
             .unreadable
@@ -439,18 +514,7 @@ pub(crate) fn plan_with(
         });
     }
 
-    let listing_name = payload
-        .listing
-        .as_ref()
-        .ok_or_else(|| unsupported(&payload, "it has no listing"))?;
-    let listing_path = store.file_path(id, listing_name);
-    let listing =
-        listing::read_all(File::open(&listing_path).map_err(io_error("open", &listing_path))?)?;
-    let needed: u64 = listing
-        .iter()
-        .filter(|member| member.kind == ListingType::File)
-        .map(|member| member.size)
-        .sum();
+    let needed = space_needed(&store, id, &payload, source)?;
 
     let target = request.to.clone().unwrap_or_else(|| metadata.path.clone());
     let rules = Rules::new(
@@ -471,6 +535,7 @@ pub(crate) fn plan_with(
         current,
         entry,
         payload,
+        source,
         target,
         needed,
         shortfall,
@@ -484,6 +549,84 @@ fn unsupported(payload: &Payload, reason: &str) -> UnearthError {
     }
 }
 
+/// The space an unearth needs below the staging directory. An archive
+/// that is fetched also needs room for itself, and its listing may be
+/// missing here, in which case only the archive is counted. A live package
+/// has no listing, so its size is a lower bound for the extracted tree.
+fn space_needed(
+    store: &Store<'_>,
+    id: ObjectId,
+    payload: &Payload,
+    source: UnearthSource,
+) -> Result<u64, UnearthError> {
+    if matches!(source, UnearthSource::LivePackage | UnearthSource::Fork) {
+        return Ok(payload.size);
+    }
+    let listing_name = payload
+        .listing
+        .as_ref()
+        .ok_or_else(|| unsupported(payload, "it has no listing"))?;
+    let listing_path = store.file_path(id, listing_name);
+    let fetched = source == UnearthSource::RemoteArchive;
+    let archive = if fetched { payload.size } else { 0 };
+    if fetched && !listing_path.exists() {
+        return Ok(archive);
+    }
+    let listing =
+        listing::read_all(File::open(&listing_path).map_err(io_error("open", &listing_path))?)?;
+    let extracted: u64 = listing
+        .iter()
+        .filter(|member| member.kind == ListingType::File)
+        .map(|member| member.size)
+        .sum();
+    Ok(archive + extracted)
+}
+
+/// Which payload the unearth reads and where it comes from. The state of
+/// the piece decides: another collection's live piece is only ever forked
+/// from its live package, a gone piece of this collection that was never
+/// archived comes back from its live package, and the rest comes from an
+/// archive.
+fn choose_source(
+    store: &Store<'_>,
+    current: &Current,
+    state: PieceState,
+    version: Option<u32>,
+) -> Result<(Payload, UnearthSource), UnearthError> {
+    let metadata = &current.metadata;
+    let live = metadata
+        .payloads
+        .iter()
+        .filter(|payload| payload.kind == PayloadKind::Live)
+        .max_by_key(|payload| payload.version);
+    let archived = metadata
+        .payloads
+        .iter()
+        .any(|payload| payload.kind == PayloadKind::Archive);
+    let (payload, source) = match state {
+        PieceState::LiveOnAnotherMachine => {
+            if version.is_some() {
+                return Err(UnearthError::VersionOfLivePiece {
+                    path: metadata.path.clone(),
+                });
+            }
+            let live = live.ok_or_else(|| UnearthError::NoLivePackage {
+                path: metadata.path.clone(),
+            })?;
+            (live.clone(), UnearthSource::Fork)
+        }
+        PieceState::Gone if !archived && version.is_none() => {
+            let live = live.ok_or_else(|| UnearthError::NoArchive {
+                path: metadata.path.clone(),
+            })?;
+            (live.clone(), UnearthSource::LivePackage)
+        }
+        _ => choose_payload(store, current, version)?,
+    };
+    check_supported(&payload)?;
+    Ok((payload, source))
+}
+
 /// The archive to unearth: the one of `version`, else the newest that did
 /// not lose a conflict. Where two machines made the same version, the one
 /// this machine holds comes first, then the newer.
@@ -491,7 +634,7 @@ fn choose_payload(
     store: &Store<'_>,
     current: &Current,
     version: Option<u32>,
-) -> Result<Payload, UnearthError> {
+) -> Result<(Payload, UnearthSource), UnearthError> {
     let metadata = &current.metadata;
     let archives: Vec<&Payload> = metadata
         .payloads
@@ -526,24 +669,29 @@ fn choose_payload(
             },
         });
     };
-    if !held(best) {
-        return Err(UnearthError::NoLocalArchive {
-            path: metadata.path.clone(),
-        });
-    }
-    if best.package_format != PackageFormat::TAR_ZSTD_1.as_str() {
+    let source = if held(best) {
+        UnearthSource::LocalArchive
+    } else {
+        UnearthSource::RemoteArchive
+    };
+    Ok((best.clone(), source))
+}
+
+/// The package format and checksum algorithm this version reads.
+fn check_supported(payload: &Payload) -> Result<(), UnearthError> {
+    if payload.package_format != PackageFormat::TAR_ZSTD_1.as_str() {
         return Err(unsupported(
-            best,
-            &format!("its package format is {}", best.package_format),
+            payload,
+            &format!("its package format is {}", payload.package_format),
         ));
     }
-    if best.checksum.algorithm != "sha256" {
+    if payload.checksum.algorithm != "sha256" {
         return Err(unsupported(
-            best,
-            &format!("its checksum algorithm is {}", best.checksum.algorithm),
+            payload,
+            &format!("its checksum algorithm is {}", payload.checksum.algorithm),
         ));
     }
-    Ok(best.clone())
+    Ok(())
 }
 
 /// The proper ancestors of `path`, shallowest first.
@@ -947,6 +1095,54 @@ pub(crate) mod tests {
             file
         }
 
+        /// The only payload becomes a live package, as it is for a piece
+        /// that was never archived.
+        pub(crate) fn live_only(&self, object: &str) -> String {
+            self.edit_meta(object, |document| {
+                let payload = document["payloads"][0].as_object_mut().expect("a payload");
+                payload.insert("kind".into(), json!("live"));
+                payload.insert("size".into(), json!(77));
+                payload.remove("listing");
+            });
+            let document: serde_json::Value = serde_json::from_slice(
+                &fs::read(self.collection.object_dir(id(object)).join("meta.1")).expect("reads"),
+            )
+            .expect("json");
+            document["payloads"][0]["file"]
+                .as_str()
+                .expect("a file")
+                .to_string()
+        }
+
+        /// A live package payload in the metadata next to the others.
+        pub(crate) fn add_live(&self, object: &str, version: u32) -> String {
+            let file = format!("{version:016x}-l.tar.zst");
+            self.edit_meta(object, |document| {
+                let mut payload = document["payloads"][0].clone();
+                payload["kind"] = json!("live");
+                payload["version"] = json!(version);
+                payload["file"] = json!(file);
+                payload["size"] = json!(77);
+                payload
+                    .as_object_mut()
+                    .expect("a payload")
+                    .remove("listing");
+                document["payloads"]
+                    .as_array_mut()
+                    .expect("payloads")
+                    .push(payload);
+            });
+            file
+        }
+
+        /// The metadata says the live piece belongs to another collection.
+        pub(crate) fn make_foreign(&self, object: &str) {
+            self.edit_meta(object, |document| {
+                document["lifecycle"] = json!("live");
+                document["collection"] = json!(OTHER_ID);
+            });
+        }
+
         /// The state after an unearth: the folder is in place and the entry
         /// says `live`.
         pub(crate) fn unearthed(&mut self, object: &str, piece: &str) {
@@ -1141,12 +1337,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_gone_piece_without_an_archive_has_none_to_unearth_from() {
+    fn a_gone_piece_without_archive_is_planned_from_its_live_package() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.edit_meta(ID, |document| document["lifecycle"] = json!("live"));
+        fx.live_only(ID);
+
+        let plan = fx.planned(&fx.request(ID));
+
+        assert_eq!(plan.source(), UnearthSource::LivePackage);
+        assert_eq!(plan.target(), &path("projects/a"));
+        assert_eq!(plan.needed, 77);
+    }
+
+    #[test]
+    fn a_gone_piece_without_any_payload_has_none_to_unearth_from() {
         let mut fx = Fixture::new();
         fx.archived(ID, "projects/a", FILES);
         fx.edit_meta(ID, |document| {
             document["lifecycle"] = json!("live");
-            document["payloads"][0]["kind"] = json!("live");
+            document["payloads"] = json!([]);
         });
 
         let error = fx.refusal(&fx.request(ID));
@@ -1155,30 +1365,160 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_live_piece_of_another_collection_has_no_archive_to_unearth_from() {
+    fn a_version_for_a_gone_piece_without_archive_does_not_fall_back_to_its_live_package() {
         let mut fx = Fixture::new();
         fx.archived(ID, "projects/a", FILES);
-        fx.edit_meta(ID, |document| {
-            document["lifecycle"] = json!("live");
-            document["collection"] = json!(OTHER_ID);
-        });
+        fx.edit_meta(ID, |document| document["lifecycle"] = json!("live"));
+        fx.live_only(ID);
+        let asked = UnearthRequest {
+            version: Some(1),
+            ..fx.request(ID)
+        };
 
-        let error = fx.refusal(&fx.request(ID));
+        let error = fx.refusal(&asked);
 
         assert!(matches!(error, UnearthError::NoArchive { .. }), "{error}");
     }
 
     #[test]
-    fn an_archive_that_is_not_on_this_machine_cannot_be_unearthed_yet() {
+    fn a_live_piece_of_another_collection_is_planned_as_a_fork() {
         let mut fx = Fixture::new();
-        let payload = fx.archived(ID, "projects/a", FILES);
-        fs::remove_file(fx.collection.object_dir(id(ID)).join(payload.as_str())).expect("gone");
+        fx.archived(ID, "projects/a", FILES);
+        fx.make_foreign(ID);
+        fx.live_only(ID);
+
+        let plan = fx.planned(&fx.request(ID));
+
+        assert_eq!(plan.source(), UnearthSource::Fork);
+        assert_eq!(plan.target(), &path("projects/a"));
+    }
+
+    #[test]
+    fn a_live_piece_of_another_collection_with_an_archive_is_still_a_fork() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.make_foreign(ID);
+        let live = fx.add_live(ID, 2);
+
+        let plan = fx.planned(&fx.request(ID));
+
+        assert_eq!(plan.source(), UnearthSource::Fork);
+        assert_eq!(plan.payload.file.as_str(), live);
+    }
+
+    #[test]
+    fn a_version_for_a_foreign_live_piece_is_refused() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.make_foreign(ID);
+        fx.add_live(ID, 2);
+        let asked = UnearthRequest {
+            version: Some(1),
+            ..fx.request(ID)
+        };
+
+        let error = fx.refusal(&asked);
+
+        assert!(
+            matches!(error, UnearthError::VersionOfLivePiece { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_live_piece_without_a_live_package_has_none_to_unearth_from() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.make_foreign(ID);
 
         let error = fx.refusal(&fx.request(ID));
 
         assert!(
-            matches!(error, UnearthError::NoLocalArchive { .. }),
+            matches!(error, UnearthError::NoLivePackage { .. }),
             "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "`projects/a` has no live package to unearth from"
+        );
+    }
+
+    #[test]
+    fn a_live_package_of_another_format_is_unsupported() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.make_foreign(ID);
+        fx.add_live(ID, 2);
+        fx.edit_meta(ID, |document| {
+            document["payloads"][1]["package_format"] = json!("tar+zstd/2");
+        });
+
+        let error = fx.refusal(&fx.request(ID));
+
+        assert!(
+            matches!(&error, UnearthError::UnsupportedPayload { reason, .. } if reason.contains("tar+zstd/2")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_archive_that_is_not_on_this_machine_is_planned_as_a_fetch() {
+        let mut fx = Fixture::new();
+        let payload = fx.archived(ID, "projects/a", FILES);
+        let object_dir = fx.collection.object_dir(id(ID));
+        let size = fs::metadata(object_dir.join(payload.as_str()))
+            .expect("the archive")
+            .len();
+        fs::remove_file(object_dir.join(payload.as_str())).expect("gone");
+
+        let plan = fx.planned(&fx.request(ID));
+
+        assert_eq!(plan.source(), UnearthSource::RemoteArchive);
+        assert_eq!(plan.payload_version(), 1);
+        let listed: u64 = FILES.iter().map(|(_, content)| content.len() as u64).sum();
+        assert_eq!(plan.needed, size + listed);
+    }
+
+    #[test]
+    fn a_fetch_is_planned_although_its_listing_is_not_on_this_machine_either() {
+        let mut fx = Fixture::new();
+        let payload = fx.archived(ID, "projects/a", FILES);
+        let object_dir = fx.collection.object_dir(id(ID));
+        let size = fs::metadata(object_dir.join(payload.as_str()))
+            .expect("the archive")
+            .len();
+        fs::remove_file(object_dir.join(payload.as_str())).expect("gone");
+        for entry in fs::read_dir(&object_dir).expect("lists") {
+            let name = entry.expect("an entry").file_name();
+            if name.to_string_lossy().ends_with(".listing.zst") {
+                fs::remove_file(object_dir.join(name)).expect("gone");
+            }
+        }
+
+        let plan = fx.planned(&fx.request(ID));
+
+        assert_eq!(plan.source(), UnearthSource::RemoteArchive);
+        assert_eq!(plan.needed, size);
+    }
+
+    #[test]
+    fn the_given_current_is_what_planning_works_from() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        let mut current = Store::new(&fx.collection)
+            .current(id(ID))
+            .expect("reads")
+            .expect("exists");
+        current.metadata.path = path("projects/b");
+
+        let planned = plan_from(&fx.collection, &fx.request(ID), Some(current), &|_| {
+            Ok(u64::MAX)
+        })
+        .expect("planned");
+
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.target() == &path("projects/b")),
+            "{planned:?}"
         );
     }
 
@@ -1399,6 +1739,47 @@ pub(crate) mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn a_dry_run_names_the_source_in_its_lines_and_json() {
+        let mut fx = Fixture::new();
+        let payload = fx.archived(ID, "projects/a", FILES);
+        fs::remove_file(fx.collection.object_dir(id(ID)).join(payload.as_str())).expect("gone");
+        fx.archived("01D39ZY06FGSCTVN4T2V9PKHFZ", "projects/b", FILES);
+        fx.edit_meta(OTHER_ID, |document| document["lifecycle"] = json!("live"));
+        fx.live_only(OTHER_ID);
+        fx.archived("01ARZ3NDEKTSV4RRFFQ69G5FAV", "projects/c", FILES);
+        fx.make_foreign("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        fx.live_only("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+        let lines_and_json = |object: &str| {
+            let plan = Planned::Unearth(fx.planned(&fx.request(object))).plan();
+            (
+                plan.lines(),
+                serde_json::to_value(plan.dry_run()).expect("serialises")["actions"][0].clone(),
+            )
+        };
+
+        let (lines, json) = lines_and_json(ID);
+        assert_eq!(
+            lines,
+            ["Would fetch archive version 1 and unearth projects/a"]
+        );
+        assert_eq!(json["source"], "remote_archive");
+        assert_eq!(json["payload_version"], 1);
+        let (lines, json) = lines_and_json(OTHER_ID);
+        assert_eq!(lines, ["Would unearth projects/b from its live package"]);
+        assert_eq!(json["source"], "live_package");
+        assert!(json.get("payload_version").is_none(), "{json}");
+        let (lines, json) = lines_and_json("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(
+            lines,
+            [
+                "Would unearth projects/c from the live package of another collection's piece, as a fork with a new ID"
+            ]
+        );
+        assert_eq!(json["source"], "fork");
     }
 
     #[test]

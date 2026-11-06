@@ -469,7 +469,7 @@ fn an_archive_that_is_not_on_this_machine_is_an_error() {
     assert_eq!(run.code(), 1);
     assert_eq!(
         run.error_message(),
-        "the archive of `alpha` is not on this machine and cannot be fetched yet"
+        "`alpha` is not on this machine and no remote was given"
     );
 }
 
