@@ -21,13 +21,13 @@ use std::path::Path;
 /// it to stay: type, mode, link target, content and, for files, the
 /// modification time, plus the sets of paths that are one file.
 #[derive(Debug, PartialEq, Eq)]
-struct Entries {
+pub(super) struct Entries {
     items: BTreeMap<String, String>,
     hard_links: BTreeSet<BTreeSet<String>>,
 }
 
 impl Entries {
-    fn of(dir: &Path) -> Entries {
+    pub(super) fn of(dir: &Path) -> Entries {
         fn walk(
             base: &Path,
             dir: &Path,
@@ -76,7 +76,7 @@ impl Entries {
     }
 
     /// The same record without the paths at or below `prefix`.
-    fn without(mut self, prefix: &str) -> Entries {
+    pub(super) fn without(mut self, prefix: &str) -> Entries {
         self.items
             .retain(|path, _| path != prefix && !path.starts_with(&format!("{prefix}/")));
         self.hard_links.retain(|group| {
@@ -97,13 +97,13 @@ fn stamp_of(seconds: i64) -> String {
 }
 
 /// The RFC 3339 time in UTC that JSON shows for a version stamp.
-fn utc_of(stamp: &str) -> String {
+pub(super) fn utc_of(stamp: &str) -> String {
     let (date, time) = stamp.split_once('T').expect("a stamp holds a T");
     format!("{date}T{}:{}:{}Z", &time[0..2], &time[2..4], &time[4..6])
 }
 
 /// The value of a header line (`# key  value`) of a decoded listing.
-fn header(listing: &str, key: &str) -> String {
+pub(super) fn header(listing: &str, key: &str) -> String {
     listing
         .lines()
         .find_map(|line| {
@@ -114,17 +114,17 @@ fn header(listing: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("no `{key}` header in the listing:\n{listing}"))
 }
 
-fn decoded_listing(listing: &Path) -> String {
+pub(super) fn decoded_listing(listing: &Path) -> String {
     let bytes = zstd::stream::decode_all(fs::File::open(listing).expect("the listing opens"))
         .expect("the listing decodes");
     String::from_utf8(bytes).expect("the listing is UTF-8")
 }
 
-fn as_str(path: &Path) -> &str {
+pub(super) fn as_str(path: &Path) -> &str {
     path.to_str().expect("the path is UTF-8")
 }
 
-fn no_staging_left(world: &World) {
+pub(super) fn no_staging_left(world: &World) {
     for area in ["tmp", "trash", "doomed", "recovered"] {
         let found: Vec<_> = fs::read_dir(world.collection().path(&format!(".antiq/{area}")))
             .expect("the area exists")

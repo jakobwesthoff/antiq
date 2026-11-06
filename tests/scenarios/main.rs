@@ -11,6 +11,7 @@ mod archive;
 mod damaged_version;
 mod find;
 mod forget;
+mod fork;
 mod grep;
 mod harness;
 mod import;
