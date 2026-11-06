@@ -134,6 +134,25 @@ macro_rules! accepts {
     };
 }
 
+/// For a command that is implemented: its options parse, and outside a
+/// collection it fails with the kind `not_a_collection`.
+macro_rules! accepts_and_needs_a_collection {
+    ($name:ident, $command:expr, [$($arg:expr),*]) => {
+        #[test]
+        fn $name() {
+            let dir = tempfile::tempdir().expect("the temp dir is writable");
+            let run = Antiq::new()
+                .args(["--json", "-C"])
+                .arg(dir.path())
+                .args([$($arg),*])
+                .run();
+            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
+            assert_eq!(run.error_kind(), "not_a_collection");
+            assert_eq!(run.json()["command"], $command);
+        }
+    };
+}
+
 #[test]
 fn status_takes_nothing() {
     let dir = tempfile::tempdir().expect("the temp dir is writable");
@@ -168,8 +187,8 @@ accepts!(
         "--if-reachable"
     ]
 );
-accepts!(find_takes_no_query, "find", ["find"]);
-accepts!(
+accepts_and_needs_a_collection!(find_takes_no_query, "find", ["find"]);
+accepts_and_needs_a_collection!(
     find_takes_a_query_and_print,
     "find",
     ["find", "q", "--print"]
@@ -179,25 +198,6 @@ accepts!(
     "fork",
     ["fork", "piece", "--name", "copy", "--dry-run"]
 );
-/// For a command that is implemented: its options parse, and outside a
-/// collection it fails with the kind `not_a_collection`.
-macro_rules! accepts_and_needs_a_collection {
-    ($name:ident, $command:expr, [$($arg:expr),*]) => {
-        #[test]
-        fn $name() {
-            let dir = tempfile::tempdir().expect("the temp dir is writable");
-            let run = Antiq::new()
-                .args(["--json", "-C"])
-                .arg(dir.path())
-                .args([$($arg),*])
-                .run();
-            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-            assert_eq!(run.error_kind(), "not_a_collection");
-            assert_eq!(run.json()["command"], $command);
-        }
-    };
-}
-
 accepts_and_needs_a_collection!(pin_takes_dry_run, "pin", ["pin", "piece", "--dry-run"]);
 accepts_and_needs_a_collection!(
     unpin_takes_dry_run,

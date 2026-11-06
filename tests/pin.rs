@@ -10,7 +10,7 @@ use antiq::meta::{Lifecycle, PayloadKind};
 use antiq::tracking::{EntryState, LocalPayload};
 use serde_json::json;
 use support::cmd::{Antiq, Run};
-use support::objects::{entry, id, metadata, payload, put_entry, put_meta};
+use support::objects::{entry, hold_lock, id, metadata, payload, put_entry, put_meta, snapshot};
 use support::tree::{COLLECTION_ID, TempCollection};
 
 /// A collection of another machine, which owns objects this one only
@@ -345,33 +345,6 @@ fn a_piece_that_cannot_be_looked_into_reports_the_failure() {
 // Dry runs
 // =========================================================
 
-/// Every path below `root` with its content, to compare before and after.
-fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
-    fn walk(
-        base: &std::path::Path,
-        dir: &std::path::Path,
-        seen: &mut std::collections::BTreeMap<String, Option<Vec<u8>>>,
-    ) {
-        for item in std::fs::read_dir(dir).expect("lists") {
-            let path = item.expect("an item").path();
-            let name = path
-                .strip_prefix(base)
-                .expect("below")
-                .display()
-                .to_string();
-            if path.is_dir() {
-                seen.insert(name, None);
-                walk(base, &path, seen);
-            } else {
-                seen.insert(name, Some(std::fs::read(&path).expect("reads")));
-            }
-        }
-    }
-    let mut seen = std::collections::BTreeMap::new();
-    walk(root, root, &mut seen);
-    seen
-}
-
 #[test]
 fn a_dry_run_lists_the_pin_and_changes_nothing() {
     let mut temp = collection_with_piece("a");
@@ -470,20 +443,10 @@ fn a_dry_run_refuses_a_directory_named_like_the_pin_file() {
 // The lock
 // =========================================================
 
-/// Holds the run lock of the collection in this process.
-fn hold_lock(temp: &TempCollection) -> antiq::lock::RunLock {
-    antiq::lock::acquire(
-        &temp.root().join(".antiq/lock"),
-        "imperius",
-        &antiq::clock::SystemClock,
-    )
-    .expect("the lock is free")
-}
-
 #[test]
 fn a_real_run_fails_while_another_run_holds_the_lock() {
     let temp = collection_with_piece("a");
-    let _held = hold_lock(&temp);
+    let _held = hold_lock(temp.root());
     let run = antiq_in(&temp, &["--json", "pin", "a"]);
     assert_eq!(run.code(), 1, "{}", run.stdout);
     assert_eq!(run.error_kind(), "lock_held");
@@ -496,7 +459,7 @@ fn a_real_run_fails_while_another_run_holds_the_lock() {
 #[test]
 fn a_dry_run_names_the_run_that_holds_the_lock() {
     let temp = collection_with_piece("a");
-    let _held = hold_lock(&temp);
+    let _held = hold_lock(temp.root());
     let run = antiq_in(&temp, &["pin", "--dry-run", "a"]);
     succeeded(&run);
     assert_eq!(run.stdout, "Would pin a\n");
@@ -513,7 +476,7 @@ fn a_dry_run_names_the_run_that_holds_the_lock() {
 #[test]
 fn a_dry_run_in_json_prints_nothing_to_stderr_while_the_lock_is_held() {
     let temp = collection_with_piece("a");
-    let _held = hold_lock(&temp);
+    let _held = hold_lock(temp.root());
     let run = antiq_in(&temp, &["--json", "pin", "--dry-run", "a"]);
     succeeded(&run);
     assert_eq!(run.stderr, "");

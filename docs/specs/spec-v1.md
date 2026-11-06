@@ -1440,8 +1440,20 @@ pinning, unpinning or printing the picker stays open; unearthing and
 forking close it. (ADR 0057)
 `--print` prints the absolute path of the picked piece's folder, for an
 archived piece the path it would be unearthed to. Without a terminal it
-prints the path of every match, one per line. With `--json`, `find`
-prints the matches as JSON and `--print` adds nothing.
+prints the path of every match, one per line. The path is written as the
+filesystem holds it, not in the escaped form of "Metadata", so that a
+shell can use it; the table and the JSON use the escaped form. With
+`--json`, `find` prints the matches as JSON and `--print` adds nothing.
+
+Without `--print` and outside the picker, `find` lists the matches as a
+table of the state, the path, the size of the current payload and the
+shortest prefix of the ID, at least 6 characters, that no other known
+object shares; on a wide terminal it adds the creation date and writes the
+whole ID. Matches through the path come first, then matches through the
+name alone, then matches through a member path alone. Without a query,
+the newest object comes first. When nothing matches, stdout stays empty,
+stderr says so and the exit code is 0. `find` takes no lock and writes
+nothing.
 
 ### Decisions
 
@@ -1574,10 +1586,15 @@ the pieces in state `live`, `unearthed` or `new`, `archived` those in state
 `live-on-another-machine` or `error` are in no count. Pieces are sorted by
 path, a new piece before an object at the same path.
 
-`find` adds `query` and `matches`, a list of objects with `id`, `path`,
-`abs_path`, `name`, `state`, `created` and `size`. `size` is the size in
-bytes of the object's current payload: its newest archive that is not
-superseded, else its newest live package.
+`find` adds `query` (null without one), `matches`, a list of objects with
+`id`, `path`, `abs_path`, `name`, `state`, `created` and `size`, and
+`warnings`. `size` is the size in bytes of the object's current payload:
+its newest archive that is not superseded, else its newest live package;
+null without a payload. `state` is one of the states under "States" or
+`error`, the state of an object whose entry, metadata or location cannot
+be used. An object whose metadata cannot be read is not listed and a
+warning names it; an object whose listing cannot be read is left out of
+the matches through members and a warning names it.
 
 `init` adds `created`, `id` (only when created), `path` (the
 collection's root), `machine`, `patterns`, `exclude` (what `--yes` writes:

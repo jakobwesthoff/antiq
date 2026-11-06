@@ -184,7 +184,7 @@ fn target(
 }
 
 /// Whether a folder is at `path`, not followed if it is a symlink.
-fn folder_exists(root: &TreeRoot, path: &RelPath) -> Result<bool, Error> {
+pub(crate) fn folder_exists(root: &TreeRoot, path: &RelPath) -> Result<bool, Error> {
     match root.lstat(path) {
         Ok(entry) => Ok(entry.kind == EntryKind::Directory),
         Err(error)

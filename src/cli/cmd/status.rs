@@ -55,7 +55,7 @@ struct Lines {
 }
 
 /// From this width on, tables use their wide layout.
-const WIDE_FROM: usize = 100;
+pub(super) const WIDE_FROM: usize = 100;
 
 // =========================================================
 // The words and colours of the console
