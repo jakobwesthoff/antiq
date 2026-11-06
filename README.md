@@ -383,7 +383,8 @@ Options:
 
 Every command takes `-C <path>` and `--json`. Commands that change
 something take `-n` / `--dry-run`, which prints the plan and changes
-nothing. No command asks a question.
+nothing. No command asks a question. `antiq --version` prints the version
+on one line, and on a terminal with 24-bit colour it draws Archie beside it.
 
 A piece is named by its path or by a search word. A search word must
 match exactly one piece. The command fails when it matches none, and

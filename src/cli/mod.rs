@@ -7,12 +7,14 @@
 
 pub mod cmd;
 pub mod console;
+mod emblem;
 mod error_block;
 pub mod notice;
 pub mod output;
 pub mod table;
 mod unresolved;
 mod usage;
+mod version_screen;
 
 use self::console::block::{Block, Para};
 use self::console::rich::Rich;
@@ -415,6 +417,12 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     let code = u8::try_from(error.exit_code()).unwrap_or(ErrorKind::Usage.exit_code());
     let shows_help =
         error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand;
+    if error.kind() == clap::error::ErrorKind::DisplayVersion
+        && !asks_for_json(args)
+        && print_version_screen(out)
+    {
+        return code;
+    }
     if code == 0 || (shows_help && !asks_for_json(args)) {
         print_clap(error, out);
         return code;
@@ -440,6 +448,25 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
         },
     );
     code
+}
+
+/// Prints Archie's version screen when stdout is a terminal that can show
+/// it. Returns whether it did; otherwise the caller prints clap's plain
+/// version.
+fn print_version_screen(out: &mut Output) -> bool {
+    let env = out.stdout_env();
+    if !env.rich {
+        return false;
+    }
+    let facts = emblem::facts_of_stdout(&env);
+    let Some(rows) = version_screen::About::of_antiq().screen(&facts) else {
+        return false;
+    };
+    for row in rows {
+        // A closed terminal leaves nowhere to print to.
+        let _ = out.line(&row);
+    }
+    true
 }
 
 /// Prints what clap rendered: help and version to stdout, an error to

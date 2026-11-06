@@ -2362,6 +2362,45 @@ line is never erased. After Ctrl-C the screen can show a partial frame, and
 the repairs of the next run clean up as after any interrupted run. A panic
 clears the region before its text is written.
 
+#### Version screen
+
+`antiq --version` and `-V` print `antiq <version>` and a newline. On a
+stdout that is a terminal and takes 24-bit colour, they print Archie's
+emblem instead, with a text block beside it (ADR 0067). The block is centred
+on the rows of the emblem, three columns to the right of it:
+
+```
+antiq  <version>
+
+<description of the crate>
+
+Archie, pangolin idol of obsidian and gold,
+keeps watch over your collection.
+
+https://antiq.westhoffswelt.de
+```
+
+`antiq` is bold magenta, the version bold, the description and the URL dim,
+`Archie` gold and italic, the rest of its sentence dim and italic. The
+emblem is 22 rows high.
+
+The plain line is printed instead when stdout is not a terminal, when
+`NO_COLOR` or the console's colour decision turns colour off, when
+`COLORTERM` is neither `truecolor` nor `24bit`, under `--json`, and when
+the window is narrower than the emblem plus three columns plus the widest
+line of the text, or has fewer rows than the emblem plus one for the prompt.
+
+The emblem exists in several renderings, one for each cell shape and glyph
+set. The cell shape is the cell's width over its height, from the window's
+size in pixels over its size in cells; the rendering with the nearest ratio
+is taken, the smaller one on a tie. A window that reports no pixels gets the
+rendering of 0.52. Sextants are used on a terminal known to draw them,
+block elements on every other. Inside tmux, the terminal that tmux's client
+is attached with decides the glyphs, and the pixel size of its cells stands
+in when the window reports none; tmux not answering within half a second
+counts as unknown, which gives block elements and 0.52. No escape sequence
+is written to the terminal to find any of this out.
+
 ### JSON output
 
 Every JSON output is one object `{"format": 1, "command": "<name>", ...}`
