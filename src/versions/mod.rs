@@ -18,6 +18,12 @@ pub mod store;
 pub enum VersionsError {
     #[error("`{0}` is not a version stamp")]
     InvalidStamp(String),
+    #[error("cannot {action} {path} in the store: {source}")]
+    Io {
+        action: &'static str,
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 impl HasKind for VersionsError {}

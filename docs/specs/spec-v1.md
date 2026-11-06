@@ -398,6 +398,13 @@ them is deleted or rewritten automatically. (ADR 0062)
   `list` marks what it sees in the listing's head; `rebuild` repairs a
   missing sidecar; `fork` can still extract it, with a warning and
   without the comparison against the listing; `unearth` refuses it.
+- **Doubled slot:** two or more files in one slot of a version, that is,
+  with the same stamp and suffix and a different `<name>`. antiq cannot
+  tell which of them belongs to the version, so the version is damaged and
+  no file of it is picked. `status` and `list` report it naming every such
+  file; `unearth`, `fork` and `push` refuse it; `rebuild` refuses it,
+  naming the files to remove by hand; `forget` removes every file of the
+  version's slots, the `.tar.zst` files first.
 - **Newer format:** a listing whose first line names a higher listing
   format than antiq knows is neither incomplete nor damaged. `list` and
   `status` mark it "newer format", `grep` skips it with a warning,

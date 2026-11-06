@@ -8,7 +8,6 @@
 //! people only and nothing reads it back, so a name is parsed for its
 //! stamp and its suffix alone.
 
-use super::VersionsError;
 use super::stamp::{MAX_COUNTER, Stamp};
 use crate::relpath::RelPath;
 use std::ffi::OsStr;
@@ -141,10 +140,7 @@ pub fn parse_file_name(name: &OsStr) -> Option<(Stamp, VersionFile)> {
     })?;
     let split = rest.windows(2).rposition(|pair| pair == b"--")?;
     let stamp = std::str::from_utf8(&rest[split + 2..]).ok()?;
-    match Stamp::parse(stamp) {
-        Ok(stamp) => Some((stamp, kind)),
-        Err(VersionsError::InvalidStamp(_)) => None,
-    }
+    Stamp::parse(stamp).ok().map(|stamp| (stamp, kind))
 }
 
 #[cfg(test)]
