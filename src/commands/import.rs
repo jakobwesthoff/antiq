@@ -792,6 +792,16 @@ pub(crate) fn parse_time(text: &str, zone: &TimeZone) -> Result<Timestamp, Impor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreported_physical_memory_is_an_error_of_the_kind_other_with_the_cause_in_the_text() {
+        let error = ImportError::Pool(SysmemError::Unavailable);
+        assert_eq!(
+            crate::error::chain_text(&error),
+            "cannot size the pool of workers: the operating system does not report the physical memory"
+        );
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
     use crate::clock::FixedClock;
     use crate::filesystem::FilesystemError;
     use crate::filesystem::atomic::recording::{Flush, Recording};
