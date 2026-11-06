@@ -48,6 +48,28 @@ pub(crate) fn notes_with(
     collection: &Collection,
     fs_kind: Result<FsKind, FsxError>,
 ) -> Vec<Warning> {
+    let mut warnings = setting_notes_with(collection, fs_kind);
+    // The lock is only read: taking it would make the caller a run of its own.
+    match lock::holder(&collection.lock_path()) {
+        Ok(Some(holder)) => warnings.push(lock_note(&holder)),
+        Ok(None) => {}
+        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
+    }
+    warnings
+}
+
+/// What a command that holds the lock tells about the collection: the
+/// notes of [`notes`] without the one about the lock, which would name the
+/// command itself.
+pub fn setting_notes(collection: &Collection) -> Vec<Warning> {
+    setting_notes_with(collection, device::fs_kind(collection.root()))
+}
+
+/// [`setting_notes`] with the filesystem kind given.
+pub(crate) fn setting_notes_with(
+    collection: &Collection,
+    fs_kind: Result<FsKind, FsxError>,
+) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let mut unknown_keys = collection.config().unknown_collection_keys.clone();
     unknown_keys.sort();
@@ -63,12 +85,6 @@ pub(crate) fn notes_with(
         Err(error) => warnings.push(Warning::new(format!(
             "cannot tell what kind of filesystem the collection is on: {error}"
         ))),
-    }
-    // The lock is only read: taking it would make the caller a run of its own.
-    match lock::holder(&collection.lock_path()) {
-        Ok(Some(holder)) => warnings.push(lock_note(&holder)),
-        Ok(None) => {}
-        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
     }
     warnings
 }
@@ -171,6 +187,30 @@ mod tests {
                     std::process::id()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn the_notes_of_a_run_that_holds_the_lock_leave_the_lock_out() {
+        let (_temp, collection) = collection_with("bogus = 1");
+        let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+        let _held = lock::acquire(&collection.lock_path(), "imperius", &clock).expect("free");
+        let notes = setting_notes_with(&collection, Ok(FsKind::Nfs));
+        assert_eq!(
+            messages(&notes),
+            [
+                "the key `bogus` under [collection] is unknown and ignored",
+                "the collection is on an NFS mount",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_real_probe_gives_the_notes_of_a_run_that_holds_the_lock() {
+        let (_temp, collection) = collection_with("bogus = 1");
+        assert_eq!(
+            messages(&setting_notes(&collection)),
+            ["the key `bogus` under [collection] is unknown and ignored"]
         );
     }
 

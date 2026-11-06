@@ -15,7 +15,7 @@ use crate::pin;
 use crate::plan::{Plan, PlanAction};
 use crate::reference::{resolve, resolve_path};
 use crate::relpath::{Name, RelPath};
-use crate::report::{CommandReport, Warning};
+use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, Started};
 use crate::select::{Rules, select};
 use crate::store::Store;
@@ -87,9 +87,11 @@ impl CommandReport for PinReport {
 /// The result of [`run`].
 #[derive(Debug)]
 pub enum Pinned {
-    /// A dry run: what would be done, and the run that holds the lock.
+    /// A dry run: what would be done, what to tell about the collection and
+    /// the run that holds the lock.
     Planned {
         plan: Plan<PinAction>,
+        notes: Vec<Warning>,
         holder: Option<Holder>,
     },
     Done(PinReport),
@@ -125,7 +127,11 @@ pub fn run(
                     Direction::Unpin => PinAction::Unpin { id, path },
                 });
             }
-            return Ok(Pinned::Planned { plan, holder });
+            return Ok(Pinned::Planned {
+                plan,
+                notes: report::setting_notes(collection),
+                holder,
+            });
         }
         Started::Guarded(guard) => guard,
     };
@@ -135,12 +141,14 @@ pub fn run(
             Direction::Unpin => pin::remove(&root, &path)?,
         }
     }
+    let mut warnings = report::setting_notes(collection);
+    warnings.extend_from_slice(guard.warnings());
     Ok(Pinned::Done(PinReport {
         id,
         path,
         pinned: wanted,
         changed,
-        warnings: guard.warnings().to_vec(),
+        warnings,
     }))
 }
 

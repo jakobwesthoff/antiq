@@ -67,7 +67,11 @@ pub(super) fn run_direction(
                 }
             }
         }
-        Pinned::Planned { plan, holder } => {
+        Pinned::Planned {
+            plan,
+            notes,
+            holder,
+        } => {
             if ctx.json {
                 out.json(Some(name), &plan.dry_run())
                     .context("print the plan")?;
@@ -75,8 +79,9 @@ pub(super) fn run_direction(
                 for line in plan.lines() {
                     out.line(&sanitize(&line)).context("print the plan")?;
                 }
-                if let Some(holder) = holder {
-                    out.note(&format!("note: {}", lock_note(&holder).message))
+                let held = holder.as_ref().map(lock_note);
+                for note in notes.iter().chain(held.iter()) {
+                    out.note(&format!("note: {}", sanitize(&note.message)))
                         .context("print the notes")?;
                 }
             }

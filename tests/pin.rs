@@ -523,6 +523,41 @@ fn what_the_repairs_report_is_a_note_and_a_warning() {
 }
 
 // =========================================================
+// What every command tells about the collection
+// =========================================================
+
+const UNKNOWN_KEY: &str = "the key `bogus` under [collection] is unknown and ignored";
+
+fn configure_an_unknown_key(temp: &TempCollection) {
+    std::fs::write(
+        temp.root().join(".antiq/config.toml"),
+        format!("[collection]\nid = \"{COLLECTION_ID}\"\nbogus = 1\n"),
+    )
+    .expect("a config can be written");
+}
+
+#[test]
+fn an_unknown_collection_key_is_noted_by_a_real_run() {
+    let temp = collection_with_piece("a");
+    configure_an_unknown_key(&temp);
+    let run = antiq_in(&temp, &["pin", "a"]);
+    succeeded(&run);
+    assert_eq!(run.stderr, format!("note: {UNKNOWN_KEY}\n"));
+    let json = antiq_in(&temp, &["--json", "unpin", "a"]).json();
+    assert_eq!(json["warnings"], json!([{"message": UNKNOWN_KEY}]));
+}
+
+#[test]
+fn an_unknown_collection_key_is_noted_by_a_dry_run() {
+    let temp = collection_with_piece("a");
+    configure_an_unknown_key(&temp);
+    let run = antiq_in(&temp, &["pin", "--dry-run", "a"]);
+    succeeded(&run);
+    assert_eq!(run.stdout, "Would pin a\n");
+    assert_eq!(run.stderr, format!("note: {UNKNOWN_KEY}\n"));
+}
+
+// =========================================================
 // Where relative references start
 // =========================================================
 
