@@ -4,10 +4,10 @@
 
 //! The `forget` operation: deletes one version of a piece, or all of them.
 
-use crate::clock::{Clock, whole_seconds};
+use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
-use crate::lock::Holder;
+use crate::plan::LockHeld;
 use crate::reference::{self, CandidateSet, ReferenceError};
 use crate::relpath::{RelPath, escape};
 use crate::repair::Repair;
@@ -205,14 +205,6 @@ pub fn forget(
     })
 }
 
-/// The lock holder a dry run names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LockHeld {
-    pub pid: u32,
-    /// In whole seconds.
-    pub started: Timestamp,
-}
-
 /// What a dry run found.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -248,13 +240,10 @@ pub fn plan(
     else {
         unreachable!("a dry run starts no guarded run");
     };
-    if let Some(Holder { pid, started, .. }) = holder {
+    if let Some(holder) = holder {
         return Ok(ForgetPlan::Held {
             dry_run: true,
-            lock_held: LockHeld {
-                pid,
-                started: whole_seconds(started),
-            },
+            lock_held: LockHeld::of(&holder),
             actions: Vec::new(),
         });
     }

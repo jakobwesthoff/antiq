@@ -198,7 +198,8 @@ fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antiq::commands::forget::{Failed, LockHeld};
+    use antiq::commands::forget::Failed;
+    use antiq::plan::LockHeld;
     use antiq::relpath::{Name, RelPath};
     use antiq::repair::Repair;
     use antiq::report::Warning;

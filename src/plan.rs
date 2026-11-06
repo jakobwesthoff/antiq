@@ -4,6 +4,7 @@
 
 //! The ordered actions a command intends to take.
 
+use crate::clock::whole_seconds;
 use crate::lock::Holder;
 use crate::repair::Repair;
 use jiff::Timestamp;
@@ -137,6 +138,23 @@ impl<A> Plan<Step<A>> {
     /// added so far.
     pub fn push_command(&mut self, action: A) {
         self.actions.push(Step::Command(action));
+    }
+}
+
+/// The holder of the run lock as a dry run names it in its JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LockHeld {
+    pub pid: u32,
+    /// In whole seconds.
+    pub started: Timestamp,
+}
+
+impl LockHeld {
+    pub fn of(holder: &Holder) -> LockHeld {
+        LockHeld {
+            pid: holder.pid,
+            started: whole_seconds(holder.started),
+        }
     }
 }
 

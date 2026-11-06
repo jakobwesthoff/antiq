@@ -164,7 +164,8 @@ fn render_plan(plan: &PinPlan, direction: Direction) -> Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antiq::commands::pin::{Action, LockHeld};
+    use antiq::commands::pin::Action;
+    use antiq::plan::LockHeld;
     use antiq::relpath::{Name, RelPath};
     use antiq::repair::Repair;
     use antiq::report::Warning;
