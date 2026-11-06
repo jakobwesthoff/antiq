@@ -206,28 +206,7 @@ fn verify_strict_observed(
     // The stream is read to its end first, so a damaged package never
     // reaches the folder.
     let package = read_package(package)?;
-    let mut granted = Granted::new(root);
-    if rules.staged {
-        granted.grant();
-    }
-    let mut folder = read_folder(root, rules, observe, &granted.modes())?;
-    let restored = granted.restore()?;
-    // Restoring a mode changes the directory's ctime, so the record takes
-    // the ctime from the directory as it is left. Anything else that
-    // differs from what the walk recorded changed under the verify.
-    let mut moved = Vec::new();
-    for (path, now) in restored {
-        let index = folder
-            .record
-            .binary_search_by(|recorded| recorded.path.cmp(&path))
-            .expect("the walk recorded every directory it read");
-        let walked = &mut folder.record[index];
-        match now.map(|now| LstatRecord::of(&now)) {
-            Some(now) if now.same_but_for_ctime(walked) => walked.ctime_ns = now.ctime_ns,
-            _ => moved.push(path),
-        }
-    }
-
+    let (folder, moved) = read_folder_granted(root, rules, observe)?;
     let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
@@ -254,6 +233,39 @@ fn verify_strict_observed(
     } else {
         Err(PackError::Differs(differences))
     }
+}
+
+/// Reads the folder; in a staging tree the directories whose mode keeps
+/// the owner out are opened for the read and get their mode back. Returns
+/// the folder and the directories that were not the same after their mode
+/// came back.
+fn read_folder_granted(
+    root: &TreeRoot,
+    rules: &WalkRules,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<(Folder, Vec<RelPath>), PackError> {
+    let mut granted = Granted::new(root);
+    if rules.staged {
+        granted.grant();
+    }
+    let mut folder = read_folder(root, rules, observe, &granted.modes())?;
+    let restored = granted.restore()?;
+    // Restoring a mode changes the directory's ctime, so the record takes
+    // the ctime from the directory as it is left. Anything else that
+    // differs from what the walk recorded changed under the read.
+    let mut moved = Vec::new();
+    for (path, now) in restored {
+        let index = folder
+            .record
+            .binary_search_by(|recorded| recorded.path.cmp(&path))
+            .expect("the walk recorded every directory it read");
+        let walked = &mut folder.record[index];
+        match now.map(|now| LstatRecord::of(&now)) {
+            Some(now) if now.same_but_for_ctime(walked) => walked.ctime_ns = now.ctime_ns,
+            _ => moved.push(path),
+        }
+    }
+    Ok((folder, moved))
 }
 
 /// Directories of a staging tree that were given owner read and search for
@@ -348,8 +360,10 @@ impl Drop for Granted<'_> {
 const OWNER_READ_SEARCH: u32 = 0o500;
 
 /// Compares the tree below `root` with `listing`: path, type, size,
-/// modification time, mode, link target and content hash. Directory
-/// modification times and symlink modes do not count.
+/// modification time, mode, link target and content hash. Symlink modes do
+/// not count, and directory modification times only in a staging tree
+/// (`rules.staged`), which also gets the treatment of locked directories
+/// that [`verify_strict`] gives it.
 pub fn compare_with_listing(
     listing: &[ListingEntry],
     root: &TreeRoot,
@@ -374,8 +388,9 @@ fn compare_with_listing_observed(
     rules: &WalkRules,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Compared, PackError> {
-    let folder = read_folder(root, rules, observe, &HashMap::new())?;
-    let mut differences = differences_from(listing, &folder, false);
+    let (folder, moved) = read_folder_granted(root, rules, observe)?;
+    let mut differences = differences_from(listing, &folder, rules.staged);
+    differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     differences.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(Compared {
         differences,
@@ -1708,6 +1723,111 @@ mod tests {
         assert!(
             matches!(&error, PackError::TreeHasProblems(Problem::Unreadable { first })
                 if first.to_string() == "a"),
+            "{error:?}"
+        );
+        assert_eq!(mode_of(&tree.path("proj/a")), 0);
+    }
+
+    /// A staging tree `proj/a/f` whose directory `a` has `mode`, and the
+    /// listing of the same tree.
+    fn staging_and_listing(mode: u32) -> (Tree, Vec<ListingEntry>, Unlock) {
+        let (tree, _, unlock) = staging_with_locked_directory(mode);
+        let mut open = Tree::new();
+        open.file_with("proj/a/f", "x", 0o644, 1_000_000_000);
+        for directory in ["proj/a", "proj"] {
+            filetime::set_file_mtime(
+                open.path(directory),
+                FileTime::from_unix_time(1_000_000_000, 0),
+            )
+            .expect("the time is set");
+        }
+        let mut listing = packed(&open);
+        for line in &mut listing {
+            if line.path == path("a") {
+                line.mode = mode;
+            }
+        }
+        (tree, listing, unlock)
+    }
+
+    fn compare_staged(tree: &Tree, listing: &[ListingEntry]) -> Compared {
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        compare_with_listing(listing, &root, &staged()).expect("the comparison runs")
+    }
+
+    fn staged_directory_with_mode_equals_its_listing(mode: u32) {
+        let (tree, listing, _unlock) = staging_and_listing(mode);
+        let compared = compare_staged(&tree, &listing);
+        assert_eq!(compared.differences(), []);
+        assert_eq!(mode_of(&tree.path("proj/a")), mode, "the mode is back");
+        let recorded = compared
+            .record()
+            .iter()
+            .find(|entry| entry.path == path("a"))
+            .expect("the directory is recorded");
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let now = root.lstat(&path("a")).expect("the directory exists");
+        assert_eq!(
+            recorded.ctime_ns, now.ctime_ns,
+            "the record is of the final state"
+        );
+    }
+
+    #[test]
+    fn a_staged_directory_without_any_owner_access_equals_its_listing() {
+        staged_directory_with_mode_equals_its_listing(0o000);
+    }
+
+    #[test]
+    fn a_staged_directory_without_owner_read_equals_its_listing() {
+        staged_directory_with_mode_equals_its_listing(0o300);
+    }
+
+    #[test]
+    fn a_staged_comparison_that_finds_differences_still_restores_the_modes() {
+        let (tree, listing, _unlock) = staging_and_listing(0o000);
+        std::fs::write(tree.path("proj/extra"), "new").expect("written");
+        let compared = compare_staged(&tree, &listing);
+        assert_eq!(compared.differences(), [Difference::Added(path("extra"))]);
+        assert_eq!(mode_of(&tree.path("proj/a")), 0);
+    }
+
+    #[test]
+    fn a_staged_directory_time_is_compared_with_the_listing() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        filetime::set_file_mtime(
+            tree.path("proj/src"),
+            FileTime::from_unix_time(2_000_000_000, 0),
+        )
+        .expect("the time is set");
+        let compared = compare_staged(&tree, &listing);
+        assert_eq!(compared.differences(), [changed("src", &[Field::Mtime])]);
+    }
+
+    #[test]
+    fn a_directory_time_does_not_count_on_a_users_folder() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        filetime::set_file_mtime(
+            tree.path("proj/src"),
+            FileTime::from_unix_time(2_000_000_000, 0),
+        )
+        .expect("the time is set");
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    #[test]
+    fn a_locked_directory_of_a_users_folder_is_refused_by_the_comparison() {
+        let (tree, listing, _unlock) = staging_and_listing(0o000);
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let error = compare_with_listing(&listing, &root, &WalkRules::default())
+            .expect_err("the walk cannot read it");
+        assert!(
+            matches!(
+                &error,
+                PackError::TreeHasProblems(Problem::Unreadable { .. })
+            ),
             "{error:?}"
         );
         assert_eq!(mode_of(&tree.path("proj/a")), 0);
