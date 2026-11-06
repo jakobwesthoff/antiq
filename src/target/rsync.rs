@@ -78,7 +78,6 @@ pub struct RsyncVersion {
     /// The release carried a suffix such as `pre1`: a build before the
     /// release of its number.
     pre_release: bool,
-    protocol: u32,
 }
 
 impl fmt::Display for RsyncVersion {
@@ -451,14 +450,14 @@ pub(crate) fn parse_version_line(line: &str) -> Result<RsyncVersion, Refusal> {
     let ["rsync", "version", release, "protocol", "version", protocol] = tokens.as_slice() else {
         return Err(unrecognised());
     };
-    let protocol = protocol.parse().map_err(|_| unrecognised())?;
+    // The number has to parse, but nothing reads it afterwards.
+    protocol.parse::<u32>().map_err(|_| unrecognised())?;
     let (major, minor, patch, pre_release) = parse_release(release).ok_or_else(unrecognised)?;
     let version = RsyncVersion {
         major,
         minor,
         patch,
         pre_release,
-        protocol,
     };
     if (major, minor, patch, !pre_release) < FLOOR {
         return Err(Refusal::TooOld(version));
@@ -532,13 +531,12 @@ mod tests {
         }
     }
 
-    fn version(major: u32, minor: u32, patch: u32, protocol: u32) -> RsyncVersion {
+    fn version(major: u32, minor: u32, patch: u32) -> RsyncVersion {
         RsyncVersion {
             major,
             minor,
             patch,
             pre_release: false,
-            protocol,
         }
     }
 
@@ -549,7 +547,7 @@ mod tests {
     #[test]
     fn probe_accepts_the_recorded_rsync_3_5_1_line() {
         let rsync = probed(RSYNC_3_5_1).expect("3.5.1 passes");
-        assert_eq!(rsync.version(), version(3, 5, 1, 33));
+        assert_eq!(rsync.version(), version(3, 5, 1));
     }
 
     #[test]
@@ -589,7 +587,7 @@ mod tests {
     #[test]
     fn a_version_without_a_patch_level_reads_as_patch_zero() {
         match refusal(&line("3.2")) {
-            Refusal::TooOld(found) => assert_eq!(found, version(3, 2, 0, 31)),
+            Refusal::TooOld(found) => assert_eq!(found, version(3, 2, 0)),
             other => panic!("expected a refusal for being too old, got {other:?}"),
         }
     }
@@ -620,7 +618,7 @@ mod tests {
     fn probe_refuses_3_0_9() {
         assert_eq!(
             refusal("rsync  version 3.0.9  protocol version 30\n"),
-            Refusal::TooOld(version(3, 0, 9, 30))
+            Refusal::TooOld(version(3, 0, 9))
         );
     }
 
@@ -628,7 +626,7 @@ mod tests {
     fn probe_refuses_2_6_9_in_the_rsync_form() {
         assert_eq!(
             refusal("rsync  version 2.6.9  protocol version 29\n"),
-            Refusal::TooOld(version(2, 6, 9, 29))
+            Refusal::TooOld(version(2, 6, 9))
         );
     }
 
@@ -796,7 +794,7 @@ mod tests {
         let dirs = [openrsync.dir(), first.dir(), second.dir()];
         let rsync = resolve_in(None, &dirs).expect("it resolves");
         assert_eq!(rsync.path(), first.path());
-        assert_eq!(rsync.version(), version(3, 5, 1, 33));
+        assert_eq!(rsync.version(), version(3, 5, 1));
     }
 
     #[test]
