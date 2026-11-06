@@ -1706,6 +1706,12 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_with_too_many_fields_is_malformed() {
+        let error = parse_entries(&[frame("entry", &["a", "f", "1", "2", "3"])]).expect_err("long");
+        assert!(error.to_string().contains("wrong form"), "{error}");
+    }
+
+    #[test]
     fn a_frame_of_another_kind_is_no_entry() {
         let error = parse_entries(&[frame("object", &["a", "f", "1", "2"])]).expect_err("kind");
         assert!(error.to_string().contains("wrong form"), "{error}");
@@ -1737,6 +1743,16 @@ mod tests {
         assert!(error.to_string().contains("missing"), "{error}");
         let error = file_bytes(vec![]).expect_err("none");
         assert!(error.to_string().contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn a_checksum_of_the_wrong_length_is_malformed() {
+        let short = &ABC[..63];
+        let long = format!("{ABC}0");
+        for sum in [short, "", long.as_str()] {
+            let error = checksum_of(&[frame("sum", &[sum])]).expect_err("length");
+            assert!(error.to_string().contains("SHA-256"), "{sum}: {error}");
+        }
     }
 
     #[test]
