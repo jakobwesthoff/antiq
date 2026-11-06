@@ -28,12 +28,13 @@ sections:
     file: sections/highlights.html
     nav: false
 
+  - id: demo
+    file: sections/demo.html
+    nav: true
+    nav_label: Demo
+
   - id: use-cases
     file: sections/use-cases.html
-    nav: false
-
-  - id: showcase
-    file: sections/showcase.html
     nav: false
 
   - id: quickstart

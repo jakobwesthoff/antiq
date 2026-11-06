@@ -22,7 +22,7 @@ find it again by the name of the folder or by the path of a file it held,
 and bring it back. The whole collection, live folders and versions, can be
 mirrored to one target with rsync.
 
-![antiq archiving three folders: a card with a progress bar for each, finished lines above them](docs/pages/assets/shots/archive-live.gif)
+![antiq in a terminal: status lists three due folders, archive packs them with a progress card each, grep finds server.py in the archive of recipe-api, and unearth brings the folder back](docs/pages/assets/shots/demo.gif)
 
 antiq runs on macOS and Linux. Everything it writes can be read without it:
 archives are `tar.zst` files, and a listing is a checksum list that

@@ -117,16 +117,11 @@
   }
 }
 
-/* Captures of the console: rounded like a terminal window, on the page's own
-   dark background. */
-.showcase img,
+/* Captures of the console in the documentation: rounded like a terminal
+   window, on the page's own dark background. */
 .docs img {
   border: 1px solid var(--color-border);
   border-radius: 10px;
-}
-
-.showcase .shot {
-  margin: var(--space-xl) 0;
 }
 
 .use-cases .highlights-grid {
