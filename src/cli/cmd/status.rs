@@ -1011,7 +1011,7 @@ mod tests {
     fn a_warning_and_the_held_lock_are_a_warning_and_a_note_on_stderr() {
         let mut report = one(piece("a", Verdict::Plain, Some(2)));
         report.warnings = vec![Warning::new(
-            "the key `x` under [collection] is unknown and ignored",
+            "unknown setting `x` under [collection], which antiq ignores",
         )];
         report.holder = Some(Holder {
             pid: 4711,
@@ -1024,8 +1024,8 @@ mod tests {
         assert_eq!(
             crate::cli::notice::pipe_lines(&shown.stderr),
             [
-                "warning: the key `x` under [collection] is unknown and ignored",
-                "note: another run holds the lock (pid 4711, machine imperius, started 2026-11-04T09:00:00Z)",
+                "warning: unknown setting `x` under [collection], which antiq ignores",
+                "note: another antiq run holds the lock: its pid is 4711 on machine imperius, started 2026-11-04T09:00:00Z",
             ]
         );
     }
@@ -1398,7 +1398,7 @@ mod tests {
                 "unparsable_files": [],
                 "warnings": [],
                 "store_error": null,
-                "note": "another run holds the lock (pid 4711, machine imperius, started 2026-11-04T09:00:00Z)",
+                "note": "another antiq run holds the lock: its pid is 4711 on machine imperius, started 2026-11-04T09:00:00Z",
             })
         );
     }

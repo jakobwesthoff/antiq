@@ -92,8 +92,10 @@ impl Rich {
 
     /// The text with its first letter in upper case, for the title of a
     /// block whose words come from a message that starts in lower case.
+    /// A text that starts with a code span stays as written, as a command
+    /// or path has no capital.
     pub fn capitalised(mut self) -> Rich {
-        if let Some((_, first)) = self.spans.first_mut() {
+        if let Some((Role::Plain, first)) = self.spans.first_mut() {
             let mut letters = first.chars();
             if let Some(letter) = letters.next() {
                 *first = letter.to_uppercase().chain(letters).collect();

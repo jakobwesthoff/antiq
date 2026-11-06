@@ -337,8 +337,8 @@ fn normalised_note(text: &str) -> String {
     let pid = std::process::id().to_string();
     let text = text.replace(&pid, "<pid>");
     let (before, rest) = text.split_once("started ").expect("the note names a start");
-    let (_, after) = rest.split_once(')').expect("the note ends its parentheses");
-    format!("{before}started <time>){after}")
+    let after = rest.find('\n').map_or("", |end| &rest[end..]);
+    format!("{before}started <time>{after}")
 }
 
 #[test]
@@ -350,7 +350,7 @@ fn a_held_lock_is_a_note_and_the_search_goes_on() {
 
     assert_eq!(run.code(), 0);
     assert_eq!(run.stdout, "projects/scanner\t2026-11-04T100211\tREADME\n");
-    insta::assert_snapshot!(normalised_note(&run.stderr), @"note: another run holds the lock (pid <pid>, machine imperius, started <time>)
+    insta::assert_snapshot!(normalised_note(&run.stderr), @"note: another antiq run holds the lock: its pid is <pid> on machine imperius, started <time>
 ");
 }
 
@@ -366,7 +366,7 @@ fn a_held_lock_is_the_note_field_under_json() {
     let note = json["note"].as_str().expect("a note");
     assert!(
         normalised_note(note)
-            .starts_with("another run holds the lock (pid <pid>, machine imperius"),
+            .starts_with("another antiq run holds the lock: its pid is <pid> on machine imperius"),
         "{note}"
     );
     assert_eq!(json["pieces"][0]["files"][0]["path"], "README");
@@ -421,14 +421,18 @@ fn an_unknown_config_key_is_a_note_and_a_warning() {
     assert_eq!(text.code(), 0);
     assert_eq!(
         text.stderr,
-        "warning: the key `bogus` under [collection] is unknown and ignored\n\
+        "warning: unknown setting `bogus` under [collection], which antiq ignores\n\
          no archived path matches qxzv\n"
     );
 
     let json = grep_json(&collection, "README");
     assert_eq!(
         json.json()["warnings"],
-        json!([{"message": "the key `bogus` under [collection] is unknown and ignored"}])
+        json!([{
+            "code": "antiq::config::unknown_key",
+            "message": "unknown setting `bogus` under [collection], which antiq ignores",
+            "fix": "Correct the name or remove the line in `.antiq/config.toml`."
+        }])
     );
     assert_eq!(json.stderr, "");
 }

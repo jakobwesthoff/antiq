@@ -568,7 +568,7 @@ mod tests {
         let report = list(&collection, None).expect("lists");
         let note = report.note.expect("the lock is noted");
         assert!(
-            note.contains(&format!("pid {}", std::process::id())),
+            note.contains(&format!("pid is {}", std::process::id())),
             "{note}"
         );
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);

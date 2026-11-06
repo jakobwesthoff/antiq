@@ -489,11 +489,11 @@ fn notes_on_the_settings_go_to_stderr_and_into_the_warnings() {
     let plain = archive(&collection, &[], &["-n"]);
     let json = archive(&collection, &["--json"], &["-n"]);
 
-    let note = "warning: the key `mystery` under [collection] is unknown and ignored";
+    let note = "warning: unknown setting `mystery` under [collection], which antiq ignores";
     assert_eq!(plain.code(), 0, "{}", plain.stderr);
     assert_eq!(plain.stderr.lines().collect::<Vec<_>>(), [note]);
     assert_eq!(
         json.json()["warnings"][0]["message"],
-        "the key `mystery` under [collection] is unknown and ignored"
+        "unknown setting `mystery` under [collection], which antiq ignores"
     );
 }

@@ -41,8 +41,7 @@ fn a_warning_on_a_stderr_terminal_is_a_block_after_an_empty_line() {
     run.expect_code(0);
     assert_eq!(
         run.stderr,
-        "\n ⚠ WARNING  Unknown setting bogus under [collection]\n\
-         ▌   antiq ignores it.\n\
+        "\n ⚠ WARNING  Unknown setting bogus under [collection], which antiq ignores\n\
          ▌ → Correct the name or remove the line in .antiq/config.toml.\n"
     );
 }
@@ -57,7 +56,7 @@ fn a_warning_on_a_stderr_pipe_is_a_warning_line() {
     run.expect_code(0);
     assert_eq!(
         run.stderr,
-        "warning: the key `bogus` under [collection] is unknown and ignored\n"
+        "warning: unknown setting `bogus` under [collection], which antiq ignores\n"
     );
 }
 

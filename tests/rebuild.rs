@@ -884,7 +884,7 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
         let mut text = fs::read_to_string(&config).expect("the config exists");
         text.push_str("colour = \"red\"\n");
         fs::write(&config, text).expect("the config is written");
-        let note = "the key `colour` under [collection] is unknown and ignored";
+        let note = "unknown setting `colour` under [collection], which antiq ignores";
 
         for dry in [true, false] {
             let args: &[&str] = if dry {
@@ -896,7 +896,14 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
             run.expect_code(0);
             run.text_only(|_| assert!(run.stderr.contains(&format!("warning: {note}\n"))));
             run.json_only(|json| {
-                assert_eq!(json["warnings"], serde_json::json!([{"message": note}]));
+                assert_eq!(
+                    json["warnings"],
+                    serde_json::json!([{
+                        "code": "antiq::config::unknown_key",
+                        "message": note,
+                        "fix": "Correct the name or remove the line in `.antiq/config.toml`."
+                    }])
+                );
             });
         }
     }

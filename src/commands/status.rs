@@ -1201,13 +1201,10 @@ mod tests {
 
         assert_eq!(
             found.warnings,
-            [Warning::of(
-                WarningKind::UnknownKey {
-                    table: "collection",
-                    key: "idle_dyas".into()
-                },
-                "the key `idle_dyas` under [collection] is unknown and ignored"
-            )]
+            [Warning::of(WarningKind::UnknownKey {
+                table: "collection",
+                key: "idle_dyas".into()
+            })]
         );
     }
 

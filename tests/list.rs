@@ -306,9 +306,9 @@ fn a_query_without_a_match_exits_0_with_a_note_in_every_form() {
 /// Text with the pid and the start time of the lock holder replaced.
 fn without_holder(text: &str) -> String {
     let pid = std::process::id().to_string();
-    let mut out = text.replace(&format!("pid {pid},"), "pid <pid>,");
+    let mut out = text.replace(&format!("pid is {pid} "), "pid is <pid> ");
     if let Some(from) = out.find("started ") {
-        let to = out[from..].find(')').expect("the note ends") + from;
+        let to = out[from..].find('\n').map_or(out.len(), |end| end + from);
         out.replace_range(from..to, "started <time>");
     }
     out
@@ -323,7 +323,7 @@ fn a_held_lock_is_a_note_and_the_listing_goes_on() {
     let run = world.run(&["list", "scan-old"]);
     run.expect_code(0);
     assert_eq!(run.stdout.lines().count(), 1, "{:?}", run.stdout);
-    insta::assert_snapshot!(without_holder(&run.stderr), @"note: another run holds the lock (pid <pid>, machine imperius, started <time>)
+    insta::assert_snapshot!(without_holder(&run.stderr), @"note: another antiq run holds the lock: its pid is <pid> on machine imperius, started <time>
 ");
     // The holder's own lock file is the one thing that differs between the
     // two states of the world.
@@ -342,7 +342,7 @@ fn a_held_lock_is_a_note_field_in_json_and_nothing_on_stderr() {
         assert_eq!(json["versions"].as_array().expect("a list").len(), 3);
         let note = json["note"].as_str().expect("a text");
         assert!(
-            note.contains(&format!("pid {}", std::process::id())),
+            note.contains(&format!("pid is {}", std::process::id())),
             "{note}"
         );
     });

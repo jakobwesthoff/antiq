@@ -316,14 +316,18 @@ fn an_unreachable_target_under_if_reachable_still_lists_the_repairs() {
 fn an_unknown_target_key_is_a_warning_in_json_and_a_note_on_stderr() {
     let collection = stored(&[]);
     add_target_key(&collection, "rsyc_args = []");
-    let note = "the key `rsyc_args` under [target] is unknown and ignored";
+    let note = "unknown setting `rsyc_args` under [target], which antiq ignores";
 
     let run = push(&collection, &[]);
 
     goes_on(&run);
     assert_eq!(
         run.json()["warnings"],
-        serde_json::json!([{"message": note}])
+        serde_json::json!([{
+            "code": "antiq::config::unknown_key",
+            "message": note,
+            "fix": "Correct the name or remove the line in `.antiq/config.toml`."
+        }])
     );
     let text = push_text(&collection, &[]);
     assert_eq!(text.code(), 0, "{}", text.stderr);

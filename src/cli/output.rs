@@ -575,7 +575,7 @@ mod tests {
         .expect("memory accepts writes");
         assert_eq!(
             capture.stderr(),
-            "\n ⚠ WARNING  Clock skew\n\n ℹ INFO  repaired: x\n"
+            "\n ⚠ WARNING  Clock skew\n\n ℹ INFO  Repaired: x\n"
         );
         assert_eq!(capture.stdout(), "");
     }

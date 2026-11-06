@@ -736,13 +736,10 @@ mod tests {
 
         assert_eq!(
             report.warnings,
-            [Warning::of(
-                WarningKind::UnknownKey {
-                    table: "collection",
-                    key: "colour".into()
-                },
-                "the key `colour` under [collection] is unknown and ignored"
-            )]
+            [Warning::of(WarningKind::UnknownKey {
+                table: "collection",
+                key: "colour".into()
+            })]
         );
         assert!(!report.partial());
         assert_eq!(report.warnings(), report.warnings.as_slice());
@@ -902,13 +899,10 @@ mod tests {
 
         assert_eq!(
             warnings,
-            [Warning::of(
-                WarningKind::UnknownKey {
-                    table: "collection",
-                    key: "colour".into()
-                },
-                "the key `colour` under [collection] is unknown and ignored"
-            )]
+            [Warning::of(WarningKind::UnknownKey {
+                table: "collection",
+                key: "colour".into()
+            })]
         );
     }
 }

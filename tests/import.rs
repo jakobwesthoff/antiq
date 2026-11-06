@@ -703,6 +703,6 @@ fn a_real_run_names_its_repairs_and_the_notes_on_the_settings_on_stderr() {
     assert!(notes[0].starts_with("note: repaired: "), "{notes:?}");
     assert_eq!(
         notes[notes.len() - 1],
-        "warning: the key `mystery` under [collection] is unknown and ignored"
+        "warning: unknown setting `mystery` under [collection], which antiq ignores"
     );
 }

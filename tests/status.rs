@@ -392,7 +392,7 @@ fn a_held_lock_is_a_note_and_not_a_failure() {
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     assert!(
         run.stderr
-            .starts_with("note: another run holds the lock (pid "),
+            .starts_with("note: another antiq run holds the lock: its pid is "),
         "{}",
         run.stderr
     );
@@ -402,7 +402,7 @@ fn a_held_lock_is_a_note_and_not_a_failure() {
     assert!(
         found["note"]
             .as_str()
-            .is_some_and(|text| text.starts_with("another run holds the lock (pid ")),
+            .is_some_and(|text| text.starts_with("another antiq run holds the lock: its pid is ")),
         "{found}"
     );
 }

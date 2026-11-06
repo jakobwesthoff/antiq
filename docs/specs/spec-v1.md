@@ -2027,8 +2027,8 @@ with a symbol and a word:
 
 | Kind | Badge | Colour | Form |
 |------|-------|--------|------|
-| error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out. The first letter of the title is upper case |
-| warning | `⚠ WARNING` | yellow | badge and bold title on one line, then a bar with the text and a `→` line that says how to fix it |
+| error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out. The first letter of the title is upper case, unless it starts with a command or path |
+| warning | `⚠ WARNING` | yellow | badge and bold title on one line, then a bar with the text and a `→` line that says how to fix it. The first letter of the title is upper case |
 | info | `ℹ INFO` | cyan | the form of a warning; one line when there is only a title |
 | hint | `→ HINT` | cyan | badge and text on one line, wrapped text hangs under the text, no bar |
 
@@ -2055,14 +2055,14 @@ to a command's result and the dry-run footer go to stdout and are dropped
 when stdout is not rich. One that belongs to a failure or a warning goes to
 stderr and is dropped when stderr is not rich.
 
-The warnings of a run go to stderr after its result, one block each. An
-unknown config key, a collection on an SMB or NFS mount, a filesystem or a
-lock file that cannot be read have a title of their own in the words of the
-console; an unknown key adds that antiq ignores it and a `→` line with the
-fix. Every other warning has its message as the title. A pipe gets one
-`warning: <message>` line for each. Notes that are no warning, such as a
-repair that ran, a reason in `push` or the run that holds the lock, are
-info blocks on a rich stderr and `note: <text>` lines on a pipe.
+The warnings of a run go to stderr after its result, one block each. The
+title of a warning is its message, with the first letter in upper case
+unless the message starts with a command or path; a warning that has a fix
+adds it as a `→` line. The unknown config key is the one with a fix. A pipe
+gets one `warning: <message>` line for each, the message as written.
+Notes that are no warning, such as a repair that ran, a reason in `push` or
+the run that holds the lock, are info blocks on a rich stderr, with the
+title in the same case as a warning, and `note: <text>` lines on a pipe.
 
 An error on a rich stderr is an error block. Its title is the error and
 its causes joined with `: `, unless the error has an explanation of its own.
@@ -2171,7 +2171,12 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `locked`, `rule_file`, `not_a_file`, `unreadable_marker`, `pinned` and
 `empty`. `repairs` lists the repairs of the start of the run, each as
 `{"kind": "repair", "repair": "<name>", ...}`, and `warnings` is a list of
-`{message}` objects. A dry run adds `refused` and `warnings` after
+warning objects. A warning object is `{message}`; one about an unknown
+config key, a collection on an SMB or NFS mount, a filesystem that cannot
+be told or the lock adds `code` (`antiq::config::unknown_key`,
+`antiq::filesystem::network_mount`, `antiq::filesystem::unknown`,
+`antiq::lock::unreadable` or `antiq::lock::in_use`) before `message`, and
+`fix` after it when the warning has a fix (the unknown key has one). A dry run adds `refused` and `warnings` after
 `actions`, which hold the repairs, each as in `repairs`, and, per piece,
 `{"kind": "archive", "piece": ...}`.
 
@@ -2200,14 +2205,14 @@ under `[target]` among them) besides those of the repairs.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
 collection and the messages about files that could not be read, as
-`{message}` objects) and, while a run holds the lock, `note`
+warning objects) and, while a run holds the lock, `note`
 (a text). Each version is `piece`, `stamp` (the version stamp, which has the
 counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
 "list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
 null where the head of the listing lacks them) and `damage` (a list of texts).
 
 `grep` adds `pattern`, `pieces`, `skipped` and `warnings` (the notes on the
-settings of the collection and on the lock file, as `{message}` objects),
+settings of the collection and on the lock file, as warning objects),
 and a `note` field while the lock is held. Each element of `pieces` has
 `piece`, `name_match`, `versions` and `files`. `versions` lists the searched
 versions of the piece, newest first, each with `stamp` (the version stamp)
@@ -2283,7 +2288,7 @@ and `damaged_versions` adds `"reasons"`, a list of texts. `doomed` holds
 `{"path", "first_entry", "cause"}` with the cause `locked`,
 `directory_not_writable` or `null`; `spelling` holds `{"live", "stored"}`.
 `recovered`, `trash`, `unparsable_files` and the paths of `doomed` are
-relative to `.antiq/`. `warnings` is a list of `{message}` objects. While
+relative to `.antiq/`. `warnings` is a list of warning objects. While
 the lock is held, a `note` field names the holder.
 
 `unearth` has `unearthed` (false when the version did not fit), `piece`,

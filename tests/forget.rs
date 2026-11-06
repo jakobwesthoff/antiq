@@ -678,7 +678,7 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     assert_eq!(
         run.stderr,
         " ✖ ERROR\n\
-         ▌ Projects/scanner: --all-versions needs --force\n\
+         ▌ projects/scanner: --all-versions needs --force\n\
          ▌\n\
          ▌ Why it happened\n\
          ▌   --all-versions deletes every stored version of the piece, damaged and\n\
@@ -944,7 +944,7 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
         let mut text = fs::read_to_string(&config).expect("the config exists");
         text.push_str("colour = \"red\"\n");
         fs::write(&config, text).expect("the config is written");
-        let note = "the key `colour` under [collection] is unknown and ignored";
+        let note = "unknown setting `colour` under [collection], which antiq ignores";
 
         for args in [
             &["forget", "projects/scanner", SCANNER_NEW, "-n"][..],
@@ -954,7 +954,14 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
             run.expect_code(0);
             run.text_only(|_| assert_eq!(run.stderr, format!("warning: {note}\n")));
             run.json_only(|json| {
-                assert_eq!(json["warnings"], serde_json::json!([{"message": note}]));
+                assert_eq!(
+                    json["warnings"],
+                    serde_json::json!([{
+                        "code": "antiq::config::unknown_key",
+                        "message": note,
+                        "fix": "Correct the name or remove the line in `.antiq/config.toml`."
+                    }])
+                );
             });
         }
     }

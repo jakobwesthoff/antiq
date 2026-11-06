@@ -7,7 +7,8 @@
 
 use super::console::block::Block;
 use super::console::rich::Rich;
-use antiq::report::{Warning, WarningKind};
+use antiq::report::Warning;
+use miette::{Diagnostic, Severity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
@@ -34,41 +35,25 @@ impl Notice {
     }
 }
 
-/// A warning in the words of the console. A kind without wording shows
-/// the message of the library as its title.
+/// A warning as a block: the message of its kind is the title and the
+/// help of the kind is the fix. A kind with the severity of advice is an
+/// info, as nothing is wrong. A warning without a kind shows its message.
 fn warning_block(warning: &Warning) -> Block {
-    let warn = |title: Rich| Block::warning(title).pipe(&format!("warning: {}", warning.message));
-    match &warning.kind {
-        Some(WarningKind::UnknownKey { table, key }) => warn(
-            Rich::new()
-                .text("Unknown setting ")
-                .path(key)
-                .text(&format!(" under [{table}]")),
-        )
-        .text(Rich::new().text("antiq ignores it."))
-        .fix(Rich::parse(
-            "Correct the name or remove the line in `.antiq/config.toml`.",
-        )),
-        Some(WarningKind::NetworkMount { filesystem }) => {
-            warn(Rich::new().text(&format!("The antiq collection is on an {filesystem} mount")))
-        }
-        Some(WarningKind::FilesystemUnknown { reason }) => {
-            warn(Rich::new().text("Cannot tell what kind of filesystem the antiq collection is on"))
-                .text(Rich::new().text(reason))
-        }
-        Some(WarningKind::LockUnreadable { reason }) => {
-            warn(Rich::new().text("Cannot read the lock file")).text(Rich::new().text(reason))
-        }
-        Some(WarningKind::LockHeld {
-            pid,
-            machine,
-            started,
-        }) => Block::info(Rich::new().text("Another antiq run holds the lock"))
-            .text(Rich::new().text(&format!(
-                "Its pid is {pid} on machine {machine}, started {started}."
-            )))
-            .pipe(&format!("note: {}", warning.message)),
-        None => warn(Rich::new().text(&warning.message)),
+    let message = &warning.message;
+    let advice = warning
+        .kind
+        .as_ref()
+        .is_some_and(|kind| kind.severity() == Some(Severity::Advice));
+    let block = if advice {
+        Block::info(Rich::parse(message)).pipe(&format!("note: {message}"))
+    } else if warning.kind.is_some() {
+        Block::warning(Rich::parse(message)).pipe(&format!("warning: {message}"))
+    } else {
+        Block::warning(Rich::new().text(message)).pipe(&format!("warning: {message}"))
+    };
+    match warning.kind.as_ref().and_then(|kind| kind.help()) {
+        Some(help) => block.fix(Rich::parse(&help.to_string())),
+        None => block,
     }
 }
 
@@ -113,13 +98,10 @@ mod tests {
     }
 
     fn unknown_key() -> Notice {
-        Notice::Warning(Warning::of(
-            WarningKind::UnknownKey {
-                table: "collection",
-                key: "idle_dyas".into(),
-            },
-            "the key `idle_dyas` under [collection] is unknown and ignored",
-        ))
+        Notice::Warning(Warning::of(WarningKind::UnknownKey {
+            table: "collection",
+            key: "idle_dyas".into(),
+        }))
     }
 
     #[test]
@@ -127,7 +109,7 @@ mod tests {
         let notice = Notice::Warning(Warning::new("cannot open notes/a: denied"));
         assert_eq!(
             rich(notice.clone()),
-            [" ⚠ WARNING  cannot open notes/a: denied"]
+            [" ⚠ WARNING  Cannot open notes/a: denied"]
         );
         assert_eq!(pipe(notice), ["warning: cannot open notes/a: denied"]);
     }
@@ -137,23 +119,19 @@ mod tests {
         assert_eq!(
             rich(unknown_key()),
             [
-                " ⚠ WARNING  Unknown setting idle_dyas under [collection]",
-                "▌   antiq ignores it.",
+                " ⚠ WARNING  Unknown setting idle_dyas under [collection], which antiq ignores",
                 "▌ → Correct the name or remove the line in .antiq/config.toml.",
             ]
         );
         assert_eq!(
             pipe(unknown_key()),
-            ["warning: the key `idle_dyas` under [collection] is unknown and ignored"]
+            ["warning: unknown setting `idle_dyas` under [collection], which antiq ignores"]
         );
     }
 
     #[test]
     fn a_network_mount_is_named() {
-        let notice = Notice::Warning(Warning::of(
-            WarningKind::NetworkMount { filesystem: "SMB" },
-            "the collection is on an SMB mount",
-        ));
+        let notice = Notice::Warning(Warning::of(WarningKind::NetworkMount { filesystem: "SMB" }));
         assert_eq!(
             rich(notice),
             [" ⚠ WARNING  The antiq collection is on an SMB mount"]
@@ -162,52 +140,43 @@ mod tests {
 
     #[test]
     fn a_filesystem_or_lock_that_cannot_be_read_gives_its_reason() {
-        let filesystem = Notice::Warning(Warning::of(
-            WarningKind::FilesystemUnknown {
-                reason: "cannot stat /work: denied".into(),
-            },
-            "cannot tell what kind of filesystem the collection is on: cannot stat /work: denied",
-        ));
+        let filesystem = Notice::Warning(Warning::of(WarningKind::FilesystemUnknown {
+            reason: "cannot stat /work: denied".into(),
+        }));
         assert_eq!(
             rich(filesystem),
             [
-                " ⚠ WARNING  Cannot tell what kind of filesystem the antiq collection is on",
-                "▌   cannot stat /work: denied",
+                " ⚠ WARNING  Cannot tell what kind of filesystem the antiq collection is on: cannot stat /work:",
+                "            denied",
             ]
         );
-        let lock = Notice::Warning(Warning::of(
-            WarningKind::LockUnreadable {
-                reason: "denied".into(),
-            },
-            "cannot read the lock file: denied",
-        ));
+        let lock = Notice::Warning(Warning::of(WarningKind::LockUnreadable {
+            reason: "denied".into(),
+        }));
         assert_eq!(
             rich(lock),
-            [" ⚠ WARNING  Cannot read the lock file", "▌   denied"]
+            [" ⚠ WARNING  Cannot read the lock file: denied"]
         );
     }
 
     #[test]
     fn a_run_that_holds_the_lock_is_a_note_not_a_warning() {
-        let notice = Notice::Warning(Warning::of(
-            WarningKind::LockHeld {
-                pid: 4711,
-                machine: "imperius".into(),
-                started: "2026-11-04T09:00:00Z".into(),
-            },
-            "another run holds the lock (pid 4711, machine imperius, started 2026-11-04T09:00:00Z)",
-        ));
+        let notice = Notice::Warning(Warning::of(WarningKind::LockHeld {
+            pid: 4711,
+            machine: "imperius".into(),
+            started: "2026-11-04T09:00:00Z".into(),
+        }));
         assert_eq!(
             rich(notice.clone()),
             [
-                " ℹ INFO  Another antiq run holds the lock",
-                "▌   Its pid is 4711 on machine imperius, started 2026-11-04T09:00:00Z.",
+                " ℹ INFO  Another antiq run holds the lock: its pid is 4711 on machine imperius, started",
+                "         2026-11-04T09:00:00Z",
             ]
         );
         assert_eq!(
             pipe(notice),
             [
-                "note: another run holds the lock (pid 4711, machine imperius, started 2026-11-04T09:00:00Z)"
+                "note: another antiq run holds the lock: its pid is 4711 on machine imperius, started 2026-11-04T09:00:00Z"
             ]
         );
     }
@@ -217,7 +186,7 @@ mod tests {
         let notice = Notice::Note("repaired: removed an empty folder".into());
         assert_eq!(
             rich(notice.clone()),
-            [" ℹ INFO  repaired: removed an empty folder"]
+            [" ℹ INFO  Repaired: removed an empty folder"]
         );
         assert_eq!(pipe(notice), ["note: repaired: removed an empty folder"]);
     }

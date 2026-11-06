@@ -236,7 +236,12 @@ impl Block {
             Kind::Warning | Kind::Info => {
                 let hang = badge.width() + 1;
                 let first = paint(env, theme::badge(self.kind), &badge);
-                let title = flow(env, &self.title, theme::BOLD, available(env, hang));
+                let title = flow(
+                    env,
+                    &self.title.clone().capitalised(),
+                    theme::BOLD,
+                    available(env, hang),
+                );
                 self.push_hanging(&mut lines, &first, hang, &title);
                 for paragraph in &self.text {
                     self.push_paragraph(env, &bar, paragraph, &mut lines);

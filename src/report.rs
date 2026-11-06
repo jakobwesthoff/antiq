@@ -4,35 +4,53 @@
 
 //! What every command reports back.
 
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::filesystem::FilesystemError;
 use crate::filesystem::device::{self, FsKind};
 use crate::lock::{self, Holder};
+use miette::Diagnostic;
 use serde::Serialize;
+use serde::ser::SerializeMap;
 
 /// Something the user should know that did not stop the run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {
     pub message: String,
-    #[serde(skip)]
     pub kind: Option<WarningKind>,
 }
 
-/// What a warning is about, for the few the console words at length. The
-/// JSON output carries `message` only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a warning is about. The message, the help and the code of a kind
+/// are what the console and the JSON output show of it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum WarningKind {
     /// A key of the config that antiq does not know, under `[collection]`
     /// or `[target]`.
+    #[diagnostic(
+        code(antiq::config::unknown_key),
+        severity(Warning),
+        help("Correct the name or remove the line in `.antiq/config.toml`.")
+    )]
+    #[error("unknown setting {} under [{table}], which antiq ignores", CodeSpan(.key))]
     UnknownKey { table: &'static str, key: String },
     /// The collection is on a network mount, `SMB` or `NFS`.
+    #[diagnostic(code(antiq::filesystem::network_mount), severity(Warning))]
+    #[error("the antiq collection is on an {filesystem} mount")]
     NetworkMount { filesystem: &'static str },
     /// The filesystem of the collection could not be probed.
+    #[diagnostic(code(antiq::filesystem::unknown), severity(Warning))]
+    #[error("cannot tell what kind of filesystem the antiq collection is on: {reason}")]
     FilesystemUnknown { reason: String },
     /// The lock file could not be read.
+    #[diagnostic(code(antiq::lock::unreadable), severity(Warning))]
+    #[error("cannot read the lock file: {reason}")]
     LockUnreadable { reason: String },
     /// Another run holds the lock. A note more than a warning: nothing is
     /// wrong, the run is simply there.
+    #[diagnostic(code(antiq::lock::in_use), severity(Advice))]
+    #[error(
+        "another antiq run holds the lock: its pid is {pid} on machine {machine}, started {started}"
+    )]
     LockHeld {
         pid: u32,
         machine: String,
@@ -48,11 +66,27 @@ impl Warning {
         }
     }
 
-    pub fn of(kind: WarningKind, message: impl Into<String>) -> Self {
+    pub fn of(kind: WarningKind) -> Self {
         Warning {
-            message: message.into(),
+            message: kind.to_string(),
             kind: Some(kind),
         }
+    }
+}
+
+/// A warning with a kind is `{code, message, fix}`, the fix when the kind
+/// has a help. One without a kind is `{message}`.
+impl Serialize for Warning {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut object = serializer.serialize_map(None)?;
+        if let Some(code) = self.kind.as_ref().and_then(|kind| kind.code()) {
+            object.serialize_entry("code", &code.to_string())?;
+        }
+        object.serialize_entry("message", &self.message)?;
+        if let Some(help) = self.kind.as_ref().and_then(|kind| kind.help()) {
+            object.serialize_entry("fix", &help.to_string())?;
+        }
+        object.end()
     }
 }
 
@@ -107,41 +141,30 @@ pub(crate) fn setting_notes_with(
     let mut unknown_keys = collection.config().unknown_collection_keys.clone();
     unknown_keys.sort();
     for key in &unknown_keys {
-        warnings.push(Warning::of(
-            WarningKind::UnknownKey {
-                table: "collection",
-                key: key.clone(),
-            },
-            format!("the key `{key}` under [collection] is unknown and ignored"),
-        ));
+        warnings.push(Warning::of(WarningKind::UnknownKey {
+            table: "collection",
+            key: key.clone(),
+        }));
     }
     let mut unknown_target_keys = collection.config().unknown_target_keys.clone();
     unknown_target_keys.sort();
     for key in &unknown_target_keys {
-        warnings.push(Warning::of(
-            WarningKind::UnknownKey {
-                table: "target",
-                key: key.clone(),
-            },
-            format!("the key `{key}` under [target] is unknown and ignored"),
-        ));
+        warnings.push(Warning::of(WarningKind::UnknownKey {
+            table: "target",
+            key: key.clone(),
+        }));
     }
     match fs_kind {
-        Ok(FsKind::Smb) => warnings.push(Warning::of(
-            WarningKind::NetworkMount { filesystem: "SMB" },
-            "the collection is on an SMB mount",
-        )),
-        Ok(FsKind::Nfs) => warnings.push(Warning::of(
-            WarningKind::NetworkMount { filesystem: "NFS" },
-            "the collection is on an NFS mount",
-        )),
+        Ok(FsKind::Smb) => {
+            warnings.push(Warning::of(WarningKind::NetworkMount { filesystem: "SMB" }))
+        }
+        Ok(FsKind::Nfs) => {
+            warnings.push(Warning::of(WarningKind::NetworkMount { filesystem: "NFS" }))
+        }
         Ok(FsKind::Local | FsKind::Other) => {}
-        Err(error) => warnings.push(Warning::of(
-            WarningKind::FilesystemUnknown {
-                reason: error.to_string(),
-            },
-            format!("cannot tell what kind of filesystem the collection is on: {error}"),
-        )),
+        Err(error) => warnings.push(Warning::of(WarningKind::FilesystemUnknown {
+            reason: error.to_string(),
+        })),
     }
     warnings
 }
@@ -160,26 +183,17 @@ pub fn lock_status(collection: &Collection) -> (Option<String>, Option<Warning>)
 /// The note for a run that holds the lock while a command that takes none
 /// looks at the collection.
 pub fn lock_note(holder: &Holder) -> Warning {
-    Warning::of(
-        WarningKind::LockHeld {
-            pid: holder.pid,
-            machine: holder.machine.clone(),
-            started: holder.started.to_string(),
-        },
-        format!(
-            "another run holds the lock (pid {}, machine {}, started {})",
-            holder.pid, holder.machine, holder.started
-        ),
-    )
+    Warning::of(WarningKind::LockHeld {
+        pid: holder.pid,
+        machine: holder.machine.clone(),
+        started: holder.started.to_string(),
+    })
 }
 
 pub(crate) fn unreadable_lock(error: &dyn std::fmt::Display) -> Warning {
-    Warning::of(
-        WarningKind::LockUnreadable {
-            reason: error.to_string(),
-        },
-        format!("cannot read the lock file: {error}"),
-    )
+    Warning::of(WarningKind::LockUnreadable {
+        reason: error.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -206,15 +220,33 @@ mod tests {
     }
 
     #[test]
-    fn a_warning_with_a_kind_serialises_as_its_message_only() {
-        let warning = Warning::of(
-            WarningKind::NetworkMount { filesystem: "SMB" },
-            "the collection is on an SMB mount",
-        );
+    fn a_warning_with_a_kind_serialises_with_its_code_and_its_fix() {
+        let mount = Warning::of(WarningKind::NetworkMount { filesystem: "SMB" });
         assert_eq!(
-            serde_json::to_string(&warning).expect("a warning serialises"),
-            r#"{"message":"the collection is on an SMB mount"}"#
+            serde_json::to_string(&mount).expect("a warning serialises"),
+            r#"{"code":"antiq::filesystem::network_mount","message":"the antiq collection is on an SMB mount"}"#
         );
+        let unknown = Warning::of(WarningKind::UnknownKey {
+            table: "collection",
+            key: "bogus".into(),
+        });
+        assert_eq!(
+            serde_json::to_string(&unknown).expect("a warning serialises"),
+            r#"{"code":"antiq::config::unknown_key","message":"unknown setting `bogus` under [collection], which antiq ignores","fix":"Correct the name or remove the line in `.antiq/config.toml`."}"#
+        );
+    }
+
+    #[test]
+    fn a_note_has_the_severity_of_advice_and_the_others_of_a_warning() {
+        use miette::{Diagnostic, Severity};
+        let held = WarningKind::LockHeld {
+            pid: 1,
+            machine: "m".into(),
+            started: "t".into(),
+        };
+        let unreadable = WarningKind::LockUnreadable { reason: "r".into() };
+        assert_eq!(held.severity(), Some(Severity::Advice));
+        assert_eq!(unreadable.severity(), Some(Severity::Warning));
     }
 
     #[test]
@@ -253,8 +285,8 @@ mod tests {
         assert_eq!(
             messages(&notes),
             [
-                "the key `bogus` under [collection] is unknown and ignored",
-                "the key `idle_dyas` under [collection] is unknown and ignored",
+                "unknown setting `bogus` under [collection], which antiq ignores",
+                "unknown setting `idle_dyas` under [collection], which antiq ignores",
             ]
         );
     }
@@ -267,9 +299,9 @@ mod tests {
         assert_eq!(
             messages(&notes),
             [
-                "the key `bogus` under [collection] is unknown and ignored",
-                "the key `alpha` under [target] is unknown and ignored",
-                "the key `rsynk` under [target] is unknown and ignored",
+                "unknown setting `bogus` under [collection], which antiq ignores",
+                "unknown setting `alpha` under [target], which antiq ignores",
+                "unknown setting `rsynk` under [target], which antiq ignores",
             ]
         );
     }
@@ -279,11 +311,11 @@ mod tests {
         let (_temp, collection) = collection_with("");
         assert_eq!(
             messages(&notes_with(&collection, Ok(FsKind::Smb))),
-            ["the collection is on an SMB mount"]
+            ["the antiq collection is on an SMB mount"]
         );
         assert_eq!(
             messages(&notes_with(&collection, Ok(FsKind::Nfs))),
-            ["the collection is on an NFS mount"]
+            ["the antiq collection is on an NFS mount"]
         );
     }
 
@@ -300,7 +332,7 @@ mod tests {
         assert!(
             notes[0]
                 .message
-                .starts_with("cannot tell what kind of filesystem the collection is on"),
+                .starts_with("cannot tell what kind of filesystem the antiq collection is on"),
             "{notes:?}"
         );
     }
@@ -314,10 +346,10 @@ mod tests {
         assert_eq!(
             messages(&notes),
             [
-                "the key `bogus` under [collection] is unknown and ignored",
-                "the collection is on an SMB mount",
+                "unknown setting `bogus` under [collection], which antiq ignores",
+                "the antiq collection is on an SMB mount",
                 &format!(
-                    "another run holds the lock (pid {}, machine imperius, started 2026-11-04T10:00:00Z)",
+                    "another antiq run holds the lock: its pid is {} on machine imperius, started 2026-11-04T10:00:00Z",
                     std::process::id()
                 ),
             ]
@@ -333,8 +365,8 @@ mod tests {
         assert_eq!(
             messages(&notes),
             [
-                "the key `bogus` under [collection] is unknown and ignored",
-                "the collection is on an NFS mount",
+                "unknown setting `bogus` under [collection], which antiq ignores",
+                "the antiq collection is on an NFS mount",
             ]
         );
     }
@@ -344,7 +376,7 @@ mod tests {
         let (_temp, collection) = collection_with("bogus = 1");
         assert_eq!(
             messages(&setting_notes(&collection)),
-            ["the key `bogus` under [collection] is unknown and ignored"]
+            ["unknown setting `bogus` under [collection], which antiq ignores"]
         );
     }
 

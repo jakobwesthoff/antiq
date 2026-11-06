@@ -454,11 +454,20 @@ fn a_run_of_backticks_without_a_closing_run_is_plain_text() {
 }
 
 #[test]
-fn the_title_of_an_error_block_starts_with_a_capital_in_the_rich_form_only() {
+fn the_title_of_a_block_starts_with_a_capital_in_the_rich_form_only() {
     let block = Block::error(Rich::new().text("cannot read ").path("a.toml"));
     assert_eq!(block.render(&bare(80))[1], "▌ Cannot read a.toml");
     assert_eq!(block.render_plain()[0], "error: cannot read a.toml");
     let warning = Block::warning(Rich::new().text("unknown key"));
-    assert_eq!(warning.render(&bare(80))[0], " ⚠ WARNING  unknown key");
+    assert_eq!(warning.render(&bare(80))[0], " ⚠ WARNING  Unknown key");
+    assert_eq!(warning.render_plain()[0], "warning: unknown key");
+    let info = Block::info(Rich::new().text("repaired: x"));
+    assert_eq!(info.render(&bare(80))[0], " ℹ INFO  Repaired: x");
+    let command = Block::info(Rich::new().cmd("forget").text(" deletes nothing"));
+    assert_eq!(
+        command.render(&bare(80))[0],
+        " ℹ INFO  forget deletes nothing",
+        "a title that starts with a code span keeps its case"
+    );
     assert_eq!(Rich::new().capitalised(), Rich::new());
 }
