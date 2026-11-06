@@ -1130,9 +1130,11 @@ checks it would make. (ADR 0061)
 - On a pipe a run prints `Unearthed <piece> (version <version>)` on
   stdout. On a terminal it shows a card and leaves one finished line and the
   summary `Unearthed to <path>` (see "Progress cards"). The repairs that were done (`note: repaired: <repair>`) and the
-  warnings (`warning: <warning>`) go to stderr. A skipped version prints
-  `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout
-  line, the sizes in decimal units. In `-n` the `Would skip` line reads
+  warnings (`warning: <warning>`) go to stderr. On a pipe a skipped version
+  prints `Skipped <piece>: <size> needed, <size> free` on stderr and no
+  stdout line, the sizes in decimal units. On a terminal its finished line
+  reads `skipped`, with `<size> needed, <size> free` under it, and the
+  summary is `⚠ Skipped <piece>`. In `-n` the `Would skip` line reads
   `Would skip <piece> (version <version>): <size> needed, <size> free`, and
   the `check` lines read `the version <version> is sound`, `the destination
   <path> is free`, `there is room for <size>`, `the member names fit the
