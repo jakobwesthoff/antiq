@@ -1205,7 +1205,21 @@ unearthing. Unearthing an ID that is already unearthed does nothing and
 says where it is. (ADR 0034)
 
 The target is the stored relative path, or `--to`, a path inside the
-collection that the patterns select. A taken target refuses.
+collection that the patterns select. `unearth` refuses the collection
+root, `.antiq/` and everything below it, and a path at or below an
+excluded folder. It refuses a path that has a piece above it, meaning a
+folder that the patterns select or that a tracked piece holds, and a path
+that has a file or a symlink above it; nothing is followed through a
+symlink. A folder above the path that the volume finds under another
+spelling than the path's (another case, or another Unicode normalisation)
+refuses too. A taken target refuses: anything at the path, a dangling
+symlink included, or a tracked piece that holds it. Folders above the
+target that do not exist are created.
+
+A piece that is gone but whose metadata holds an archive is unearthed from
+that archive, as an archived one is. `--version` names an archive payload
+version, a superseded one included. Of two payloads that share a version,
+the one this machine holds comes first.
 
 Before extracting, `unearth` checks every member name against the
 target: names it cannot hold, name lengths, and names that collide
