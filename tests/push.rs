@@ -12,6 +12,7 @@ use support::cmd::{Antiq, Run, hold_lock, snapshot};
 use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection};
 use support::scenario::target::Target;
+use support::ssh_shim::SshShim;
 
 fn collection() -> Collection {
     Collection::build(&Clock::now())
@@ -1754,4 +1755,222 @@ fn a_dry_run_of_the_push_runs_no_second_pass() {
 
     assert_eq!(transfers(&fake).len(), 1);
     assert_eq!(json["actions"][0]["pieces"][0]["deleted"], 1);
+}
+
+// =========================================================
+// The real rsync
+// =========================================================
+
+fn pushed(run: &Run) {
+    assert_eq!(run.code(), 0, "{} {}", run.stdout, run.stderr);
+    assert_eq!(run.json()["result"], "pushed", "{}", run.stdout);
+}
+
+#[test]
+fn init_then_push_copies_the_collection_and_leaves_antiqs_scratch_behind() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    fs::create_dir_all(collection.path("projects/a/node_modules/dep")).expect("made");
+    fs::write(collection.path("projects/a/node_modules/dep/i.js"), "js").expect("written");
+    fs::write(collection.path(".antiq/tmp/scratch"), "x").expect("written");
+    fs::create_dir_all(collection.path(".antiq/trash")).expect("made");
+    fs::create_dir_all(collection.path(".antiq/doomed")).expect("made");
+
+    pushed(&push(&collection, &["--init"]));
+
+    let root = target.path();
+    assert_eq!(
+        fs::read(root.join("projects/a/a.txt")).expect("copied"),
+        b"a"
+    );
+    assert!(root.join("projects/a/node_modules/dep/i.js").exists());
+    assert!(root.join(".antiq/config.toml").exists());
+    assert_eq!(
+        fs::read(root.join(".antiq-target")).expect("the marker"),
+        expected_marker(&collection)
+    );
+    for absent in [".antiq/tmp", ".antiq/trash", ".antiq/doomed", ".antiq/lock"] {
+        assert!(!root.join(absent).exists(), "{absent} is not mirrored");
+    }
+}
+
+#[test]
+fn what_is_deleted_locally_is_deleted_on_the_target_and_the_marker_stays() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    fs::write(collection.path("projects/a/second.txt"), "2").expect("written");
+    pushed(&push(&collection, &["--init"]));
+    let marker = fs::read(target.path().join(".antiq-target")).expect("the marker");
+    fs::remove_file(collection.path("projects/a/second.txt")).expect("removed");
+
+    let json = push(&collection, &[]).json();
+
+    assert_eq!(json["result"], "pushed", "{json}");
+    assert_eq!(json["pieces"][0]["deleted"], 1);
+    assert!(!target.path().join("projects/a/second.txt").exists());
+    assert!(target.path().join("projects/a/a.txt").exists());
+    assert_eq!(
+        fs::read(target.path().join(".antiq-target")).expect("kept"),
+        marker
+    );
+}
+
+#[test]
+fn hard_links_arrive_as_hard_links_and_read_only_folders_arrive() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    fs::hard_link(
+        collection.path("projects/a/a.txt"),
+        collection.path("projects/a/linked.txt"),
+    )
+    .expect("linked");
+    fs::create_dir_all(collection.path("projects/a/frozen")).expect("made");
+    fs::write(collection.path("projects/a/frozen/f.txt"), "f").expect("written");
+    fs::set_permissions(
+        collection.path("projects/a/frozen"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .expect("frozen");
+
+    let run = push(&collection, &["--init"]);
+
+    fs::set_permissions(
+        collection.path("projects/a/frozen"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("thawed");
+    fs::set_permissions(
+        target.path().join("projects/a/frozen"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("thawed on the target");
+    pushed(&run);
+    let a = fs::metadata(target.path().join("projects/a/a.txt")).expect("copied");
+    let b = fs::metadata(target.path().join("projects/a/linked.txt")).expect("copied");
+    assert_eq!(a.ino(), b.ino());
+    assert!(target.path().join("projects/a/frozen/f.txt").exists());
+}
+
+/// Whether the volume of `dir` treats `lower` and `LOWER` as one name.
+fn folds_case(dir: &Path) -> bool {
+    let probe = dir.join("antiq-probe-case");
+    fs::write(&probe, "").expect("the probe is written");
+    let folds = dir.join("ANTIQ-PROBE-CASE").exists();
+    fs::remove_file(&probe).expect("the probe is removed");
+    folds
+}
+
+/// Pushes `Name.txt`, renames it to `name.txt` and pushes again. Returns the
+/// JSON of the second push and the names the target lists afterwards.
+fn push_a_case_only_rename(target: &Target) -> (serde_json::Value, Vec<String>) {
+    let collection = with_real_rsync(&target.path());
+    fs::write(collection.path("projects/a/Name.txt"), "n").expect("written");
+    pushed(&push(&collection, &["--init"]));
+    fs::rename(
+        collection.path("projects/a/Name.txt"),
+        collection.path("projects/a/name.txt"),
+    )
+    .expect("renamed");
+
+    let json = push(&collection, &[]).json();
+
+    let mut names: Vec<String> = fs::read_dir(target.path().join("projects/a"))
+        .expect("the piece folder arrived")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    (json, names)
+}
+
+#[test]
+fn a_name_that_changes_only_in_case_goes_through_the_second_pass_on_a_volume_that_folds() {
+    let target = Target::new();
+    if !folds_case(&target.path()) {
+        eprintln!("skipped: the volume of the target is case-sensitive");
+        return;
+    }
+
+    let (json, names) = push_a_case_only_rename(&target);
+
+    assert_eq!(json["result"], "pushed", "{json}");
+    assert_eq!(json["second_pass"], true, "{json}");
+    assert_eq!(names, ["a.txt", "name.txt"]);
+    assert_eq!(
+        fs::read(target.path().join("projects/a/name.txt")).expect("restored"),
+        b"n"
+    );
+}
+
+#[test]
+fn a_name_that_changes_only_in_case_needs_no_second_pass_on_a_volume_that_keeps_case() {
+    let target = Target::new();
+    if folds_case(&target.path()) {
+        eprintln!("skipped: the volume of the target folds case");
+        return;
+    }
+
+    let (json, names) = push_a_case_only_rename(&target);
+
+    assert_eq!(json["result"], "pushed", "{json}");
+    assert_eq!(json["second_pass"], false, "{json}");
+    assert_eq!(names, ["a.txt", "name.txt"]);
+}
+
+/// A collection that pushes through the ssh stand-in to the directory
+/// `target`, with the real rsync on both ends.
+fn over_ssh(target: &Path, shim: &SshShim) -> Collection {
+    let collection = collection();
+    set_url(&collection, &format!("shimhost:{}", target.display()));
+    let rsync = real_rsync();
+    let rsync = serde_json::to_string(rsync.to_str().expect("UTF-8")).expect("quotes");
+    let shell = serde_json::to_string(shim.path().to_str().expect("UTF-8")).expect("quotes");
+    add_target_key(&collection, &format!("rsync = {rsync}"));
+    add_target_key(&collection, &format!("rsync_path = {rsync}"));
+    add_target_key(&collection, &format!("rsync_args = [\"-e\", {shell}]"));
+    collection
+}
+
+#[test]
+fn an_ssh_target_is_initialised_pushed_to_and_checked_against_its_marker() {
+    let target = Target::new();
+    let shim = SshShim::new();
+    let collection = over_ssh(&target.path(), &shim);
+
+    let listed = push(&collection, &[]);
+    unreachable_reason(&listed);
+    pushed(&push(&collection, &["--init"]));
+    assert_eq!(
+        fs::read(target.path().join(".antiq-target")).expect("the marker"),
+        expected_marker(&collection)
+    );
+    assert!(target.path().join("projects/a/a.txt").exists());
+
+    pushed(&push(&collection, &[]));
+    assert!(!shim.calls().is_empty());
+
+    target.marker_with(&collection.id(), "Some Other Mac", "/elsewhere");
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("Some Other Mac"), "{message}");
+    pushed(&push(&collection, &["--force"]));
+    assert!(tmp_entries(&collection).is_empty());
+}
+
+#[test]
+fn an_ssh_target_that_refuses_the_connection_is_unreachable() {
+    let target = Target::new();
+    let shim = SshShim::new();
+    shim.fault("connect-refused");
+    let collection = over_ssh(&target.path(), &shim);
+
+    let reason = unreachable_reason(&push(&collection, &[]));
+
+    assert!(reason.contains("Connection refused"), "{reason}");
+    assert_eq!(push(&collection, &["--if-reachable"]).code(), 0);
 }
