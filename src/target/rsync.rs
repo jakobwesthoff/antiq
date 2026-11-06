@@ -7,7 +7,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
+use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,21 +186,23 @@ impl Rsync {
         target: &TargetUrl,
         dry_run: bool,
     ) -> Call {
+        self.mirror_listing(options, collection, target, dry_run, "--itemize-changes")
+    }
+
+    /// The mirror with the option that makes rsync list each change.
+    fn mirror_listing(
+        &self,
+        options: &Options,
+        collection: &Path,
+        target: &TargetUrl,
+        dry_run: bool,
+        listing: &str,
+    ) -> Call {
         let mut args: Vec<OsString> = Vec::new();
         if dry_run {
             args.push("-n".into());
         }
-        args.extend(
-            [
-                "-a",
-                "-H",
-                "-x",
-                "--delete",
-                "--delete-delay",
-                "--itemize-changes",
-            ]
-            .map(OsString::from),
-        );
+        args.extend(["-a", "-H", "-x", "--delete", "--delete-delay", listing].map(OsString::from));
         args.extend(MIRROR_EXCLUDES.map(|name| OsString::from(format!("--exclude={name}"))));
         self.finish(
             args,
@@ -211,6 +213,13 @@ impl Rsync {
                 target.dir_arg(),
             ],
         )
+    }
+
+    /// The dry run of the mirror, listing each change with its size
+    /// (`%i %l %n%L`) in place of `--itemize-changes`, so that a progress
+    /// display knows the bytes and the files ahead of the real run.
+    pub fn mirror_counted(&self, options: &Options, collection: &Path, target: &TargetUrl) -> Call {
+        self.mirror_listing(options, collection, target, true, "--out-format=%i %l %n%L")
     }
 
     /// The call that lists the target directory.
@@ -379,16 +388,66 @@ impl Call {
     /// Runs the call and returns what it left, whatever the exit status:
     /// the caller reads the status and the texts of 23, 24, 30 and 255.
     pub fn run(&self) -> Result<Outcome, RsyncError> {
-        let mut command = self.command();
-        command.stdin(Stdio::null());
-        let output = command.output().map_err(|cause| RsyncError::Spawn {
+        self.run_observed(&mut |_| {})
+    }
+
+    /// [`run`](Call::run), handing each line of standard output to `on_line`
+    /// (with its newline) while rsync still runs. The outcome holds the
+    /// whole output as `run` returns it.
+    ///
+    /// Standard error is read on a thread of its own: a full pipe would
+    /// otherwise stop rsync while this one waits for a line.
+    pub fn run_observed(&self, on_line: &mut dyn FnMut(&[u8])) -> Result<Outcome, RsyncError> {
+        let spawn_error = |cause| RsyncError::Spawn {
             path: self.program.clone(),
             cause,
-        })?;
+        };
+        let mut command = self.command();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(spawn_error)?;
+        let mut stderr = child.stderr.take().expect("stderr was piped");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+
+        let (stdout_bytes, stderr_bytes, read_failure) = std::thread::scope(|scope| {
+            let drain = scope.spawn(move || {
+                let mut bytes = Vec::new();
+                let read = stderr.read_to_end(&mut bytes);
+                (bytes, read)
+            });
+            let mut bytes = Vec::new();
+            let mut line = Vec::new();
+            let mut failure = None;
+            loop {
+                line.clear();
+                match stdout.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        on_line(&line);
+                        bytes.extend_from_slice(&line);
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            let (err_bytes, err_read) = drain.join().expect("the stderr reader does not panic");
+            (bytes, err_bytes, failure.or(err_read.err()))
+        });
+        if let Some(cause) = read_failure {
+            // A pipe that failed to read leaves rsync blocked on a full one.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(spawn_error(cause));
+        }
+        let status = child.wait().map_err(spawn_error)?;
         Ok(Outcome {
-            code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
+            code: status.code(),
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
         })
     }
 }
@@ -961,6 +1020,27 @@ mod tests {
     }
 
     #[test]
+    fn the_counted_mirror_is_the_dry_run_with_a_sized_listing() {
+        let (_fake, rsync) = probed_fake();
+        let collection = Path::new("/Users/jakob/projects");
+        let counted = rsync.mirror_counted(&options(), collection, &nas());
+        let dry = rsync.mirror(&options(), collection, &nas(), true);
+
+        let expected: Vec<String> = argv(&dry)
+            .into_iter()
+            .map(|arg| {
+                if arg == "--itemize-changes" {
+                    "--out-format=%i %l %n%L".to_string()
+                } else {
+                    arg
+                }
+            })
+            .collect();
+        assert_eq!(argv(&counted), expected);
+        assert_eq!(argv(&counted)[0], "-n");
+    }
+
+    #[test]
     fn the_mirror_argv_is_the_one_of_the_spec() {
         let (_fake, rsync) = probed_fake();
         let call = rsync.mirror(
@@ -1273,6 +1353,59 @@ mod tests {
         assert_eq!(calls[1][1..], argv(&call)[..]);
         let env = String::from_utf8(fake.read("env.log")).expect("text");
         assert_eq!(env, "LC_ALL=C\nLC_ALL=C\n");
+    }
+
+    #[test]
+    fn run_observed_hands_over_each_line_while_rsync_still_runs() {
+        let (fake, rsync) = probed_fake();
+        fake.answer(1, "one\ntwo\nthree\n", "", 0);
+        fake.pace(1, "0.2");
+        let call = rsync.list(&options(), &nas());
+        let started = std::time::Instant::now();
+        let mut arrivals = Vec::new();
+
+        let outcome = call
+            .run_observed(&mut |line| arrivals.push((line.to_vec(), started.elapsed())))
+            .expect("the fake runs");
+
+        assert_eq!(outcome.stdout, b"one\ntwo\nthree\n");
+        let lines: Vec<&[u8]> = arrivals.iter().map(|(line, _)| line.as_slice()).collect();
+        assert_eq!(lines, [&b"one\n"[..], b"two\n", b"three\n"]);
+        assert!(
+            arrivals[0].1 < std::time::Duration::from_millis(500),
+            "{:?}",
+            arrivals[0].1
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(600));
+    }
+
+    #[test]
+    fn run_observed_does_not_stall_on_a_full_standard_error_and_returns_what_run_returns() {
+        let (fake, rsync) = probed_fake();
+        fake.answer(1, "a\nb\n", "", 24);
+        fake.fill_stderr(1, 300_000);
+        fake.answer(2, "a\nb\n", "", 24);
+        fake.fill_stderr(2, 300_000);
+        let call = rsync.list(&options(), &nas());
+
+        let observed = call.run_observed(&mut |_| {}).expect("the fake runs");
+        let plain = call.run().expect("the fake runs");
+
+        assert_eq!(observed, plain);
+        assert_eq!(observed.code, Some(24));
+        assert_eq!(observed.stderr.len(), 300_000);
+    }
+
+    #[test]
+    fn run_observed_of_a_program_that_cannot_start_is_a_spawn_error() {
+        let call = Call {
+            program: "/nonexistent/rsync".into(),
+            args: Vec::new(),
+        };
+        assert!(matches!(
+            call.run_observed(&mut |_| {}),
+            Err(RsyncError::Spawn { .. })
+        ));
     }
 
     // =========================================================

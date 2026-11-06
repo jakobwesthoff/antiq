@@ -5,11 +5,15 @@
 //! Steps 5 to 8 of `push`: the marker and the mirror.
 
 use super::PushError;
+use super::live::{Forecast, Live};
 use super::precheck::{Runner, Scratch};
 use super::summary;
+use crate::progress::Observer;
+use crate::relpath::RelPath;
 use crate::target::marker::{self, Marker};
 use crate::target::rsync::{Options, Outcome, Rsync};
 use crate::target::url::TargetUrl;
+use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 
@@ -143,6 +147,29 @@ pub(super) struct Mirrored {
     /// would), in order.
     pub stdouts: Vec<Vec<u8>>,
     pub second_pass: bool,
+}
+
+/// Runs the mirror as a dry run that lists the sizes and tells the
+/// observer which pieces will change. Nothing is returned when the dry
+/// run fails, changes nothing or lists nothing that can be read: the
+/// real run then goes on without progress, and says what is wrong itself.
+pub(super) fn forecast<'a>(
+    mirror: &Mirror,
+    folders: &[RelPath],
+    observer: &'a dyn Observer,
+) -> Option<RefCell<Live<'a>>> {
+    let call = mirror
+        .rsync
+        .mirror_counted(mirror.options, mirror.collection, mirror.url);
+    let outcome = call.run().ok()?;
+    if !matches!(outcome.code, Some(0 | 24)) {
+        return None;
+    }
+    let found = Forecast::from_sized(&summary::parse_sized(&outcome.stdout), folders);
+    if found.is_empty() {
+        return None;
+    }
+    Some(RefCell::new(Live::new(found, folders.to_vec(), observer)))
 }
 
 /// Runs the mirror (step 6), and after deletions the second pass (step 7).

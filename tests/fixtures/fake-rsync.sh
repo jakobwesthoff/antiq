@@ -13,6 +13,8 @@
 #   stderr        printed verbatim to standard error by a transfer
 #   exit          exit status of a transfer (default 0)
 #   signal        when present, a transfer kills itself with SIGKILL
+#   pace          seconds a transfer waits after each line of its stdout
+#   stderr_fill   bytes a transfer writes to stderr before anything else
 #
 # A run with several transfers answers each differently: the Nth transfer
 # (counted from 1, versions not counted) reads stdout.N, stderr.N, exit.N
@@ -73,9 +75,21 @@ answer() {
 if [ -n "$(answer signal)" ]; then
     kill -KILL $$
 fi
-file=$(answer stdout)
+file=$(answer stderr_fill)
 if [ -n "$file" ]; then
-    cat "$file"
+    head -c "$(cat "$file")" /dev/zero | tr '\0' 'x' >&2
+fi
+file=$(answer stdout)
+pace=$(answer pace)
+if [ -n "$file" ]; then
+    if [ -n "$pace" ]; then
+        while IFS= read -r line; do
+            printf '%s\n' "$line"
+            sleep "$(cat "$pace")"
+        done <"$file"
+    else
+        cat "$file"
+    fi
 fi
 file=$(answer stderr)
 if [ -n "$file" ]; then

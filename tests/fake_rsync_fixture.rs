@@ -74,3 +74,44 @@ fn the_log_splits_into_calls_with_empty_arguments_kept() {
     );
     assert!(fake.dir().join("rsync").exists());
 }
+
+#[test]
+fn a_paced_transfer_prints_a_line_and_waits_before_the_next() {
+    let fake = FakeRsync::new(RSYNC_3_5_1);
+    fake.answer(1, "one\ntwo\nthree\n", "", 0);
+    fake.pace(1, "0.2");
+    let started = std::time::Instant::now();
+    let mut child = Command::new(fake.path())
+        .arg("a")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the fixture runs");
+    let mut lines = std::io::BufReader::new(child.stdout.take().expect("piped"));
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut lines, &mut first).expect("a line comes");
+    let first_at = started.elapsed();
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut lines, &mut rest).expect("the rest comes");
+    child.wait().expect("it ends");
+
+    assert_eq!((first.as_str(), rest.as_str()), ("one\n", "two\nthree\n"));
+    assert!(
+        first_at < std::time::Duration::from_millis(500),
+        "{first_at:?}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(600),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_transfer_can_fill_the_standard_error_pipe_before_it_prints() {
+    let fake = FakeRsync::new(RSYNC_3_5_1);
+    fake.answer(1, "line\n", "", 0);
+    fake.fill_stderr(1, 300_000);
+    let output = run(&fake, &["a"]);
+    assert_eq!(output.stdout, b"line\n");
+    assert_eq!(output.stderr.len(), 300_000);
+}

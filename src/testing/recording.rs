@@ -31,6 +31,9 @@ pub enum Seen {
     Dropped {
         name: String,
     },
+    Paused {
+        name: String,
+    },
 }
 
 impl Seen {
@@ -60,6 +63,7 @@ impl Seen {
                 outcome,
             } => format!("finished {name} {bytes} {outcome:?}"),
             Seen::Dropped { name } => format!("dropped {name}"),
+            Seen::Paused { name } => format!("paused {name}"),
         }
     }
 
@@ -69,7 +73,8 @@ impl Seen {
             Seen::Started { name, .. }
             | Seen::Operation { name, .. }
             | Seen::Finished { name, .. }
-            | Seen::Dropped { name } => Some(name),
+            | Seen::Dropped { name }
+            | Seen::Paused { name } => Some(name),
         }
     }
 }
@@ -132,6 +137,9 @@ impl Observer for Recorder {
                 outcome: outcome.clone(),
             },
             Event::Dropped { name } => Seen::Dropped {
+                name: name.to_string(),
+            },
+            Event::Paused { name } => Seen::Paused {
                 name: name.to_string(),
             },
         };

@@ -114,6 +114,10 @@ pub enum Event<'a> {
     },
     /// A planned item turned out not to be due when it came to its turn.
     Dropped { name: &'a str },
+    /// The item has started and leaves its card until its next operation:
+    /// the next [`Event::Operation`] of that name reopens the same item.
+    /// It has not finished and gets its `Finished` only when it does.
+    Paused { name: &'a str },
 }
 
 /// Receives the events of a run, from any thread.
@@ -237,6 +241,7 @@ mod tests {
                 ),
                 Event::Finished { name, outcome, .. } => format!("finished {name} {outcome:?}"),
                 Event::Dropped { name } => format!("dropped {name}"),
+                Event::Paused { name } => format!("paused {name}"),
             };
             self.0.lock().expect("no test thread panics").push(text);
         }

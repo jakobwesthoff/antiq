@@ -69,6 +69,23 @@ impl FakeRsync {
         }
     }
 
+    /// Makes the `call`th transfer wait `seconds` after each line of its
+    /// standard output.
+    pub fn pace(&self, call: usize, seconds: &str) {
+        fs::write(self.dir.path().join(format!("pace.{call}")), seconds)
+            .expect("the directory is writable");
+    }
+
+    /// Makes the `call`th transfer write `bytes` bytes to standard error
+    /// before anything else, more than a pipe holds.
+    pub fn fill_stderr(&self, call: usize, bytes: usize) {
+        fs::write(
+            self.dir.path().join(format!("stderr_fill.{call}")),
+            bytes.to_string(),
+        )
+        .expect("the directory is writable");
+    }
+
     /// Makes the `call`th transfer kill itself with SIGKILL.
     pub fn kill_on(&self, call: usize) {
         fs::write(self.dir.path().join(format!("signal.{call}")), "")

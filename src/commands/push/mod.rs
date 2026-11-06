@@ -10,6 +10,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::machine::MachineError;
 use crate::plan::{HeldDryRun, Plan};
+use crate::progress::Observer;
 use crate::relpath::RelPath;
 use crate::report::setting_notes;
 use crate::run::{self, RunError, Started};
@@ -24,6 +25,7 @@ pub use outcome::{PushAction, PushOutcome, PushReport};
 pub use store::VersionCommand;
 use summary::Changes;
 
+mod live;
 mod mirror;
 mod outcome;
 mod precheck;
@@ -212,11 +214,32 @@ pub struct PushRequest {
     pub dry_run: bool,
 }
 
+/// [`push`], telling `observer` how the mirror goes. On a real run, the
+/// mirror is first run as a dry run that lists the sizes, so that the
+/// observer knows the pieces and the files ahead.
+pub fn push_observed(
+    collection: &Collection,
+    request: &PushRequest,
+    clock: &dyn Clock,
+    observer: &dyn Observer,
+) -> Result<PushOutcome, PushError> {
+    push_watched(collection, request, clock, Some(observer))
+}
+
 /// Pushes the collection to its target.
 pub fn push(
     collection: &Collection,
     request: &PushRequest,
     clock: &dyn Clock,
+) -> Result<PushOutcome, PushError> {
+    push_watched(collection, request, clock, None)
+}
+
+fn push_watched(
+    collection: &Collection,
+    request: &PushRequest,
+    clock: &dyn Clock,
+    observer: Option<&dyn Observer>,
 ) -> Result<PushOutcome, PushError> {
     // Everything that needs no lock is checked first, so that a push without
     // a usable target says so also while another run holds the lock.
@@ -352,14 +375,33 @@ pub fn push(
     }
 
     recheck_directory(&call_url, directory)?;
+    let mirror_job = mirror::Mirror {
+        rsync: &rsync,
+        options: &options,
+        collection: collection.root(),
+        url: &call_url,
+    };
+    // A dry run has no progress to show, and without an observer nobody
+    // needs the sizes.
+    let live = match observer {
+        Some(observer) if !request.dry_run => mirror::forecast(&mirror_job, &folders, observer),
+        _ => None,
+    };
+    // Only the first call is the mirror itself: the checks and the second
+    // pass that may follow it are told to nobody.
+    let first = std::cell::Cell::new(true);
     let mirrored = mirror::run_mirror(
-        &mirror::Mirror {
-            rsync: &rsync,
-            options: &options,
-            collection: collection.root(),
-            url: &call_url,
+        &mirror_job,
+        &|call| match &live {
+            Some(live) if first.replace(false) => {
+                let outcome = call.run_observed(&mut |line| live.borrow_mut().line(line))?;
+                if matches!(outcome.code, Some(0 | 24)) {
+                    live.borrow_mut().finish();
+                }
+                Ok(outcome)
+            }
+            _ => call.run(),
         },
-        &|call| call.run(),
         request.dry_run,
     )?;
     report.vanished = mirrored.vanished;

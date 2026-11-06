@@ -110,27 +110,64 @@ fn path_of(field: &[u8]) -> Vec<u8> {
 pub(super) fn parse_itemized(stdout: &[u8]) -> Vec<Item> {
     stdout
         .split(|byte| *byte == b'\n')
+        .filter_map(item_of_line)
+        .collect()
+}
+
+/// The change an itemized line describes, if it is one of a non-directory.
+pub(super) fn item_of_line(line: &[u8]) -> Option<Item> {
+    let (flags, field) = split_item(line)?;
+    item_of(flags, field)
+}
+
+fn item_of(flags: &[u8], field: &[u8]) -> Option<Item> {
+    if flags == b"*deleting" {
+        // A directory is listed with a trailing slash and counts through
+        // the files that left with it.
+        return (!field.ends_with(b"/")).then(|| Item {
+            change: Change::Deleted,
+            path: path_of(field),
+        });
+    }
+    if flags[1] == b'd' {
+        return None;
+    }
+    let created = flags[2..].iter().all(|byte| *byte == b'+');
+    Some(Item {
+        change: if created {
+            Change::Created
+        } else {
+            Change::Updated
+        },
+        path: path_of(field),
+    })
+}
+
+/// A change with the size rsync lists for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SizedItem {
+    pub item: Item,
+    /// The bytes of the file; 0 for a deletion.
+    pub bytes: u64,
+}
+
+/// The changes of non-directories in the output of the counted dry run
+/// (`%i %l %n%L`). A line whose size is not a number is left out.
+pub(super) fn parse_sized(stdout: &[u8]) -> Vec<SizedItem> {
+    stdout
+        .split(|byte| *byte == b'\n')
         .filter_map(|line| {
             let (flags, field) = split_item(line)?;
-            if flags == b"*deleting" {
-                // A directory is listed with a trailing slash and counts
-                // through the files that left with it.
-                return (!field.ends_with(b"/")).then(|| Item {
-                    change: Change::Deleted,
-                    path: path_of(field),
-                });
-            }
-            if flags[1] == b'd' {
+            // The size is the first word of the path field.
+            let space = field.iter().position(|byte| *byte == b' ')?;
+            let digits = &field[..space];
+            if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
                 return None;
             }
-            let created = flags[2..].iter().all(|byte| *byte == b'+');
-            Some(Item {
-                change: if created {
-                    Change::Created
-                } else {
-                    Change::Updated
-                },
-                path: path_of(field),
+            let bytes = std::str::from_utf8(digits).ok()?.parse().ok()?;
+            Some(SizedItem {
+                item: item_of(flags, &field[space + 1..])?,
+                bytes,
             })
         })
         .collect()
@@ -150,6 +187,33 @@ pub(super) fn has_deletion(stdout: &[u8]) -> bool {
         .any(|line| line.starts_with(b"*deleting"))
 }
 
+/// The folder a path belongs to.
+pub(super) struct Owner {
+    /// The index in the folders given.
+    pub index: usize,
+    /// The path lies in the store, not in the live folder.
+    pub in_store: bool,
+}
+
+/// The longest of `folders` that `path` is, or lies below. A path in
+/// `.antiq/pieces/<folder>/...` belongs to `<folder>` and is in the store.
+pub(super) fn owner(path: &[u8], folders: &[RelPath]) -> Option<Owner> {
+    let stored = path.strip_prefix(b".antiq/pieces/");
+    let path = stored.unwrap_or(path);
+    folders
+        .iter()
+        .enumerate()
+        .filter(|(_, folder)| {
+            let name = folder.as_bytes();
+            path == name || (path.starts_with(name) && path[name.len()..].starts_with(b"/"))
+        })
+        .max_by_key(|(_, folder)| folder.as_bytes().len())
+        .map(|(index, _)| Owner {
+            index,
+            in_store: stored.is_some(),
+        })
+}
+
 /// Counts `items` per piece. `folders` are the live pieces and the store
 /// folders; a path belongs to the longest of them that it is, or lies
 /// below, and `.antiq/pieces/<folder>/...` belongs to `<folder>`.
@@ -157,21 +221,8 @@ pub(super) fn group(items: &[Item], folders: &[RelPath]) -> Changes {
     let mut per_folder: HashMap<usize, Counts> = HashMap::new();
     let mut changes = Changes::default();
     for item in items {
-        let path = item
-            .path
-            .strip_prefix(b".antiq/pieces/")
-            .unwrap_or(&item.path);
-        let owner = folders
-            .iter()
-            .enumerate()
-            .filter(|(_, folder)| {
-                let name = folder.as_bytes();
-                path == name || (path.starts_with(name) && path[name.len()..].starts_with(b"/"))
-            })
-            .max_by_key(|(_, folder)| folder.as_bytes().len())
-            .map(|(index, _)| index);
-        let counts = match owner {
-            Some(index) => per_folder.entry(index).or_default(),
+        let counts = match owner(&item.path, folders) {
+            Some(owner) => per_folder.entry(owner.index).or_default(),
             None => &mut changes.other,
         };
         match item.change {
@@ -227,6 +278,90 @@ mod tests {
                 (Change::Created, "a/hard".into()),
             ]
         );
+    }
+
+    fn sized(text: &str) -> Vec<(Change, String, u64)> {
+        parse_sized(text.as_bytes())
+            .into_iter()
+            .map(|sized| {
+                (
+                    sized.item.change,
+                    String::from_utf8_lossy(&sized.item.path).into_owned(),
+                    sized.bytes,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_sized_listing_gives_every_change_its_bytes() {
+        let text = ">f+++++++++ 5 a.txt\n\
+                    >f.st...... 120 a/changed.txt\n\
+                    cL+++++++++ 5 lnk -> a.txt\n\
+                    >f+++++++++ 5 d/sp ace.txt\n\
+                    *deleting   0 gone/f\n\
+                    *deleting   0 stale\n";
+        assert_eq!(
+            sized(text),
+            [
+                (Change::Created, "a.txt".into(), 5),
+                (Change::Updated, "a/changed.txt".into(), 120),
+                (Change::Created, "lnk".into(), 5),
+                (Change::Created, "d/sp ace.txt".into(), 5),
+                (Change::Deleted, "gone/f".into(), 0),
+                (Change::Deleted, "stale".into(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn directories_and_lines_without_a_size_are_not_sized_items() {
+        let text = "sending incremental file list\n\
+                    cd+++++++++ 96 d/\n\
+                    *deleting   0 gone/\n\
+                    >f+++++++++ many a.txt\n\
+                    >f+++++++++ a.txt\n\
+                    >f+++++++++ 12\n";
+        assert_eq!(sized(text), []);
+    }
+
+    #[test]
+    fn a_real_rsync_lists_what_the_parser_reads() {
+        let path_var = std::env::var_os("PATH").expect("PATH is set");
+        let rsync = crate::target::rsync::Rsync::resolve(None, &path_var).expect(
+            "these tests need rsync 3.2.4 or newer on PATH or in the usual install directories",
+        );
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let (from, to) = (temp.path().join("from"), temp.path().join("to"));
+        std::fs::create_dir_all(from.join("d")).expect("dirs");
+        std::fs::create_dir_all(to.join("gone")).expect("dirs");
+        std::fs::write(from.join("a.txt"), "hello").expect("file");
+        std::fs::write(from.join("d/sp ace.txt"), "xx yy").expect("file");
+        std::os::unix::fs::symlink("a.txt", from.join("lnk")).expect("link");
+        std::fs::write(to.join("gone/f"), "old").expect("file");
+        let options = crate::target::rsync::Options {
+            fsync: false,
+            rsync_path: None,
+            rsync_args: Vec::new(),
+        };
+        let url = crate::target::url::TargetUrl::Path { root: to.clone() };
+
+        let outcome = rsync
+            .mirror_counted(&options, &from, &url)
+            .run()
+            .expect("rsync runs");
+
+        assert_eq!(outcome.code, Some(0));
+        assert_eq!(
+            sized(&String::from_utf8_lossy(&outcome.stdout)),
+            [
+                (Change::Created, "a.txt".into(), 5),
+                (Change::Created, "lnk".into(), 5),
+                (Change::Created, "d/sp ace.txt".into(), 5),
+                (Change::Deleted, "gone/f".into(), 0),
+            ]
+        );
+        assert!(!to.join("a.txt").exists(), "a dry run sends nothing");
     }
 
     #[test]
