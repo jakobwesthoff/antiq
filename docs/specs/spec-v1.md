@@ -314,6 +314,18 @@ document that breaks either rule is refused when it is read.
 Unknown fields are kept on rewrite. A file with a higher `format` is
 read-only and any write to it fails with a clear error. (ADR 0053)
 
+The `action` of a history entry is one of these:
+
+| Action | Written by |
+|--------|------------|
+| `archive` | `archive` |
+| `reclaim` | reclaiming |
+| `unearth` | `unearth` |
+| `fork` | `fork`, on the old and on the new ID |
+| `sync` | `sync` |
+| `import` | `import` |
+| `resolve` | `resolve` |
+
 Paths and names are stored as the bytes the filesystem holds. In the
 escaped form, valid UTF-8 stays as it is, `%` becomes `%25`, and every
 byte that is not part of valid UTF-8 becomes `%XX`, with upper-case hex
