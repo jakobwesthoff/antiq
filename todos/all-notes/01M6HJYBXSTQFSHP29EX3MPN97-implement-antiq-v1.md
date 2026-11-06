@@ -1280,7 +1280,7 @@ its finishing commit. Acceptance lines in an entry add to this.
   all durable before the next step; tracking `removing` and rename into
   `trash/`; walk the trashed tree against the verify's lstat record and
   on a difference rename it back and treat it as unearthed at the
-  committed version, or move it to `recovered/<ulid>-<time>/` when its
+  version of the new payload, or move it to `recovered/<ulid>-<time>/` when its
   path is taken; delete and clear the entry; when a rename fails, walk
   and compare in place and delete there with the entry `removing`;
   upload left to `sync`), "Objects" (`archive` mints IDs for new
@@ -2733,6 +2733,20 @@ the same commit; the lead checks that at acceptance.
   into `recovered/` is one function shared with `repair.rs`. A payload
   without metadata is the todo "Remove local payloads that no metadata
   names".
+- 2026-11-04 (merged, plan review and opus diff review 9, all fixed):
+  a run error keeps the full report (failing and unstarted pieces are
+  `skipped`, the index is updated, exit 3); a stored piece whose removal
+  stopped is an `unfinished` row with its ID and `where` (trash,
+  recovered, in_place; console word `stuck`), exit 3; `record` discards
+  payload and listing only on positive evidence that the metadata was
+  not written; an in-place delete after a refused rename warns. For
+  I41: `row_lines` in `cli/cmd/archive.rs` is `pub(super)` and draws the
+  finished rows. `SpaceLedger` reserves the sum of parallel pieces and
+  holds a piece's share until its package and listing are stored or
+  removed. `DurableArchive` is the token that the payload, listing and
+  metadata are durable before the `removing` entry. Pieces sharing
+  hard-linked files can come back unearthed when run side by side: todo
+  "Archive pieces that share hard-linked files on one worker".
 
 ### I20
 
@@ -2766,6 +2780,26 @@ the same commit; the lead checks that at acceptance.
   run repair writes the missing entry of an own `import` object with a
   matching local payload; I23 maps ENOTCONN, EHOSTDOWN, EHOSTUNREACH,
   ENETUNREACH and ETIMEDOUT on a path remote's root to away.
+- 2026-11-04 (merged, plan review 16 and opus diff review 4, all fixed):
+  `import` checks the tar structure (`extract::scan`, 64 KiB record cap)
+  before it reads the package whole; `read_package`, `read_package_from`
+  and `verify_strict` take only packages antiq wrote in this run or that
+  passed `scan` (rustdoc), as a scan inside them would decompress every
+  archive twice. A damaged tracking entry skips its file only. The
+  predicate of an unfinished import is `repair::unfinished_import`,
+  shared by the repair and the dry run. macOS `tar --zstd` archives carry
+  no checksum and are refused with the `zstd -dc | zstd -19 --long=27`
+  rewrite in the message.
+
+### I22
+
+- 2026-11-04 (merged, opus diff review 3, all fixed): `Store::check_writable`
+  is `write_pending`'s pre-flight, called before the rename. The old ID's
+  manifest stays for I32. With `--name`, a failure of the first write
+  renames the folder back only when `meta.pending` holds no or another
+  document; any other failure after the rename is
+  `ForkError::AfterRename` naming the new path. `fork <old id>` on a
+  folder another ID holds refuses with that ID.
 
 ### I23
 
