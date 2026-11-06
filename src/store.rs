@@ -275,17 +275,23 @@ impl<'c> Store<'c> {
     /// earlier recorded change that cannot be read is not replaced either.
     pub fn write_pending(&self, _lock: &RunLock, metadata: &Metadata) -> Result<(), StoreError> {
         let bytes = meta::to_bytes(metadata)?;
-        // An earlier recorded change that cannot be read is the only copy
-        // of that change; this write would replace it.
-        let pending_path = self.collection.meta_pending_path(metadata.id);
-        if let Some(pending) = read_if_present(&pending_path)? {
-            parse_for(metadata.id, &pending)
-                .map_err(|reason| StoreError::PendingUnreadable { reason })?;
-        }
-        self.check_highest_is_writable(metadata.id)?;
+        self.check_writable(metadata.id)?;
         self.ensure_object_dir(metadata.id)?;
         write_atomic(&self.collection.meta_pending_path(metadata.id), &bytes)?;
         Ok(())
+    }
+
+    /// Fails with the error [`Store::write_pending`] would give for the
+    /// object, without writing. A caller that does something irreversible
+    /// before its write asks first.
+    pub fn check_writable(&self, id: ObjectId) -> Result<(), StoreError> {
+        // An earlier recorded change that cannot be read is the only copy
+        // of that change; a write would replace it.
+        let pending_path = self.collection.meta_pending_path(id);
+        if let Some(pending) = read_if_present(&pending_path)? {
+            parse_for(id, &pending).map_err(|reason| StoreError::PendingUnreadable { reason })?;
+        }
+        self.check_highest_is_writable(id)
     }
 
     fn check_highest_is_writable(&self, id: ObjectId) -> Result<(), StoreError> {

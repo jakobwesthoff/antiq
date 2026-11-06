@@ -350,7 +350,7 @@ impl UnearthReport {
 }
 
 /// The absolute path of a path in the collection.
-fn absolute(collection: &Collection, path: &RelPath) -> String {
+pub(crate) fn absolute(collection: &Collection, path: &RelPath) -> String {
     collection
         .root()
         .join(OsStr::from_bytes(path.as_bytes()))
@@ -560,7 +560,7 @@ fn ancestors(path: &RelPath) -> Vec<RelPath> {
 /// The checks that read the index and the patterns. They are made once, at
 /// planning: the index counts the entry an unearth writes itself, so they
 /// cannot be repeated once that entry is written.
-fn check_planned_target(
+pub(crate) fn check_planned_target(
     rules: &Rules,
     index: &Index,
     id: ObjectId,

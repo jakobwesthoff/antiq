@@ -459,9 +459,9 @@ metadata comes before its entry. `archive` makes payload, listing,
 metadata and the entry (`pending`) durable, then sets `removing` with
 the payload, renames the folder and sets `gone`. `unearth` writes
 `unearthing`, renames, records the metadata change, and only then
-writes `live`. `fork` records the old ID's archived metadata, sets
-its entry `gone` with its local payloads, then records the new ID's
-metadata and entry.
+writes `live`. `fork` renames the folder first when `--name` is
+given, records the old ID's archived metadata, sets its entry `gone`
+with its local payloads, then records the new ID's metadata and entry.
 
 A renamed folder is a new piece, and the entry of its old path becomes
 gone. A gone piece keeps its live package; `unearth` restores it from
@@ -496,7 +496,7 @@ read or has a higher `format`.
 | `archive` | lifecycle `archived`, a new archive payload, history |
 | reclaiming | lifecycle `archived`, live payload removed, history |
 | `unearth` | lifecycle `live`, owning collection, path and name (the target), history |
-| `fork` | old ID: lifecycle `archived`, live payload removed; new ID created |
+| `fork` | old ID: lifecycle `archived`, live payload removed, history; new ID created with source `fork`, lifecycle `live`, no payload, history |
 | `sync` | live payload replaced, `verified` times, history |
 | `import` | new ID with its archive payload |
 | `resolve` | as the decision table under Command line says |
@@ -1356,12 +1356,46 @@ collection's ID.
 
 ### fork
 
-`fork <piece> [--name <name>]` works only on unearthed pieces. It gives
-the piece a new ID with the time of the fork and keeps the tracking
-entry's unearthed time; a fork made while unearthing another
-collection's piece uses that unearthing time. `--name` renames the folder
-within its parent; a taken name refuses. The old ID's live package is
-deleted. Unearthing the old ID afterwards needs `--to`.
+`fork <piece> [--name <name>]` works only on unearthed pieces: the
+tracking entry says `live`, the folder is there, the metadata has an
+archive payload and its owning collection is this one. Every other piece
+is refused with the next step. A live piece without an archive has
+nothing to fork from. An archived, remote-only or gone piece has no
+folder, and `unearth` brings it back; where a folder is at its path, that
+folder is a new piece, and `archive` or `sync` gives it an ID. Another
+collection's live piece is forked by `unearth`. A version of the metadata
+that cannot be written on top of, as under "Metadata changes", refuses
+before anything is renamed.
+
+The new ID is minted with the time of the fork and the source `fork`. It
+starts live and owned by this collection, without a payload until it is
+archived, and keeps the tracking entry's unearthed time; a fork made
+while unearthing another collection's piece uses that unearthing time.
+The old ID becomes archived, and its entry `gone` keeps its local
+payloads. A diverged folder and a replacing-with-loss decision belong to
+the folder, so the new ID has neither and the old entry drops both; a
+version conflict and a superseded archive are about the old ID and stay
+on it. The old ID's live package is deleted. Unearthing the old ID
+afterwards needs `--to`, as its path belongs to the new ID.
+
+`--name` renames the folder within its parent before anything is
+written. The name is one name: not empty, not `.` or `..`, without `/`
+or a NUL byte; anything else is a usage error. The new path must be
+selected by the patterns, must not be excluded, `.antiq/` or inside
+another piece, and nothing may be there, a file or a symlink included;
+otherwise the fork is refused and nothing has changed. An archived
+object recorded at the new path does not make it taken. A name equal to
+the folder's current name renames nothing and the fork goes ahead.
+
+A fork that stops after the rename leaves the old ID unchanged and the
+folder under its new name, a new piece as after any rename; `unearth` of
+the old ID restores its archive to the old path. A fork that stops after
+the old ID's metadata is written is finished by running `fork` again,
+which records one `fork` history entry. A fork that stops after the old
+ID's entry is written, before the new ID's metadata, leaves the old ID
+archived and the folder a new piece next to it. A fork that stops
+between the new ID's metadata and its entry loses the unearthed time:
+the repair at the start of the next run writes the new entry without it.
 
 ### import
 
@@ -1646,7 +1680,7 @@ brake would hold.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, the URL of `remote add` is invalid, or `--host-key-alias` is given with a path URL | |
+| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, the URL of `remote add` is invalid, `--host-key-alias` is given with a path URL, or the `--name` of `fork` is not a name | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
 | `unknown_reference` | 1 | a piece reference matches no object | |
