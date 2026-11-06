@@ -6,11 +6,6 @@
 //! fill a disk, change a folder between two steps or record the order of
 //! the flushes.
 
-#![allow(
-    dead_code,
-    reason = "the pipeline that uses them follows in a later commit"
-)]
-
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
 use crate::filesystem::moves::{Moved, move_dir};

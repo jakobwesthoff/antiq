@@ -4,14 +4,9 @@
 
 //! Steps 5 to 7 of `archive`: the folder of a stored piece leaves its path.
 
-#![allow(
-    dead_code,
-    reason = "the pipeline that calls it follows in a later commit"
-)]
-
-use super::ArchiveError;
 use super::seams::Seams;
 use super::store::{remove_staging, staging_chain};
+use super::{ArchiveError, chain, went};
 use crate::archive::Verified;
 use crate::archive::verify::LstatRecord;
 use crate::collection::Collection;
@@ -20,10 +15,10 @@ use crate::filesystem::atomic::{Durable, create_dir_chain, flush_dir_of};
 use crate::filesystem::io_error;
 use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
-use crate::repair::{Destination, give_back as repair_give_back};
+use crate::repair::{Destination, flush_dir_unless_gone, give_back as repair_give_back};
 use crate::report::Warning;
 use crate::rules::PieceRules;
-use crate::select::Rules;
+use crate::select::{Rules, SelectError};
 use crate::tree::{PieceTree, Problem};
 use crate::versions::names::VersionFileNames;
 use crate::versions::stamp::Stamp;
@@ -69,6 +64,12 @@ pub(crate) enum Outcome {
     Differs {
         destination: Destination,
         reason: String,
+    },
+    /// The re-walk ran out of file descriptors, so the tree could not be
+    /// compared. It went back as a changed one does; the version stays.
+    OutOfDescriptors {
+        destination: Destination,
+        cause: String,
     },
     /// The folder, or a copy of it, is where the error says and the
     /// repairs of the next run finish or undo the step.
@@ -179,8 +180,21 @@ fn remove(
                     format!("cannot restore the mode of the moved tree: {error}"),
                 );
             }
+            // The version no longer goes back through its staging.
+            remove_staging(
+                context.run_dirs,
+                &context.collection.tmp_dir(),
+                &staging_chain(request.stamp, request.stored),
+            );
         }
-        Err(source) => return take_version_back(context, request, trash_error(source)),
+        Err(source) => {
+            // The chain made for the rename stays empty when it is refused.
+            {
+                let _guard = guard();
+                remove_empty(durable, &roots.trash, &places.above);
+            }
+            return take_version_back(context, request, trash_error(source));
+        }
     }
     // The archive is durable. A rename that does not reach the disk puts
     // the folder back at its path, so a failed flush is only a warning.
@@ -202,8 +216,8 @@ fn remove(
     // Step 6: walk the trashed tree again and compare it
     // =========================================================
 
-    if let Some(reason) = rewalk(context, request, &roots, &places) {
-        return give_back(context, request, &roots, &places, reason, warnings);
+    if let Some(mismatch) = rewalk(context, request, &roots, &places) {
+        return give_back(context, request, &roots, &places, mismatch, warnings);
     }
 
     // =========================================================
@@ -247,16 +261,23 @@ fn remove(
             }
         }
         Err(source) => {
-            let error = doomed_error(source);
+            let reason = format!("cannot move {piece} into doomed/{stamp_text}: {source}");
             return match give_back(
                 context,
                 request,
                 &roots,
                 &places,
-                error.to_string(),
+                Mismatch::Differs(reason),
                 warnings,
             ) {
-                Outcome::Differs { .. } => Outcome::Kept(Box::new(error)),
+                Outcome::Differs { destination, .. } => {
+                    Outcome::Kept(Box::new(ArchiveError::DoomedRefused {
+                        piece: piece.clone(),
+                        stamp: stamp_text.clone(),
+                        went: went(destination, request.stamp, request.live),
+                        source: Box::new(source),
+                    }))
+                }
                 kept => kept,
             };
         }
@@ -270,7 +291,7 @@ fn remove(
         }));
     }
     let _guard = guard();
-    if let Err(source) = flush_dir_of(durable, &roots.doomed, &places.above) {
+    if let Err(source) = flush_dir_unless_gone(durable, &roots.doomed, &places.above) {
         warn(
             warnings,
             format!("the deletion cannot be flushed: {source}"),
@@ -281,8 +302,9 @@ fn remove(
 }
 
 /// Removes the empty folders of `chain` below `root`, deepest first. A
-/// folder that is not empty ends it: another piece uses it. What stays is
-/// left to repair 5, so a failure is not reported.
+/// folder that is not empty ends it: another piece uses it. A failure is
+/// not reported: repairs 3 and 4 remove the empty chains of `doomed/` and
+/// `trash/` at the start of the next run.
 fn remove_empty(durable: &dyn Durable, root: &TreeRoot, chain: &RelPath) {
     let _ = remove_empty_chain_with(durable, root, chain);
 }
@@ -302,7 +324,7 @@ fn take_version_back(
         Outcome::Kept(Box::new(ArchiveError::Rollback {
             piece: piece.clone(),
             stamp: stamp_text.clone(),
-            cause: cause.to_string(),
+            cause: chain(&cause),
             source,
         }))
     };
@@ -313,16 +335,6 @@ fn take_version_back(
         Ok(tmp) => tmp,
         Err(source) => return failed(Box::new(io_error("open", &tmp_dir)(source))),
     };
-    let created = {
-        let _guard = context
-            .run_dirs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        create_dir_chain(durable, &tmp, &chain)
-    };
-    if let Err(source) = created {
-        return failed(Box::new(source));
-    }
     let pieces_dir = context.collection.pieces_dir();
     let back = TreeRoot::open(&pieces_dir)
         .map_err(io_error("open", &pieces_dir))
@@ -349,13 +361,21 @@ fn take_version_back(
     Outcome::Kept(Box::new(cause))
 }
 
+/// Why the trashed tree is not the verified one.
+enum Mismatch {
+    /// The tree differs from the verified one, or cannot be walked.
+    Differs(String),
+    /// The tree could not be read for lack of file descriptors.
+    OutOfDescriptors(String),
+}
+
 /// Why the trashed tree is not the verified one, or `None` when it is.
 fn rewalk(
     context: &RemoveContext<'_>,
     request: &RemoveRequest<'_>,
     roots: &Roots,
     places: &Places,
-) -> Option<String> {
+) -> Option<Mismatch> {
     // The exclude list applies to the tree where it lies in trash/.
     let exclude: Vec<RelPath> = request
         .exclude
@@ -366,7 +386,10 @@ fn rewalk(
         .and_then(|rules| rules.bind_with(&roots.trash, context.seams.walk_hooks()))
     {
         Ok(select) => select,
-        Err(error) => return Some(error.to_string()),
+        Err(error @ SelectError::OutOfDescriptors { .. }) => {
+            return Some(Mismatch::OutOfDescriptors(error.to_string()));
+        }
+        Err(error) => return Some(Mismatch::Differs(error.to_string())),
     };
     match walk_piece_with(
         &roots.trash,
@@ -375,10 +398,10 @@ fn rewalk(
         request.rules,
         context.seams.walk_hooks(),
     ) {
-        Err(error) => Some(error.to_string()),
+        Err(error) => Some(Mismatch::OutOfDescriptors(error.to_string())),
         Ok(tree) => match tree.problems().first() {
-            Some(problem) => Some(describe(problem)),
-            None => differs(request.verified.record(), &tree),
+            Some(problem) => Some(Mismatch::Differs(describe(problem))),
+            None => differs(request.verified.record(), &tree).map(Mismatch::Differs),
         },
     }
 }
@@ -390,7 +413,7 @@ fn give_back(
     request: &RemoveRequest<'_>,
     roots: &Roots,
     places: &Places,
-    reason: String,
+    mismatch: Mismatch,
     warnings: &mut Vec<Warning>,
 ) -> Outcome {
     let durable = context.seams.durable();
@@ -413,17 +436,25 @@ fn give_back(
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             remove_empty(durable, &roots.trash, &places.above);
-            Outcome::Differs {
-                destination: given.destination,
-                reason,
+            match mismatch {
+                Mismatch::Differs(reason) => Outcome::Differs {
+                    destination: given.destination,
+                    reason,
+                },
+                Mismatch::OutOfDescriptors(cause) => Outcome::OutOfDescriptors {
+                    destination: given.destination,
+                    cause,
+                },
             }
         }
         // The tree stays in trash/, where repair 4 gives it back.
         Err(source) => Outcome::Kept(Box::new(ArchiveError::GiveBack {
             piece: request.live.to_string(),
             stamp: request.stamp.to_string(),
-            reason,
-            source,
+            reason: match mismatch {
+                Mismatch::Differs(reason) | Mismatch::OutOfDescriptors(reason) => reason,
+            },
+            source: Box::new(source),
         })),
     }
 }
@@ -514,6 +545,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const WHEN: &str = "2026-11-04T09:02:11Z";
     const LONG_AGO: i64 = 1_700_000_000;
@@ -536,6 +568,11 @@ mod tests {
         /// Every `lstat` of the walk and of the exclude list runs out of
         /// descriptors.
         out_of_descriptors: bool,
+        /// The first move, the one into `trash/`, is refused.
+        refuse_trash_move: bool,
+        moves: AtomicUsize,
+        /// Runs once the tree is deleted from `doomed/`.
+        after_delete: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
     impl Hooks for Probe {
@@ -574,6 +611,11 @@ mod tests {
             to_root: &TreeRoot,
             to: &RelPath,
         ) -> Result<Moved, FilesystemError> {
+            if self.refuse_trash_move && self.moves.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(io_error("rename", Path::new("piece"))(
+                    io::Error::from_raw_os_error(libc::EACCES),
+                ));
+            }
             let moved = RealSeams.move_dir(from_root, from, to_root, to)?;
             if self.restore_fails {
                 let source = io::Error::from_raw_os_error(libc::EPERM);
@@ -592,7 +634,11 @@ mod tests {
                     io::Error::from_raw_os_error(libc::EACCES),
                 ));
             }
-            RealSeams.remove(root, path)
+            RealSeams.remove(root, path)?;
+            if let Some(change) = &self.after_delete {
+                change();
+            }
+            Ok(())
         }
     }
 
@@ -729,18 +775,46 @@ mod tests {
                 destination,
                 reason,
             } => (*destination, reason),
-            Outcome::Removed => panic!("the folder differs, but it was removed"),
-            Outcome::Kept(error) => panic!("the folder differs, but {error:?}"),
+            other => panic!("the folder differs, but {}", name_of(other)),
         }
+    }
+
+    fn expect_exhausted(removal: &Removal) -> (Destination, &str) {
+        match &removal.outcome {
+            Outcome::OutOfDescriptors { destination, cause } => (*destination, cause),
+            other => panic!("the walk ran out of descriptors, but {}", name_of(other)),
+        }
+    }
+
+    fn name_of(outcome: &Outcome) -> String {
+        match outcome {
+            Outcome::Removed => "the folder was removed".into(),
+            Outcome::Differs { reason, .. } => format!("the folder differs: {reason}"),
+            Outcome::OutOfDescriptors { cause, .. } => format!("out of descriptors: {cause}"),
+            Outcome::Kept(error) => format!("{error:?}"),
+        }
+    }
+
+    /// The OS error numbers on the chain of causes below `error`.
+    fn os_errors(error: &(dyn std::error::Error + 'static)) -> Vec<i32> {
+        let mut found = Vec::new();
+        let mut link = Some(error);
+        while let Some(cause) = link {
+            if let Some(code) = cause
+                .downcast_ref::<io::Error>()
+                .and_then(io::Error::raw_os_error)
+            {
+                found.push(code);
+            }
+            link = cause.source();
+        }
+        found
     }
 
     fn expect_kept(removal: &Removal) -> &ArchiveError {
         match &removal.outcome {
             Outcome::Kept(error) => error,
-            Outcome::Removed => panic!("the folder is kept, but it was removed"),
-            Outcome::Differs { reason, .. } => {
-                panic!("the folder is kept, but it differs: {reason}")
-            }
+            other => panic!("the folder is kept, but {}", name_of(other)),
         }
     }
 
@@ -757,16 +831,13 @@ mod tests {
 
         assert!(
             matches!(removal.outcome, Outcome::Removed),
-            "the folder is removed, but {:?}",
-            match &removal.outcome {
-                Outcome::Kept(error) => format!("{error:?}"),
-                Outcome::Differs { reason, .. } => reason.clone(),
-                Outcome::Removed => String::new(),
-            }
+            "the folder is removed, but {}",
+            name_of(&removal.outcome)
         );
         assert!(!world.temp.root().join("piece").exists());
         assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
         assert_eq!(entries(&antiq(&world, "doomed")), Vec::<String>::new());
+        assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
         assert_eq!(store_files(&world).len(), 3, "the version stays");
     }
 
@@ -786,6 +857,11 @@ mod tests {
             error.to_string(),
             format!("cannot move piece into trash/{}", stored.stamp)
         );
+        assert_eq!(
+            os_errors(error),
+            [libc::EEXIST],
+            "the error of the rename is on the chain"
+        );
         assert!(world.temp.root().join("piece/a.txt").exists());
         assert_eq!(
             store_files(&world),
@@ -793,6 +869,22 @@ mod tests {
             "the version is taken back"
         );
         assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_refused_rename_leaves_no_empty_chain_in_trash() {
+        let world = world(&["group/piece"]);
+        let stored = store(&world, "group/piece");
+        let seams = Probe {
+            refuse_trash_move: true,
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "group/piece", &stored, &seams, &[]);
+
+        expect_kept(&removal);
+        assert!(world.temp.root().join("group/piece/a.txt").exists());
+        assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
     }
 
     #[test]
@@ -812,13 +904,28 @@ mod tests {
         let text = error.to_string();
         assert!(
             text.contains("cannot put the version")
-                && text.contains("cannot move piece into trash/"),
-            "{text}"
+                && text.contains("cannot move piece into trash/")
+                && text.contains("(os error 5)"),
+            "both causes with their OS error: {text}"
         );
+        assert_eq!(os_errors(error), [libc::EIO], "the cause of the rollback");
+        let mut sidecars = vec![
+            stored.names.of(VersionFile::Checksum).to_string(),
+            stored.names.of(VersionFile::Listing).to_string(),
+        ];
+        sidecars.sort();
         assert_eq!(
-            store_files(&world).len(),
-            3,
-            "the version stays in the store"
+            store_files(&world),
+            sidecars,
+            "the archive moved, its flush failed, the sidecars wait in the store"
+        );
+        let staged = antiq(&world, "tmp/pack")
+            .join(stored.stamp.to_string())
+            .join("piece");
+        assert_eq!(
+            entries(&staged),
+            [stored.names.of(VersionFile::Archive)],
+            "the archive waits in the staging for repair 1"
         );
         assert!(world.temp.root().join("piece/a.txt").exists());
     }
@@ -883,6 +990,36 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_marker_is_no_content_and_may_change_after_the_verify() {
+        let world = world(&["piece"]);
+        let marker = world.temp.root().join("piece/.antiq-restored");
+        fs::write(&marker, "restored 2026-10-01T00:00:00Z\n").expect("the marker is written");
+        let stored = store(&world, "piece");
+        assert!(
+            stored
+                .verified
+                .listing()
+                .iter()
+                .all(|entry| !entry.path.to_string().contains("antiq-restored")),
+            "the marker is not packed"
+        );
+        let seams = tree_changes(|tree| {
+            fs::write(
+                tree.join(".antiq-restored"),
+                "restored 2026-11-01T00:00:00Z\n",
+            )
+            .expect("the marker is rewritten");
+        });
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        assert!(matches!(removal.outcome, Outcome::Removed));
+        assert!(!world.temp.root().join("piece").exists());
+        assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
+        assert_eq!(entries(&antiq(&world, "doomed")), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_change_to_an_ignored_file_is_no_difference() {
         let world = world(&["piece"]);
         let stored = store(&world, "piece");
@@ -898,11 +1035,11 @@ mod tests {
     }
 
     #[test]
-    fn an_exclude_entry_created_after_the_verify_sends_the_folder_back() {
+    fn an_exclude_entry_created_in_an_ignored_subtree_after_the_verify_sends_the_folder_back() {
         let world = world(&["piece"]);
         let stored = store(&world, "piece");
         let seams = tree_changes(|tree| {
-            fs::write(tree.join("secret.txt"), "x").expect("the file is written");
+            fs::write(tree.join("node_modules/secret.txt"), "x").expect("the file is written");
         });
 
         let removal = remove(
@@ -910,13 +1047,19 @@ mod tests {
             "piece",
             &stored,
             &seams,
-            &[path("piece/secret.txt")],
+            &[path("piece/node_modules/secret.txt")],
         );
 
         let (destination, reason) = expect_differs(&removal);
         assert_eq!(destination, Destination::Live);
-        assert!(reason.contains("secret.txt"), "{reason}");
-        assert!(world.temp.root().join("piece/secret.txt").exists());
+        assert!(reason.contains("exclude list"), "{reason}");
+        assert!(
+            world
+                .temp
+                .root()
+                .join("piece/node_modules/secret.txt")
+                .exists()
+        );
     }
 
     #[test]
@@ -949,7 +1092,24 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_doomed_target_gives_the_folder_back() {
+    fn a_crash_after_the_store_leaves_a_whole_version_and_an_empty_staging_for_repair_2() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let staged = antiq(&world, "tmp/pack").join(stored.stamp.to_string());
+        assert!(staged.join("piece").is_dir(), "the staging stays empty");
+
+        let lock = crate::testing::hold_lock(world.temp.root());
+        let outcome = crate::repair::run(&collection(&world), &lock);
+
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(outcome.done.len(), 1, "{:?}", outcome.done);
+        assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
+        assert_eq!(store_files(&world).len(), 3, "the version stays");
+        assert!(world.temp.root().join("piece/a.txt").exists());
+    }
+
+    #[test]
+    fn a_taken_doomed_target_gives_the_folder_back_and_says_where_it_went() {
         let world = world(&["piece"]);
         let stored = store(&world, "piece");
         let target = antiq(&world, "doomed")
@@ -962,10 +1122,47 @@ mod tests {
         let error = expect_kept(&removal);
         assert_eq!(
             error.to_string(),
-            format!("cannot move piece into doomed/{}", stored.stamp)
+            format!(
+                "cannot move piece into doomed/{}, so the folder went back to its path",
+                stored.stamp
+            )
+        );
+        assert_eq!(
+            os_errors(error),
+            [libc::EEXIST],
+            "the error of the rename is on the chain"
         );
         assert!(world.temp.root().join("piece/a.txt").exists());
         assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_refused_doomed_move_names_recovered_when_the_path_is_taken() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let blocker = antiq(&world, "doomed")
+            .join(stored.stamp.to_string())
+            .join("piece/blocker");
+        fs::create_dir_all(&blocker).expect("the target is made");
+        let root = world.temp.root().to_path_buf();
+        let seams = tree_changes(move |_| {
+            fs::create_dir(root.join("piece")).expect("the path is taken");
+        });
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        let error = expect_kept(&removal);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot move piece into doomed/{stamp}, so the folder went to recovered/{stamp}/piece",
+                stamp = stored.stamp
+            )
+        );
+        let recovered = antiq(&world, "recovered")
+            .join(stored.stamp.to_string())
+            .join("piece/a.txt");
+        assert!(recovered.exists());
     }
 
     #[test]
@@ -995,6 +1192,8 @@ mod tests {
                 "{:?}",
                 describe_removal(&second)
             );
+            assert_eq!(warning_texts(&first), Vec::<&str>::new());
+            assert_eq!(warning_texts(&second), Vec::<&str>::new());
             assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
             assert_eq!(entries(&antiq(&world, "doomed")), Vec::<String>::new());
         }
@@ -1061,6 +1260,24 @@ mod tests {
             .join("piece/a.txt");
         assert!(doomed.exists(), "repair 3 deletes it on the next run");
         assert!(!world.temp.root().join("piece").exists());
+    }
+
+    #[test]
+    fn a_doomed_chain_that_another_piece_removed_is_no_warning() {
+        let world = world(&["group/piece"]);
+        let stored = store(&world, "group/piece");
+        let chain = antiq(&world, "doomed").join(stored.stamp.to_string());
+        let seams = Probe {
+            after_delete: Some(Box::new(move || {
+                fs::remove_dir_all(&chain).expect("the chain is removed");
+            })),
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "group/piece", &stored, &seams, &[]);
+
+        assert!(matches!(removal.outcome, Outcome::Removed));
+        assert_eq!(warning_texts(&removal), Vec::<&str>::new());
     }
 
     #[test]
@@ -1162,9 +1379,9 @@ mod tests {
 
         let removal = remove(&world, "piece", &stored, &seams, &[]);
 
-        let (destination, reason) = expect_differs(&removal);
+        let (destination, cause) = expect_exhausted(&removal);
         assert_eq!(destination, Destination::Live);
-        assert!(reason.contains("descriptors"), "{reason}");
+        assert!(cause.contains("descriptors"), "{cause}");
         assert!(world.temp.root().join("piece/a.txt").exists());
     }
 
@@ -1185,9 +1402,9 @@ mod tests {
             &[path("piece/secret.txt")],
         );
 
-        let (destination, reason) = expect_differs(&removal);
+        let (destination, cause) = expect_exhausted(&removal);
         assert_eq!(destination, Destination::Live);
-        assert!(reason.contains("piece/secret.txt"), "{reason}");
+        assert!(cause.contains("piece/secret.txt"), "{cause}");
         assert!(world.temp.root().join("piece/a.txt").exists());
     }
 
@@ -1278,11 +1495,7 @@ mod tests {
     }
 
     fn describe_removal(removal: &Removal) -> String {
-        match &removal.outcome {
-            Outcome::Removed => "removed".into(),
-            Outcome::Differs { reason, .. } => reason.clone(),
-            Outcome::Kept(error) => format!("{error:?}"),
-        }
+        name_of(&removal.outcome)
     }
 
     fn entry(kind: EntryKind, path_text: &str, size: u64, mtime: i128, ctime: i128) -> TreeEntry {

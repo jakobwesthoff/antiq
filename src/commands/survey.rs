@@ -146,7 +146,7 @@ impl Refusal {
         Refusal { kind, path, line }
     }
 
-    fn unreadable_marker(top: &RelPath, file: &str) -> Refusal {
+    pub(crate) fn unreadable_marker(top: &RelPath, file: &str) -> Refusal {
         let name = Name::from_bytes(file.as_bytes().to_vec()).expect("a marker name is a name");
         Refusal {
             kind: RefusalKind::UnreadableMarker,

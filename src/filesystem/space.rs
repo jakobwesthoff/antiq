@@ -4,8 +4,6 @@
 
 //! Free space.
 
-#![allow(dead_code, reason = "used again by C4 and C6")]
-
 use super::{FilesystemError, io_error};
 use std::error::Error;
 use std::io;

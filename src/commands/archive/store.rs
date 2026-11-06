@@ -5,11 +5,6 @@
 //! Steps 2 to 4 of `archive`: pack a piece into the staging, verify the
 //! packing against the folder and move the version into the store.
 
-#![allow(
-    dead_code,
-    reason = "the pipeline that calls it follows in a later commit"
-)]
-
 use super::ArchiveError;
 use super::seams::Seams;
 use crate::archive::check::{ChecksumFile, file_sha256};
@@ -89,6 +84,9 @@ pub(crate) enum StoreFailure {
     NoRoom(Box<ArchiveError>),
     /// The folder changed while it was packed.
     Changed(Box<ArchiveError>),
+    /// The folder could not be read for lack of file descriptors, so it is
+    /// unknown whether it changed. Nothing is left in the staging.
+    OutOfDescriptors(Box<ArchiveError>),
     /// The version is in the store, but the store folder may not be durable.
     NotDurable(Box<ArchiveError>),
     /// Any other failure. Of the staging, only a move into the store that
@@ -102,6 +100,10 @@ pub(crate) enum StoreFailure {
 /// The steps stop at the first failure and take back what they made. The
 /// exception is a move into the store that stopped half way and could not
 /// be undone: the staging stays for repair 1, whatever the cause was.
+///
+/// After a success the staging folder stays, empty. If the folder of the
+/// piece cannot be moved to `trash/`, the version goes back through it, so
+/// the caller removes it with [`remove_staging`] once that move succeeded.
 pub(crate) fn store_version(
     context: &StoreContext<'_>,
     request: &StoreRequest<'_>,
@@ -148,17 +150,14 @@ pub(crate) fn store_version(
     .map_err(|source| {
         StoreFailure::Failed(Box::new(ArchiveError::Stamp {
             piece: piece.clone(),
-            source,
+            source: Box::new(source),
         }))
     })?;
 
     let chain = staging_chain(&stamp, request.stored);
     let result = stage_and_store(context, request, &stamp, &chain, lease);
     match result {
-        Ok(stored) => {
-            remove_staging(context.run_dirs, &tmp_dir, &chain);
-            Ok(stored)
-        }
+        Ok(stored) => Ok(stored),
         Err(abort) => {
             if !abort.keep_staging {
                 remove_staging(context.run_dirs, &tmp_dir, &chain);
@@ -187,6 +186,27 @@ impl Abort {
             failure,
             keep_staging: false,
         }
+    }
+}
+
+/// What a failed verify means for the piece. A folder that differs, or
+/// that no longer walks without a problem, changed while it was packed.
+fn verify_abort(error: ArchiveError) -> Abort {
+    let failure = match &error {
+        ArchiveError::Verify {
+            source: PackError::Differs(_) | PackError::TreeHasProblems(_),
+            ..
+        } => StoreFailure::Changed(Box::new(error)),
+        // The walk fails with nothing but a shortage of file descriptors.
+        ArchiveError::Verify {
+            source: PackError::Walk(_),
+            ..
+        } => StoreFailure::OutOfDescriptors(Box::new(error)),
+        _ => return Abort::of(error),
+    };
+    Abort {
+        failure,
+        keep_staging: false,
     }
 }
 
@@ -265,7 +285,7 @@ fn stage_and_store(
                 piece: piece.clone(),
                 stamp: stamp_text.clone(),
                 file: name.to_string(),
-                source,
+                source: Box::new(source),
             })
         })
     };
@@ -351,20 +371,9 @@ fn stage_and_store(
         rules: request.rules.clone(),
         staged: false,
     };
-    let verified = match TarZstd.verify_strict(&archive_path, &live_root, &rules) {
-        Ok(verified) => verified,
-        // A folder that differs, or that no longer walks without a
-        // problem, changed while it was packed.
-        Err(
-            source @ (PackError::Differs(_) | PackError::TreeHasProblems(_) | PackError::Walk(_)),
-        ) => {
-            return Err(Abort {
-                failure: StoreFailure::Changed(Box::new(verify_error(source))),
-                keep_staging: false,
-            });
-        }
-        Err(source) => return Err(Abort::of(verify_error(source))),
-    };
+    let verified = TarZstd
+        .verify_strict(&archive_path, &live_root, &rules)
+        .map_err(|source| verify_abort(verify_error(source)))?;
     if verified.listing() != packed.listing.as_slice() {
         return Err(Abort::of(verify_error(PackError::Damaged(
             "the listing of the packing differs from the members the verify read".into(),
@@ -394,22 +403,20 @@ fn stage_and_store(
         let error = ArchiveError::MoveIn {
             piece: piece.clone(),
             stamp: stamp_text.clone(),
-            source,
+            source: Box::new(source),
         };
-        return Err(match &error {
+        let cause = match &error {
+            ArchiveError::MoveIn { source, .. } => Some(&**source),
+            _ => None,
+        };
+        return Err(match cause {
             // Repair 1 finishes the move from the staging.
-            ArchiveError::MoveIn {
-                source: VersionsError::PartlyMoved { .. },
-                ..
-            } => Abort {
+            Some(VersionsError::PartlyMoved { .. }) => Abort {
                 failure: StoreFailure::Failed(Box::new(error)),
                 keep_staging: true,
             },
             // The version exists. The piece stops before its folder goes.
-            ArchiveError::MoveIn {
-                source: VersionsError::StoredNotDurable { .. },
-                ..
-            } => Abort {
+            Some(VersionsError::StoredNotDurable { .. }) => Abort {
                 failure: StoreFailure::NotDurable(Box::new(error)),
                 keep_staging: false,
             },
@@ -686,6 +693,7 @@ mod tests {
         match failure {
             StoreFailure::NoRoom(error)
             | StoreFailure::Changed(error)
+            | StoreFailure::OutOfDescriptors(error)
             | StoreFailure::NotDurable(error)
             | StoreFailure::Failed(error) => format!("{error:?}"),
         }
@@ -725,6 +733,19 @@ mod tests {
         );
     }
 
+    /// The staging of a stored version is still there, empty, until the
+    /// folder of the piece has moved to `trash/`.
+    fn staging_is_kept_empty(world: &World, stamp: &Stamp) {
+        let staging = world
+            .temp
+            .root()
+            .join(".antiq/tmp/pack")
+            .join(stamp.to_string())
+            .join("piece");
+        assert!(staging.is_dir(), "{} stays", staging.display());
+        assert_eq!(entries_of(&staging), Vec::<String>::new());
+    }
+
     fn store_is_empty(world: &World) {
         let pieces = world.temp.root().join(".antiq/pieces");
         assert_eq!(
@@ -753,7 +774,7 @@ mod tests {
         expected.sort();
         assert_eq!(entries_of(&store_folder(&world)), expected);
         assert_eq!(stored.stamp.to_string(), "2026-11-04T090211");
-        staging_is_gone(&world);
+        staging_is_kept_empty(&world, &stored.stamp);
     }
 
     #[test]
@@ -1122,7 +1143,85 @@ mod tests {
         let third = stored(&world, &RealSeams);
 
         assert_eq!(third.stamp.to_string(), "2026-11-04T090211-3");
+        staging_is_kept_empty(&world, &third.stamp);
+    }
+
+    fn store_folder_with_mode(world: &World, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = store_folder(world);
+        fs::create_dir_all(&folder).expect("the store folder is made");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(mode)).expect("the mode is set");
+    }
+
+    fn unlock_store_folder(world: &World) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(store_folder(world), fs::Permissions::from_mode(0o755))
+            .expect("the mode is restored");
+    }
+
+    #[test]
+    fn a_store_folder_that_cannot_be_read_stops_before_the_staging_is_made() {
+        let world = world();
+        store_folder_with_mode(&world, 0o000);
+        assert!(
+            fs::read_dir(store_folder(&world)).is_err(),
+            "the test runs as a user the mode binds"
+        );
+
+        let failure = failure(&world, &RealSeams);
+
+        let StoreFailure::Failed(error) = &failure else {
+            panic!("the stamp fails, but {}", describe(&failure));
+        };
+        assert_eq!(error.to_string(), "cannot choose a version stamp for piece");
+        assert!(entries_of(&world.temp.root().join(".antiq/tmp/pack")).is_empty());
+        unlock_store_folder(&world);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_flushed_in_the_staging_names_the_file_and_removes_the_staging() {
+        let world = world();
+        let recording = Recording::new();
+        recording.fail_files_at(0);
+        let probe = Probe {
+            recording: Some(recording),
+            ..Probe::default()
+        };
+
+        let failure = failure(&world, &probe);
+
+        let StoreFailure::Failed(error) = &failure else {
+            panic!("the flush fails, but {}", describe(&failure));
+        };
+        assert_eq!(
+            error.to_string(),
+            "cannot make piece--2026-11-04T090211.tar.zst in tmp/pack/2026-11-04T090211/piece durable"
+        );
         staging_is_gone(&world);
+        store_is_empty(&world);
+    }
+
+    #[test]
+    fn a_store_folder_that_refuses_the_files_undoes_the_move_and_removes_the_staging() {
+        let world = world();
+        store_folder_with_mode(&world, 0o555);
+        assert!(
+            fs::File::create(store_folder(&world).join("probe")).is_err(),
+            "the test runs as a user the mode binds"
+        );
+
+        let failure = failure(&world, &RealSeams);
+
+        let StoreFailure::Failed(error) = &failure else {
+            panic!("the move fails, but {}", describe(&failure));
+        };
+        assert_eq!(
+            error.to_string(),
+            "cannot move the version 2026-11-04T090211 of piece into the store"
+        );
+        staging_is_gone(&world);
+        assert!(entries_of(&store_folder(&world)).is_empty());
+        unlock_store_folder(&world);
     }
 
     // =========================================================
@@ -1149,5 +1248,27 @@ mod tests {
             error.to_string(),
             "cannot verify the packing of piece in tmp/pack/2026-11-04T090211"
         );
+    }
+
+    #[test]
+    fn a_verify_that_runs_out_of_descriptors_is_told_apart_from_a_changed_folder() {
+        let out_of_descriptors = |source| ArchiveError::Verify {
+            piece: "piece".into(),
+            stamp: "2026-11-04T090211".into(),
+            source,
+        };
+        let walk = PackError::Walk(crate::walk::WalkError::OutOfDescriptors {
+            piece: path("piece"),
+            path: path("piece/sub"),
+            source: io::Error::from_raw_os_error(libc::EMFILE),
+        });
+
+        let abort = verify_abort(out_of_descriptors(walk));
+
+        assert!(
+            matches!(abort.failure, StoreFailure::OutOfDescriptors(_)),
+            "a failure other than OutOfDescriptors"
+        );
+        assert!(!abort.keep_staging);
     }
 }

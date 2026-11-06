@@ -1116,6 +1116,24 @@ pub(crate) fn give_back(
     })
 }
 
+/// Makes the directory `dir` of `root` durable, unless it is gone. A piece
+/// of the same run that finished first removes the empty folders of a shared
+/// chain, so a folder that no longer exists has nothing left to flush.
+pub(crate) fn flush_dir_unless_gone(
+    durable: &dyn Durable,
+    root: &TreeRoot,
+    dir: &RelPath,
+) -> Result<(), crate::filesystem::FilesystemError> {
+    match flush_dir_of(durable, root, dir) {
+        Err(crate::filesystem::FilesystemError::Io { source, .. })
+            if source.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// Makes a rename durable: the parent that gained the tree, then the one
 /// that lost it.
 fn after_move(
@@ -1126,7 +1144,7 @@ fn after_move(
     from: &RelPath,
 ) -> Result<(), crate::filesystem::FilesystemError> {
     flush_dir_of(durable, to_root, &parent_of(to))?;
-    flush_dir_of(durable, from_root, &parent_of(from))
+    flush_dir_unless_gone(durable, from_root, &parent_of(from))
 }
 
 /// What the repairs of a run pass on to each other and to the outcome.
@@ -2580,6 +2598,33 @@ mod tests {
                 "{note}"
             );
             assert!(exists(&temp, "a/b/f"));
+        }
+
+        #[test]
+        fn a_folder_of_trash_that_another_run_removed_is_no_note() {
+            let mut temp = TempCollection::minimal();
+            temp.tree().file("a/keep", "k");
+            trash_tree(&mut temp, S, "a/b");
+            let (trash, collection, antiq) = roots(&temp);
+            let recording = Recording::new();
+            let emptied = temp.root().join(format!(".antiq/trash/{S}/a"));
+            recording.observe(move |_, _| {
+                fs::remove_dir(&emptied).ok();
+            });
+
+            let given = give_back(
+                &trash,
+                &collection,
+                &antiq,
+                Some(&name(S)),
+                &path("a/b"),
+                &path("a/b"),
+                &recording,
+            )
+            .expect("the tree moved");
+
+            assert_eq!(given.destination, Destination::Live);
+            assert!(given.note.is_none(), "{:?}", given.note);
         }
 
         #[test]
