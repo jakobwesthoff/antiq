@@ -50,7 +50,12 @@ pub fn parse(answer: &str) -> ClientTerminal {
 /// Asks tmux about the client of the pane this process runs in. Any failure
 /// is an unknown answer: no tmux program, an error, no answer in time.
 pub fn ask() -> Option<ClientTerminal> {
-    let mut child = Command::new("tmux")
+    ask_program("tmux")
+}
+
+/// `ask` of the tmux that `program` names.
+fn ask_program(program: impl AsRef<std::ffi::OsStr>) -> Option<ClientTerminal> {
+    let mut child = Command::new(program)
         .args(["display-message", "-p", FORMAT])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -113,6 +118,47 @@ mod tests {
         ] {
             assert_eq!(parse(answer).cell_pixels, None, "{answer:?}");
         }
+    }
+
+    /// A script that stands in for tmux, in a directory of its own.
+    fn fake_tmux(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let path = dir.path().join("tmux");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the script is written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the script becomes executable");
+        (dir, path)
+    }
+
+    #[test]
+    fn tmux_is_asked_for_the_format_and_its_answer_is_read() {
+        let (_dir, path) = fake_tmux(
+            r#"[ "$1 $2" = "display-message -p" ] || exit 3
+printf 'ghostty 1.3.2\t15\t39\n'"#,
+        );
+        assert_eq!(
+            ask_program(&path),
+            Some(ClientTerminal {
+                termtype: Some("ghostty 1.3.2".into()),
+                cell_pixels: Some((15, 39)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_tmux_that_fails_or_is_missing_gives_no_answer() {
+        let (_dir, path) = fake_tmux("exit 1");
+        assert_eq!(ask_program(&path), None);
+        assert_eq!(ask_program("/nonexistent/tmux"), None);
+    }
+
+    #[test]
+    fn a_tmux_that_does_not_answer_in_time_is_given_up_on() {
+        let (_dir, path) = fake_tmux("exec sleep 30");
+        let started = Instant::now();
+        assert_eq!(ask_program(&path), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
