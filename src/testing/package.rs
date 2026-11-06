@@ -125,3 +125,22 @@ pub fn raw_tar(members: &[RawMember<'_>]) -> Vec<u8> {
     out.extend_from_slice(&[0; 1024]);
     out
 }
+
+/// The listing in the code block of the spec's "Listing format" section,
+/// which the writer must reproduce byte for byte.
+pub fn spec_listing_example() -> String {
+    let spec = include_str!("../../docs/specs/spec-v1.md");
+    let section = spec
+        .split("\n## Listing format\n")
+        .nth(1)
+        .expect("the spec has a Listing format section");
+    let block = section
+        .split("```text\n")
+        .nth(1)
+        .expect("the section opens with an example");
+    block
+        .split("```")
+        .next()
+        .expect("the example is closed")
+        .to_string()
+}

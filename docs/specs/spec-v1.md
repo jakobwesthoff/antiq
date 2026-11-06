@@ -382,8 +382,11 @@ them is deleted or rewritten automatically. (ADR 0062)
 - **Damaged version:** a `.tar.zst` whose listing or checksum file is
   missing; or whose size differs from the `archive-bytes` its listing
   records (archive files never change once stored); or whose listing does
-  not decode to its end (zstd checksum) or lacks a parsable `piece`,
-  `archived` or `archive-bytes` line; or whose checksum file is not
+  not decode to its end (zstd checksum), does not parse to its end (a
+  header or entry line out of the format, a file or hard line without its
+  checksum line, a path twice, `files` or `bytes` that differ from the
+  entries) or lacks a parsable `piece`, `archived` or `archive-bytes`
+  line; or whose checksum file is not
   exactly one checksum line for the archive's name. `status` reports it;
   `list` marks what it sees in the listing's head; `rebuild` repairs a
   missing sidecar; `fork` can still extract it, with a warning and
@@ -414,35 +417,42 @@ tools read it as part of the file name.
 # piece         projects/scanner
 # archived      2026-11-04T09:02:11Z
 # archive       projects-scanner--2026-11-04T090211.tar.zst
-# archive-bytes 1093744120
-# files         48211
-# bytes         1288490188
+# archive-bytes 233
+# files         1
+# bytes         4211
 #
 # dir   0755  2026-10-30T17:40:00Z                 -  src/
-# file  0644  2026-10-30T17:44:02Z              4211  src/main.rs
-3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b  src/main.rs
-# hard  0644  2026-10-30T17:44:02Z                 -  src/main-copy.rs	=> src/main.rs
-3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b  src/main-copy.rs
 # link  0755  2026-10-30T17:41:00Z                 -  src/latest	-> main.rs
+# file  0644  2026-10-30T17:44:02Z              4211  src/main-copy.rs
+86a08606186d72ffc5c4c34cb07b4ae234333cce251383c907bdeed0f17ce9d0  src/main-copy.rs
+# hard  0644  2026-10-30T17:44:02Z                 -  src/main.rs	=> src/main-copy.rs
+86a08606186d72ffc5c4c34cb07b4ae234333cce251383c907bdeed0f17ce9d0  src/main.rs
 ```
 
 - **Header:** `piece` (the stored spelling), `archived` (the version time,
   the one in the file name), `archive` (the archive file's name),
   `archive-bytes` (its size, written when packing finishes), `files` and
   `bytes` (count and total size of the regular files, so `list` and
-  `status` read only the head of a listing). The header lines come in
-  this order, after the first line `# antiq listing 1` (a listing whose
-  first line names a higher number is of a newer format, see "Damage"), and end with a
-  line holding only `#`. A version made by `import` adds `imported <time>`,
-  the real time of the import; a listing written by `rebuild` adds
-  `rebuilt <time>`.
+  `status` read only the head of a listing). The writer derives `files`
+  and `bytes` from the entries, and a full read refuses a listing whose
+  counts differ from its entries. Each header line is `# `, the key padded
+  with spaces to 14 characters, then the value; `piece` is spelled like a
+  path in a comment line (see "Escaping in comment lines"). The header
+  lines come in this order, after the first line `# antiq listing 1` (a
+  listing whose first line names a higher number is of a newer format,
+  see "Damage"), and end with a line holding only `#`. A version made by
+  `import` adds `imported`, the real time of the import, and a listing
+  written by `rebuild` adds `rebuilt`, both after `bytes` in this order,
+  with a time written like `archived`.
 - **Entry lines:** after `# `, four fixed-width fields: the type, left
   aligned in 4 characters; the mode as 4 octal digits; the UTC time with
   `T` in 20 characters; the exact size in bytes, right aligned in 16
-  characters, or `-`. Two spaces separate the fields and two spaces
+  characters, or `-` for a type without a size. A listing cannot be
+  written for a file of 10^16 bytes or more. Two spaces separate the fields and two spaces
   separate the size from the path, which runs to the end of the line and
   starts at byte offset 54. A link line separates path and target with one
-  tab: `<path>\t-> <target>`.
+  tab: `<path>\t-> <target>`. The time field holds the years 0001 to 9999;
+  a listing cannot be written for a file with a time outside them.
 - **Types:** `dir` (the path ends in `/`), `file`, `link`, and `hard` for
   a hard link, written `<path>\t=> <target>` with size `-`; the archive
   stores it as a tar link member, and it does not count in `files` or
@@ -455,11 +465,14 @@ tools read it as part of the file name.
   backslash gets a leading `\` on the line, with newline written `\n` and
   backslash `\\`; nothing else is escaped, a carriage return or tab stays
   raw. Both macOS `shasum` and GNU `sha256sum` read that. GNU's own `\r`
-  escape is not used.
+  escape is not used. The exception is a path that ends in a carriage
+  return: `shasum` reads its line, while GNU `sha256sum` strips the
+  carriage return from the line and looks for the path without it.
 - **Escaping in comment lines:** never a leading backslash. Inside paths
   and link targets, backslash, newline, tab and carriage return are
   written `\\`, `\n`, `\t` and `\r`.
-- A test listing with such names passes `shasum -a 256 --strict -c` and
+- A test listing with such names, a path ending in a carriage return
+  apart, passes `shasum -a 256 --strict -c` and
   `sha256sum --strict -c` with exit 0.
 - An archive unpacks to one top-level directory named after the folder
   when it was packed; the listing has no line for it, and its paths are

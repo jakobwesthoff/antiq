@@ -802,11 +802,14 @@ mod tests {
         assert_eq!(members[1].kind, EntryType::Link);
         assert_eq!(members[1].link.as_deref(), Some(&b"proj/a"[..]));
         assert_eq!(members[1].size, 0);
-        let line = serde_json::to_string(&listing[1]).expect("serialises");
+        let line = &listing[1];
+        assert_eq!(line.path, path("b"));
+        assert_eq!(line.kind, ListingType::Hardlink);
         assert_eq!(
-            line,
-            r#"{"path":"b","type":"hardlink","size":0,"mtime":1700000000,"mode":420,"link":"a"}"#
+            (line.size, line.mtime, line.mode),
+            (0, 1_700_000_000, 0o644)
         );
+        assert_eq!(line.link, Some(LinkTarget::from_bytes(b"a".to_vec())));
     }
 
     #[test]
@@ -876,16 +879,51 @@ mod tests {
             plain(symlink("src/link", b"note.txt")),
         ]);
         assert_eq!(members(&tar).len(), 3);
-        let lines: Vec<_> = listing
+        let described: Vec<_> = listing
             .iter()
-            .map(|e| serde_json::to_string(e).expect("serialises"))
+            .map(|e| {
+                (
+                    e.path.to_string(),
+                    e.kind,
+                    e.size,
+                    e.mtime,
+                    e.mode,
+                    e.link.as_ref().map(|l| l.as_bytes().to_vec()),
+                    e.sha256.clone(),
+                )
+            })
             .collect();
+        let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         assert_eq!(
-            lines,
+            described,
             [
-                r#"{"path":"src","type":"dir","size":0,"mtime":1700000000,"mode":493}"#.to_string(),
-                r#"{"path":"src/note.txt","type":"file","size":5,"mtime":1700000000,"mode":420,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}"#.to_string(),
-                r#"{"path":"src/link","type":"symlink","size":0,"mtime":1700000000,"mode":511,"link":"note.txt"}"#.to_string(),
+                (
+                    "src".to_string(),
+                    ListingType::Dir,
+                    0,
+                    1_700_000_000,
+                    0o755,
+                    None,
+                    None
+                ),
+                (
+                    "src/note.txt".to_string(),
+                    ListingType::File,
+                    5,
+                    1_700_000_000,
+                    0o644,
+                    None,
+                    Some(hello.to_string())
+                ),
+                (
+                    "src/link".to_string(),
+                    ListingType::Symlink,
+                    0,
+                    1_700_000_000,
+                    0o777,
+                    Some(b"note.txt".to_vec()),
+                    None
+                ),
             ]
         );
     }
