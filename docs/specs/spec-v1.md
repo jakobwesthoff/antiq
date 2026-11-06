@@ -2204,7 +2204,8 @@ an old card can stay on the screen; a finished line is erased only if the
 window gets wider between the moment antiq reads its size and the moment
 the terminal draws the redraw.
 
-Lines are laid out for at most 100 columns. The size column is left out
+Counts group their thousands with a space, `1 203/2 931 files`. Lines are
+laid out for at most 100 columns. The size column is left out
 below 50 columns, the count below 60, and the bar is 40 cells wide from 70
 columns, 12 from 40 and 10 below. A name too long for its column is shortened
 in the middle; with the version of an `unearth` the name is shortened to as

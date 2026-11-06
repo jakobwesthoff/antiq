@@ -12,7 +12,7 @@
 use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::output::Style;
-use crate::cli::table::{decimal_size, mid, pad_left, sanitize, wrap};
+use crate::cli::table::{decimal_size, mid, pad_left, sanitize, thousands, wrap};
 use crate::cli::unresolved::pasteable_line;
 use anstyle::Style as Look;
 use antiq::pin::PIN_FILE;
@@ -52,7 +52,9 @@ pub(crate) struct Count {
 
 /// `3/12 files`, and nothing while the total is not known.
 pub(crate) fn items(done: u64, total: Option<u64>, noun: &str) -> String {
-    total.map_or_else(String::new, |total| format!("{done}/{total} {noun}"))
+    total.map_or_else(String::new, |total| {
+        format!("{}/{} {noun}", thousands(done), thousands(total))
+    })
 }
 
 /// The count of an operation that its command does not list.

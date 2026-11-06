@@ -807,6 +807,19 @@ fn no_line_of_the_region_is_wider_than_the_terminal() {
 }
 
 #[test]
+fn the_count_of_files_groups_its_thousands_with_a_space() {
+    let mut cards = cards(UNEARTH);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Extracting, 1_203, 2_931);
+    cards.apply(msg, secs(0));
+    assert!(
+        cards.region(secs(0), MOCKUP, 24)[1].ends_with("1 203/2 931 files"),
+        "{:?}",
+        cards.region(secs(0), MOCKUP, 24)[1]
+    );
+}
+
+#[test]
 fn a_card_with_big_counts_keeps_both_lines_within_the_terminal_by_dropping_the_detail() {
     for color in [false, true] {
         for cols in [70, 72, 75] {
@@ -816,7 +829,7 @@ fn a_card_with_big_counts_keeps_both_lines_within_the_terminal_by_dropping_the_d
                 (PUSH, Operation::Storing, "created"),
                 (ARCHIVE, Operation::Packing, "files"),
             ] {
-                let detail_fits = 52 + "123456/654321 ".len() + unit.len() <= cols;
+                let detail_fits = 52 + "123 456/654 321 ".len() + unit.len() <= cols;
                 let mut cards = with_style(kind, style(color, true));
                 cards.apply(started("tools/pdf-merge", 3_100_000), secs(0));
                 let (msg, _k) = operation("tools/pdf-merge", operation_kind, 123_456, 654_321);

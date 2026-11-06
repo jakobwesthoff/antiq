@@ -8,7 +8,7 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, pad, paint, painted, sanitize, spaces,
+    Color, WIDE_FROM, decimal_size, mid, pad, paint, painted, sanitize, spaces, thousands,
 };
 use crate::cli::{Context, ListArgs};
 use antiq::collection::Collection;
@@ -303,19 +303,6 @@ pub(in crate::cli) fn table(
         lines.push(line);
     }
     lines
-}
-
-/// The count with a space between the thousands, `48 211`.
-fn thousands(count: u64) -> String {
-    let digits = count.to_string();
-    let mut grouped = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(' ');
-        }
-        grouped.push(digit);
-    }
-    grouped
 }
 
 #[cfg(test)]
@@ -747,15 +734,6 @@ mod tests {
             lines.stdout
         );
         assert!(!lines.stdout[2].contains('+'), "{:?}", lines.stdout);
-    }
-
-    #[test]
-    fn thousands_are_grouped_by_a_space() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1_000), "1 000");
-        assert_eq!(thousands(48_211), "48 211");
-        assert_eq!(thousands(1_234_567), "1 234 567");
     }
 
     #[test]

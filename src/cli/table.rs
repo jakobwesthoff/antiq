@@ -199,6 +199,19 @@ pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// The count with a space between the thousands, `48 211`.
+pub fn thousands(count: u64) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(' ');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +337,14 @@ mod tests {
     fn paint_leaves_empty_and_uncolored_text_alone() {
         assert_eq!(paint(colored(), Color::Red, ""), "");
         assert_eq!(paint(plain(), Color::Red, "x"), "x");
+    }
+
+    #[test]
+    fn thousands_are_grouped_by_a_space() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1 000");
+        assert_eq!(thousands(48_211), "48 211");
+        assert_eq!(thousands(1_234_567), "1 234 567");
     }
 }

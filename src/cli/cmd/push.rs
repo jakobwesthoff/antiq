@@ -13,7 +13,7 @@ use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::{pad, pad_left, sanitize};
+use crate::cli::table::{pad, pad_left, sanitize, thousands};
 use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -45,9 +45,9 @@ pub(super) const COUNTS: &[(Operation, Count)] = &[
 /// otherwise.
 fn entries(done: u64, total: Option<u64>) -> String {
     match (total, done) {
-        (Some(total), _) => format!("{done} of {total} entries"),
+        (Some(total), _) => format!("{} of {} entries", thousands(done), thousands(total)),
         (None, 1) => "1 entry".to_string(),
-        (None, _) => format!("{done} entries"),
+        (None, _) => format!("{} entries", thousands(done)),
     }
 }
 
@@ -287,6 +287,14 @@ mod tests {
             assert!(second.ends_with(&format!("  {text}")), "{second:?}");
             assert!(!second.contains('%'), "{second:?}");
         }
+    }
+
+    #[test]
+    fn counts_group_their_thousands_with_a_space() {
+        let second = second_line(Operation::Storing, 10_012, 17_304);
+        assert!(second.ends_with("  10 012 of 17 304 entries"), "{second:?}");
+        let second = second_line(Operation::Storing, 1_203, 0);
+        assert!(second.ends_with("  1 203 entries"), "{second:?}");
     }
 
     #[test]
