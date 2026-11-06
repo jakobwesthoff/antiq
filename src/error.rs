@@ -27,35 +27,43 @@ use crate::run::RunError;
 use crate::select::SelectError;
 use crate::sysmem::SysmemError;
 use crate::walk::WalkError;
+use jiff::Timestamp;
 use serde_json::{Map, Value};
 
 /// The kind of an error as scripts see it in the JSON error object, and
-/// the exit code that goes with it.
+/// the exit code that goes with it. The variants follow the order of the
+/// spec's table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     Usage,
-    /// A command that has no implementation yet.
-    NotImplemented,
     NotACollection,
     AmbiguousReference,
     UnknownReference,
-    /// A path given as a piece, `--to` or `--path` lies outside the collection.
+    /// A path given as a piece, `--as` or `--name` lies outside the collection.
     OutsideCollection,
     LockHeld,
+    /// The target of `push` cannot be reached.
+    TargetUnreachable,
+    /// `push` runs without a target url.
+    NoTarget,
+    /// A command that has no implementation yet.
+    NotImplemented,
     FormatTooNew,
     /// Every failure without a kind of its own.
     Other,
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 9] = [
+    pub const ALL: [ErrorKind; 11] = [
         ErrorKind::Usage,
-        ErrorKind::NotImplemented,
         ErrorKind::NotACollection,
         ErrorKind::AmbiguousReference,
         ErrorKind::UnknownReference,
         ErrorKind::OutsideCollection,
         ErrorKind::LockHeld,
+        ErrorKind::TargetUnreachable,
+        ErrorKind::NoTarget,
+        ErrorKind::NotImplemented,
         ErrorKind::FormatTooNew,
         ErrorKind::Other,
     ];
@@ -64,22 +72,26 @@ impl ErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorKind::Usage => "usage",
-            ErrorKind::NotImplemented => "not_implemented",
             ErrorKind::NotACollection => "not_a_collection",
             ErrorKind::AmbiguousReference => "ambiguous_reference",
             ErrorKind::UnknownReference => "unknown_reference",
             ErrorKind::OutsideCollection => "outside_collection",
             ErrorKind::LockHeld => "lock_held",
+            ErrorKind::TargetUnreachable => "target_unreachable",
+            ErrorKind::NoTarget => "no_target",
+            ErrorKind::NotImplemented => "not_implemented",
             ErrorKind::FormatTooNew => "format_too_new",
             ErrorKind::Other => "other",
         }
     }
 
-    /// Exit codes 0 and 3 belong to runs that did not fail; see the
-    /// exit-code table of the spec.
+    /// Exit code 0 belongs to runs that did not fail and 3 to runs that
+    /// finished with some pieces failed; see the exit-code table of the
+    /// spec.
     pub fn exit_code(self) -> u8 {
         match self {
             ErrorKind::Usage => 2,
+            ErrorKind::TargetUnreachable => 4,
             _ => 1,
         }
     }
@@ -168,26 +180,51 @@ impl Error {
     /// `message` for this error. Empty for errors without details.
     pub fn details(&self) -> Map<String, Value> {
         let mut details = Map::new();
-        match self {
-            Error::Reference(ReferenceError::Ambiguous { candidates, .. }) => {
-                details.insert(
-                    "candidates".into(),
-                    serde_json::to_value(candidates)
-                        .expect("candidates are plain strings and always serialise"),
-                );
-            }
-            Error::Lock(LockError::Held { pid, started })
-            | Error::Run(RunError::Lock(LockError::Held { pid, started })) => {
-                details.insert("pid".into(), Value::from(*pid));
-                details.insert(
-                    "started".into(),
-                    Value::from(whole_seconds(*started).to_string()),
-                );
-            }
-            _ => {}
+        if let Error::Reference(ReferenceError::Ambiguous { candidates, .. }) = self {
+            details.insert(
+                "candidates".into(),
+                serde_json::to_value(candidates)
+                    .expect("candidates are plain strings and always serialise"),
+            );
+        }
+        // `Lock` and `Run` are transparent, so the walk starts at what they
+        // wrap.
+        let held = match self {
+            Error::Lock(inner) => find_held_lock(inner),
+            Error::Run(inner) => find_held_lock(inner),
+            other => find_held_lock(other),
+        };
+        if let Some((pid, started)) = held {
+            details.insert("pid".into(), Value::from(pid));
+            details.insert(
+                "started".into(),
+                Value::from(whole_seconds(started).to_string()),
+            );
         }
         details
     }
+}
+
+/// The pid and start of the held lock that `error` or one of its sources
+/// is.
+///
+/// A command error that wraps a [`LockError`] or a [`RunError`] must name
+/// it as its source and must not be `#[error(transparent)]`: a transparent
+/// error forwards `source()` to the source of the wrapped error, which
+/// skips the wrapped error itself and hides the lock from this walk.
+fn find_held_lock(error: &(dyn std::error::Error + 'static)) -> Option<(u32, Timestamp)> {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        match (current.downcast_ref(), current.downcast_ref()) {
+            (Some(LockError::Held { pid, started }), _)
+            | (_, Some(RunError::Lock(LockError::Held { pid, started }))) => {
+                return Some((*pid, *started));
+            }
+            _ => {}
+        }
+        link = current.source();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -197,6 +234,7 @@ mod tests {
     use crate::listing::ListingError;
     use crate::lock::LockError;
     use crate::reference::{Candidate, ReferenceError};
+    use crate::run::RunError;
     use jiff::Timestamp;
     use serde_json::json;
 
@@ -211,16 +249,20 @@ mod tests {
     fn every_kind_has_its_name_and_exit_code() {
         let table = [
             (ErrorKind::Usage, "usage", 2),
-            (ErrorKind::NotImplemented, "not_implemented", 1),
             (ErrorKind::NotACollection, "not_a_collection", 1),
             (ErrorKind::AmbiguousReference, "ambiguous_reference", 1),
             (ErrorKind::UnknownReference, "unknown_reference", 1),
             (ErrorKind::OutsideCollection, "outside_collection", 1),
             (ErrorKind::LockHeld, "lock_held", 1),
+            (ErrorKind::TargetUnreachable, "target_unreachable", 4),
+            (ErrorKind::NoTarget, "no_target", 1),
+            (ErrorKind::NotImplemented, "not_implemented", 1),
             (ErrorKind::FormatTooNew, "format_too_new", 1),
             (ErrorKind::Other, "other", 1),
         ];
         assert_eq!(table.len(), ErrorKind::ALL.len());
+        let listed: Vec<ErrorKind> = table.iter().map(|(kind, _, _)| *kind).collect();
+        assert_eq!(listed, ErrorKind::ALL, "ALL follows the order of the table");
         for (kind, name, code) in table {
             assert!(ErrorKind::ALL.contains(&kind), "{kind:?} is not in ALL");
             assert_eq!(kind.as_str(), name);
@@ -331,5 +373,65 @@ mod tests {
     #[test]
     fn errors_without_details_give_an_empty_map() {
         assert!(Error::Usage("bad".into()).details().is_empty());
+    }
+
+    /// What a command error that wraps a lock error looks like: its own
+    /// message, the lock error as its source.
+    #[derive(Debug, thiserror::Error)]
+    enum Wrapping {
+        #[error("cannot archive")]
+        Lock(#[from] LockError),
+        #[error("cannot start the run")]
+        Run(#[from] RunError),
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum Hiding {
+        #[error(transparent)]
+        Lock(#[from] LockError),
+    }
+
+    fn held() -> LockError {
+        LockError::Held {
+            pid: 4242,
+            started: "2026-11-03T10:00:00Z".parse().expect("valid literal"),
+        }
+    }
+
+    #[test]
+    fn the_chain_walker_finds_a_held_lock_below_a_wrapping_error() {
+        let (pid, started) = find_held_lock(&Wrapping::Lock(held())).expect("a held lock");
+        assert_eq!(pid, 4242);
+        assert_eq!(started.to_string(), "2026-11-03T10:00:00Z");
+    }
+
+    #[test]
+    fn the_chain_walker_finds_a_held_lock_inside_a_run_error() {
+        let error = Wrapping::Run(RunError::Lock(held()));
+        assert_eq!(find_held_lock(&error).map(|(pid, _)| pid), Some(4242));
+    }
+
+    #[test]
+    fn the_chain_walker_ignores_other_lock_errors() {
+        assert_eq!(
+            find_held_lock(&Wrapping::Lock(LockError::HeldUnknown)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_chain_walker_does_not_see_through_a_transparent_wrapper() {
+        // `transparent` forwards `source()` to the inner error's source,
+        // which is why a command error must not use it for a lock error.
+        assert_eq!(find_held_lock(&Hiding::Lock(held())), None);
+    }
+
+    #[test]
+    fn the_details_of_a_run_error_carry_the_held_lock() {
+        let error: Error = RunError::Lock(held()).into();
+        assert_eq!(
+            serde_json::Value::Object(error.details()),
+            json!({"pid": 4242, "started": "2026-11-03T10:00:00Z"})
+        );
     }
 }

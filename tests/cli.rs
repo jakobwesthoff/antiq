@@ -191,11 +191,23 @@ fn forget_all_versions_needs_force() {
 }
 
 #[test]
-fn forget_force_goes_with_all_versions_only() {
-    assert_usage(&["forget", "piece", "v", "--force"], "cannot be used with");
+fn forget_force_alone_is_refused() {
     assert_usage(
         &["forget", "piece", "--force"],
         "required arguments were not provided",
+    );
+}
+
+#[test]
+fn forget_force_is_refused_with_a_version() {
+    assert_usage(&["forget", "piece", "v", "--force"], "cannot be used with");
+}
+
+#[test]
+fn forget_all_versions_is_refused_with_a_version() {
+    assert_usage(
+        &["forget", "piece", "v", "--all-versions"],
+        "cannot be used with",
     );
 }
 
