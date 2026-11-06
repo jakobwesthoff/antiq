@@ -1396,7 +1396,10 @@ An answer that does not fit the pending decision is a usage error.
 Every state-changing command takes `--dry-run`, which prints the plan
 and changes nothing; under `--json` the plan is JSON. (ADR 0046) A dry
 run takes no lock and may read the remote; it writes nothing, locally or
-on the remote.
+on the remote. On the console a plan is one `Would ...` line per action,
+or `Nothing to do.` when there is none, followed by the place where the
+brake would hold, if it would: `The brake would hold at <planned> of
+<set size>:` and one line per item, up to ten, with path and ID.
 
 `--if-reachable` makes a run exit 0 when the remote is away, for
 scheduled runs, except as `away_warn_days` says. Without a remote it
@@ -1426,7 +1429,9 @@ before naming a command has `"command": null`. An error is `{"format": 1,
 "command": ..., "error": {"kind": ..., "message": ...}}`, where `message`
 is the text of the error without the context lines a console shows. Some
 kinds add keys to the error object. A `--dry-run` plan carries
-`"dry_run": true` and an `actions` list.
+`"dry_run": true` and an `actions` list, in that order, and a `brake`
+object (`planned`, `set_size`, `items`, as in the `brake` error) where the
+brake would hold.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
