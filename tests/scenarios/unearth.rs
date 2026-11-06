@@ -802,3 +802,28 @@ fn a_word_that_fits_one_piece_offers_a_path_that_names_it_from_a_subdirectory() 
         });
     });
 }
+
+#[test]
+fn from_a_subdirectory_an_unknown_word_leads_to_a_path_that_names_the_piece() {
+    both_modes(scanner_world, |world| {
+        let projects = world.collection().path("projects");
+        // The closest piece is shown relative to the collection root, which
+        // from `projects/` is not yet a path of the piece.
+        let unknown = world.run_in(&projects, &["unearth", "-n", "scna-old"]);
+        unknown.expect_code(1);
+        unknown.json_only(|_| {
+            assert_eq!(unknown.error_kind().as_deref(), Some("unknown_reference"));
+        });
+
+        let rooted = world.run_in(&projects, &["unearth", "-n", "tools/scan-old"]);
+        rooted.expect_code(1);
+        rooted.json_only(|json| {
+            assert_eq!(json["error"]["kind"], "inexact_reference");
+            let fix = json["error"]["fix"].as_str().expect("a text");
+            let example = fix.split('`').nth(1).expect("the path is a code span");
+            let named = world.run_in(&projects, &["unearth", "-n", example]);
+            named.expect_code(0);
+            named.json_only(|json| assert_eq!(json["actions"][0]["piece"], "tools/scan-old"));
+        });
+    });
+}

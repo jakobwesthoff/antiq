@@ -9,8 +9,10 @@
 
 mod support;
 
+use std::ffi::OsString;
 use std::fs;
-use support::cmd::{hold_lock, snapshot};
+use std::os::unix::ffi::OsStringExt;
+use support::cmd::{Antiq, hold_lock, snapshot};
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
 use support::scenario::world::{Mode, Setup, World};
 
@@ -478,4 +480,107 @@ fn a_refusal_a_repair_may_lift_is_a_note_of_the_dry_run() {
         "{:?}",
         dry.stderr
     );
+}
+
+#[test]
+fn a_dry_run_judges_the_repairs_by_the_path_the_run_would_resolve() {
+    let world = world(Mode::Text, after_a_died_unearth);
+    let projects = world.collection().path("projects");
+
+    let from_below = world.run_in(&projects, &["unearth", "died", "-n"]);
+    from_below.expect_code(0);
+    assert!(
+        from_below
+            .stderr
+            .contains("warning: cannot be judged before the repairs run"),
+        "{:?}",
+        from_below.stderr
+    );
+
+    // The dry run comes first: a real run repairs the store.
+    let dry = world.run_in(&projects, &["unearth", "projects/died", "-n"]);
+    let real = world.run_in(&projects, &["unearth", "projects/died"]);
+    real.expect_code(1);
+    dry.expect_code(1);
+}
+
+/// What a shell makes of `$'...'`: the bytes between the quotes, with the
+/// escapes `\\`, `\'` and `\xHH` resolved.
+fn bytes_of_dollar_quote(quoted: &str) -> Vec<u8> {
+    let inner = quoted
+        .strip_prefix("$'")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("a $'...' word");
+    let raw = inner.as_bytes();
+    let mut bytes = Vec::new();
+    let mut at = 0;
+    while at < raw.len() {
+        if raw[at] != b'\\' {
+            bytes.push(raw[at]);
+            at += 1;
+        } else if raw[at + 1] == b'x' {
+            let hex = std::str::from_utf8(&raw[at + 2..at + 4]).expect("two hex digits");
+            bytes.push(u8::from_str_radix(hex, 16).expect("hex digits"));
+            at += 4;
+        } else {
+            bytes.push(raw[at + 1]);
+            at += 2;
+        }
+    }
+    bytes
+}
+
+#[test]
+fn the_path_offered_for_a_name_that_is_not_utf8_reaches_the_piece() {
+    let world = world(Mode::Json, |_| {});
+    let root = world.collection().root();
+    let name = OsString::from_vec(b"d\xff".to_vec());
+    let folder = world.collection().path("projects").join(&name);
+    if let Err(error) = fs::create_dir_all(&folder) {
+        // A volume that keeps names as UTF-8 (APFS) has no such piece.
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::ILSEQ.raw_os_error())
+        );
+        return;
+    }
+    fs::write(folder.join("a"), "1\n").expect("a file is written");
+    let given = OsString::from_vec(b"projects/d\xff".to_vec());
+    let antiq = || Antiq::new().env("TZ", "UTC").arg("-C").arg(&root);
+    let archived = antiq().arg("archive").arg(&given).run();
+    assert_eq!(archived.status.code(), Some(0), "{}", archived.stderr);
+    assert!(!folder.exists(), "the folder is archived away");
+
+    let word = antiq().args(["--json", "unearth", "projects/d"]).run();
+    assert_eq!(word.status.code(), Some(1), "{}", word.stderr);
+    let json: Value = serde_json::from_str(&word.stdout).expect("a JSON object");
+    assert_eq!(json["error"]["kind"], "inexact_reference");
+    let fix = json["error"]["fix"].as_str().expect("a text");
+    let example = fix.split('`').nth(1).expect("the path is a code span");
+    assert_eq!(example, "$'projects/d\\xff'");
+
+    let named = antiq()
+        .arg("unearth")
+        .arg(OsString::from_vec(bytes_of_dollar_quote(example)))
+        .run();
+    assert_eq!(named.status.code(), Some(0), "{}", named.stderr);
+    assert!(folder.join("a").exists());
+}
+
+#[test]
+fn an_argument_that_is_not_utf8_reaches_the_reference_as_its_bytes() {
+    let world = world(Mode::Json, scanner);
+    let given = OsString::from_vec(b"projects/d\xff".to_vec());
+    let run = Antiq::new()
+        .env("TZ", "UTC")
+        .arg("-C")
+        .arg(world.collection().root())
+        .args(["--json", "unearth"])
+        .arg(&given)
+        .run();
+    assert_eq!(run.status.code(), Some(1), "{}", run.stderr);
+    let json: Value = serde_json::from_str(&run.stdout).expect("a JSON object");
+    assert_eq!(json["error"]["kind"], "unknown_reference");
+    let message = json["error"]["message"].as_str().expect("a text");
+    assert!(message.contains("`projects/d%FF`"), "{message}");
 }

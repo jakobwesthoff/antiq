@@ -98,6 +98,23 @@ fn rebuild_lists_the_candidates_of_an_ambiguous_word() {
 }
 
 #[test]
+fn the_one_candidate_of_an_inexact_word_is_a_line_on_a_pipe() {
+    let world = world(Mode::Text, stored_pieces);
+    let run = world.run(&["unearth", "scaner"]);
+    run.expect_code(1);
+    let lines: Vec<&str> = run.stderr.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "error: `scaner` is not the path of a piece, and this command acts only on a path",
+            "  fix: Run the command again with the path of the piece: projects/scanner.",
+            "    candidate: projects/scanner",
+            "  while attempting to unearth the version",
+        ]
+    );
+}
+
+#[test]
 fn the_candidates_come_before_the_lines_naming_what_the_run_was_doing() {
     let world = world(Mode::Text, stored_pieces);
     let run = world.run(&["unearth", "scan"]);
@@ -107,7 +124,7 @@ fn the_candidates_come_before_the_lines_naming_what_the_run_was_doing() {
         lines,
         [
             "error: no unique piece matches `scan`, as it fits the paths of 2 pieces",
-            "  fix: Name the piece by more of its path, for example projects/scanner.",
+            "  fix: Name the piece by more of its path.",
             "    candidate: projects/scanner",
             "    candidate: tools/scan-old",
             "  while attempting to unearth the version",

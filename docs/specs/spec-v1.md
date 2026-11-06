@@ -1066,7 +1066,9 @@ creates a new version. `-n` names the version, the destination path and the
 checks it would make. (ADR 0061)
 
 - `<piece>` is the path of a piece (see "Piece references"). A search
-  word never acts: it lists the pieces it matches in an error. Without `--version` the newest version is taken. A folder of
+  word never acts: an error shows the pieces it matches, or the closest
+  pieces when it matches none. Without `--version` the newest version is
+  taken. A folder of
   the store that holds only versions without an archive is no piece to
   unearth: the error is `unknown_reference` and says that the piece holds
   only incomplete versions, which `forget` removes. A version named by
@@ -2012,8 +2014,8 @@ that treats other spellings of a name as the same (see "Spelling"), a path
 in another spelling names the candidate whose folder it leads to. Any other
 input is a search word, matched with the same fuzzy pattern `list` uses
 (smart case, smart normalization) against the candidates' paths in their
-escaped form. A command that removes nothing (`archive`, `pin`, `unpin`,
-`fork` and `rebuild`) acts on a search word that matches exactly one
+escaped form. A command that deletes no stored version (`archive`, `pin`,
+`unpin`, `fork` and `rebuild`) acts on a search word that matches exactly one
 candidate. `unearth` and `forget` remove a version and act only on the path
 of a candidate; a search word that matches exactly one candidate is the
 error kind `inexact_reference`, which lists that candidate, and nothing is
@@ -2039,7 +2041,8 @@ refusal of `forget --all-versions` without `--force`, is followed on a
 terminal by the same info "Nothing was <done>.".
 
 - Several pieces match a word. The caption is "The N pieces that match
-  `<word>`". For `unearth`, `fork`, `rebuild` and `forget` the table is the
+  `<word>`" and the "How to fix it" is "Name the piece by more of its
+  path.". For `unearth`, `fork`, `rebuild` and `forget` the table is the
   table of `antiq list` with all versions of the candidate pieces, in which
   the letters the word matched are bold red. For `archive`, `pin` and
   `unpin` it has the columns PIECE and VERSIONS, the number of stored
@@ -2057,10 +2060,12 @@ terminal by the same info "Nothing was <done>.".
 - `unearth` or `forget` is given a search word that matches exactly one
   piece. The error is `inexact_reference`; its message says that the word
   is not the path of a piece and that the command acts only on a path. Its
-  "How to fix it" tells to run the command again with the path of the
-  piece and gives the path as an example: relative to the collection root
-  when the command runs there, absolute otherwise, so that it is a path
-  from the directory the command runs in. The caption is "The piece that
+  "How to fix it" is "Run the command again with the path of the piece:
+  <path>.", where the path is spelled so that it names the piece from the
+  directory the command runs in: relative to the collection root when the
+  command runs there, absolute otherwise, and as the raw text of the
+  path, so a `%` in a name is not an escape. A path that is not UTF-8 is
+  written in the byte quoting of a shell, such as `$'projects/d\xff'`. The caption is "The piece that
   matches `<word>`" and the table is that of the first case, with the
   matched letters bold red.
 - Several versions match a `--version` or version argument. The caption is
@@ -2082,9 +2087,11 @@ The JSON error carries `code` and `fix` besides `kind` and `message`
 (`antiq::reference::ambiguous`, `antiq::reference::inexact` and
 `antiq::reference::unknown`, or `antiq::version::ambiguous`), and
 `error.candidates` lists the candidate pieces, relative to the collection
-root, so a script that runs `unearth` or `forget` with one of them from
-another directory passes `-C <root>`. The closest pieces and the matching
-versions are not part of it.
+root and in the escaped form of the list table. A script that runs
+`unearth` or `forget` with one of them passes `-C <root>` and uses it as
+given only when the path holds no `%` and is UTF-8; the `fix` of
+`inexact_reference` holds the exact spelling. The closest pieces and the
+matching versions are not part of it.
 
 ### Console output
 
@@ -2159,7 +2166,8 @@ is the section "How to fix it". A help of several paragraphs separates
 them by an empty line, and a paragraph whose lines start with two spaces
 is shown as written. These errors have an explanation: outside an antiq
 collection, a piece reference that matches several pieces, one piece for a
-command that acts only on a path, no piece, or only pieces with incomplete versions, a path outside the antiq collection,
+command that acts only on a path, no piece, or only pieces with
+incomplete versions, a path outside the antiq collection,
 a version input that matches several versions or none, a held run lock,
 `push` without a target, `push` refused for a damaged or incomplete store,
 a target marker that names another host or path, a target that cannot be
@@ -2169,7 +2177,8 @@ target marker of a newer format, and `forget --all-versions` without
 error is the chain text of the whole error, and its `fix` is the help of
 the explanation. The steps the run was in are listed innermost first under "What
 antiq was doing". A reference that matches several pieces or versions, one
-piece for a command that acts only on a path, or no piece, adds a table and an info after the block (see "Piece references").
+piece for a command that acts only on a path, or no piece, adds a table
+and an info after the block (see "Piece references").
 The title of the error for an unreachable target, and the title of the
 warnings about a filesystem that cannot be told and a lock file that cannot
 be read, hold system text; they show it as written, backticks included.

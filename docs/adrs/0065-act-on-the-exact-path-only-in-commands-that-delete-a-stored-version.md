@@ -1,4 +1,4 @@
-# 65. Act on a search word only in commands that remove nothing
+# 65. Act on the exact path only in commands that delete a stored version
 
 Date: 2026-11-06
 
@@ -23,9 +23,13 @@ the piece is then named explicitly while the search stays.
 
 A word that matches several candidates stays `ambiguous_reference`, and a
 word that matches none stays `unknown_reference`. `archive`, `pin`,
-`unpin`, `fork` and `rebuild` remove nothing and keep acting on a word
-that matches exactly one candidate.
+`unpin`, `fork` and `rebuild` delete no stored version and keep acting on
+a word that matches exactly one candidate.
 
 ## Consequences
 
-None further.
+A scripted `unearth` or `forget` that relied on a single fuzzy match now
+exits 1 with `inexact_reference`. A run from a subdirectory can take two
+steps, because the closest pieces of an unknown word are shown relative to
+the collection root. A piece whose name is not UTF-8 is named by the byte
+quoting of a shell, which the error spells out.

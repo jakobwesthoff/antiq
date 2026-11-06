@@ -1042,3 +1042,44 @@ fn a_search_word_that_fits_one_piece_is_offered_and_nothing_is_deleted() {
         assert!(!exists(&world, "projects/scanner", SCANNER_NEW));
     }
 }
+
+#[test]
+fn a_path_read_from_the_wrong_directory_is_offered_and_nothing_is_deleted() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, three_versions);
+        let projects = world.collection().path("projects");
+        fs::create_dir_all(&projects).expect("the folder is made");
+        let before = state(&world);
+        let run = world.run_in(&projects, &["forget", "projects/scanner", SCANNER_NEW]);
+        run.expect_code(1);
+        run.json_only(|json| {
+            assert_eq!(json["error"]["kind"], "inexact_reference");
+            let fix = json["error"]["fix"].as_str().expect("a text");
+            assert!(
+                fix.contains(&world.collection().root().display().to_string()),
+                "{fix}"
+            );
+        });
+        assert_eq!(state(&world), before);
+    }
+}
+
+#[test]
+fn a_word_fitting_one_sidecar_only_folder_is_offered_by_forget() {
+    both(three_versions, |world| {
+        world
+            .collection()
+            .damage_remove_archive("tools/scan-old", SCAN_OLD);
+        let before = state(world);
+        let run = world.run(&["forget", "scan-old", SCAN_OLD]);
+        run.expect_code(1);
+        run.json_only(|json| {
+            assert_eq!(json["error"]["kind"], "inexact_reference");
+            assert_eq!(
+                json["error"]["candidates"],
+                serde_json::json!([{"path": "tools/scan-old"}])
+            );
+        });
+        assert_eq!(state(world), before);
+    });
+}

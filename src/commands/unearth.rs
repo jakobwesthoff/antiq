@@ -15,6 +15,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::markers::{self, RESTORED_FILE, Restored};
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
 use crate::progress::{Observer, Operation, Outcome as Progress, Silent, Tracker};
+use crate::reference;
 use crate::relpath::RelPath;
 use crate::repair::{Destination, Repair};
 use crate::report::{CommandReport, Warning, setting_notes};
@@ -27,8 +28,8 @@ use crate::versions::store;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::Serialize;
-use std::ffi::OsString;
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 /// Why unearth failed.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -72,6 +73,8 @@ impl HasKind for UnearthError {
 #[derive(Debug, Clone)]
 pub struct UnearthRequest {
     pub cwd: PathBuf,
+    /// The path of the piece. A search word is only offered, never acted
+    /// on.
     pub piece: OsString,
     pub version: Option<String>,
     pub dry_run: bool,
@@ -284,6 +287,15 @@ pub(crate) fn concerns(repair: &Repair, piece: &str) -> bool {
     }
 }
 
+/// The path the piece reference `given` leads to from `cwd`, for judging
+/// whether a repair concerns the piece the person named. A reference that
+/// is no path below the collection concerns no repair.
+pub(crate) fn path_named(collection: &Collection, cwd: &Path, given: &OsStr) -> String {
+    reference::resolve_path(collection, cwd, Path::new(given))
+        .map(|path| path.to_string())
+        .unwrap_or_default()
+}
+
 /// Whether `repair` gives a tree back to the live path `piece`.
 pub(crate) fn gives_back_to(repair: &Repair, piece: &RelPath) -> bool {
     matches!(
@@ -345,7 +357,7 @@ impl Run<'_> {
             Warning::new(format!("cannot be judged before the repairs run: {error}"))
         };
 
-        let given = self.request.piece.to_string_lossy().into_owned();
+        let given = path_named(self.collection, &self.request.cwd, &self.request.piece);
         let chosen = match self.choose() {
             Ok(chosen) => chosen,
             Err(error) if concerned(&given) => {

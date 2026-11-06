@@ -25,21 +25,12 @@ pub struct Candidate {
     pub path: String,
 }
 
-/// The first of the pieces an ambiguous reference matches, as the example
-/// of a longer reference. An ambiguous reference always has candidates.
-fn example_path(candidates: &[Candidate]) -> CodeSpan<&str> {
-    CodeSpan(candidates.first().map_or("", |first| first.path.as_str()))
-}
-
 /// Errors of resolving a piece reference.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ReferenceError {
     #[diagnostic(
         code(antiq::reference::ambiguous),
-        help(
-            "Name the piece by more of its path, for example {}.",
-            example_path(.candidates)
-        )
+        help("Name the piece by more of its path.")
     )]
     #[error(
         "no unique piece matches {}, as it fits the paths of {} pieces",
@@ -53,7 +44,7 @@ pub enum ReferenceError {
     #[diagnostic(
         code(antiq::reference::inexact),
         help(
-            "Run the command again with the path of the piece you mean, for example {}.",
+            "Run the command again with the path of the piece: {}.",
             CodeSpan(.example)
         )
     )]
@@ -357,8 +348,10 @@ pub fn resolve_piece(
 ///
 /// A path is read against that directory, so the root-relative path the
 /// output shows names the candidate only at the collection root. Anywhere
-/// else the absolute path does. The text is raw where the bytes are UTF-8:
-/// the escaped form of a name that holds a `%` is the name of another path.
+/// else the absolute path does. The text is the raw path: the escaped form
+/// of a name that holds a `%` is the name of another path. A path that is
+/// not UTF-8 cannot be typed as text, so it is written in the byte quoting
+/// of a shell, `$'...\xff'`.
 fn exact_spelling(collection: &Collection, cwd: &Path, candidate: &RelPath) -> String {
     let at_root = matches!(
         resolve_path(collection, cwd, Path::new(".")),
@@ -373,14 +366,21 @@ fn exact_spelling(collection: &Collection, cwd: &Path, candidate: &RelPath) -> S
     };
     match spelled.into_os_string().into_string() {
         Ok(text) => text,
-        Err(_) if at_root => candidate.to_string(),
-        Err(_) => escape(
-            collection
-                .root()
-                .join(OsStr::from_bytes(candidate.as_bytes()))
-                .as_os_str()
-                .as_bytes(),
-        ),
+        Err(raw) => {
+            let mut quoted = String::from("$'");
+            for &byte in raw.as_bytes() {
+                match byte {
+                    b'\\' | b'\'' => {
+                        quoted.push('\\');
+                        quoted.push(char::from(byte));
+                    }
+                    b' '..=b'~' => quoted.push(char::from(byte)),
+                    _ => quoted.push_str(&format!("\\x{byte:02x}")),
+                }
+            }
+            quoted.push('\'');
+            quoted
+        }
     }
 }
 
@@ -1159,18 +1159,21 @@ mod tests {
     }
 
     #[test]
-    fn the_example_of_a_name_that_is_not_utf8_is_its_escaped_form() {
+    fn the_example_of_a_name_that_is_not_utf8_is_in_shell_byte_quoting() {
         let fx = Fixture::new();
-        let set = set_of(&fx, &["projects/d%FF"]);
+        let set = set_of(&fx, &["projects/d%FF", "projects/it's\\ok%FF"]);
         assert_eq!(
             example_of(&fx, &fx.root(), &set, "projects/d"),
-            "projects/d%FF"
+            "$'projects/d\\xff'"
+        );
+        assert_eq!(
+            example_of(&fx, &fx.root(), &set, "projects/it"),
+            "$'projects/it\\'s\\\\ok\\xff'"
         );
         let from_below = fx.root().join("projects");
-        let example = example_of(&fx, &from_below, &set, "projects/d");
         assert_eq!(
-            example,
-            format!("{}/projects/d%FF", escape(fx.root().as_os_str().as_bytes()))
+            example_of(&fx, &from_below, &set, "projects/d"),
+            format!("$'{}/projects/d\\xff'", fx.root().display())
         );
     }
 

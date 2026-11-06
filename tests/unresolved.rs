@@ -90,7 +90,7 @@ fn an_ambiguous_word_lists_the_list_table_of_the_store_pieces() {
          ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Name the piece by more of its path, for example projects/scanner.\n\
+         ▌   Name the piece by more of its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to unearth.\n\
@@ -114,7 +114,7 @@ fn an_ambiguous_word_for_a_live_piece_counts_the_versions() {
          ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Name the piece by more of its path, for example projects/scanner.\n\
+         ▌   Name the piece by more of its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to pin.\n\
@@ -207,8 +207,7 @@ fn a_word_that_fits_one_piece_is_offered_in_a_table_and_nothing_is_done() {
              ▌ scaner is not the path of a piece, and this command acts only on a path\n\
              ▌\n\
              ▌ How to fix it\n\
-             ▌   Run the command again with the path of the piece you mean, for example\n\
-             ▌   projects/scanner.\n\
+             ▌   Run the command again with the path of the piece: projects/scanner.\n\
              ▌\n\
              ▌ What antiq was doing\n\
              ▌   Attempting to find the piece to {command}.\n\
@@ -313,10 +312,7 @@ fn the_json_error_of_an_unresolved_reference_carries_its_code_message_and_fix() 
         let error = &value["error"];
         assert_eq!(error["kind"], "ambiguous_reference");
         assert_eq!(error["code"], "antiq::reference::ambiguous");
-        assert_eq!(
-            error["fix"],
-            "Name the piece by more of its path, for example `projects/scanner`."
-        );
+        assert_eq!(error["fix"], "Name the piece by more of its path.");
     });
 }
 
