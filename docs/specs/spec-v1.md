@@ -1047,7 +1047,9 @@ checks it would make. (ADR 0061)
   `.antiq/tmp/` is refused as a mount point. The checks of the member names
   and of the extracted tree are named and not run, as they need the
   extraction, which writes into `.antiq/tmp/`. Without room for the version
-  `-n` prints a `Would skip` line instead and exits 3. A dry run chooses
+  `-n` prints a `Would skip` line instead and exits 3, also where the
+  destination is taken, as the real run measures the room before it looks
+  at the destination. A dry run chooses
   among the versions as they are, and a refusal is softened into a warning
   only when a planned repair that deletes sidecars, a version or an empty
   folder names the piece's path as given.

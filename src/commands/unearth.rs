@@ -316,30 +316,36 @@ impl Run<'_> {
             }
             Err(error) => return Err(error.into()),
         };
-        match check_destination(self.root, self.rules, &chosen.piece) {
-            Ok(missing) => {
-                // A tree that repair 4 gives back to the path is there
-                // when the unearth starts.
-                if repairs
-                    .iter()
-                    .any(|repair| gives_back_to(repair, &chosen.piece))
-                {
-                    return Err(RestoreError::Target {
-                        path: chosen.piece.clone(),
-                        problem: TargetProblem::Taken,
-                    }
-                    .into());
-                }
-                let staging = measured_tmp(self.collection);
-                check_same_volume(self.root, hooks, &staging, &chosen.piece, &missing)?;
-            }
-            Err(error) if concerned(&chosen.piece.to_string()) => warnings.push(unjudged(&error)),
-            Err(error) => return Err(error.into()),
-        }
         let needed = chosen.listing.bytes;
         let available = hooks
             .available_space(&self.collection.measured_tmp_dir())
             .map_err(RestoreError::from)?;
+        // The real run measures the room before it looks at the destination,
+        // so a dry run that finds no room does not look at it either.
+        if available >= needed {
+            match check_destination(self.root, self.rules, &chosen.piece) {
+                Ok(missing) => {
+                    // A tree that repair 4 gives back to the path is there
+                    // when the unearth starts.
+                    if repairs
+                        .iter()
+                        .any(|repair| gives_back_to(repair, &chosen.piece))
+                    {
+                        return Err(RestoreError::Target {
+                            path: chosen.piece.clone(),
+                            problem: TargetProblem::Taken,
+                        }
+                        .into());
+                    }
+                    let staging = measured_tmp(self.collection);
+                    check_same_volume(self.root, hooks, &staging, &chosen.piece, &missing)?;
+                }
+                Err(error) if concerned(&chosen.piece.to_string()) => {
+                    warnings.push(unjudged(&error))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         plan.push_command(UnearthAction {
             kind: "unearth",
             piece: chosen.piece.to_string(),
@@ -1229,6 +1235,20 @@ mod tests {
 
         let plan = dry_plan_of(&world, &Probe::default());
         assert!(!plan.skips());
+    }
+
+    #[test]
+    fn a_dry_run_checks_the_room_before_the_destination_as_the_real_run_does() {
+        let world = World::new(&[NEW]);
+        fs::create_dir_all(world.root().join("projects/scanner")).expect("takes the place");
+        let probe = Probe::default();
+        probe.space.set(Some(3));
+
+        let real = report(world.run(&probe));
+        assert!(real.skipped.is_some(), "the real run skips for the room");
+
+        let plan = dry_plan_of(&world, &probe);
+        assert!(plan.skips(), "the dry run predicts it");
     }
 
     #[test]

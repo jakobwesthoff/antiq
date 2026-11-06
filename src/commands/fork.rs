@@ -321,30 +321,6 @@ impl Run<'_> {
             Err(error) => return Err(error.into()),
         };
         let destination = named.unwrap_or_else(|| picked.piece.clone());
-        match check_destination(self.root, self.rules, &destination) {
-            Ok(missing) => {
-                // A tree that repair 4 gives back to the path is there
-                // when the fork starts.
-                if repairs
-                    .iter()
-                    .any(|repair| gives_back_to(repair, &destination))
-                {
-                    return Err(self.refuse(RestoreError::Target {
-                        path: destination,
-                        problem: TargetProblem::Taken,
-                    }));
-                }
-                let staging = measured_tmp(self.collection);
-                check_same_volume(self.root, hooks, &staging, &destination, &missing)
-                    .map_err(|error| self.refuse(error))?;
-            }
-            Err(error) if self.request.name.is_none() && concerned(&destination.to_string()) => {
-                warnings.push(unjudged(&error));
-            }
-            Err(error) => return Err(self.refuse(error)),
-        }
-        warnings.extend(self.notes(&picked));
-
         let bytes = picked.listing.as_ref().map(|listing| listing.bytes);
         let skipped = match bytes {
             Some(needed) => {
@@ -359,6 +335,36 @@ impl Run<'_> {
             }
             None => None,
         };
+        // The real run measures the room before it looks at the destination,
+        // so a dry run that finds no room does not look at it either.
+        if skipped.is_none() {
+            match check_destination(self.root, self.rules, &destination) {
+                Ok(missing) => {
+                    // A tree that repair 4 gives back to the path is there
+                    // when the fork starts.
+                    if repairs
+                        .iter()
+                        .any(|repair| gives_back_to(repair, &destination))
+                    {
+                        return Err(self.refuse(RestoreError::Target {
+                            path: destination,
+                            problem: TargetProblem::Taken,
+                        }));
+                    }
+                    let staging = measured_tmp(self.collection);
+                    check_same_volume(self.root, hooks, &staging, &destination, &missing)
+                        .map_err(|error| self.refuse(error))?;
+                }
+                Err(error)
+                    if self.request.name.is_none() && concerned(&destination.to_string()) =>
+                {
+                    warnings.push(unjudged(&error));
+                }
+                Err(error) => return Err(self.refuse(error)),
+            }
+        }
+        warnings.extend(self.notes(&picked));
+
         let mut checks = vec!["version", "destination"];
         if bytes.is_some() {
             checks.push("free_space");
@@ -989,6 +995,21 @@ mod tests {
         let plan = plan(world.run_with(&world.request(None, true), &probe));
 
         assert!(plan.skips());
+    }
+
+    #[test]
+    fn a_dry_run_checks_the_room_before_the_destination_as_the_real_run_does() {
+        let world = World::new(&[NEW]);
+        fs::create_dir_all(world.root().join("projects/scanner")).expect("takes the place");
+        let probe = Probe::default();
+        probe.space.set(Some(3));
+
+        let plan = plan(world.run_with(&world.request(None, true), &probe));
+
+        assert!(
+            plan.skips(),
+            "the dry run predicts the skip of the real run"
+        );
     }
 
     #[test]
