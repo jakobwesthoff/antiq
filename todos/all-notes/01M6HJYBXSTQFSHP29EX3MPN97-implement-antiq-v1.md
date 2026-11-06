@@ -2570,7 +2570,9 @@ the same commit; the lead checks that at acceptance.
 - Write orders the later items follow (from I09): archive, unearth and
   minting write the metadata first, then the entry (I19, I30, I32, I34;
   removing sets `removing_payload`); I20 unearths as entry
-  `unearthing`, rename, entry `live`, then metadata; a fork (I22, I26,
+  `unearthing`, rename, top mode, metadata, then entry `live` (lead,
+  2026-11-04: the `unearthing` entry marks an unearth whose metadata may
+  be missing, and the start-of-run repair writes it); a fork (I22, I26,
   I31, I37) writes the old ID's archived metadata, the old entry `gone`
   keeping its local payloads, the new metadata, then the new entry; I21
   writes a `gone` entry with the local archive at version 1, version
@@ -2741,6 +2743,14 @@ the same commit; the lead checks that at acceptance.
   unearthing time and payload version whose metadata does not record
   the unearth gets the change written from the entry. The name probe
   runs on the staging volume, as the spec says.
+- 2026-11-04 (merged, plan review 12 and opus diff review 8, all fixed):
+  `ops::unearth::{plan, apply}` with `UnearthRequest`; I34 adds
+  fetching where an archived ID has no local archive. I22's fork and
+  I26's routing build on `Planned`. `fold_path` in `pack/names.rs` is
+  `pub(crate)`. A dry run skips the volume-folding check (it needs the
+  probe), so it can say `Would unearth` where the real run refuses on a
+  case-folding volume. `src/fsx/space.rs` drops its `allow(dead_code)`
+  once I19 lands.
 
 ### I21
 
