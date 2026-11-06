@@ -132,6 +132,10 @@ pub struct TargetRules {
     pub decomposes: bool,
     /// A name that is not valid UTF-8 cannot be created.
     pub requires_utf8: bool,
+    /// A second name for a file can be created.
+    pub hard_links: bool,
+    /// A symlink can be created.
+    pub symlinks: bool,
     /// The longest name one directory entry can have.
     pub name_limit: names::NameLimit,
 }

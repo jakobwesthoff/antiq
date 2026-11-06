@@ -9,7 +9,7 @@
 //! is opened without following symlinks, so no member is written through
 //! one, and paths past the platform's limit work.
 
-use super::names::check_paths;
+use super::names::{MemberKind, MemberName, check_members};
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{RelPath, escape};
@@ -514,7 +514,7 @@ pub fn unpack(
     // it was.
     scan(package)?;
     let names = gather(package)?;
-    let problems = check_paths(&names, rules);
+    let problems = check_members(&names, rules);
     if !problems.is_empty() {
         return Err(PackError::UnholdableNames(problems));
     }
@@ -613,7 +613,7 @@ fn scan(package: &Path) -> Result<(), PackError> {
 
 /// The second pass classifies and places every member and returns their
 /// paths below the container, in archive order, for the name check.
-fn gather(package: &Path) -> Result<Vec<RelPath>, PackError> {
+fn gather(package: &Path) -> Result<Vec<MemberName>, PackError> {
     let mut archive = open(package)?;
     let mut container = None;
     let mut placement = Placement::new();
@@ -625,7 +625,15 @@ fn gather(package: &Path) -> Result<Vec<RelPath>, PackError> {
             .admit(&member)
             .map_err(|refusal| member.refused(refusal))?;
         if !member.path.is_root() {
-            paths.push(member.path);
+            let kind = match member.kind {
+                Kind::Symlink(_) => MemberKind::Symlink,
+                Kind::HardLink(_) => MemberKind::HardLink,
+                Kind::Directory | Kind::File => MemberKind::Plain,
+            };
+            paths.push(MemberName {
+                path: member.path,
+                kind,
+            });
         }
     }
     drain(archive)?;
@@ -1895,6 +1903,47 @@ mod tests {
             matches!(&error, PackError::Extract { source, .. }
                 if source.raw_os_error() == Some(libc::EILSEQ)),
             "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_hard_link_is_refused_up_front_on_a_volume_without_hard_links() {
+        let mut archive = container();
+        archive
+            .file("proj/first", 0o644, 1_000_000_000, b"x")
+            .member(
+                b"proj/second",
+                b'1',
+                0o644,
+                1_000_000_000,
+                b"proj/first",
+                b"",
+            );
+        let rules = TargetRules {
+            hard_links: false,
+            ..TargetRules::linux()
+        };
+        assert_eq!(
+            name_problems(&archive, &rules),
+            [names::NameProblem::HardLinkUnsupported {
+                path: rel("second")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_symlink_is_refused_up_front_on_a_volume_without_symlinks() {
+        let mut archive = container();
+        archive
+            .file("proj/first", 0o644, 1_000_000_000, b"x")
+            .symlink("proj/link", "first", 0o777, 1_000_000_000);
+        let rules = TargetRules {
+            symlinks: false,
+            ..TargetRules::linux()
+        };
+        assert_eq!(
+            name_problems(&archive, &rules),
+            [names::NameProblem::SymlinkUnsupported { path: rel("link") }]
         );
     }
 

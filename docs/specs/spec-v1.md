@@ -1096,7 +1096,10 @@ staging volume. It refuses the piece with a list of the offending
 names and the reason. A name is too long when it exceeds 255 bytes on
 Linux or 255 UTF-16 code units, counted on the name as stored, on
 macOS; a volume that stores names decomposed (HFS+) counts them in that
-form. macOS also refuses a name that is not valid UTF-8. Two members
+form. macOS also refuses a name that is not valid UTF-8. The probe also
+tries to create a hard link and a symlink on the staging volume; a hard
+link or symlink member of the package is refused, with the others, when
+the volume has none (exFAT has no hard links). Two members
 collide when their paths are equal after Unicode normalisation (where
 the volume ignores it) and full case folding (where the volume ignores
 case); the refusal lists both names. A member more than 512 directory

@@ -44,6 +44,40 @@ pub enum NameProblem {
     Collision {
         paths: Vec<RelPath>,
     },
+    /// A hard link, on a volume that has none.
+    HardLinkUnsupported {
+        path: RelPath,
+    },
+    /// A symlink, on a volume that has none.
+    SymlinkUnsupported {
+        path: RelPath,
+    },
+}
+
+/// What a member is, as far as the volume's rules care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    Plain,
+    Symlink,
+    HardLink,
+}
+
+/// A member of an archive: its path below the top-level directory and
+/// its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberName {
+    pub path: RelPath,
+    pub kind: MemberKind,
+}
+
+impl MemberName {
+    /// A file or directory.
+    pub fn plain(path: RelPath) -> MemberName {
+        MemberName {
+            path,
+            kind: MemberKind::Plain,
+        }
+    }
 }
 
 impl fmt::Display for NameProblem {
@@ -77,6 +111,12 @@ impl fmt::Display for NameProblem {
                 let earlier: Vec<String> = earlier.iter().map(|path| format!("`{path}`")).collect();
                 let joined = earlier.join(", ");
                 write!(f, "{joined} and `{last}` become one name on this volume")
+            }
+            NameProblem::HardLinkUnsupported { path } => {
+                write!(f, "`{path}` is a hard link, which this volume cannot hold")
+            }
+            NameProblem::SymlinkUnsupported { path } => {
+                write!(f, "`{path}` is a symlink, which this volume cannot hold")
             }
         }
     }
@@ -114,6 +154,8 @@ impl TargetRules {
             normalization_insensitive: true,
             decomposes: false,
             requires_utf8: true,
+            hard_links: true,
+            symlinks: true,
             name_limit: NameLimit {
                 max: 255,
                 unit: LengthUnit::Utf16Units,
@@ -128,6 +170,8 @@ impl TargetRules {
             normalization_insensitive: false,
             decomposes: false,
             requires_utf8: false,
+            hard_links: true,
+            symlinks: true,
             name_limit: NameLimit {
                 max: 255,
                 unit: LengthUnit::Bytes,
@@ -199,9 +243,10 @@ fn name_problems(path: &RelPath, rules: &TargetRules, problems: &mut Vec<NamePro
     }
 }
 
-/// The problems `paths` would have on a volume with `rules`, ordered by
+/// The problems `members` would have on a volume with `rules`, ordered by
 /// the first member each concerns.
-pub fn check_paths(paths: &[RelPath], rules: &TargetRules) -> Vec<NameProblem> {
+pub fn check_members(members: &[MemberName], rules: &TargetRules) -> Vec<NameProblem> {
+    let paths: Vec<&RelPath> = members.iter().map(|member| &member.path).collect();
     let keys: Vec<Vec<u8>> = paths.iter().map(|path| fold_path(path, rules)).collect();
     let mut groups: HashMap<&[u8], Vec<usize>> = HashMap::new();
     for (index, key) in keys.iter().enumerate() {
@@ -209,8 +254,17 @@ pub fn check_paths(paths: &[RelPath], rules: &TargetRules) -> Vec<NameProblem> {
     }
 
     let mut problems = Vec::new();
-    for (index, path) in paths.iter().enumerate() {
+    for (index, path) in paths.iter().copied().enumerate() {
         name_problems(path, rules, &mut problems);
+        match members[index].kind {
+            MemberKind::HardLink if !rules.hard_links => {
+                problems.push(NameProblem::HardLinkUnsupported { path: path.clone() });
+            }
+            MemberKind::Symlink if !rules.symlinks => {
+                problems.push(NameProblem::SymlinkUnsupported { path: path.clone() });
+            }
+            _ => {}
+        }
         let group = &groups[keys[index].as_slice()];
         if group[0] != index {
             continue;
@@ -219,8 +273,8 @@ pub fn check_paths(paths: &[RelPath], rules: &TargetRules) -> Vec<NameProblem> {
         // refuses on its own; only different spellings collide.
         let mut spellings: Vec<&RelPath> = Vec::new();
         for member in group {
-            if !spellings.contains(&&paths[*member]) {
-                spellings.push(&paths[*member]);
+            if !spellings.contains(&paths[*member]) {
+                spellings.push(paths[*member]);
             }
         }
         if spellings.len() > 1 {
@@ -232,14 +286,14 @@ pub fn check_paths(paths: &[RelPath], rules: &TargetRules) -> Vec<NameProblem> {
     problems
 }
 
-/// The problems `paths` would have on macOS and on Linux.
-pub fn portability_warnings(paths: &[RelPath]) -> Vec<PortabilityWarning> {
+/// The problems `members` would have on macOS and on Linux.
+pub fn portability_warnings(members: &[MemberName]) -> Vec<PortabilityWarning> {
     let mut warnings = Vec::new();
     for (platform, rules) in [
         (Platform::MacOs, TargetRules::macos()),
         (Platform::Linux, TargetRules::linux()),
     ] {
-        for problem in check_paths(paths, &rules) {
+        for problem in check_members(members, &rules) {
             warnings.push(PortabilityWarning { platform, problem });
         }
     }
@@ -303,6 +357,37 @@ impl<'a> ProbeDirectory<'a> {
         let entries = self.root.read_dir(&self.path)?;
         Ok(entries.iter().any(|entry| entry.name.as_bytes() == name))
     }
+
+    /// Gives the probe file `existing` a second name, `new`.
+    fn hard_link(&mut self, existing: &[u8], new: &[u8]) -> io::Result<()> {
+        let path = self.entry(new);
+        self.root.hard_link(&self.entry(existing), &path)?;
+        self.created.push(path);
+        Ok(())
+    }
+
+    /// Creates a symlink to `target`.
+    fn symlink(&mut self, name: &[u8], target: &[u8]) -> io::Result<()> {
+        let path = self.entry(name);
+        self.root.create_symlink(&path, target)?;
+        self.created.push(path);
+        Ok(())
+    }
+}
+
+/// Whether the one call that tried to create a link shows that the volume
+/// has none: it was refused as not permitted or not supported. Any other
+/// failure says nothing about links and is the probe's error.
+fn link_supported(attempt: io::Result<()>) -> io::Result<bool> {
+    match attempt {
+        Ok(()) => Ok(true),
+        Err(error) => match error.raw_os_error() {
+            Some(errno) if [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&errno) => {
+                Ok(false)
+            }
+            _ => Err(error),
+        },
+    }
 }
 
 impl Drop for ProbeDirectory<'_> {
@@ -349,6 +434,11 @@ impl TargetRules {
         let lower = directory.create_file(b"antiq-probe-case")?;
         let case_insensitive = directory.finds(b"ANTIQ-PROBE-CASE")?;
 
+        let hard_links =
+            link_supported(directory.hard_link(b"antiq-probe-case", b"antiq-probe-hard"))?;
+        let symlinks =
+            link_supported(directory.symlink(b"antiq-probe-symlink", b"antiq-probe-case"))?;
+
         // A volume that ignores normalisation finds the decomposed
         // spelling of the precomposed name just written. One that stores
         // names decomposed lists it under another spelling than the one
@@ -370,6 +460,8 @@ impl TargetRules {
             normalization_insensitive,
             decomposes,
             requires_utf8,
+            hard_links,
+            symlinks,
             name_limit: NameLimit {
                 max,
                 unit: NAME_LIMIT_UNIT,
@@ -384,6 +476,21 @@ mod tests {
 
     fn paths(names: &[&str]) -> Vec<RelPath> {
         names.iter().map(|name| rel(name)).collect()
+    }
+
+    fn plain(paths: &[RelPath]) -> Vec<MemberName> {
+        paths.iter().cloned().map(MemberName::plain).collect()
+    }
+
+    fn check_paths(paths: &[RelPath], rules: &TargetRules) -> Vec<NameProblem> {
+        check_members(&plain(paths), rules)
+    }
+
+    fn member(path: &str, kind: MemberKind) -> MemberName {
+        MemberName {
+            path: rel(path),
+            kind,
+        }
     }
 
     fn rel(name: &str) -> RelPath {
@@ -575,6 +682,49 @@ mod tests {
         );
     }
 
+    fn without_links() -> TargetRules {
+        TargetRules {
+            hard_links: false,
+            symlinks: false,
+            ..TargetRules::linux()
+        }
+    }
+
+    #[test]
+    fn a_hard_link_is_a_problem_on_a_volume_without_hard_links() {
+        let members = [
+            member("file", MemberKind::Plain),
+            member("again", MemberKind::HardLink),
+        ];
+        assert_eq!(
+            check_members(&members, &without_links()),
+            [NameProblem::HardLinkUnsupported { path: rel("again") }]
+        );
+        assert_eq!(check_members(&members, &TargetRules::linux()), []);
+    }
+
+    #[test]
+    fn a_symlink_is_a_problem_on_a_volume_without_symlinks() {
+        let members = [member("link", MemberKind::Symlink)];
+        assert_eq!(
+            check_members(&members, &without_links()),
+            [NameProblem::SymlinkUnsupported { path: rel("link") }]
+        );
+        assert_eq!(check_members(&members, &TargetRules::linux()), []);
+    }
+
+    #[test]
+    fn the_macos_and_linux_rules_have_hard_links_and_symlinks() {
+        for rules in [TargetRules::macos(), TargetRules::linux()] {
+            assert!(rules.hard_links && rules.symlinks);
+        }
+        let members = [
+            member("link", MemberKind::Symlink),
+            member("again", MemberKind::HardLink),
+        ];
+        assert_eq!(portability_warnings(&members), []);
+    }
+
     fn hfs_plus() -> TargetRules {
         TargetRules {
             decomposes: true,
@@ -657,7 +807,7 @@ mod tests {
         let long = repeated(128, "\u{e9}");
         let members = paths(&["README", "Readme", &long, "plain"]);
         assert_eq!(
-            portability_warnings(&members),
+            portability_warnings(&plain(&members)),
             [
                 PortabilityWarning {
                     platform: Platform::MacOs,
@@ -673,7 +823,10 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(portability_warnings(&paths(&["plain", "names"])), []);
+        assert_eq!(
+            portability_warnings(&plain(&paths(&["plain", "names"]))),
+            []
+        );
     }
 
     #[test]
@@ -696,6 +849,8 @@ mod tests {
             .to_string(),
             collision(&["README", "Readme"]).to_string(),
             collision(&["a", "b", "c"]).to_string(),
+            NameProblem::HardLinkUnsupported { path: rel("h") }.to_string(),
+            NameProblem::SymlinkUnsupported { path: rel("s") }.to_string(),
             PortabilityWarning {
                 platform: Platform::MacOs,
                 problem: collision(&["a", "A"]),
@@ -715,6 +870,8 @@ mod tests {
                 "`n` has a name of 300 UTF-16 units, the volume allows 255".to_string(),
                 "`README` and `Readme` become one name on this volume".to_string(),
                 "`a`, `b` and `c` become one name on this volume".to_string(),
+                "`h` is a hard link, which this volume cannot hold".to_string(),
+                "`s` is a symlink, which this volume cannot hold".to_string(),
                 "on macOS: `a` and `A` become one name on this volume".to_string(),
                 "on Linux: `a` and `A` become one name on this volume".to_string(),
             ]
@@ -790,6 +947,53 @@ mod probe_tests {
         assert!(probe.lists(b"here").expect("the listing works"));
         assert!(!probe.lists(b"HERE").expect("the listing works"));
         assert!(!probe.lists(b"missing").expect("the listing works"));
+    }
+
+    #[test]
+    fn the_probe_directory_removes_its_links_too() {
+        let (_dir, root) = temp_root();
+        {
+            let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
+            probe.create_file(b"file").expect("a file is created");
+            probe.hard_link(b"file", b"again").expect("a hard link");
+            probe.symlink(b"link", b"file").expect("a symlink");
+            assert!(probe.lists(b"again").expect("lists"));
+            assert!(probe.lists(b"link").expect("lists"));
+        }
+        assert!(is_empty(&root));
+    }
+
+    #[test]
+    fn a_link_that_was_created_shows_that_the_volume_has_links() {
+        assert!(link_supported(Ok(())).expect("a known answer"));
+    }
+
+    #[test]
+    fn a_link_that_the_volume_refuses_shows_that_it_has_none() {
+        for errno in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            let refused = io::Error::from_raw_os_error(errno);
+            assert!(
+                !link_supported(Err(refused)).expect("a known answer"),
+                "{errno}"
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_failure_of_a_link_is_a_real_error() {
+        for errno in [libc::ENOSPC, libc::EACCES, libc::EINVAL, libc::EEXIST] {
+            let failed = io::Error::from_raw_os_error(errno);
+            assert!(link_supported(Err(failed)).is_err(), "{errno}");
+        }
+    }
+
+    #[test]
+    fn the_probe_finds_hard_links_and_symlinks_on_the_temp_volume() {
+        let (_dir, root) = temp_root();
+        let rules = TargetRules::probe(&root).expect("the probe runs");
+        assert!(rules.hard_links);
+        assert!(rules.symlinks);
+        assert!(is_empty(&root));
     }
 
     #[test]
@@ -926,6 +1130,8 @@ mod probe_tests {
         let root = TreeRoot::open(&volume.mount).expect("the volume opens");
         let rules = TargetRules::probe(&root).expect("the probe runs");
         assert!(rules.requires_utf8);
+        assert!(!rules.hard_links, "exFAT answers ENOTSUP to a hard link");
+        assert!(rules.symlinks);
         assert!(is_empty(&root));
     }
 }

@@ -96,6 +96,10 @@ own on the staging volume and reads the answers. Disk images made with
 - exFAT answers a name that is not UTF-8 with `EINVAL`, where APFS
   answers `EILSEQ` (**measured**). The probe takes both as "the volume
   refuses such names".
+- On exFAT and on FAT32 (`-fs MS-DOS`) a hard link fails with errno 45,
+  "Operation not supported", and a symlink is created (**measured**).
+  The probe tries both calls once and takes only `EPERM`, `ENOTSUP` and
+  `EOPNOTSUPP` as "not supported".
 - HFS+ stores a precomposed name decomposed, so a directory listing
   returns other bytes than the ones written, and the 255-unit limit
   applies to the decomposed form: 127 times `é` creates and 128 times

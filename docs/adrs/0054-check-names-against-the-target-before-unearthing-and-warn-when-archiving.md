@@ -18,8 +18,9 @@ which macOS allows (`docs/research/names.md`).
 ## Decision
 
 Before extracting anything, unearthing checks every member name against
-the rules of the target: names the target cannot hold, name lengths, and
-names that collide under the target's case and Unicode rules. Paths are
+the rules of the target: names the target cannot hold, name lengths,
+names that collide under the target's case and Unicode rules, and hard
+links or symlinks on a target that cannot create them. Paths are
 not checked for length: a path longer than the platform's path limit is
 extracted directory by directory. It refuses the piece with a list of the
 offending names and the reason. The strict verify (ADR 0033) stays as the
