@@ -3321,4 +3321,19 @@ mod tests {
         assert!(outcome.done.is_empty(), "{:?}", outcome.done);
         assert!(exists(&temp, ".antiq/pieces/p"));
     }
+
+    #[test]
+    fn missing_run_directories_have_nothing_to_repair() {
+        let mut temp = TempCollection::minimal();
+        stage(&mut temp, "a", S);
+        for dir in ["pieces", "trash", "doomed"] {
+            fs::remove_dir_all(temp.root().join(".antiq").join(dir)).expect("removes");
+        }
+
+        let planned = plan(&collection(&temp));
+
+        let lines: Vec<String> = planned.repairs.iter().map(Repair::describe).collect();
+        assert_eq!(lines, ["delete .antiq/tmp/pack"]);
+        assert!(planned.warnings.is_empty(), "{:?}", messages(&planned));
+    }
 }
