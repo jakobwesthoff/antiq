@@ -20,7 +20,8 @@ Set WaitTimeout 120s
 # decides the shades. The magenta is the accent of the project page.
 Set Theme { "name": "antiq", "black": "#0f0f14", "red": "#ef6487", "green": "#5eca89", "yellow": "#fdd877", "blue": "#65aef7", "magenta": "#b49cff", "cyan": "#43c1be", "white": "#e5e5e5", "brightBlack": "#9ca3af", "brightRed": "#ef6487", "brightGreen": "#5eca89", "brightYellow": "#fdd877", "brightBlue": "#65aef7", "brightMagenta": "#cbbcff", "brightCyan": "#43c1be", "brightWhite": "#ffffff", "background": "#0f0f14", "foreground": "#e5e5e5", "selection": "#2d2640", "cursor": "#b49cff" }
 
+# The prompt is a "> " in the magenta of the theme, the accent of the page.
 Hide
-Type `export PS1='$ ' && unset COLUMNS && cd "$ANTIQ_DEMO_ROOT/experiments" && clear`
+Type `export PS1='\[\e[35m\]> \[\e[0m\]' && unset COLUMNS && cd "$ANTIQ_DEMO_ROOT/experiments" && clear`
 Enter
 Show
