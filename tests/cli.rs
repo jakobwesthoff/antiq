@@ -167,7 +167,6 @@ fn list_needs_a_collection() {
         assert_eq!(run.json()["command"], "list");
     }
 }
-command_line!(grep, "grep", ["grep", "pattern"]);
 command_line!(pin, "pin", ["pin", "piece", "-n"]);
 command_line!(unpin, "unpin", ["unpin", "piece", "-n"]);
 command_line!(push, "push", ["push"]);

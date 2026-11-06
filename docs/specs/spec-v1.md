@@ -1116,9 +1116,12 @@ and `scanner.*` do not, and `scanner.*` lists the files below the piece. Only
 the heads of the listings of such a piece are read, and the file count is the
 one of its newest searched version. In a pipe every hit and
 version is one tab-separated line `piece  stamp  path`, with the full
-version stamp (`-` as the path for a name match). With no hit `grep` exits
-0 and says so on stderr; a pattern that is not a valid regular expression
-is a usage error, exit 2. A held lock is noted as for `list`.
+version stamp (`-` as the path for a name match), ordered by piece, then
+path, then version with the newest first. A skipped version is a `warning:`
+line on stderr. With no hit `grep` exits 0 and says `no archived path
+matches <pattern>` on stderr; a pattern that is not a valid regular
+expression is a usage error, exit 2, also outside a collection. A held lock
+is noted as for `list`: a `note:` line on stderr.
 
 ### status
 
@@ -1464,4 +1467,18 @@ collection, as `{message}` objects) and, while a run holds the lock, `note`
 counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
 "list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
 null where the head of the listing lacks them) and `damage` (a list of texts).
+
+`grep` adds `pattern`, `pieces` and `skipped`, and a `note` field while the
+lock is held or its file cannot be read. Each element of `pieces` has
+`piece`, `name_match`, `versions` and `files`. `versions` lists the searched
+versions of the piece, newest first, each with `stamp` (the version stamp)
+and `version` (its time as RFC 3339 in UTC); for a piece whose name matches
+each also has `files`, the file count of that version. `files` lists the
+matching paths in byte order, each with `path` and the `versions` that hold
+it as stamps, newest first; it is empty for a piece whose name matches.
+`skipped` lists the versions that could not be searched, each with `piece`,
+`stamp` and `reason`, and is empty when there are none. Under `--json` a
+skipped version and the lock note appear only in the object, while the note
+that nothing matched is on stderr as in text output.
+
 The keys that the other commands add are not yet established.

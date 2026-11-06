@@ -223,7 +223,6 @@ impl Output {
 
     /// Writes a line of a command's result to stdout as the bytes it is.
     /// For output that a shell reads back, such as a path.
-    #[allow(dead_code, reason = "used again by C11")]
     pub fn line_os(&mut self, text: &OsStr) -> io::Result<()> {
         self.stdout.write_line_bytes(text.as_bytes())
     }
