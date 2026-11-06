@@ -30,6 +30,7 @@ pub mod fake_rsync;
 
 pub mod package;
 mod pool;
+pub mod recording;
 pub use pool::shared_pool;
 
 use crate::relpath::RelPath;

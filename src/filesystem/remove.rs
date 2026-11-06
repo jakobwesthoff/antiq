@@ -8,6 +8,7 @@
 
 use super::{FilesystemError, failure, io_error, shown};
 use crate::filesystem::tree::{DirEntry, TreeRoot};
+use crate::progress::Counter;
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
 use crate::walk::MAX_DEPTH;
@@ -32,13 +33,25 @@ use std::path::Path;
 /// `InvalidInput` failure, before anything is looked at: the tree cannot
 /// remove itself.
 pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
-    remove_tree_with(
+    remove_tree_counted(root, path, &Counter::new())
+}
+
+/// [`remove_tree`], adding one to `counter` for every entry it removes, the
+/// top included.
+pub(crate) fn remove_tree_counted(
+    root: &TreeRoot,
+    path: &RelPath,
+    counter: &Counter,
+) -> Result<(), FilesystemError> {
+    remove_tree_owned(
         root,
         path,
         &|entry| entry.device,
         &|entry| entry.mount_root,
         &|dir| dir.read_dir(&RelPath::root()),
         MAX_DEPTH,
+        &|entry| entry.uid,
+        counter,
     )
 }
 
@@ -83,6 +96,7 @@ type List<'a> = &'a dyn Fn(&TreeRoot) -> io::Result<Vec<DirEntry>>;
 /// directory does not describe truthfully.
 /// `max_depth` is the deepest level of directories below the top that is
 /// entered.
+#[cfg(test)]
 fn remove_tree_with(
     root: &TreeRoot,
     path: &RelPath,
@@ -99,11 +113,16 @@ fn remove_tree_with(
         list,
         max_depth,
         &|entry| entry.uid,
+        &Counter::new(),
     )
 }
 
 /// [`remove_tree_with`] with a seam for the owner of an entry, which a
-/// test cannot change.
+/// test cannot change, and the counter of the removed entries.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam of a test is an argument of its own"
+)]
 fn remove_tree_owned(
     root: &TreeRoot,
     path: &RelPath,
@@ -112,6 +131,7 @@ fn remove_tree_owned(
     list: List<'_>,
     max_depth: usize,
     owner_of: OwnerOf<'_>,
+    counter: &Counter,
 ) -> Result<(), FilesystemError> {
     // The root path names the tree itself, which has no directory above it
     // to take the last `remove_dir` from. Refusing here keeps the removal
@@ -154,9 +174,9 @@ fn remove_tree_owned(
         return Err(locked(root, path));
     }
     if top.kind != EntryKind::Directory {
-        return skip_if_missing(root.remove_file(path))
-            .map(|_| ())
-            .map_err(failure("remove", root, path));
+        skip_if_missing(root.remove_file(path)).map_err(failure("remove", root, path))?;
+        counter.add(1);
+        return Ok(());
     }
     if device_of(&top) != reference || mount_root_of(&top) {
         return Err(foreign_device(root, path));
@@ -188,6 +208,7 @@ fn remove_tree_owned(
                         holder.remove_dir(&finished.name)
                     });
                 skip_if_missing(removal).map_err(failure("remove", holder, &finished.name))?;
+                counter.add(1);
             }
             continue;
         };
@@ -203,6 +224,7 @@ fn remove_tree_owned(
                     directory.remove_file(&name)
                 });
             skip_if_missing(removal).map_err(failure("remove", directory, &name))?;
+            counter.add(1);
             continue;
         }
         if device_of(&stat) != reference || mount_root_of(&stat) {
@@ -220,7 +242,9 @@ fn remove_tree_owned(
     }
     skip_if_missing(root.remove_dir(path))
         .map(|_| ())
-        .map_err(failure("remove", root, path))
+        .map_err(failure("remove", root, path))?;
+    counter.add(1);
+    Ok(())
 }
 
 /// The refusal for the entry at `path`; the root of the original tree
@@ -579,6 +603,31 @@ mod tests {
         remove_tree(&root_of(&tree), &path("t")).expect("removes");
         assert!(!tree.path("t").exists());
         assert!(tree.path("outside/keep").exists());
+    }
+
+    #[test]
+    fn every_removed_entry_counts_once_the_top_included() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/d/b", "y");
+        tree.symlink("t/dangling", "nowhere");
+        let counter = Counter::new();
+
+        remove_tree_counted(&root_of(&tree), &path("t"), &counter).expect("removes");
+
+        // t, t/a, t/d, t/d/b and t/dangling
+        assert_eq!(counter.done(), 5);
+    }
+
+    #[test]
+    fn a_top_that_is_a_file_counts_as_one_entry() {
+        let mut tree = Tree::new();
+        tree.file("lone", "x");
+        let counter = Counter::new();
+
+        remove_tree_counted(&root_of(&tree), &path("lone"), &counter).expect("removes");
+
+        assert_eq!(counter.done(), 1);
     }
 
     #[test]
@@ -1285,6 +1334,7 @@ mod tests {
             &real_list,
             MAX_DEPTH,
             &foreign,
+            &Counter::new(),
         )
         .expect_err("refused");
         assert_locked(error, "t/theirs");

@@ -13,7 +13,7 @@ use crate::archive::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Lease, Pool, workers_for_piece,
 };
 use crate::archive::tar_write::sparse_warning;
-use crate::archive::verify::verify_strict;
+use crate::archive::verify::verify_strict_counted;
 use crate::archive::zstd::ZstdSettings;
 use crate::archive::{PackError, PackNote, PackSettings, Packager, TarZstd, Verified, WalkRules};
 use crate::clock::Clock;
@@ -24,6 +24,7 @@ use crate::filesystem::remove::remove_tree;
 use crate::filesystem::space::{ReserveError, SpaceLedger, is_out_of_space};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::{self, Header, ListingEntry, ListingType};
+use crate::progress::{Operation, Tracker};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
 use crate::rules::PieceRules;
@@ -54,6 +55,8 @@ pub(crate) struct StoreContext<'a> {
     pub run_dirs: &'a Mutex<()>,
     /// The compression for the number of workers the pool granted.
     pub zstd: &'a (dyn Fn(u32) -> ZstdSettings + Sync),
+    /// Reports the operations of the piece.
+    pub tracker: Tracker<'a>,
 }
 
 /// Where the folder of a piece lies.
@@ -312,8 +315,10 @@ fn stage_and_store(
 
     let (archive, archive_rel) = create(&names.archive)?;
     let workers = u32::try_from(lease.workers()).unwrap_or(u32::MAX);
+    let packing = context.tracker.operation(Operation::Packing);
     let settings = PackSettings {
         zstd: (context.zstd)(workers),
+        counter: Some(&packing),
     };
     let packed = {
         let mut sink = context.seams.pack_sink(Box::new(BufWriter::new(&archive)));
@@ -374,6 +379,7 @@ fn stage_and_store(
         source,
     };
     let archive_path = staging_path.join(&names.archive);
+    let verifying = context.tracker.operation(Operation::Verifying);
     context.seams.before_read_back(&staging_path);
     let read_back = file_sha256(&archive_path).map_err(|source| Abort::of(verify_error(source)))?;
     if read_back != packed.sha256 {
@@ -392,8 +398,14 @@ fn stage_and_store(
         staged: false,
         kept: matches!(request.folder, Folder::Outside(_)),
     };
-    let verified = verify_strict(&archive_path, live_root, &rules, context.seams.walk_hooks())
-        .map_err(|source| verify_abort(verify_error(source)))?;
+    let verified = verify_strict_counted(
+        &archive_path,
+        live_root,
+        &rules,
+        context.seams.walk_hooks(),
+        &verifying,
+    )
+    .map_err(|source| verify_abort(verify_error(source)))?;
     if verified.listing() != packed.listing.as_slice() {
         return Err(Abort::of(verify_error(PackError::Damaged(
             "the listing of the packing differs from the members the verify read".into(),
@@ -404,6 +416,7 @@ fn stage_and_store(
     // Step 4: move the version into the store
     // =========================================================
 
+    context.tracker.operation(Operation::Storing);
     let pieces = TreeRoot::open(&context.collection.pieces_dir()).map_err(|source| {
         Abort::of(stage_error(io_error(
             "open",
@@ -705,6 +718,7 @@ mod tests {
             seams: probe,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
+            tracker: Tracker::silent(),
         };
         let request = StoreRequest {
             folder: Folder::Live(&piece),
@@ -865,6 +879,7 @@ mod tests {
             seams,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
+            tracker: Tracker::silent(),
         };
         let request = StoreRequest {
             folder: Folder::Outside(&root),
@@ -939,6 +954,7 @@ mod tests {
             seams: &RealSeams,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
+            tracker: Tracker::silent(),
         };
         let request = StoreRequest {
             folder: Folder::Live(&gone),

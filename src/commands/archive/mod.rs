@@ -30,6 +30,7 @@ use crate::markers::RESTORED_FILE;
 use crate::pin::PIN_FILE;
 use crate::plan::HeldDryRun;
 use crate::plan::Step;
+use crate::progress::{Event, Observer, Outcome as Progress, Planned, Silent, Tracker};
 use crate::reference::ReferenceError;
 use crate::reference::{CandidateSet, resolve_piece, stored_spelling};
 use crate::relpath::{Name, RelPath};
@@ -55,7 +56,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
-use store::{Folder, StoreContext, StoreFailure, StoreRequest, store_version};
+use store::{Folder, StoreContext, StoreFailure, StoreRequest, apparent_size, store_version};
 
 /// Which pieces to archive.
 #[derive(Debug, Clone)]
@@ -81,6 +82,8 @@ pub(crate) struct Env<'a> {
     pub zstd: &'a (dyn Fn(u32) -> ZstdSettings + Sync),
     /// How many pieces run at a time.
     pub parallel: usize,
+    /// Told what the run does, when someone watches it.
+    pub observer: Option<&'a dyn Observer>,
 }
 
 /// Archives the pieces `request` names, or lists what it would do.
@@ -88,6 +91,26 @@ pub fn archive(
     collection: &Collection,
     clock: &dyn Clock,
     request: &Request,
+) -> Result<Outcome, ArchiveError> {
+    run_archive(collection, clock, request, None)
+}
+
+/// [`archive`], telling `observer` what a real run does. A dry run has
+/// nothing to tell.
+pub fn archive_observed(
+    collection: &Collection,
+    clock: &dyn Clock,
+    request: &Request,
+    observer: &dyn Observer,
+) -> Result<Outcome, ArchiveError> {
+    run_archive(collection, clock, request, Some(observer))
+}
+
+fn run_archive(
+    collection: &Collection,
+    clock: &dyn Clock,
+    request: &Request,
+    observer: Option<&dyn Observer>,
 ) -> Result<Outcome, ArchiveError> {
     if matches!(&request.target, Target::Piece { reference, .. } if reference.is_empty()) {
         return Err(ArchiveError::EmptyReference);
@@ -116,6 +139,7 @@ pub fn archive(
                 pool: &pool,
                 zstd: &zstd,
                 parallel: std::thread::available_parallelism().map_or(1, usize::from),
+                observer,
             };
             execute(collection, clock, &request.target, &guard, &env).map(Outcome::Archived)
         }
@@ -374,13 +398,23 @@ impl Done {
 /// ended, the second records the file as the deletion left it.
 fn run_pieces(shared: &Shared<'_>) -> (Vec<Done>, Option<String>) {
     let pieces = &shared.setup.pieces;
-    let links = match hard_links(shared) {
-        Ok(links) => links,
+    let looks = match look_at_pieces(shared) {
+        Ok(looks) => looks,
         Err(cause) => {
             let done = pieces.iter().map(not_started).collect();
             return (done, Some(cause));
         }
     };
+    let (links, expected): (Vec<PieceLinks>, Vec<Option<Planned>>) = looks
+        .into_iter()
+        .map(|look| (look.links, look.planned))
+        .unzip();
+    let announced: Vec<Planned> = expected.iter().flatten().cloned().collect();
+    if let Some(observer) = shared.env.observer
+        && !announced.is_empty()
+    {
+        observer.event(Event::Planned { items: &announced });
+    }
     let groups = share_groups(&links);
     let next = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
@@ -394,7 +428,7 @@ fn run_pieces(shared: &Shared<'_>) -> (Vec<Done>, Option<String>) {
                         if stopped.load(Ordering::SeqCst) {
                             return;
                         }
-                        let done = process(shared, &pieces[index]);
+                        let done = process(shared, &pieces[index], expected[index].is_some());
                         if done.exhausted.is_some() {
                             stopped.store(true, Ordering::SeqCst);
                         }
@@ -435,25 +469,34 @@ struct PieceLinks {
     ignored: HashSet<FileId>,
 }
 
+/// What the look at a piece before the run found: its linked files, and
+/// the piece with its size when the run expects to work on it.
+#[derive(Default)]
+struct Look {
+    links: PieceLinks,
+    planned: Option<Planned>,
+}
+
 /// The linked files of each piece, or the cause when a walk ran out of file
-/// descriptors, which ends the run like the walk of a piece does.
+/// descriptors, which ends the run like the walk of a piece does. With an
+/// observer, each piece is judged on this walk as well, so the run can tell
+/// beforehand which pieces it expects to work on.
 ///
 /// No walk before this one reaches into the pieces, and the walk of a piece
-/// belongs to the moment it starts, so this one only keeps the identities
+/// belongs to the moment it starts, so this one only keeps what it needs
 /// and drops the tree. It is skipped for fewer than two pieces, which cannot
-/// share a file. Running out of descriptors is the only way such a walk
-/// fails.
-fn hard_links(shared: &Shared<'_>) -> Result<Vec<PieceLinks>, String> {
+/// share a file and are not announced. Running out of descriptors is the
+/// only way such a walk fails.
+///
+/// The verdict is advisory: the piece is judged again when it starts.
+fn look_at_pieces(shared: &Shared<'_>) -> Result<Vec<Look>, String> {
     let pieces = &shared.setup.pieces;
     if pieces.len() < 2 {
-        return Ok(pieces.iter().map(|_| PieceLinks::default()).collect());
+        return Ok(pieces.iter().map(|_| Look::default()).collect());
     }
     let next = AtomicUsize::new(0);
     let failed: Mutex<Option<String>> = Mutex::new(None);
-    let slots: Vec<Mutex<PieceLinks>> = pieces
-        .iter()
-        .map(|_| Mutex::new(PieceLinks::default()))
-        .collect();
+    let slots: Vec<Mutex<Look>> = pieces.iter().map(|_| Mutex::new(Look::default())).collect();
     std::thread::scope(|scope| {
         for _ in 0..shared.env.parallel.clamp(1, pieces.len()) {
             scope.spawn(|| {
@@ -464,8 +507,19 @@ fn hard_links(shared: &Shared<'_>) -> Result<Vec<PieceLinks>, String> {
                     };
                     match shared.setup.walk(piece, shared.env.seams.link_hooks()) {
                         Ok(tree) => {
-                            *slots[index].lock().unwrap_or_else(PoisonError::into_inner) =
-                                piece_links(&tree);
+                            let planned = shared.env.observer.is_some().then(|| {
+                                match shared.setup.judge(&tree, shared.now) {
+                                    Judged::Quiet => None,
+                                    Judged::Go | Judged::Refused(_) => Some(Planned {
+                                        name: piece.to_string(),
+                                        bytes: apparent_size(&tree),
+                                    }),
+                                }
+                            });
+                            *slots[index].lock().unwrap_or_else(PoisonError::into_inner) = Look {
+                                links: piece_links(&tree),
+                                planned: planned.flatten(),
+                            };
                         }
                         Err(error) => {
                             failed
@@ -566,11 +620,11 @@ fn skipped(piece: &RelPath, reason: SkipReason, message: String) -> Done {
 }
 
 /// Steps 1 to 7 for one piece: walk and judge it again, store its version,
-/// remove its folder.
-fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
+/// remove its folder. `planned` tells whether the observer was told to
+/// expect the piece.
+fn process(shared: &Shared<'_>, piece: &RelPath, planned: bool) -> Done {
     let env = shared.env;
     let setup = shared.setup;
-    let config = &shared.collection.config().collection;
 
     // The walk and the verdict are those of the moment the piece starts.
     let tree = match setup.walk(piece, env.seams.walk_hooks()) {
@@ -581,11 +635,51 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
             return done;
         }
     };
+    let name = piece.to_string();
+    let tracker = Tracker::new(env.observer.unwrap_or(&Silent), &name);
+    let bytes = apparent_size(&tree);
     match setup.judge(&tree, shared.now) {
         Judged::Go => {}
-        Judged::Quiet => return Done::new(Finished::Quiet),
-        Judged::Refused(refused) => return Done::new(Finished::Refused(refused)),
+        Judged::Quiet => {
+            if planned {
+                tracker.dropped();
+            }
+            return Done::new(Finished::Quiet);
+        }
+        Judged::Refused(refused) => {
+            let reasons = refused
+                .reasons
+                .iter()
+                .map(|reason| reason.text.clone())
+                .collect();
+            tracker.finished(bytes, &Progress::Refused(reasons));
+            return Done::new(Finished::Refused(refused));
+        }
     }
+
+    tracker.started(bytes, None);
+    let done = store_and_remove(shared, piece, &tree, tracker);
+    let outcome = match &done.finished {
+        Finished::Archived(archived) => Progress::Files(archived.files),
+        Finished::Skipped(skipped) => Progress::Skipped(skipped.message.clone()),
+        Finished::Refused(_) | Finished::Quiet => {
+            unreachable!("a piece that went on is archived or skipped")
+        }
+    };
+    tracker.finished(bytes, &outcome);
+    done
+}
+
+/// Steps 2 to 7 of a piece that is due.
+fn store_and_remove(
+    shared: &Shared<'_>,
+    piece: &RelPath,
+    tree: &PieceTree,
+    tracker: Tracker<'_>,
+) -> Done {
+    let env = shared.env;
+    let setup = shared.setup;
+    let config = &shared.collection.config().collection;
 
     let stored_path = match stored_spelling_of(shared.collection, piece) {
         Ok(path) => path,
@@ -604,11 +698,12 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
         seams: env.seams,
         run_dirs: &shared.run_dirs,
         zstd: env.zstd,
+        tracker,
     };
     let request = StoreRequest {
         folder: Folder::Live(piece),
         stored: &stored_path,
-        tree: &tree,
+        tree,
         rules: &setup.piece_rules,
         imported: None,
         time: None,
@@ -640,6 +735,7 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
             collection: shared.collection,
             seams: env.seams,
             run_dirs: &shared.run_dirs,
+            tracker,
         },
         &RemoveRequest {
             live: piece,
@@ -932,6 +1028,7 @@ mod tests {
     use crate::error::Error;
     use crate::filesystem::tree::TreeRoot;
     use crate::plan::Step;
+    use crate::progress::Counter;
     use crate::relpath::RelPath;
     use crate::report::CommandReport;
     use crate::testing::shared_pool;
@@ -1027,13 +1124,18 @@ mod tests {
             }
         }
 
-        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
+        fn remove(
+            &self,
+            root: &TreeRoot,
+            path: &RelPath,
+            counter: &Counter,
+        ) -> Result<(), FilesystemError> {
             if self.failing_delete {
                 return Err(crate::filesystem::io_error("remove", Path::new("doomed"))(
                     io::Error::from_raw_os_error(libc::EACCES),
                 ));
             }
-            RealSeams.remove(root, path)
+            RealSeams.remove(root, path, counter)
         }
     }
 
@@ -1075,6 +1177,16 @@ mod tests {
         seams: &dyn Seams,
         parallel: usize,
     ) -> Result<ArchiveReport, ArchiveError> {
+        execute_observed(world, target, seams, parallel, None)
+    }
+
+    fn execute_observed(
+        world: &TempCollection,
+        target: &Target,
+        seams: &dyn Seams,
+        parallel: usize,
+        observer: Option<&dyn Observer>,
+    ) -> Result<ArchiveReport, ArchiveError> {
         let collection = collection(world);
         let clock = FixedClock::new(now());
         // A run that ended just before has released the lock, but a forked
@@ -1091,6 +1203,7 @@ mod tests {
             pool: shared_pool(),
             zstd: &fast,
             parallel,
+            observer,
         };
         execute(&collection, &clock, target, &guard, &env)
     }
@@ -2132,8 +2245,13 @@ mod tests {
             }
         }
 
-        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
-            RealSeams.remove(root, path)?;
+        fn remove(
+            &self,
+            root: &TreeRoot,
+            path: &RelPath,
+            counter: &Counter,
+        ) -> Result<(), FilesystemError> {
+            RealSeams.remove(root, path, counter)?;
             if Path::new(&path.to_string()).ends_with(self.remover) {
                 self.update(|state| state.1 = true);
             }
@@ -2280,8 +2398,13 @@ mod tests {
     }
 
     impl Seams for Order {
-        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
-            RealSeams.remove(root, path)?;
+        fn remove(
+            &self,
+            root: &TreeRoot,
+            path: &RelPath,
+            counter: &Counter,
+        ) -> Result<(), FilesystemError> {
+            RealSeams.remove(root, path, counter)?;
             let piece = path
                 .to_string()
                 .rsplit('/')
@@ -2352,5 +2475,127 @@ mod tests {
         assert_eq!(messages.len(), 2, "{messages:?}");
         assert!(messages[1].starts_with("not started"), "{messages:?}");
         assert!(world.root().join("b/a.txt").exists());
+    }
+
+    // =========================================================
+    // Progress events
+    // =========================================================
+
+    use crate::testing::recording::Recorder;
+
+    #[test]
+    fn a_lone_piece_reports_its_operations_with_counters_that_reach_their_totals() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+            .expect("the run ends");
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started piece 9",
+                "piece Packing 2/2",
+                "piece Verifying 2/2",
+                "piece Storing 0/0",
+                "piece Removing 4/4",
+                "finished piece 9 Files(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn pieces_are_planned_without_the_ones_that_are_not_due() {
+        let mut world = world("");
+        add(&mut world, "due", 40);
+        add(&mut world, "recent", 1);
+        add(&mut world, "refused", 40);
+        fs::create_dir_all(world.root().join("refused/inner/.antiq")).expect("a nested collection");
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+            .expect("the run ends");
+
+        let lines = recorder.lines();
+        assert_eq!(lines[0], "planned due refused");
+        assert!(
+            lines.iter().all(|line| !line.contains("recent")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            recorder.lines_of("due").first().map(String::as_str),
+            Some("started due 9")
+        );
+        let refused = recorder.lines_of("refused");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].starts_with("finished refused ") && refused[0].contains("Refused"),
+            "{refused:?}"
+        );
+    }
+
+    /// Makes the second piece recent while the first one is being walked.
+    struct Refreshing {
+        touched: std::sync::atomic::AtomicBool,
+        piece: std::path::PathBuf,
+    }
+
+    impl Seams for Refreshing {
+        fn walk_hooks(&self) -> &dyn Hooks {
+            if !self.touched.swap(true, Ordering::SeqCst) {
+                fs::File::options()
+                    .write(true)
+                    .open(&self.piece)
+                    .expect("the file opens")
+                    .set_modified(std::time::SystemTime::from(now()))
+                    .expect("the time is set");
+            }
+            &RealFs
+        }
+    }
+
+    #[test]
+    fn a_planned_piece_that_is_no_longer_due_when_its_turn_comes_is_dropped() {
+        let mut world = world("");
+        add(&mut world, "a", 40);
+        add(&mut world, "b", 40);
+        let seams = Refreshing {
+            touched: std::sync::atomic::AtomicBool::new(false),
+            piece: world.root().join("b/sub/b.txt"),
+        };
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &seams, 1, Some(&recorder)).expect("the run ends");
+
+        assert_eq!(recorder.lines()[0], "planned a b");
+        assert_eq!(recorder.lines_of("b"), ["dropped b"]);
+        assert_eq!(
+            recorder.lines_of("a").last().map(String::as_str),
+            Some("finished a 9 Files(2)")
+        );
+    }
+
+    #[test]
+    fn a_folder_that_changes_after_the_verify_ends_as_a_skipped_piece() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let seams = Probe {
+            after_trash_rename: Some(Box::new(|tree| {
+                fs::write(tree.join("a.txt"), "changed later").expect("the file is written");
+            })),
+            ..Probe::default()
+        };
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &seams, 1, Some(&recorder)).expect("the run ends");
+
+        let lines = recorder.lines();
+        assert_eq!(lines[0], "started piece 9");
+        let last = lines.last().expect("events came");
+        assert!(
+            last.starts_with("finished piece 9 Skipped(") && last.contains("went back"),
+            "{last}"
+        );
     }
 }

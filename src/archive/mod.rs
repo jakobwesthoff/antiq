@@ -16,6 +16,7 @@ pub mod zstd;
 
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::ListingEntry;
+use crate::progress::Counter;
 use crate::relpath::{Name, RelPath};
 use crate::rules::PieceRules;
 use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
@@ -47,8 +48,11 @@ impl fmt::Display for PackageFormat {
 
 /// How a piece is packed.
 #[derive(Debug, Clone, Copy)]
-pub struct PackSettings {
+pub struct PackSettings<'a> {
     pub zstd: ZstdSettings,
+    /// Counts the files and symlinks as they are packed, and gets their
+    /// number as its total.
+    pub counter: Option<&'a Counter>,
 }
 
 /// What packing found worth telling the user. Paths start with the name
@@ -196,7 +200,7 @@ pub trait Packager {
         &self,
         root: &TreeRoot,
         tree: &PieceTree,
-        settings: &PackSettings,
+        settings: &PackSettings<'_>,
         out: &mut dyn Write,
     ) -> Result<Packed, PackError>;
 
@@ -223,7 +227,7 @@ impl Packager for TarZstd {
         &self,
         root: &TreeRoot,
         tree: &PieceTree,
-        settings: &PackSettings,
+        settings: &PackSettings<'_>,
         out: &mut dyn Write,
     ) -> Result<Packed, PackError> {
         // An incomplete walk would give an archive that silently lacks
@@ -247,8 +251,19 @@ impl Packager for TarZstd {
         let mut writer = TarWriter::new(encoder, container);
         let mut directories = DirectoryStack::new(root);
         let mut content = |entry: &TreeEntry| directories.open(entry);
+        let counted =
+            |entry: &TreeEntry| matches!(entry.kind, EntryKind::File | EntryKind::Symlink);
+        if let Some(counter) = settings.counter {
+            let files = tree.packed_entries().filter(|entry| counted(entry)).count();
+            counter.set_total(files as u64);
+        }
         for entry in tree.packed_entries() {
             writer.add(entry, &mut content)?;
+            if let Some(counter) = settings.counter
+                && counted(entry)
+            {
+                counter.add(1);
+            }
         }
         let (encoder, listing, notes) = writer.finish()?;
         let mut compressed = encoder.finish().map_err(PackError::Write)?;
@@ -423,9 +438,10 @@ mod pack_tests {
         PieceTree::new(RelPath::parse(top).expect("valid"), entries, vec![])
     }
 
-    fn fast() -> PackSettings {
+    fn fast() -> PackSettings<'static> {
         PackSettings {
             zstd: ZstdSettings::fast(),
+            counter: None,
         }
     }
 

@@ -729,9 +729,10 @@ mod tests {
     // Fixtures
     // =========================================================
 
-    fn fast() -> PackSettings {
+    fn fast() -> PackSettings<'static> {
         PackSettings {
             zstd: ZstdSettings::fast(),
+            counter: None,
         }
     }
 

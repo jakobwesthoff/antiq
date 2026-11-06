@@ -125,6 +125,59 @@ impl Observer for Silent {
     fn event(&self, _event: Event<'_>) {}
 }
 
+/// What a step needs to report on one item: the observer and the name the
+/// events carry.
+#[derive(Clone, Copy)]
+pub(crate) struct Tracker<'a> {
+    observer: &'a dyn Observer,
+    name: &'a str,
+}
+
+impl<'a> Tracker<'a> {
+    pub(crate) fn new(observer: &'a dyn Observer, name: &'a str) -> Tracker<'a> {
+        Tracker { observer, name }
+    }
+
+    /// For the callers that nobody watches.
+    pub(crate) const fn silent() -> Tracker<'static> {
+        Tracker {
+            observer: &Silent,
+            name: "",
+        }
+    }
+
+    pub(crate) fn started(&self, bytes: u64, stamp: Option<&str>) {
+        self.observer.event(Event::Started {
+            name: self.name,
+            bytes,
+            stamp,
+        });
+    }
+
+    /// Announces the operation and hands back the counter the step adds to.
+    pub(crate) fn operation(&self, operation: Operation) -> Counter {
+        let counter = Counter::new();
+        self.observer.event(Event::Operation {
+            name: self.name,
+            operation,
+            counter: &counter,
+        });
+        counter
+    }
+
+    pub(crate) fn finished(&self, bytes: u64, outcome: &Outcome) {
+        self.observer.event(Event::Finished {
+            name: self.name,
+            bytes,
+            outcome,
+        });
+    }
+
+    pub(crate) fn dropped(&self) {
+        self.observer.event(Event::Dropped { name: self.name });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

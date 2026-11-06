@@ -85,6 +85,7 @@ impl Store {
         let root = collection.sub(&piece).expect("the piece opens");
         let settings = PackSettings {
             zstd: ZstdSettings::fast(),
+            counter: None,
         };
         let mut archive = Vec::new();
         let packed = TarZstd

@@ -23,6 +23,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::markers::RESTORED_FILE;
 use crate::pin::{self, PIN_FILE, PinError};
 use crate::plan::{HeldDryRun, PlanAction, Step};
+use crate::progress::Tracker;
 use crate::reference::{ReferenceError, resolve_path};
 use crate::relpath::{Name, RelPath, RelPathError};
 use crate::repair::Repair;
@@ -443,6 +444,7 @@ pub(crate) fn execute(
         seams: env.seams,
         run_dirs: &run_dirs,
         zstd: env.zstd,
+        tracker: Tracker::silent(),
     };
     let store = StoreRequest {
         folder: Folder::Outside(&prepared.root),

@@ -35,6 +35,7 @@ pub fn pack_piece_with(tree: &Tree, piece: &str, piece_rules: &PieceRules) -> Pa
     let root = collection.sub(&top).expect("the piece opens");
     let settings = PackSettings {
         zstd: ZstdSettings::fast(),
+        counter: None,
     };
     let mut bytes = Vec::new();
     let packed = TarZstd

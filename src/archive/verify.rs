@@ -10,6 +10,7 @@ use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
 use crate::filesystem::tree::{TreeError, TreeRoot};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
+use crate::progress::Counter;
 use crate::relpath::RelPath;
 use crate::select::Rules;
 use crate::tree::{EntryKind, Problem, TreeEntry};
@@ -176,13 +177,27 @@ impl Compared {
 ///
 /// The package must be one antiq wrote in this run or one that passed the
 /// structure check of `extract`, as it is read with `read_package`.
+#[cfg(test)]
 pub(crate) fn verify_strict(
     package: &Path,
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
 ) -> Result<Verified, PackError> {
-    verify_strict_observed(package, root, rules, hooks, &mut |_, _| {})
+    verify_strict_observed(package, root, rules, hooks, None, &mut |_, _| {})
+}
+
+/// [`verify_strict`], counting the files it reads into `counter`. The
+/// counter gets its total once the package is read: the regular files the
+/// package holds under their own name.
+pub(crate) fn verify_strict_counted(
+    package: &Path,
+    root: &TreeRoot,
+    rules: &WalkRules,
+    hooks: &dyn Hooks,
+    counter: &Counter,
+) -> Result<Verified, PackError> {
+    verify_strict_observed(package, root, rules, hooks, Some(counter), &mut |_, _| {})
 }
 
 fn verify_strict_observed(
@@ -190,12 +205,28 @@ fn verify_strict_observed(
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
+    counter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Verified, PackError> {
     // The stream is read to its end first, so a damaged package never
     // reaches the folder.
     let package = read_package(package)?;
-    let (folder, moved) = read_folder_granted(root, rules, hooks, observe)?;
+    // A hard link is not read again, so only the first name of a file counts.
+    if let Some(counter) = counter {
+        let files = package
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == ListingType::File)
+            .count();
+        counter.set_total(files as u64);
+    }
+    let mut counted = |stage: Stage, path: &RelPath| {
+        if let (Some(counter), Stage::AfterRead) = (counter, stage) {
+            counter.add(1);
+        }
+        observe(stage, path);
+    };
+    let (folder, moved) = read_folder_granted(root, rules, hooks, &mut counted)?;
     let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
@@ -1899,7 +1930,7 @@ mod tests {
                 std::fs::write(directory.join("g"), "new").expect("written");
             }
         };
-        let error = verify_strict_observed(&file, &root, &staged(), &RealFs, &mut observe)
+        let error = verify_strict_observed(&file, &root, &staged(), &RealFs, None, &mut observe)
             .expect_err("the directory changed");
         assert!(
             matches!(&error, PackError::Differs(found)

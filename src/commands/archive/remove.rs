@@ -14,6 +14,7 @@ use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, create_dir_chain, flush_dir_of};
 use crate::filesystem::io_error;
 use crate::filesystem::tree::TreeRoot;
+use crate::progress::{Operation, Tracker};
 use crate::relpath::{Name, RelPath};
 use crate::repair::{Destination, flush_dir_unless_gone, give_back as repair_give_back};
 use crate::report::Warning;
@@ -39,6 +40,8 @@ pub(crate) struct RemoveContext<'a> {
     /// finishes cannot remove a `<stamp>/` folder that another piece is
     /// about to use.
     pub run_dirs: &'a Mutex<()>,
+    /// Reports the removal as an operation of the piece.
+    pub tracker: Tracker<'a>,
 }
 
 /// The piece whose folder goes.
@@ -147,6 +150,8 @@ fn remove(
         stamp,
     };
     let durable = context.seams.durable();
+    let removing = context.tracker.operation(Operation::Removing);
+    removing.set_total(request.verified.record().len() as u64);
     let guard = || {
         context
             .run_dirs
@@ -289,7 +294,7 @@ fn remove(
         }
     }
 
-    if let Err(source) = context.seams.remove(&roots.doomed, &places.tree) {
+    if let Err(source) = context.seams.remove(&roots.doomed, &places.tree, &removing) {
         return Outcome::Kept(Box::new(ArchiveError::Delete {
             piece: piece.clone(),
             stamp: stamp_text.clone(),
@@ -552,6 +557,7 @@ mod tests {
     use crate::filesystem::moves::Moved;
     use crate::filesystem::space::SpaceLedger;
     use crate::filesystem::tree::TreeRoot;
+    use crate::progress::Counter;
     use crate::select::Rules;
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
@@ -644,13 +650,18 @@ mod tests {
             Ok(moved)
         }
 
-        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
+        fn remove(
+            &self,
+            root: &TreeRoot,
+            path: &RelPath,
+            counter: &Counter,
+        ) -> Result<(), FilesystemError> {
             if self.failing_delete {
                 return Err(io_error("remove", Path::new(&path.to_string()))(
                     io::Error::from_raw_os_error(libc::EACCES),
                 ));
             }
-            RealSeams.remove(root, path)?;
+            RealSeams.remove(root, path, counter)?;
             if let Some(change) = &self.after_delete {
                 change();
             }
@@ -714,6 +725,7 @@ mod tests {
             seams: &RealSeams,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
+            tracker: Tracker::silent(),
         };
         let request = StoreRequest {
             folder: Folder::Live(&piece),
@@ -743,6 +755,7 @@ mod tests {
             collection: &collection,
             seams,
             run_dirs: &world.run_dirs,
+            tracker: Tracker::silent(),
         };
         let request = RemoveRequest {
             live: &piece,

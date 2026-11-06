@@ -9,9 +9,10 @@
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
 use crate::filesystem::moves::{Moved, move_dir};
-use crate::filesystem::remove::remove_tree;
+use crate::filesystem::remove::remove_tree_counted;
 use crate::filesystem::space::available_space;
 use crate::filesystem::tree::TreeRoot;
+use crate::progress::Counter;
 use crate::relpath::RelPath;
 use crate::walk::{Hooks, RealFs};
 use std::io::Write;
@@ -68,9 +69,15 @@ pub(crate) trait Seams: Send + Sync {
         move_dir(from_root, from, to_root, to)
     }
 
-    /// Deletes the tree at `path` below `root`.
-    fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
-        remove_tree(root, path)
+    /// Deletes the tree at `path` below `root`, adding one to `counter` for
+    /// every entry it removes.
+    fn remove(
+        &self,
+        root: &TreeRoot,
+        path: &RelPath,
+        counter: &Counter,
+    ) -> Result<(), FilesystemError> {
+        remove_tree_counted(root, path, counter)
     }
 }
 
