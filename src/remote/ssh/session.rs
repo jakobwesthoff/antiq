@@ -5,11 +5,15 @@
 //! The ssh executable and its master connection.
 
 use crate::config::{MachineConfig, RemoteConfig};
-use crate::remote::ssh::script::ScriptError;
+use crate::remote::ssh::classify::{self, Failure, MuxProblem};
+use crate::remote::ssh::script::{Script, ScriptError};
+use crate::report::Warning;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// The longest ControlPath antiq uses. `ssh -M` binds the path plus a
 /// suffix of 17 characters, and macOS allows 104 bytes for a socket path.
@@ -131,6 +135,42 @@ pub enum Mode {
     Direct,
 }
 
+/// What a script printed and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Output {
+    /// The exit status of the remote command, 0 to 254.
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Output {
+    /// For a script made with [`Script::with_clock`]: the remote clock in
+    /// epoch seconds and the rest of standard output.
+    pub fn clock_and_rest(&self) -> Result<(i64, &[u8]), SessionError> {
+        let not_a_clock = || {
+            SessionError::Broken("the first line of the answer is not the remote clock".to_string())
+        };
+        let end = self
+            .stdout
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .ok_or_else(not_a_clock)?;
+        let clock = std::str::from_utf8(&self.stdout[..end])
+            .ok()
+            .and_then(|text| text.parse::<i64>().ok())
+            .ok_or_else(not_a_clock)?;
+        Ok((clock, &self.stdout[end + 1..]))
+    }
+}
+
+fn failure_error(failure: Failure) -> SessionError {
+    match failure {
+        Failure::Away(message) => SessionError::Away(message),
+        Failure::Broken(message) => SessionError::Broken(message),
+    }
+}
+
 /// One run's connection to the remote.
 #[derive(Debug)]
 pub struct Session {
@@ -138,6 +178,18 @@ pub struct Session {
     control_path: PathBuf,
     log_path: PathBuf,
     mode: Mutex<Mode>,
+    warnings: Mutex<Vec<Warning>>,
+    /// Set once a refused session has been warned about.
+    refused_warned: AtomicBool,
+    /// Set when a master was started, so that `finish` has one to stop.
+    started: AtomicBool,
+    finished: AtomicBool,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 static NEXT_SESSION: AtomicU32 = AtomicU32::new(0);
@@ -325,6 +377,10 @@ impl Session {
             control_path,
             log_path,
             mode: Mutex::new(Mode::Direct),
+            warnings: Mutex::new(Vec::new()),
+            refused_warned: AtomicBool::new(false),
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         })
     }
 
@@ -345,8 +401,245 @@ impl Session {
     pub fn rsh_argv(&self) -> Vec<OsString> {
         let mut argv = vec![self.settings.program.clone().into_os_string()];
         argv.extend(self.common_args());
-        argv.extend(self.command_mode_args());
+        argv.extend(self.command_mode_args(self.mode()));
         argv
+    }
+
+    /// How commands reach the remote right now.
+    pub fn mode(&self) -> Mode {
+        *self.mode.lock().expect("no panic holds the mode lock")
+    }
+
+    // =========================================================
+    // Phases: keeping a master connection alive
+    // =========================================================
+
+    /// Makes the connection ready for a remote phase. Call it before each
+    /// phase of remote work; it is cheap when the master is healthy.
+    ///
+    /// A healthy master answers `-O check` and nothing else happens. If it
+    /// does not answer, the master is stopped, its socket removed (only a
+    /// socket), a new master started and checked. When no master can be
+    /// had, commands run over connections of their own and a warning says
+    /// so; the next phase tries again. `Err` means the host itself is
+    /// away or broken, which a restart cannot help.
+    pub fn begin_phase(&self) -> Result<(), SessionError> {
+        let mut mode = self.mode.lock().expect("no panic holds the mode lock");
+        if self.mux_ok("check")? {
+            *mode = Mode::Master;
+            return Ok(());
+        }
+        // The master is gone or never was. `-O exit` is for a master that
+        // is still there but no longer answers `check`; its result does not
+        // matter.
+        let _ = self.mux_ok("exit")?;
+        remove_run_file(&self.control_path, "sock")?;
+        // `ssh -M` on a path that is taken disables multiplexing and leaves
+        // a plain connection running that nothing can end. Never start one.
+        if std::fs::symlink_metadata(&self.control_path).is_ok() {
+            *mode = Mode::Direct;
+            self.warn_direct(MuxProblem::AlreadyExists.to_string());
+            return Ok(());
+        }
+        let offset = self.log_len();
+        let status = self.start_master()?;
+        if status.code() == Some(255) {
+            // With `-E` the failure of the start itself is in the log.
+            return Err(failure_error(classify::command_failure(
+                &self.log_since(offset),
+            )));
+        }
+        if status.success() && self.mux_ok("check")? {
+            *mode = Mode::Master;
+            return Ok(());
+        }
+        *mode = Mode::Direct;
+        let reason = classify::mux_problem(&self.log_since(offset))
+            .map(|problem| problem.to_string())
+            .unwrap_or_else(|| "the master connection did not come up".to_string());
+        self.warn_direct(reason);
+        Ok(())
+    }
+
+    fn warn_direct(&self, reason: String) {
+        self.warn(format!(
+            "the ssh master connection is not available ({reason}); commands use direct connections"
+        ));
+    }
+
+    fn warn(&self, message: String) {
+        self.warnings
+            .lock()
+            .expect("no panic holds the warnings lock")
+            .push(Warning::new(message));
+    }
+
+    /// Runs `ssh -O <op>` against this run's socket. True when ssh exited
+    /// with status 0.
+    fn mux_ok(&self, op: &str) -> Result<bool, SessionError> {
+        let status = self
+            .ssh()
+            .args(self.common_args())
+            .arg("-S")
+            .arg(&self.control_path)
+            .args(["-O", op, "--"])
+            .arg(&self.settings.target.host)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|source| SessionError::Io {
+                what: "run ssh",
+                source,
+            })?;
+        Ok(status.success())
+    }
+
+    /// Starts the master. Its output goes to the log (`-E`) and to nowhere
+    /// else: the master keeps the standard streams it inherited open for
+    /// as long as it lives, and a pipe held open would keep the reader
+    /// waiting for that long.
+    fn start_master(&self) -> Result<std::process::ExitStatus, SessionError> {
+        self.started.store(true, Ordering::Relaxed);
+        self.ssh()
+            .args(self.common_args())
+            .args(["-M", "-N", "-f", "-S"])
+            .arg(&self.control_path)
+            .arg("-o")
+            .arg(format!("ControlPersist={}", self.settings.control_persist))
+            .arg("-E")
+            .arg(&self.log_path)
+            .arg("--")
+            .arg(&self.settings.target.host)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|source| SessionError::Io {
+                what: "start the ssh master",
+                source,
+            })
+    }
+
+    fn ssh(&self) -> Command {
+        let mut command = Command::new(&self.settings.program);
+        // The error texts are matched, and strerror follows the locale.
+        command.env("LC_ALL", "C");
+        command
+    }
+
+    fn log_len(&self) -> u64 {
+        std::fs::metadata(&self.log_path).map_or(0, |metadata| metadata.len())
+    }
+
+    /// What the master wrote to its log after byte `offset`.
+    fn log_since(&self, offset: u64) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(&self.log_path) else {
+            return Vec::new();
+        };
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(offset)).is_ok() {
+            let _ = file.read_to_end(&mut bytes);
+        }
+        bytes
+    }
+
+    // =========================================================
+    // Running scripts
+    // =========================================================
+
+    /// Runs a script on the remote and returns what it printed and its
+    /// exit status. A script that exits non-zero is an `Ok(Output)` for
+    /// the caller to read.
+    ///
+    /// Exit status 255 is ssh's own, so scripts must never exit with it.
+    /// It is classified as `Away` or `Broken`; a master that lost its
+    /// server leaves nothing on the command's stderr, so the lines the
+    /// master wrote to its log during the run are read as well.
+    pub fn run(&self, script: &Script) -> Result<Output, SessionError> {
+        let stdin = script.to_stdin()?;
+        let mode = self.mode();
+        let offset = self.log_len();
+        let mut child = self
+            .ssh()
+            .args(self.common_args())
+            .args(self.command_mode_args(mode))
+            .arg("--")
+            .arg(&self.settings.target.host)
+            .arg("/bin/sh -s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|source| SessionError::Io {
+                what: "start ssh",
+                source,
+            })?;
+        let mut pipe = child.stdin.take().expect("stdin was requested as a pipe");
+        // The script is written while the output is read: a script and an
+        // answer that both fill their pipe would block each other
+        // otherwise. A write error means ssh ended early, which its exit
+        // status reports.
+        let output = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = pipe.write_all(&stdin);
+            });
+            child.wait_with_output()
+        })
+        .map_err(|source| SessionError::Io {
+            what: "wait for ssh",
+            source,
+        })?;
+        let Some(status) = output.status.code() else {
+            return Err(SessionError::Broken(
+                "ssh was ended by a signal".to_string(),
+            ));
+        };
+        if status == 255 {
+            // Over a direct connection nothing is added to the log, so
+            // this reads nothing then.
+            let failure = classify::decided_failure(&output.stderr)
+                .or_else(|| classify::decided_failure(&self.log_since(offset)))
+                .unwrap_or_else(|| classify::command_failure(&output.stderr));
+            return Err(failure_error(failure));
+        }
+        if classify::session_refused(&output.stderr)
+            && !self.refused_warned.swap(true, Ordering::Relaxed)
+        {
+            self.warn(format!(
+                "{}; ssh runs such commands over a connection of their own",
+                MuxProblem::SessionRefused
+            ));
+        }
+        Ok(Output {
+            status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    /// Warnings collected since the last call.
+    pub fn take_warnings(&self) -> Vec<Warning> {
+        std::mem::take(
+            &mut *self
+                .warnings
+                .lock()
+                .expect("no panic holds the warnings lock"),
+        )
+    }
+
+    /// Ends the master and removes its socket and log. Idempotent; also
+    /// run when the session is dropped.
+    pub fn finish(&self) {
+        if self.finished.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if self.started.load(Ordering::Relaxed) {
+            let _ = self.mux_ok("exit");
+        }
+        let _ = remove_run_file(&self.control_path, "sock");
+        let _ = remove_run_file(&self.log_path, "log");
     }
 
     /// Options of every ssh call. The user's `~/.ssh/config` is read as
@@ -389,9 +682,9 @@ impl Session {
 
     /// What a call that runs a script adds: no terminal, no configured
     /// remote command, and the way to reach the remote.
-    fn command_mode_args(&self) -> Vec<OsString> {
+    fn command_mode_args(&self, mode: Mode) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec!["-T".into(), "-o".into(), "RemoteCommand=none".into()];
-        match *self.mode.lock().expect("no panic holds the mode lock") {
+        match mode {
             Mode::Master => {
                 args.extend(["-S".into(), self.control_path.clone().into_os_string()]);
                 args.extend(["-o".into(), "ControlMaster=no".into()]);
@@ -907,6 +1200,33 @@ mod tests {
             session.rsh_argv()[0],
             OsString::from("/opt/ssh wrapper/ssh")
         );
+    }
+
+    fn output(stdout: &[u8]) -> Output {
+        Output {
+            status: 0,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_clock_is_split_from_the_rest_of_the_answer() {
+        let answer = output(b"1730678400\nrest\nmore\n");
+        let (clock, rest) = answer.clock_and_rest().expect("a clock");
+        assert_eq!(clock, 1730678400);
+        assert_eq!(rest, b"rest\nmore\n");
+    }
+
+    #[test]
+    fn a_first_line_that_is_no_number_is_not_a_clock() {
+        assert!(output(b"abc\nrest\n").clock_and_rest().is_err());
+    }
+
+    #[test]
+    fn an_answer_without_a_line_is_not_a_clock() {
+        assert!(output(b"1730678400").clock_and_rest().is_err());
+        assert!(output(b"").clock_and_rest().is_err());
     }
 
     #[test]

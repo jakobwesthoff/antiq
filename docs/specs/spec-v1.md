@@ -727,19 +727,34 @@ marker is reachable.
 
 antiq runs the system's `ssh` with a master connection per run, a short
 finite `ControlPersist` and a short `ControlPath` in a per-user
-directory, named with the run's pid. The directory is
-`/tmp/antiq-<uid>/` with mode `0700`, checked before use. The
-`ControlPath` is at most 86 bytes, since `ssh -M` binds the path plus a
-suffix of 17 characters within the 104 bytes macOS allows for a socket
-path; a longer one is refused with antiq's own error. Sockets of runs
-that no longer exist are removed at start. Before each remote phase
-antiq runs `-O check`; when it fails, antiq sends `-O exit`, removes the
-socket (only a socket, only in its own directory), starts a new master
-and checks it again. If that fails too, commands run as direct
-connections, with a warning. At the end of the run it sends `-O exit`.
-Every call passes `BatchMode=yes`, `ConnectTimeout`,
-`ServerAliveInterval`, `ServerAliveCountMax`, and `HostKeyAlias` when
-configured. (ADR 0048)
+directory, named with the run's pid and a counter that keeps two
+sessions of one process apart (`<pid>-<n>.sock`). The directory is
+`/tmp/antiq-<uid>/` with mode `0700`, checked before use: it must be a
+directory, not a link, owned by the user. The `ControlPath` is at most
+86 bytes, since `ssh -M` binds the path plus a suffix of 17 characters
+within the 104 bytes macOS allows for a socket path; a longer one is
+refused with antiq's own error. At start, the sockets and master logs
+of runs that no longer exist are removed, and so is a socket at the new
+run's own path, which an earlier run with the same pid may have left
+behind. Only sockets and master logs are removed, and only in this
+directory.
+
+The master writes its messages to a log next to the socket
+(`<pid>-<n>.log`, `ssh -E`), since a detached master has no standard
+error. The failures of starting a master and the keepalive timeout of a
+master that lost its server are read from that log.
+
+Before each remote phase antiq runs `-O check`; when it fails, antiq
+sends `-O exit`, removes the socket (only a socket), starts a new master
+and checks it again. If anything other than a socket is at the control
+path, no master is started, because `ssh -M` there leaves a plain
+connection running that is no master. If starting the master fails with
+exit status 255, the failure is classified as away or broken like a
+command's. If the master starts and the second check still fails, or
+something is in the way, commands run as direct connections, with a
+warning. At the end of the run it sends `-O exit`. Every call passes
+`BatchMode=yes`, `ConnectTimeout`, `ServerAliveInterval`,
+`ServerAliveCountMax`, and `HostKeyAlias` when configured. (ADR 0048)
 
 Every remote command runs as `/bin/sh -s` with the script and its
 quoted values on standard input, so the login shell parses nothing but

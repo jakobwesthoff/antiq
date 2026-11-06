@@ -112,20 +112,35 @@ fn is_broken_line(line: &str) -> bool {
 /// "away", which `--if-reachable` turns into success. A text without a
 /// recognised line is broken.
 pub fn command_failure(stderr: &[u8]) -> Failure {
-    let lines: Vec<String> = lines(stderr)
-        .into_iter()
-        .filter(|line| !is_noise(line))
-        .collect();
-    if let Some(line) = lines.iter().find(|line| is_broken_line(line)) {
-        return Failure::Broken(line.clone());
+    if let Some(failure) = decided_failure(stderr) {
+        return failure;
     }
-    if let Some(line) = lines.iter().find(|line| is_away_line(line)) {
-        return Failure::Away(line.clone());
-    }
+    let lines = own_lines(stderr);
     if lines.is_empty() {
         return Failure::Broken(NO_MESSAGE.to_string());
     }
     Failure::Broken(lines.join("; "))
+}
+
+/// The failure a recognised line tells, if any line is recognised. Text
+/// that has no such line says nothing, which is not the same as "broken":
+/// the master's log may still hold the answer.
+pub fn decided_failure(text: &[u8]) -> Option<Failure> {
+    let lines = own_lines(text);
+    if let Some(line) = lines.iter().find(|line| is_broken_line(line)) {
+        return Some(Failure::Broken(line.clone()));
+    }
+    lines
+        .iter()
+        .find(|line| is_away_line(line))
+        .map(|line| Failure::Away(line.clone()))
+}
+
+fn own_lines(text: &[u8]) -> Vec<String> {
+    lines(text)
+        .into_iter()
+        .filter(|line| !is_noise(line))
+        .collect()
 }
 
 // =========================================================
@@ -295,6 +310,25 @@ mod tests {
         let mut text = fixture!("timeout").to_vec();
         text.extend_from_slice(fixture!("permission-denied"));
         assert!(broken(&text).contains("Permission denied"));
+    }
+
+    #[test]
+    fn text_without_a_recognised_line_decides_nothing() {
+        assert_eq!(decided_failure(b""), None);
+        assert_eq!(decided_failure(b"something odd happened\n"), None);
+        assert_eq!(decided_failure(fixture!("control-socket-stale")), None);
+    }
+
+    #[test]
+    fn a_recognised_line_decides() {
+        assert!(matches!(
+            decided_failure(fixture!("keepalive-timeout")),
+            Some(Failure::Away(_))
+        ));
+        assert!(matches!(
+            decided_failure(fixture!("permission-denied")),
+            Some(Failure::Broken(_))
+        ));
     }
 
     #[test]
