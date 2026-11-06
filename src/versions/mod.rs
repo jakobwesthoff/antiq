@@ -13,8 +13,11 @@ pub mod naming;
 pub mod stamp;
 pub mod store;
 
-/// Why an operation on versions failed. Nothing in it can fail yet.
+/// Why an operation on versions failed.
 #[derive(Debug, thiserror::Error)]
-pub enum VersionsError {}
+pub enum VersionsError {
+    #[error("`{0}` is not a version stamp")]
+    InvalidStamp(String),
+}
 
 impl HasKind for VersionsError {}
