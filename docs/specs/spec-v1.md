@@ -829,12 +829,22 @@ archive that passes the stream check or a remote copy whose check is
 recorded; otherwise the piece is not reclaimed and is listed as pending
 remote work. (ADR 0033, ADR 0035)
 
-A tolerant verify is used for live packages. A file whose lstat (size,
-modification time, ctime) differs before and after its read, or that
-read short, discards the package being written and restarts the piece,
-up to `live_retries` times; then the piece is skipped for this run and
-shown as "backup stale since <time>". Files that vanished are dropped.
-The stream checksum is verified before upload.
+A tolerant verify is used for live packages. The walk's record of each
+file is the state before its read. A file whose lstat (type, size,
+modification time, ctime, inode) differs from that record after its read,
+that read short, or that vanished after its read, discards the package
+being written and restarts the piece with a new walk. So does a file that
+was replaced between the walk and its open, by a symlink, a directory or
+another file, or by a change above it. `live_retries` counts the
+restarts, so a piece is tried `live_retries` + 1 times; then the piece is
+skipped for this run and shown as "backup stale since <time>". A file that
+is gone when the packer comes to open it is dropped from the package and
+from the manifest. An entry that a restart's walk lost between listing
+its directory and reading it counts as one more change; in the walk made
+before the first attempt it makes the piece unreadable (see "Walks"). The
+stream checksum is verified before upload: the finished package is read
+back through the decoder, which checks the frame, and its SHA-256 must be
+that of the bytes written.
 
 ### Change detection
 
