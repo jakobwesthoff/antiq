@@ -864,6 +864,39 @@ mod tests {
     }
 
     #[test]
+    fn the_leftovers_stay_when_the_store_cannot_be_read_each_named_by_its_first_component() {
+        let temp = world("");
+        let mut store = Store::new();
+        store.add_version(&source("projects/scanner"), "projects/scanner", STAMP);
+        put(&temp, &store);
+        for kind in ["recovered", "trash", "doomed"] {
+            leftover(
+                &temp,
+                &format!("{kind}/2026-11-04T090211/projects/scanner/a.txt"),
+            );
+        }
+        let folder = antiq(&temp, "pieces/projects/scanner");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+        let locked_out = fs::read_dir(&folder).is_err();
+
+        let found = reported(&temp);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("restores");
+
+        assert!(locked_out, "the test needs a user that mode 000 locks out");
+        assert!(found.store_error.is_some());
+        assert_eq!(
+            found.recovered,
+            [path("recovered/2026-11-04T090211/projects")]
+        );
+        assert_eq!(found.trash, [path("trash/2026-11-04T090211/projects")]);
+        assert_eq!(found.doomed.len(), 1);
+        assert_eq!(
+            found.doomed[0].path,
+            path("doomed/2026-11-04T090211/projects")
+        );
+    }
+
+    #[test]
     fn a_tree_in_trash_is_named_by_the_piece_whose_version_has_its_stamp() {
         let temp = world("");
         let mut store = Store::new();
