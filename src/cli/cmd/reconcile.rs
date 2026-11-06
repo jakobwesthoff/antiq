@@ -22,7 +22,6 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
         .context("find the collection")?;
     let request = ReconcileRequest {
         prune: args.prune,
-        force: args.force,
         dry_run: args.dry_run,
     };
     let mut interaction = ctx.interaction();

@@ -1210,3 +1210,15 @@ fn a_dry_run_lists_no_drop_that_a_version_from_the_remote_prevents() {
     assert_eq!(real.json()["pruned"], json!([]), "{}", real.stdout);
     assert!(!dry.stdout.contains("drop alpha"), "{}", dry.stdout);
 }
+
+#[test]
+fn a_dry_run_with_force_reports_no_hold_of_the_brake() {
+    let world = three_of_ten();
+
+    let run = world.reconcile_json(&["--prune", "--dry-run", "--force"]);
+
+    succeeded(&run);
+    assert!(run.json().get("brake").is_none(), "{}", run.stdout);
+    let actions = run.json()["actions"].to_string();
+    assert!(actions.contains("\"action\":\"drop\""), "{actions}");
+}

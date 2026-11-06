@@ -360,5 +360,33 @@ mod tests {
             .expect_err("a directory is no manifest");
 
         assert!(matches!(error, Error::Fsx(_)), "{error}");
+        let recorded: Vec<_> = Tombstones::read(&world.collection)
+            .expect("reads")
+            .iter()
+            .collect();
+        assert_eq!(recorded, [(object(1), 1)], "the record comes first");
+    }
+
+    #[test]
+    fn the_repairs_finish_a_drop_that_stopped_at_the_manifest() {
+        let world = world();
+        let pieces = planned(&world);
+        let manifest = world.collection.manifest_path(object(1));
+        fs::create_dir(&manifest).expect("a directory");
+        execute(&world.collection, &world.lock, &Part::default(), &pieces)
+            .expect_err("a directory is no manifest");
+        fs::remove_dir(&manifest).expect("the obstacle is gone");
+        let clock = FixedClock::new("2026-11-04T12:00:00Z".parse().expect("a time"));
+
+        crate::repair::run(
+            &world.collection,
+            &world.lock,
+            &clock,
+            &crate::repair::RealEffects,
+        )
+        .expect("the repairs run");
+
+        assert!(!world.collection.object_dir(object(1)).exists());
+        assert!(!world.collection.tracking_path(object(1)).exists());
     }
 }

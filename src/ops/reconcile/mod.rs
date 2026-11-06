@@ -221,7 +221,6 @@ pub type Opener<'a> = &'a dyn Fn(&Collection) -> Result<Box<dyn Remote>, RemoteE
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileRequest {
     pub prune: bool,
-    pub force: bool,
     pub dry_run: bool,
 }
 
