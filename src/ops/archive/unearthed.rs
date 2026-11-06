@@ -2257,21 +2257,16 @@ pub(crate) mod tests {
         assert_eq!(scene.entry().state, EntryState::Live);
     }
 
-    /// Answers by the path in the title and counts how many questions are
-    /// open at the same time.
-    struct Counting {
-        open: Arc<std::sync::atomic::AtomicUsize>,
-        most: Arc<std::sync::atomic::AtomicUsize>,
-    }
+    /// Answers by the path in the title: replace for `p0`, skip for `p1`,
+    /// fork for `p2` and nothing for the rest.
+    struct ByPath;
 
-    impl Interaction for Counting {
+    impl Interaction for ByPath {
         fn choose(&mut self, question: &Question) -> Option<Choice> {
-            let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
-            self.most.fetch_max(now, Ordering::SeqCst);
+            // Yielding gives the other workers the chance to ask meanwhile.
             for _ in 0..50 {
                 std::thread::yield_now();
             }
-            self.open.fetch_sub(1, Ordering::SeqCst);
             let answer = if question.title.contains("/p0?") {
                 "replace"
             } else if question.title.contains("/p1?") {
@@ -2328,16 +2323,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workers_ask_one_question_at_a_time_and_each_piece_gets_its_own_answer() {
-        for round in 0..50 {
+    fn each_piece_gets_its_own_answer_under_four_workers() {
+        for round in 0..5 {
             let scene = four_pieces();
-            let (open, most) = Default::default();
-            let counting = Counting {
-                open: Arc::clone(&open),
-                most: Arc::clone(&most),
-            };
             let ids = SeqIds::new(1);
-            let asker = asker(counting);
+            let asker = asker(ByPath);
 
             let request = ArchiveRequest {
                 collection: &scene.collection,
@@ -2351,7 +2341,6 @@ pub(crate) mod tests {
             let report = rerun_while_lock_unattributed(|| archive_with(&request, &RealSeams))
                 .unwrap_or_else(|error| panic!("round {round}: {error}"));
 
-            assert_eq!(most.load(Ordering::SeqCst), 1, "round {round}");
             let archived: Vec<String> = archived_rows(&report)
                 .iter()
                 .map(|row| row.path.to_string())

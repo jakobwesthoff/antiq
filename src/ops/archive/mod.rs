@@ -639,9 +639,9 @@ pub(crate) fn plan_one(
 // The run
 // =========================================================
 
-/// Whoever answers the questions of a run, shared by its workers: the lock
-/// is held only while one question is asked, so the answerer sees one
-/// question at a time.
+/// Whoever answers the questions of a run, shared by its workers. A
+/// question needs `&mut` access to the answerer, which only the guard of
+/// the mutex gives, so the answerer sees one question at a time.
 pub type Asker = Mutex<Box<dyn Interaction>>;
 
 /// An answerer that answers nothing, as a run without a terminal has.
