@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::block::{Block, Para};
-use super::env::{Env, utf8_locale};
+use super::env::{Env, cursor_term, utf8_locale};
 use super::render::{Part, render_blocks, render_parts};
 use super::rich::Rich;
 use super::symbols::Symbols;
@@ -40,6 +40,17 @@ fn the_first_non_empty_locale_variable_decides_utf8() {
     assert!(utf8_locale(Some(""), Some("en_US.UTF-8"), Some("C")));
     assert!(utf8_locale(None, None, Some("de_DE.utf8")));
     assert!(!utf8_locale(None, Some("POSIX"), Some("en_US.UTF-8")));
+}
+
+#[test]
+fn only_a_named_terminal_that_is_not_dumb_moves_its_cursor() {
+    assert!(cursor_term(Some("xterm-256color")));
+    assert!(!cursor_term(Some("dumb")));
+    assert!(!cursor_term(Some("")));
+    assert!(!cursor_term(None));
+    assert!(bare(80).cursor);
+    assert!(!bare(80).with_cursor(false).cursor);
+    assert!(!Env::pipe().cursor);
 }
 
 #[test]

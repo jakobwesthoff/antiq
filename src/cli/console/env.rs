@@ -28,6 +28,10 @@ pub struct Env {
     pub utf8: bool,
     /// Columns of the terminal, or 80.
     pub width: usize,
+    /// The terminal moves its cursor on the escape sequences of an ANSI
+    /// terminal, so that a region of lines can be redrawn in place. `TERM`
+    /// unset or `dumb` clears it; `NO_COLOR` does not.
+    pub cursor: bool,
 }
 
 impl Env {
@@ -37,7 +41,18 @@ impl Env {
             color,
             utf8,
             width,
+            cursor: rich,
         }
+    }
+
+    /// The same environment with the cursor switch set.
+    #[allow(
+        dead_code,
+        reason = "the wiring of commit 7 is its caller and removes this"
+    )]
+    pub fn with_cursor(mut self, cursor: bool) -> Env {
+        self.cursor = cursor;
+        self
     }
 
     /// A pipe: nothing but plain lines.
@@ -66,8 +81,15 @@ impl Env {
                 var("LANG").as_deref(),
             ),
             width: crate::cli::output::terminal_columns(stream).map_or(DEFAULT_WIDTH, usize::from),
+            cursor: cursor_term(var("TERM").as_deref()),
         }
     }
+}
+
+/// Whether a terminal named by `TERM` can redraw in place: any terminal
+/// but one that is unnamed or `dumb`.
+pub fn cursor_term(term: Option<&str>) -> bool {
+    term.is_some_and(|term| !term.is_empty() && term != "dumb")
 }
 
 /// Whether the locale names UTF-8. The first of the three variables that

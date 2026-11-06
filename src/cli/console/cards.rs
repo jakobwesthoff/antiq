@@ -287,6 +287,11 @@ impl Cards {
         std::mem::take(&mut self.ready)
     }
 
+    /// Whether a finished piece waits for its line.
+    pub(crate) fn has_ready(&self) -> bool {
+        !self.ready.is_empty()
+    }
+
     /// Whether the piece has finished, whether or not its line was taken.
     pub(crate) fn has_finished(&self, name: &str) -> bool {
         self.items

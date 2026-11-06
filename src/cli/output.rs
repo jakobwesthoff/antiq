@@ -45,6 +45,29 @@ impl Sink {
         self.write_line_bytes(line.as_bytes())
     }
 
+    /// Writes `bytes` as they are and flushes. A reader that is gone, or a
+    /// terminal that was closed under the run (`EIO`), closes the sink and
+    /// the run goes on without output.
+    fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        let written = self
+            .writer
+            .write_all(bytes)
+            .and_then(|()| self.writer.flush());
+        match written {
+            Err(error)
+                if error.kind() == io::ErrorKind::BrokenPipe
+                    || error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
+            {
+                self.closed = true;
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
     fn write_line_bytes(&mut self, line: &[u8]) -> io::Result<()> {
         if self.closed {
             return Ok(());
@@ -142,6 +165,14 @@ pub fn terminal_columns(stream: impl AsFd) -> Option<u16> {
     (size.ws_col > 0).then_some(size.ws_col)
 }
 
+/// The columns and rows of the terminal behind `stream`, `None` when it is
+/// no terminal or reports zero columns or zero rows.
+fn window_size(stream: impl AsFd) -> Option<(usize, usize)> {
+    let size = rustix::termios::tcgetwinsize(stream).ok()?;
+    (size.ws_col > 0 && size.ws_row > 0)
+        .then_some((usize::from(size.ws_col), usize::from(size.ws_row)))
+}
+
 /// Where a run writes to.
 pub struct Output {
     stdout: Sink,
@@ -149,15 +180,27 @@ pub struct Output {
     stdout_style: Style,
     stdout_env: Env,
     stderr_env: Env,
+    size: Size,
+}
+
+/// Where the size of the terminal comes from.
+#[derive(Debug, Clone, Copy)]
+enum Size {
+    /// The window of the process's own stdout.
+    Window,
+    /// A size given by the caller, or none.
+    Given(Option<(usize, usize)>),
 }
 
 impl Output {
     /// The process's own stdout and stderr, each laid out for what it is.
     pub fn stdio() -> Output {
         let stdout = Env::detect(&io::stdout());
-        Output::new(Box::new(io::stdout()), Box::new(io::stderr()))
+        let mut output = Output::new(Box::new(io::stdout()), Box::new(io::stderr()))
             .with_stdout_style(Style::from_env(&stdout))
-            .with_envs(stdout, Env::detect(&io::stderr()))
+            .with_envs(stdout, Env::detect(&io::stderr()));
+        output.size = Size::Window;
+        output
     }
 
     pub fn new(stdout: Box<dyn Write + Send>, stderr: Box<dyn Write + Send>) -> Output {
@@ -167,7 +210,33 @@ impl Output {
             stdout_style: Style::from_env(&Env::pipe()),
             stdout_env: Env::pipe(),
             stderr_env: Env::pipe(),
+            size: Size::Given(None),
         }
+    }
+
+    /// The same output with the size that `stdout_size` reports.
+    #[allow(
+        dead_code,
+        reason = "the wiring of commit 7 is its caller and removes this"
+    )]
+    pub fn with_stdout_size(mut self, size: Option<(usize, usize)>) -> Output {
+        self.size = Size::Given(size);
+        self
+    }
+
+    /// The columns and rows of the terminal behind stdout, or `None` when
+    /// it reports none. A window of zero columns or zero rows is unknown.
+    pub fn stdout_size(&self) -> Option<(usize, usize)> {
+        match self.size {
+            Size::Given(size) => size,
+            Size::Window => window_size(io::stdout()),
+        }
+    }
+
+    /// Writes `bytes` to stdout as they are, such as the escape sequences
+    /// that redraw a region of lines.
+    pub fn stdout_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.stdout.write_raw(bytes)
     }
 
     /// The same output with the environments of its two streams.
@@ -939,6 +1008,65 @@ mod tests {
         let pty = pty(132);
         assert_eq!(terminal_columns(&pty.slave), Some(132));
         drop(pty.master);
+    }
+
+    #[test]
+    fn a_terminal_reports_its_columns_and_rows() {
+        let pty = pty(132);
+        assert_eq!(window_size(&pty.slave), Some((132, 24)));
+        drop(pty.master);
+    }
+
+    #[test]
+    fn a_window_of_zero_columns_has_no_size() {
+        let pty = pty(0);
+        assert_eq!(window_size(&pty.slave), None);
+        drop(pty.master);
+    }
+
+    #[test]
+    fn a_pipe_has_no_size_and_a_given_size_is_reported_as_it_is() {
+        let (reader, _writer) = io::pipe().expect("a pipe can be made");
+        assert_eq!(window_size(&reader), None);
+        let capture = Capture::default();
+        assert_eq!(capture.output().stdout_size(), None);
+        assert_eq!(
+            capture
+                .output()
+                .with_stdout_size(Some((90, 30)))
+                .stdout_size(),
+            Some((90, 30))
+        );
+    }
+
+    /// A terminal that was closed under the run: every write fails with `EIO`.
+    struct DeadTerminal;
+
+    impl Write for DeadTerminal {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(5))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_bytes_to_a_closed_pipe_or_a_dead_terminal_are_dropped() {
+        let (stream, _flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
+        let mut out = Output::new(Box::new(stream), Box::new(Vec::new()));
+        out.stdout_raw(b"x").expect("a closed pipe is no error");
+        let mut out = Output::new(Box::new(DeadTerminal), Box::new(Vec::new()));
+        out.stdout_raw(b"x").expect("a dead terminal is no error");
+        out.stdout_raw(b"y").expect("and stays closed");
+    }
+
+    #[test]
+    fn another_failure_of_a_raw_write_is_an_error() {
+        let (stream, _flushes) = FailsOnFlush::new(io::ErrorKind::PermissionDenied);
+        let mut out = Output::new(Box::new(stream), Box::new(Vec::new()));
+        assert!(out.stdout_raw(b"x").is_err());
     }
 
     #[test]

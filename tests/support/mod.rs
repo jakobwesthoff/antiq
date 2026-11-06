@@ -9,6 +9,7 @@
 pub mod cmd;
 pub mod fake_rsync;
 pub mod scenario;
+pub mod screen;
 pub mod ssh_shim;
 pub mod tree;
 pub mod versions;

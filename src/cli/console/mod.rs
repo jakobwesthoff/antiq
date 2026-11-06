@@ -8,6 +8,7 @@ pub mod block;
 pub mod cards;
 pub mod dryrun;
 pub mod env;
+pub mod live;
 pub mod render;
 pub mod rich;
 pub mod symbols;
