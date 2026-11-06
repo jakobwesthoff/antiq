@@ -629,21 +629,68 @@ each one is reported in a warning.
 
 ### Committing a version
 
-1. The payload is uploaded under its temp name, flushed, and renamed to
-   its final name.
+1. The payload and its listing are uploaded under their temp names,
+   flushed, and renamed to their final names. On the SSH remote the
+   flush is the `sync` on the NAS (see "SSH remote"), which runs once
+   after the uploads and before the claim.
 2. The writer claims metadata version N+1, one above the highest
-   committed version or claim, by creating `meta.<N+1>.claim`
-   exclusively. An existing claim is a conflict.
-3. It writes the metadata under a temp name, checks that its claim still
-   exists, that no `meta.<M>` with M >= N+1 exists, and that the payload
-   is still present with its size, and renames the metadata to
-   `meta.<N+1>`. On the SSH remote this rename refuses an existing
-   target (`ln` to the final name, then remove the temp name).
-4. It lists the directory again; a higher committed version is a
+   committed version, by creating `meta.<N+1>.claim` exclusively. A claim
+   that already exists is a conflict. So is a claim above the highest
+   committed version that is not abandoned: its writer goes on and this
+   writer tries again at the next sync. A claim above the highest
+   committed version is skipped, and N+1 counts above it, only when it is
+   abandoned (older than the grace period) or when this machine's own
+   metadata temp name for its number is beside it, which marks an
+   interrupted attempt of this machine. Version numbers stop at
+   4294967295: when the number to claim would pass it, the commit stops.
+3. It writes the metadata under a temp name, flushes, lists the
+   directory, and checks that its claim still exists, that no `meta.<M>`
+   above the highest committed version it saw in step 2 exists, and that
+   every file the metadata names is present, a payload with its recorded
+   size. A named file that is missing and that this commit uploaded is
+   put again once; any other missing file ends the commit. It flushes
+   again if it put anything, and renames the metadata to `meta.<N+1>`.
+   On the SSH remote this rename refuses an existing target (`ln` to the
+   final name, then remove the temp name).
+4. It flushes, lists the directory again, and checks the named files once
+   more, putting a missing one again. A higher committed version is a
    conflict.
 
 A version is committed once `meta.<N+1>` exists; readers read only
 `meta.<N>` files. (ADR 0030)
+
+Before it uploads anything, a commit checks that the highest version on
+the remote is the one the change was based on and that it can be read.
+It stops when the remote holds a higher committed version, fewer than
+the base, or a highest version that does not parse, names another object
+or has a format other than 1. When the remote holds a version above the
+base with exactly the bytes about to be committed, an earlier attempt of
+this commit got past the rename. The commit then writes nothing and
+returns that version, which is how a commit that failed after its rename
+is retried.
+
+A commit that ends before the rename because a named file is missing or a
+higher version appeared deletes its temp name, flushes, and then deletes
+its claim, unless the version of its number exists. A commit that ends
+for any other reason leaves its claim and temp name. The temp name goes
+first so that a stop between the two leaves a claim without a temp name,
+which blocks, and never a temp name without a claim, which would pass for
+an interrupted attempt of this machine under a claim another writer made.
+
+An interrupted attempt of this machine is recognised by the run lock, which
+shows that no run of this machine is in flight. A crash between creating
+the claim and writing the temp name leaves a claim that is not recognised
+and blocks the object for one grace period. A collection copied to
+another machine with the same name, or two collections of one machine on
+one remote, can have a live claim of the other writer skipped; that
+writer then finds a higher committed version at step 3 or step 4 and has a
+conflict, not a silent loss.
+
+When step 4 finds a higher version, the writer's own version stays on the
+remote as committed but not current. The writer treats this as a conflict
+and does not delete its local archive because of that version. Cleanup
+removes it once it is older than the grace period, and its payloads one
+run later.
 
 Cleanup:
 
