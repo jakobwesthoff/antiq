@@ -7,8 +7,9 @@
 
 Output out/discard.txt
 # The picture shows the command, 4 lines of output and the prompt: 6 rows of
-# 38.46 pixels and the padding of 80 make 312.
-Set Height 312
+# 38.46 pixels plus 87 pixels, the padding of 80 and 7 that vhs keeps, make
+# 318.
+Set Height 318
 Source common.tape
 
 Type "antiq init --pattern '*'"

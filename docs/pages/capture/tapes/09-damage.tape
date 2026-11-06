@@ -8,8 +8,9 @@
 
 Output out/discard.txt
 # The picture shows the command, 11 lines of output and the prompt: 13 rows
-# of 38.46 pixels and the padding of 80 make 580.
-Set Height 580
+# of 38.46 pixels plus 87 pixels, the padding of 80 and 7 that vhs keeps,
+# make 588.
+Set Height 588
 Source common.tape
 
 Hide
