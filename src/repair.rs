@@ -1083,6 +1083,19 @@ mod tests {
                 self.tree()
                     .file_with(&format!("{piece}/{name}"), content, 0o644, FILE_TIME);
             }
+            // Directories carry the time they were made, which would make
+            // every build of the same scenario pack to other bytes.
+            let fixed = filetime::FileTime::from_unix_time(FILE_TIME, 0);
+            let mut directories = vec![self.at(piece)];
+            for (name, _) in files {
+                let mut parent = self.at(&format!("{piece}/{name}"));
+                while parent.pop() && parent != self.at(piece) {
+                    directories.push(parent.clone());
+                }
+            }
+            for directory in directories {
+                filetime::set_file_mtime(directory, fixed).expect("the time can be set");
+            }
             let packaged = pack_piece(self.tree(), piece);
             let sha = packaged.packed.sha256.clone();
             let payload = FileName::new(format!("{}-a.tar.zst", &sha[..16])).expect("a name");
@@ -2790,6 +2803,231 @@ mod tests {
         let world = World::new();
         fs::remove_dir(world.at(".antiq/tracking")).expect("empty");
         assert!(world.run().is_empty());
+    }
+
+    // =====================================================================
+    // Crash points
+    // =====================================================================
+
+    /// Every path below the collection with its content, directories as
+    /// `None`, apart from the lock file.
+    fn snapshot(world: &World) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+        fn walk(
+            base: &Path,
+            directory: &Path,
+            seen: &mut std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        ) {
+            for item in fs::read_dir(directory).expect("lists") {
+                let item = item.expect("an item");
+                let path = item.path();
+                let name = path
+                    .strip_prefix(base)
+                    .expect("below")
+                    .display()
+                    .to_string();
+                if name == ".antiq/lock" {
+                    continue;
+                }
+                let kind = item.file_type().expect("a type");
+                if kind.is_dir() {
+                    seen.insert(name, None);
+                    walk(base, &path, seen);
+                } else {
+                    seen.insert(name, Some(fs::read(&path).unwrap_or_default()));
+                }
+            }
+        }
+        let mut seen = std::collections::BTreeMap::new();
+        walk(world.temp.root(), world.temp.root(), &mut seen);
+        seen
+    }
+
+    /// Whether some file below the collection has exactly this content.
+    fn holds(world: &World, content: &[u8]) -> bool {
+        snapshot(world)
+            .values()
+            .any(|found| found.as_deref() == Some(content))
+    }
+
+    /// Runs the repairs of the world `build` makes with a crash after `n`
+    /// effects, for every `n` that crashes it, and then once more without.
+    /// Each time the second run has to end in the state a run without a
+    /// crash ends in, and `precious` must not have been lost on the way.
+    fn survives_every_crash(build: impl Fn() -> World, precious: &[&[u8]]) {
+        let expected = {
+            let world = build();
+            world.run();
+            snapshot(&world)
+        };
+        for content in precious {
+            // The scenario keeps what the user had, in one place or another.
+            let world = build();
+            assert!(holds(&world, content), "the scenario holds {content:?}");
+        }
+
+        let mut crash_points = 0;
+        for limit in 0.. {
+            let world = build();
+            let calls = Cell::new(0usize);
+            let fails = |_: &str, _: &str| {
+                let call = calls.get();
+                calls.set(call + 1);
+                call >= limit
+            };
+            let effects = Scripted::new(&fails);
+            let _ = world.run_with(&effects);
+            if calls.get() <= limit {
+                break;
+            }
+            crash_points += 1;
+            for content in precious {
+                assert!(
+                    holds(&world, content),
+                    "{content:?} lost at crash point {limit}"
+                );
+            }
+
+            world.run();
+            let after = snapshot(&world);
+            let differing: Vec<&String> = expected
+                .keys()
+                .chain(after.keys())
+                .filter(|name| expected.get(*name) != after.get(*name))
+                .collect();
+            assert!(
+                differing.is_empty(),
+                "after a crash at point {limit} these differ from a run without one: {differing:?}"
+            );
+            for content in precious {
+                assert!(
+                    holds(&world, content),
+                    "{content:?} lost after point {limit}"
+                );
+            }
+        }
+        assert!(crash_points > 0, "the scenario changes something");
+    }
+
+    const UNSAVED: &[u8] = b"unsaved work";
+
+    fn differing_trash_world(taken: bool) -> World {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        world.removing(ID, "projects/a", &archive);
+        world.to_trash(ID, "projects/a");
+        fs::write(world.trash(ID).join("unsaved.txt"), UNSAVED).expect("an added file");
+        if taken {
+            world.tree().file("projects/a/stranger.txt", "not ours");
+        }
+        world
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_putting_a_differing_tree_back_loses_nothing() {
+        survives_every_crash(|| differing_trash_world(false), &[UNSAVED]);
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_recovering_a_differing_tree_loses_nothing() {
+        survives_every_crash(|| differing_trash_world(true), &[UNSAVED, b"not ours"]);
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_finishing_a_trashed_tree_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                let archive = world.archived(ID, "projects/a", FILES);
+                world.removing(ID, "projects/a", &archive);
+                world.to_trash(ID, "projects/a");
+                world
+            },
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_finishing_a_folder_in_place_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                let archive = world.archived(ID, "projects/a", FILES);
+                world.removing(ID, "projects/a", &archive);
+                world
+            },
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_keeping_a_differing_folder_in_place_loses_nothing() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                let archive = world.archived(ID, "projects/a", FILES);
+                world.removing(ID, "projects/a", &archive);
+                fs::write(world.at("projects/a/unsaved.txt"), UNSAVED).expect("an added file");
+                world
+            },
+            &[UNSAVED],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_settling_an_unearthing_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                world.archived(ID, "projects/a", FILES);
+                unearthing(&world, ID, "projects/a");
+                world
+            },
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_dropping_an_unearthing_keeps_the_folder() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                world.archived(ID, "projects/a", FILES);
+                fs::write(world.at("projects/a/unsaved.txt"), UNSAVED).expect("an added file");
+                unearthing(&world, ID, "projects/a");
+                world
+            },
+            &[UNSAVED],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_catching_up_with_an_archive_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                world.archived(ID, "projects/a", FILES);
+                lagging(&world, ID, "projects/a");
+                world
+            },
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_restoring_missing_entries_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                own_live(&mut world, ID, "projects/a");
+                world.tree().file(".antiq/trash/leftover/f", "x");
+                world.tree().file(".antiq/.config.toml.4242.0.tmp", "x");
+                world
+                    .tree()
+                    .file(&format!(".antiq/tracking/{OTHER_ID}.manifest.json"), "{}");
+                world
+            },
+            &[],
+        );
     }
 
     // =====================================================================
