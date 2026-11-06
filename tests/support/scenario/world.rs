@@ -17,9 +17,13 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// The time zone every command runs in, so that output which depends on
 /// the local time reads the same on every machine.
+/// How long a command on a terminal may run.
+const TTY_DEADLINE: Duration = Duration::from_secs(20);
+
 const TIME_ZONE: &str = "Pacific/Auckland";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,9 +126,15 @@ impl World {
     /// text mode whatever the world's mode is, and nothing checks it as an
     /// envelope. The terminal's `\r\n` line ends come back as `\n`.
     pub fn run_tty(&self, args: &[&str]) -> Outcome {
+        self.run_tty_within(args, TTY_DEADLINE)
+    }
+
+    /// `run_tty` with a deadline of its own. A command that has not
+    /// finished by then is killed and the run fails.
+    pub fn run_tty_within(&self, args: &[&str], limit: Duration) -> Outcome {
         let mut terminal = Terminal::open();
         let slave = terminal.slave();
-        let mut outcome = self.execute(Some(&self.collection), None, args, Some(slave));
+        let mut outcome = self.execute(Some(&self.collection), None, args, Some((slave, limit)));
         outcome.stdout = terminal.finish();
         outcome
     }
@@ -174,9 +184,9 @@ impl World {
         collection: Option<&Collection>,
         current_dir: Option<&Path>,
         args: &[&str],
-        stdout: Option<Stdio>,
+        terminal: Option<(Stdio, Duration)>,
     ) -> Outcome {
-        let mode = if stdout.is_some() {
+        let mode = if terminal.is_some() {
             Mode::Text
         } else {
             self.mode
@@ -202,13 +212,15 @@ impl World {
             None => Antiq::new(),
         };
         let mut antiq = antiq.args(&full).env("TZ", TIME_ZONE);
-        if let Some(stdout) = stdout {
-            antiq = antiq.stdout(stdout);
-        }
         if let Some(dir) = current_dir {
             antiq = antiq.current_dir(dir);
         }
-        let run = antiq.run();
+        let run = match terminal {
+            Some((slave, limit)) => antiq.stdout(slave).run_within(limit).unwrap_or_else(|| {
+                panic!("{full:?} did not finish within {limit:?} on a terminal and was killed")
+            }),
+            None => antiq.run(),
+        };
 
         // Directory times change with every file a command creates, and
         // archives and listings record them.

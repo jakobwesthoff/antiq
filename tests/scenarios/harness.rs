@@ -1019,3 +1019,30 @@ fn a_tty_run_collects_output_larger_than_the_terminal_buffer() {
     let outcome = world.run_tty(&["flood"]);
     assert_eq!(outcome.stdout, "line\n".repeat(20_000));
 }
+
+#[test]
+#[should_panic(expected = "did not finish within")]
+fn a_command_on_a_terminal_that_does_not_finish_is_killed_and_fails() {
+    standin_world(Mode::Text).run_tty_within(&["hang"], std::time::Duration::from_millis(300));
+}
+
+#[test]
+fn run_within_kills_a_command_at_the_deadline_and_returns_finished_runs() {
+    use crate::support::cmd::Antiq;
+    use std::time::{Duration, Instant};
+    let started = Instant::now();
+    let hung = Antiq::program(FAKE)
+        .arg("hang")
+        .run_within(Duration::from_millis(300));
+    assert!(hung.is_none());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the child was killed"
+    );
+    let done = Antiq::program(FAKE)
+        .args(["tz"])
+        .run_within(Duration::from_secs(20))
+        .expect("tz finishes");
+    assert_eq!(done.stdout, "unset\n");
+    assert_eq!(done.code(), 0);
+}

@@ -8,10 +8,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// A command that runs `program` in a session of its own.
@@ -59,6 +60,7 @@ fn path_without_real_ssh(home: &Path) -> std::ffi::OsString {
 /// The antiq binary under test, with a home directory of its own.
 pub struct Antiq {
     command: Command,
+    stdout_set: bool,
     _home: TempDir,
 }
 
@@ -77,6 +79,7 @@ impl Antiq {
         command.env("PATH", path_without_real_ssh(home.path()));
         Antiq {
             command,
+            stdout_set: false,
             _home: home,
         }
     }
@@ -107,6 +110,7 @@ impl Antiq {
 
     pub fn stdout(mut self, stdout: impl Into<Stdio>) -> Antiq {
         self.command.stdout(stdout);
+        self.stdout_set = true;
         self
     }
 
@@ -117,6 +121,50 @@ impl Antiq {
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         }
+    }
+}
+
+impl Antiq {
+    /// Like `run`, but kills the command when it has not finished after
+    /// `limit` and returns `None`, so that a command that blocks fails a
+    /// test instead of hanging the suite. Output that `stdout` sent
+    /// elsewhere is not captured.
+    pub fn run_within(mut self, limit: Duration) -> Option<Run> {
+        if !self.stdout_set {
+            self.command.stdout(Stdio::piped());
+        }
+        self.command.stderr(Stdio::piped());
+        let mut child = self.command.spawn().expect("the antiq binary starts");
+        let drain = |stream: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut stream) = stream {
+                    stream.read_to_end(&mut bytes).expect("the pipe reads");
+                }
+                String::from_utf8(bytes).expect("the output is UTF-8")
+            })
+        };
+        let stdout = drain(child.stdout.take().map(|s| Box::new(s) as _));
+        let stderr = drain(child.stderr.take().map(|s| Box::new(s) as _));
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the child can be polled") {
+                break Some(status);
+            }
+            if started.elapsed() > limit {
+                child.kill().expect("the child can be killed");
+                child.wait().expect("the killed child is reaped");
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let stdout = stdout.join().expect("the reader does not panic");
+        let stderr = stderr.join().expect("the reader does not panic");
+        status.map(|status| Run {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 

@@ -18,6 +18,7 @@
 #   tty                         prints "tty" or "pipe" for its stdout
 #   flood                       prints 20000 lines of "line", more than a
 #                               terminal buffer holds
+#   hang                        sleeps for 30 seconds
 #   touchdir <dir>              creates a file in <dir> (relative to -C),
 #                               which changes the directory's mtime
 #
@@ -92,6 +93,9 @@ flood)
         echo line
         i=$((i + 1))
     done
+    ;;
+hang)
+    exec sleep 30
     ;;
 touchdir)
     dir=$1
