@@ -859,6 +859,23 @@ Symlinks are archived and restored as they are, whatever their target.
 An archive with a member whose path leads outside the piece is refused,
 and unearthing never writes through a symlink. (ADR 0027)
 
+Before it writes anything, extraction reads the whole package and refuses
+it for the first member that is absolute or has a `..` component; lies
+outside the one top-level directory; is a kind other than file,
+directory, symlink or hard link; appears twice; sits in a directory that
+an earlier member did not create or in something that is not a
+directory (so never below a symlink); lies more than 512 directory
+levels below the top-level directory; is a symlink without a target or
+with a NUL in it; is a hard link to anything but a regular file that an
+earlier member created in the archive; or has a mode or modification
+time that does not parse or is beyond 63 bits of seconds. Paths are
+judged by the names the archive carries, including those of GNU long-name
+and pax records, and by their exact bytes, so `a/x` is not placed in a
+directory `A`. Long-name, long-link and pax records above 64 KiB, sparse
+members, and a pax `size` that differs from the member's header size are
+refused as well. The package is decompressed three times: once for the
+records, once for the members and once to extract. (ADR 0050)
+
 ### Verifying
 
 A strict verify gates archiving and unearthing. It reads the stream to
@@ -1080,7 +1097,9 @@ Linux or 255 UTF-16 code units, counted on the name as stored, on
 macOS; macOS also refuses a name that is not valid UTF-8. Two members
 collide when their paths are equal after Unicode normalisation (where
 the volume ignores it) and full case folding (where the volume ignores
-case); the refusal lists both names. Paths are not checked for length:
+case); the refusal lists both names. A member more than 512 directory
+levels below the top directory is refused, since the walk, the strict
+verify and the removal of staging go no deeper. Paths are not checked for length:
 a path longer than the platform's path limit is extracted directory by
 directory. (ADR 0054)
 

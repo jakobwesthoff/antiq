@@ -12,12 +12,13 @@
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{RelPath, escape};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use tar::{Archive, Entry};
+use tar::{Archive, Entry, PaxExtensions};
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
@@ -32,6 +33,15 @@ const OWNER_ACCESS: u32 = 0o700;
 
 const READ_CHUNK: usize = 64 * 1024;
 
+/// Directory levels below the container that a member may lie at. The
+/// walk, the strict verify and the removal of staging go this deep and no
+/// deeper.
+const MAX_DEPTH: usize = 512;
+
+/// Largest long name, long link or pax record accepted. The `tar` crate
+/// reads such a record whole into memory, whatever size its header claims.
+const MAX_RECORD: u64 = 64 * 1024;
+
 /// Why a member of a package is not extracted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -43,6 +53,29 @@ pub enum Refusal {
     OtherTopLevel,
     /// A kind of member that archives do not hold; the tar type byte.
     UnsupportedType(u8),
+    /// The path starts at the root of the file system.
+    Absolute,
+    /// The path has a `..` component.
+    ParentComponent,
+    /// An earlier member has the same path.
+    Duplicate,
+    /// The directory the member belongs in was not extracted before it.
+    ParentMissing,
+    /// The entry the member belongs in is a file or a symlink.
+    ParentNotDirectory,
+    /// A hard link whose target is missing, outside the container or not
+    /// a regular file extracted before it.
+    LinkTarget,
+    /// A symlink without a target, or with a NUL in it.
+    InvalidLink,
+    /// A header field that does not parse or is out of range.
+    Malformed(&'static str),
+    /// More directory levels below the container than the walk enters.
+    TooDeep,
+    /// A long name, long link or pax record above the size cap.
+    OversizedRecord,
+    /// A pax size record that disagrees with the member's header.
+    PaxSizeMismatch,
 }
 
 impl fmt::Display for Refusal {
@@ -60,6 +93,31 @@ impl fmt::Display for Refusal {
                 "it is not a file, directory or link (tar type {})",
                 char::from(*byte)
             ),
+            Refusal::Absolute => f.write_str("its path is absolute"),
+            Refusal::ParentComponent => f.write_str("its path has a `..` component"),
+            Refusal::Duplicate => f.write_str("an earlier member has the same path"),
+            Refusal::ParentMissing => {
+                f.write_str("the directory it belongs in was not extracted before it")
+            }
+            Refusal::ParentNotDirectory => {
+                f.write_str("the entry it belongs in is not a directory")
+            }
+            Refusal::LinkTarget => f.write_str("its link target is not a file extracted before it"),
+            Refusal::InvalidLink => {
+                f.write_str("its symlink target is missing, empty or holds a NUL byte")
+            }
+            Refusal::Malformed(field) => write!(f, "its {field} field is not valid"),
+            Refusal::TooDeep => write!(
+                f,
+                "it lies more than {MAX_DEPTH} levels below the top-level directory"
+            ),
+            Refusal::OversizedRecord => write!(
+                f,
+                "a record that describes it is larger than {MAX_RECORD} bytes"
+            ),
+            Refusal::PaxSizeMismatch => {
+                f.write_str("a pax size record disagrees with the size in its header")
+            }
         }
     }
 }
@@ -79,6 +137,8 @@ enum Kind {
 
 /// A member of the package as extraction sees it.
 struct Member {
+    /// The path as the archive spells it, in escaped form.
+    shown: String,
     /// Below the container; the root path for the container itself.
     path: RelPath,
     kind: Kind,
@@ -94,11 +154,20 @@ fn locate(
     container: &mut Option<Vec<u8>>,
     is_directory: bool,
 ) -> Result<RelPath, Refusal> {
+    if raw.starts_with(b"/") {
+        return Err(Refusal::Absolute);
+    }
     let mut trimmed = raw;
     while let Some(rest) = trimmed.strip_prefix(b"./") {
         trimmed = rest;
     }
     let trimmed = trimmed.strip_suffix(b"/").unwrap_or(trimmed);
+    if trimmed
+        .split(|byte| *byte == b'/')
+        .any(|name| name == b"..")
+    {
+        return Err(Refusal::ParentComponent);
+    }
     let full = RelPath::from_bytes(trimmed.to_vec()).map_err(|_| Refusal::InvalidPath)?;
     let mut names = full.components();
     let top = names.next().ok_or(Refusal::InvalidPath)?;
@@ -122,13 +191,26 @@ fn locate(
     }
 }
 
+impl Member {
+    fn refused(&self, refusal: Refusal) -> PackError {
+        PackError::Refused {
+            member: self.shown.clone(),
+            refusal,
+        }
+    }
+}
+
+/// Turns a header into a [`Member`], or says why the member is refused.
 fn classify<R: Read>(
     entry: &Entry<'_, R>,
     container: &mut Option<Vec<u8>>,
 ) -> Result<Member, PackError> {
+    // `Entry::path_bytes` and `link_name_bytes` give the name a long-name
+    // or pax record carries; the header's own field holds only a prefix.
     let raw = entry.path_bytes();
+    let shown = escape(&raw);
     let refuse = |refusal| PackError::Refused {
-        member: escape(&raw),
+        member: shown.clone(),
         refusal,
     };
     let entry_type = entry.header().entry_type();
@@ -138,25 +220,91 @@ fn classify<R: Read>(
     } else if entry_type.is_file() {
         Kind::File
     } else if entry_type.is_symlink() {
-        let target = entry
-            .link_name_bytes()
-            .ok_or_else(|| refuse(Refusal::InvalidPath))?;
+        let target = entry.link_name_bytes().unwrap_or_default();
+        if target.is_empty() || target.contains(&0) {
+            return Err(refuse(Refusal::InvalidLink));
+        }
         Kind::Symlink(target.into_owned())
     } else if entry_type.is_hard_link() {
-        let target = entry
-            .link_name_bytes()
-            .ok_or_else(|| refuse(Refusal::InvalidPath))?;
-        Kind::HardLink(locate(&target, container, false).map_err(refuse)?)
+        let target = entry.link_name_bytes().unwrap_or_default();
+        let target = locate(&target, container, false).map_err(|_| refuse(Refusal::LinkTarget))?;
+        Kind::HardLink(target)
     } else {
         return Err(refuse(Refusal::UnsupportedType(entry_type.as_byte())));
     };
     let header = entry.header();
+    let mode = header
+        .mode()
+        .map_err(|_| refuse(Refusal::Malformed("mode")))?;
+    let mtime = header
+        .mtime()
+        .ok()
+        .filter(|seconds| i64::try_from(*seconds).is_ok())
+        .ok_or_else(|| refuse(Refusal::Malformed("mtime")))?;
     Ok(Member {
+        shown: shown.clone(),
         path,
         kind,
-        mode: header.mode().map_err(PackError::Archive)? & PERMISSION_BITS,
-        mtime: header.mtime().map_err(PackError::Archive)?,
+        mode: mode & PERMISSION_BITS,
+        mtime,
     })
+}
+
+/// What an extracted member is, as far as later members can build on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    Directory,
+    File,
+    Symlink,
+}
+
+/// The members seen so far, by the exact bytes of their paths. Whether a
+/// member can be created, and whether a hard link has a target, is
+/// decided here and not by asking the volume, which may find a different
+/// spelling (`a` for `A`) than the archive means.
+struct Placement {
+    placed: HashMap<RelPath, Placed>,
+}
+
+impl Placement {
+    fn new() -> Placement {
+        Placement {
+            placed: HashMap::new(),
+        }
+    }
+
+    fn admit(&mut self, member: &Member) -> Result<(), Refusal> {
+        if member.path.is_root() {
+            return Ok(());
+        }
+        if member.path.components().count() > MAX_DEPTH {
+            return Err(Refusal::TooDeep);
+        }
+        if self.placed.contains_key(&member.path) {
+            return Err(Refusal::Duplicate);
+        }
+        let (parent, _) = split(&member.path);
+        if !parent.is_root() {
+            match self.placed.get(&parent) {
+                None => return Err(Refusal::ParentMissing),
+                Some(Placed::Directory) => {}
+                Some(_) => return Err(Refusal::ParentNotDirectory),
+            }
+        }
+        let placed = match &member.kind {
+            Kind::Directory => Placed::Directory,
+            Kind::File => Placed::File,
+            Kind::Symlink(_) => Placed::Symlink,
+            Kind::HardLink(target) => {
+                if self.placed.get(target) != Some(&Placed::File) {
+                    return Err(Refusal::LinkTarget);
+                }
+                Placed::File
+            }
+        };
+        self.placed.insert(member.path.clone(), placed);
+        Ok(())
+    }
 }
 
 // =========================================================
@@ -182,6 +330,7 @@ struct Extraction<'a> {
     parent: Option<(RelPath, TreeRoot)>,
     members: usize,
     chunk: Vec<u8>,
+    placement: Placement,
 }
 
 /// The open directory `parent` of a member, kept for the next member.
@@ -245,6 +394,7 @@ impl<'a> Extraction<'a> {
             parent: None,
             members: 0,
             chunk: vec![0; READ_CHUNK],
+            placement: Placement::new(),
         }
     }
 
@@ -253,11 +403,15 @@ impl<'a> Extraction<'a> {
         member: Member,
         entry: &mut Entry<'_, R>,
     ) -> Result<(), PackError> {
+        self.placement
+            .admit(&member)
+            .map_err(|refusal| member.refused(refusal))?;
         let Member {
             path,
             kind,
             mode,
             mtime,
+            ..
         } = member;
         if path.is_root() {
             self.top = Some((mode, mtime));
@@ -362,19 +516,105 @@ pub fn unpack(
     staging: &TreeRoot,
     _rules: &TargetRules,
 ) -> Result<Unpacked, PackError> {
-    let file = File::open(package).map_err(PackError::Archive)?;
-    let decoder = zstd::decoder(file).map_err(PackError::Archive)?;
-    let mut archive = Archive::new(decoder);
+    // Two passes write nothing, so a package that is refused for what its
+    // headers say leaves staging as it was.
+    scan(package)?;
+    gather(package)?;
+
+    let mut archive = open(package)?;
     let mut extraction = Extraction::new(staging);
     for entry in archive.entries().map_err(PackError::Archive)? {
         let mut entry = entry.map_err(PackError::Archive)?;
         let member = classify(&entry, &mut extraction.container)?;
         extraction.extract(member, &mut entry)?;
     }
-    // The tar iterator stops at the first zero block. Reading on checks
-    // the frame's content checksum and anything that follows.
-    io::copy(&mut archive.into_inner(), &mut ZerosOnly).map_err(PackError::Archive)?;
+    drain(archive)?;
     extraction.finish()
+}
+
+fn open(package: &Path) -> Result<Archive<impl Read>, PackError> {
+    let file = File::open(package).map_err(PackError::Archive)?;
+    let decoder = zstd::decoder(file).map_err(PackError::Archive)?;
+    Ok(Archive::new(decoder))
+}
+
+/// The tar iterator stops at the first zero block. Reading on checks the
+/// frame's content checksum and that nothing but zeros follows.
+fn drain<R: Read>(archive: Archive<R>) -> Result<(), PackError> {
+    io::copy(&mut archive.into_inner(), &mut ZerosOnly).map_err(PackError::Archive)?;
+    Ok(())
+}
+
+/// The `size` a pax record sets for the member after it, if it has one.
+fn pax_size<R: Read>(entry: &mut Entry<'_, R>) -> Result<Option<Option<u64>>, io::Error> {
+    let mut data = Vec::new();
+    entry.read_to_end(&mut data)?;
+    for record in PaxExtensions::new(&data) {
+        let record = record?;
+        if record.key() == Ok("size") {
+            return Ok(Some(record.value().ok().and_then(|text| text.parse().ok())));
+        }
+    }
+    Ok(None)
+}
+
+/// The first pass looks at the records the `tar` crate would read whole
+/// into memory, and at nothing else, in raw mode: raw mode does not read
+/// them. It refuses a record larger than [`MAX_RECORD`], a sparse member,
+/// whose extra headers the crate also reads before antiq sees the member,
+/// and a pax `size` that differs from the header's. With that size
+/// applied the crate would find the records that follow at other places
+/// than this pass does.
+fn scan(package: &Path) -> Result<(), PackError> {
+    let mut archive = open(package)?;
+    // The size a pax record set for the next member; `Some(None)` when
+    // the record's value is not a number.
+    let mut pending: Option<Option<u64>> = None;
+    for entry in archive.entries().map_err(PackError::Archive)?.raw(true) {
+        let mut entry = entry.map_err(PackError::Archive)?;
+        let entry_type = entry.header().entry_type();
+        let shown = escape(&entry.path_bytes());
+        let refuse = |refusal| PackError::Refused {
+            member: shown.clone(),
+            refusal,
+        };
+        let is_pax = entry_type.is_pax_local_extensions();
+        if entry_type.is_gnu_longname() || entry_type.is_gnu_longlink() || is_pax {
+            if entry.size() > MAX_RECORD {
+                return Err(refuse(Refusal::OversizedRecord));
+            }
+            if is_pax {
+                pending = pax_size(&mut entry)
+                    .map_err(PackError::Archive)?
+                    .or(pending);
+            }
+            continue;
+        }
+        if entry_type.is_gnu_sparse() {
+            return Err(refuse(Refusal::UnsupportedType(entry_type.as_byte())));
+        }
+        if let Some(size) = pending.take()
+            && size != Some(entry.size())
+        {
+            return Err(refuse(Refusal::PaxSizeMismatch));
+        }
+    }
+    drain(archive)
+}
+
+/// The second pass classifies and places every member.
+fn gather(package: &Path) -> Result<(), PackError> {
+    let mut archive = open(package)?;
+    let mut container = None;
+    let mut placement = Placement::new();
+    for entry in archive.entries().map_err(PackError::Archive)? {
+        let entry = entry.map_err(PackError::Archive)?;
+        let member = classify(&entry, &mut container)?;
+        placement
+            .admit(&member)
+            .map_err(|refusal| member.refused(refusal))?;
+    }
+    drain(archive)
 }
 
 #[cfg(test)]
@@ -500,6 +740,70 @@ mod tests {
             self.bytes.extend_from_slice(data);
             let padding = (512 - data.len() % 512) % 512;
             self.bytes.resize(self.bytes.len() + padding, 0);
+            self
+        }
+
+        /// A member whose header `tweak` changes before its checksum is
+        /// computed.
+        fn member_with(
+            &mut self,
+            name: &[u8],
+            type_byte: u8,
+            tweak: impl FnOnce(&mut tar::Header),
+        ) -> &mut RawArchive {
+            let mut header = tar::Header::new_gnu();
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_size(0);
+            header.set_mtime(1_000_000_000);
+            header.set_entry_type(EntryType::new(type_byte));
+            tweak(&mut header);
+            header.set_cksum();
+            self.bytes.extend_from_slice(header.as_bytes());
+            self
+        }
+
+        /// A record that describes the next member: a GNU long name
+        /// (`L`), a GNU long link (`K`) or a pax header (`x`).
+        fn record(&mut self, type_byte: u8, data: &[u8]) -> &mut RawArchive {
+            let size = data.len() as u64;
+            self.member_with(b"././@LongLink", type_byte, |header| header.set_size(size));
+            self.bytes.extend_from_slice(data);
+            let padding = (512 - data.len() % 512) % 512;
+            self.bytes.resize(self.bytes.len() + padding, 0);
+            self
+        }
+
+        /// A GNU long name for the next member. The next header carries a
+        /// harmless name of its own.
+        fn long_name(&mut self, path: &[u8]) -> &mut RawArchive {
+            self.record(b'L', &[path, b"\0"].concat())
+        }
+
+        fn long_link(&mut self, target: &[u8]) -> &mut RawArchive {
+            self.record(b'K', &[target, b"\0"].concat())
+        }
+
+        /// A pax header with the given records for the next member.
+        fn pax(&mut self, records: &[(&str, &str)]) -> &mut RawArchive {
+            let mut data = Vec::new();
+            for (key, value) in records {
+                // Each record starts with its own length, digits included.
+                let body = format!(" {key}={value}\n");
+                let mut length = body.len() + 1;
+                while format!("{length}{body}").len() != length {
+                    length += 1;
+                }
+                data.extend_from_slice(format!("{length}{body}").as_bytes());
+            }
+            self.record(b'x', &data)
+        }
+
+        /// Bytes appended to the stream as they are.
+        fn raw(&mut self, bytes: &[u8]) -> &mut RawArchive {
+            self.bytes.extend_from_slice(bytes);
             self
         }
 
@@ -870,11 +1174,11 @@ mod tests {
     }
 
     #[test]
-    fn a_path_that_is_not_below_a_directory_is_refused() {
+    fn a_path_with_an_empty_component_is_refused() {
         let mut archive = RawArchive::new();
         archive
             .dir("proj/", 0o755, 1_000_000_000)
-            .file("/tmp/x", 0o644, 1_000_000_000, b"x");
+            .file("proj//x", 0o644, 1_000_000_000, b"x");
         assert_eq!(refusal_of(&archive), Refusal::InvalidPath);
     }
 
@@ -959,6 +1263,17 @@ mod tests {
             Refusal::InvalidPath.to_string(),
             Refusal::NoContainer.to_string(),
             Refusal::OtherTopLevel.to_string(),
+            Refusal::Absolute.to_string(),
+            Refusal::ParentComponent.to_string(),
+            Refusal::Duplicate.to_string(),
+            Refusal::ParentMissing.to_string(),
+            Refusal::ParentNotDirectory.to_string(),
+            Refusal::LinkTarget.to_string(),
+            Refusal::InvalidLink.to_string(),
+            Refusal::Malformed("mode").to_string(),
+            Refusal::TooDeep.to_string(),
+            Refusal::OversizedRecord.to_string(),
+            Refusal::PaxSizeMismatch.to_string(),
         ];
         assert_eq!(
             others,
@@ -966,7 +1281,427 @@ mod tests {
                 "its path is empty or not below a directory",
                 "the first member is not the directory that holds the others",
                 "it lies outside the archive's top-level directory",
+                "its path is absolute",
+                "its path has a `..` component",
+                "an earlier member has the same path",
+                "the directory it belongs in was not extracted before it",
+                "the entry it belongs in is not a directory",
+                "its link target is not a file extracted before it",
+                "its symlink target is missing, empty or holds a NUL byte",
+                "its mode field is not valid",
+                "it lies more than 512 levels below the top-level directory",
+                "a record that describes it is larger than 65536 bytes",
+                "a pax size record disagrees with the size in its header",
             ]
         );
+    }
+
+    // =========================================================
+    // Hostile archives
+    // =========================================================
+
+    /// A staging root next to a directory the archive must never reach.
+    struct Sandbox {
+        _dir: tempfile::TempDir,
+        staging: TreeRoot,
+        staging_path: PathBuf,
+        outside: PathBuf,
+    }
+
+    fn sandbox() -> Sandbox {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let staging_path = dir.path().join("staging");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&staging_path).expect("staging is created");
+        std::fs::create_dir(&outside).expect("outside is created");
+        std::fs::write(outside.join("secret"), b"secret").expect("a secret");
+        let staging = TreeRoot::open(&staging_path).expect("staging opens");
+        Sandbox {
+            _dir: dir,
+            staging,
+            staging_path,
+            outside,
+        }
+    }
+
+    impl Sandbox {
+        /// Unpacks `archive` and checks it was refused for `refusal`, that
+        /// nothing was written to staging and that outside is as it was.
+        fn assert_refused_before_any_write(&self, archive: &RawArchive, refusal: Refusal) {
+            let error = unpack_bytes(&archive.finish(), &self.staging).expect_err("refused");
+            assert!(
+                matches!(&error, PackError::Refused { refusal: found, .. } if *found == refusal),
+                "{error:?}"
+            );
+            let written = std::fs::read_dir(&self.staging_path)
+                .expect("staging lists")
+                .count();
+            assert_eq!(written, 0, "staging is empty");
+            let outside: Vec<_> = std::fs::read_dir(&self.outside)
+                .expect("outside lists")
+                .map(|entry| entry.expect("an entry").file_name())
+                .collect();
+            assert_eq!(outside, ["secret"], "outside is untouched");
+            assert_eq!(
+                std::fs::read(self.outside.join("secret")).expect("the secret reads"),
+                b"secret"
+            );
+        }
+    }
+
+    fn container() -> RawArchive {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_000_000_000);
+        archive
+    }
+
+    #[test]
+    fn an_absolute_member_is_refused_before_anything_is_written() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.file("/tmp/x", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Absolute);
+    }
+
+    #[test]
+    fn a_member_with_a_parent_component_is_refused_before_anything_is_written() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.file("proj/ok", 0o644, 1_000_000_000, b"ok").file(
+            "proj/../escaped.txt",
+            0o644,
+            1_000_000_000,
+            b"x",
+        );
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentComponent);
+    }
+
+    #[test]
+    fn a_child_of_a_symlink_to_a_directory_outside_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .symlink("proj/a", "../outside", 0o777, 1_000_000_000)
+            .file("proj/a/pwn.txt", 0o644, 1_000_000_000, b"pwned");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentNotDirectory);
+    }
+
+    #[test]
+    fn a_child_of_a_symlink_to_an_absolute_path_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .symlink("proj/a", "/etc", 0o777, 1_000_000_000)
+            .file("proj/a/pwn.txt", 0o644, 1_000_000_000, b"pwned");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentNotDirectory);
+    }
+
+    #[test]
+    fn a_directory_that_replaces_a_symlink_of_the_same_name_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .symlink("proj/a", "../outside", 0o777, 1_000_000_000)
+            .dir("proj/a/", 0o755, 1_000_000_000);
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Duplicate);
+    }
+
+    #[test]
+    fn the_same_path_twice_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.file("proj/a", 0o644, 1_000_000_000, b"1").file(
+            "proj/a",
+            0o644,
+            1_000_000_000,
+            b"2",
+        );
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Duplicate);
+    }
+
+    #[test]
+    fn a_hard_link_to_a_file_outside_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .member(
+                b"proj/h",
+                b'1',
+                0o644,
+                1_000_000_000,
+                b"../outside/secret",
+                b"",
+            )
+            .file("proj/h2", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_to_an_absolute_path_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member(b"proj/h", b'1', 0o644, 1_000_000_000, b"/etc/passwd", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_to_a_symlink_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .symlink("proj/s", "../outside/secret", 0o777, 1_000_000_000)
+            .member(b"proj/h", b'1', 0o644, 1_000_000_000, b"proj/s", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_to_a_directory_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.dir("proj/d/", 0o755, 1_000_000_000).member(
+            b"proj/h",
+            b'1',
+            0o644,
+            1_000_000_000,
+            b"proj/d",
+            b"",
+        );
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_to_a_member_that_comes_later_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .member(b"proj/h", b'1', 0o644, 1_000_000_000, b"proj/later", b"")
+            .file("proj/later", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_without_a_target_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member(b"proj/h", b'1', 0o644, 1_000_000_000, b"", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_hard_link_to_an_earlier_file_is_extracted() {
+        let mut archive = container();
+        archive
+            .file("proj/first", 0o644, 1_000_000_000, b"shared")
+            .member(
+                b"proj/second",
+                b'1',
+                0o644,
+                1_000_000_000,
+                b"proj/first",
+                b"",
+            );
+        let (_dir, staged) = staging();
+        unpack_bytes(&archive.finish(), &staged).expect("the package unpacks");
+        assert_eq!(read(&staged, "second"), b"shared");
+        assert_eq!(
+            staged.lstat(&rel("first")).expect("exists").inode,
+            staged.lstat(&rel("second")).expect("exists").inode
+        );
+    }
+
+    #[test]
+    fn a_symlink_without_a_target_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member(b"proj/s", b'2', 0o777, 1_000_000_000, b"", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::InvalidLink);
+    }
+
+    #[test]
+    fn a_member_whose_parent_was_not_extracted_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.file("proj/missing/x", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentMissing);
+    }
+
+    #[test]
+    fn a_member_below_a_file_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.file("proj/f", 0o644, 1_000_000_000, b"x").file(
+            "proj/f/x",
+            0o644,
+            1_000_000_000,
+            b"x",
+        );
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentNotDirectory);
+    }
+
+    #[test]
+    fn a_parent_is_found_by_its_exact_spelling_and_not_by_what_the_volume_makes_of_it() {
+        // On a volume that ignores case, `a` finds the directory `A`.
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .dir("proj/A/", 0o755, 1_000_000_000)
+            .file("proj/a/x", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentMissing);
+    }
+
+    #[test]
+    fn a_hostile_path_in_a_gnu_long_name_record_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .long_name(b"proj/../../escaped")
+            .file("proj/ok", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::ParentComponent);
+    }
+
+    #[test]
+    fn a_hostile_target_in_a_gnu_long_link_record_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .file("proj/f", 0o644, 1_000_000_000, b"x")
+            .long_link(b"../outside/secret")
+            .member(b"proj/h", b'1', 0o644, 1_000_000_000, b"proj/f", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
+    }
+
+    #[test]
+    fn a_nul_in_a_symlink_target_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .long_link(b"a\0b")
+            .member(b"proj/s", b'2', 0o777, 1_000_000_000, b"harmless", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::InvalidLink);
+    }
+
+    #[test]
+    fn a_hostile_path_in_a_pax_header_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .pax(&[("path", "/tmp/x")])
+            .file("proj/ok", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Absolute);
+    }
+
+    #[test]
+    fn a_mode_that_is_not_octal_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member_with(b"proj/f", b'0', |header| {
+            header.as_old_mut().mode = *b"zzzzzzz\0";
+        });
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Malformed("mode"));
+    }
+
+    #[test]
+    fn a_modification_time_beyond_the_range_of_i64_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member_with(b"proj/f", b'0', |header| {
+            // Base-256 with the largest value of 64 bits.
+            let mut field = [0xff; 12];
+            field[..4].copy_from_slice(&[0x80, 0, 0, 0]);
+            header.as_old_mut().mtime = field;
+        });
+        sandbox.assert_refused_before_any_write(&archive, Refusal::Malformed("mtime"));
+    }
+
+    #[test]
+    fn a_long_name_record_above_the_cap_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .record(b'L', &vec![b'a'; 70_000])
+            .file("proj/ok", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::OversizedRecord);
+    }
+
+    #[test]
+    fn a_pax_record_above_the_cap_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .record(b'x', &vec![b' '; 70_000])
+            .file("proj/ok", 0o644, 1_000_000_000, b"x");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::OversizedRecord);
+    }
+
+    #[test]
+    fn a_sparse_member_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive.member_with(b"proj/sparse", b'S', |_| {});
+        sandbox.assert_refused_before_any_write(&archive, Refusal::UnsupportedType(b'S'));
+    }
+
+    #[test]
+    fn a_pax_size_that_differs_from_the_header_size_is_refused_before_anything_hides_behind_it() {
+        // Read by header sizes alone, the zero block ends the stream before
+        // the oversized record that follows. Applying the pax size, the
+        // record is the next thing the reader would buffer.
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .pax(&[("size", "1024")])
+            .member(b"proj/f", b'0', 0o644, 1_000_000_000, b"", b"")
+            .raw(&[0; 1024])
+            .record(b'L', &vec![b'a'; 70_000]);
+        sandbox.assert_refused_before_any_write(&archive, Refusal::PaxSizeMismatch);
+    }
+
+    #[test]
+    fn a_pax_size_that_equals_the_header_size_is_fine() {
+        let mut archive = container();
+        archive
+            .pax(&[("size", "2"), ("mtime", "1")])
+            .file("proj/f", 0o644, 1_000_000_000, b"ok");
+        let (_dir, staged) = staging();
+        unpack_bytes(&archive.finish(), &staged).expect("the package unpacks");
+        assert_eq!(read(&staged, "f"), b"ok");
+    }
+
+    #[test]
+    fn a_pax_size_that_is_not_a_number_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .pax(&[("size", "many")])
+            .file("proj/f", 0o644, 1_000_000_000, b"ok");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::PaxSizeMismatch);
+    }
+
+    /// An archive of directories nested `depth` levels, one name each.
+    fn nested(depth: usize) -> RawArchive {
+        let mut archive = container();
+        for level in 1..=depth {
+            let path = format!("proj/{}", "d/".repeat(level));
+            if path.len() > 100 {
+                archive.long_name(path.as_bytes());
+                archive.member(b"d", b'5', 0o755, 1_000_000_000, b"", b"");
+            } else {
+                archive.dir(&path, 0o755, 1_000_000_000);
+            }
+        }
+        archive
+    }
+
+    #[test]
+    fn a_member_more_than_512_levels_below_the_container_is_refused() {
+        let sandbox = sandbox();
+        sandbox.assert_refused_before_any_write(&nested(513), Refusal::TooDeep);
+    }
+
+    #[test]
+    fn a_member_512_levels_below_the_container_is_extracted() {
+        let (_dir, staged) = staging();
+        let unpacked = unpack_bytes(&nested(512).finish(), &staged).expect("unpacks");
+        assert_eq!(unpacked.members, 512);
     }
 }
