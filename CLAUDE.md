@@ -53,7 +53,8 @@ license text lives.
 - `assets/social/fonts/Inter-Variable.ttf`: Inter, SIL Open Font License
   1.1, text in `assets/social/fonts/Inter-OFL.txt`.
 - `assets/social/fonts/VictorMono-Variable.ttf`: Victor Mono, SIL Open
-  Font License 1.1, text in `assets/social/fonts/VictorMono-OFL.txt`.
+  Font License 1.1, text in `assets/social/fonts/VictorMono-OFL.txt`. The
+  social image and the captures of `docs/pages/capture/` use it.
 
 ## Documentation conventions
 

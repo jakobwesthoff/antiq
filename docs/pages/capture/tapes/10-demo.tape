@@ -13,12 +13,7 @@
 Output ../assets/demo.webm
 Output ../assets/demo.mp4
 # The version screen needs 24 rows: 22 for the emblem, the command and the prompt.
-# vhs gives antiq no pixel size, so antiq draws for a cell 0.52 times as wide as
-# it is high, while this font's cell is 0.45, which leaves Archie a little tall.
-# A letter spacing of 3 brings the cell to 0.505, but it has to be set before
-# common.tape, applies to the whole video, and cuts the 105 columns to 94, so
-# the tables would change their layout. It is left out.
-Set Height 1000
+Set Height 1080
 Source common.tape
 Set TypingSpeed 55ms
 
@@ -63,13 +58,15 @@ Enter
 Wait+Screen@120s /Unearthed/
 
 # The last output stays for 20 seconds. Then comes the version screen. The
-# shell of vhs runs in a tmux whose client antiq cannot ask, and antiq draws
-# sextants for terminals it knows to draw them, which this font may lack. The
-# hidden setup removes the variables that decide on the glyphs, so antiq draws
-# blocks.
+# shell of vhs runs in a tmux whose client antiq cannot ask, so the hidden setup
+# removes the variables that decide on the glyphs: antiq draws blocks. vhs also
+# reports no pixel size, so antiq would assume a cell 0.52 times as wide as it is
+# high. The terminal draws cells of 17.33 by 38.46 pixels (measured from a
+# frame), and the setup writes that into the size of the terminal, so antiq
+# picks the emblem rendering of that shape.
 Sleep 20s
 Hide
-Type "unset TMUX TERM_PROGRAM && clear"
+Type `unset TMUX TERM_PROGRAM && python3 -c 'import fcntl,termios,struct; r,c,_,_=struct.unpack("HHHH",fcntl.ioctl(1,termios.TIOCGWINSZ,bytes(8))); fcntl.ioctl(1,termios.TIOCSWINSZ,struct.pack("HHHH",r,c,round(c*17.33),round(r*38.46)))' && clear`
 Enter
 Show
 Sleep 500ms

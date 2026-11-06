@@ -7,6 +7,10 @@
 # in PATH and ANTIQ_DEMO_ROOT naming the demo world that scripts/world.sh built.
 
 Set Shell "bash"
+# Victor Mono, the font of the author's terminal. vhs draws with the fonts that
+# are installed on the machine; the file is assets/social/fonts/VictorMono-Variable.ttf
+# and render.sh refuses to run without the family.
+Set FontFamily "Victor Mono"
 Set FontSize 28
 Set Padding 40
 # 1900 pixels at this font size and padding give 105 columns, above the 100

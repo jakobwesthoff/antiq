@@ -43,7 +43,7 @@ expected_columns=105
 # =========================================================
 
 missing=""
-for tool in vhs ttyd ffmpeg oxipng openssl cargo; do
+for tool in vhs ttyd ffmpeg oxipng openssl cargo fc-list; do
     command -v "$tool" > /dev/null || missing="$missing $tool"
 done
 if [ -n "$missing" ]; then
@@ -71,6 +71,13 @@ fi
 free_kb=$(df -Pk "$(dirname "${ANTIQ_DEMO_ROOT:-/tmp}")" | awk 'NR == 2 { print $4 }')
 if [ "$free_kb" -lt 1500000 ]; then
     echo "render.sh: less than 1.5 GB free for the demo world" >&2
+    exit 1
+fi
+
+# vhs draws with the fonts installed on the machine and falls back to another
+# one for a family it does not find, which would change every image.
+if ! fc-list : family | grep 'Victor Mono' > /dev/null; then
+    echo "render.sh: the font Victor Mono is not installed; install $repo/assets/social/fonts/VictorMono-Variable.ttf" >&2
     exit 1
 fi
 
