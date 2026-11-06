@@ -54,7 +54,7 @@ fn within<'a>(container: &[u8], full: &'a [u8]) -> Option<&'a [u8]> {
 /// GNU tar writes for such times into huge ones.
 fn modification_time(header: &tar::Header) -> Result<i64, PackError> {
     let field = header.as_old().mtime;
-    let too_large = || PackError::Damaged("a modification time does not fit 64 bits".into());
+    let too_large = || PackError::Damaged("a modification time does not fit 63 bits".into());
     if field[0] == 0xff {
         return Ok(0);
     }
@@ -467,16 +467,16 @@ mod tests {
         field[0] = 0x80;
         field[4] = 0x80;
         let reason = damaged_by(&compress(&tar_with_time_field(field)));
-        assert!(reason.contains("64 bits"), "{reason}");
+        assert!(reason.contains("63 bits"), "{reason}");
     }
 
     #[test]
-    fn a_modification_time_beyond_64_bits_is_damaged() {
+    fn a_modification_time_beyond_63_bits_is_damaged() {
         let mut field = [0; 12];
         field[0] = 0x80;
         field[3] = 1;
         let reason = damaged_by(&compress(&tar_with_time_field(field)));
-        assert!(reason.contains("64 bits"), "{reason}");
+        assert!(reason.contains("63 bits"), "{reason}");
     }
 
     #[test]
