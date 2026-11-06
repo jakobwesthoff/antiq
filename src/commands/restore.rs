@@ -272,6 +272,18 @@ fn pick(
         }
         Condition::Damaged(damages) => {
             if policy == Policy::Sound {
+                // A listing of a newer format is refused as such, whatever
+                // else is damaged beside it.
+                if let Some(listing_name) = version.listings.first() {
+                    read_listing(
+                        places,
+                        &piece,
+                        listing_name,
+                        false,
+                        &piece_text,
+                        &stamp_text,
+                    )?;
+                }
                 return Err(RestoreError::Damaged {
                     piece: piece_text,
                     stamp: stamp_text,
@@ -3618,6 +3630,19 @@ mod fork_choice_tests {
             World::with(&source)
         }
 
+        fn unearth_picks(&self) -> Result<Chosen, RestoreError> {
+            let collection =
+                Collection::find(self.collection.root()).expect("the collection is found");
+            choose_version(
+                &collection,
+                &self.store.places(),
+                self.collection.root(),
+                OsStr::new("projects/scanner"),
+                None,
+                &TimeZone::UTC,
+            )
+        }
+
         fn picks(&self) -> Result<Picked, RestoreError> {
             let collection =
                 Collection::find(self.collection.root()).expect("the collection is found");
@@ -3692,6 +3717,24 @@ mod fork_choice_tests {
         version.edit_listing(|text| text.replacen("# antiq listing 1", "# antiq listing 2", 1));
         version.remove(VersionFile::Checksum);
         let error = world.picks().expect_err("a newer format is refused");
+        assert!(
+            matches!(error, RestoreError::FormatTooNew { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            Error::from(crate::commands::unearth::UnearthError::from(error)).kind(),
+            ErrorKind::FormatTooNew
+        );
+    }
+
+    #[test]
+    fn unearth_refuses_a_newer_listing_next_to_other_damage_as_too_new() {
+        let (world, version) = World::scanner();
+        version.edit_listing(|text| text.replacen("# antiq listing 1", "# antiq listing 2", 1));
+        version.remove(VersionFile::Checksum);
+        let error = world
+            .unearth_picks()
+            .expect_err("a newer format is refused");
         assert!(
             matches!(error, RestoreError::FormatTooNew { .. }),
             "{error:?}"
