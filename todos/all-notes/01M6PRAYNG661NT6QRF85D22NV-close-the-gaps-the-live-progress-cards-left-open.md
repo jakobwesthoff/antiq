@@ -2,7 +2,6 @@
 title: "Close the gaps the live progress cards left open"
 kind: improvement
 component: cli
-status: needs-discussion
 origin: implementation
 tags: [ux, testing]
 ---
@@ -14,15 +13,22 @@ the implementation plan or the diff review of 2026-11-05 and left out
 of that unit of work. They are independent of each other and can be
 taken one at a time.
 
+## Decisions
+
+- These are features, not leftovers: all of them are implemented now,
+  before the README and docs rework, so its captures show the final
+  output (Jakob, chat, 2026-11-05).
+- Packing counts bytes instead of files, with no extra label for the
+  tail (lead, 2026-11-05). What still runs after the last byte is
+  measured first; if that tail stays long, the lead decides again.
+
 ## Packing stops at 99 percent
 
-The `Packing` counter counts packed files. After the last file the
-encoder finishes, the archive is hashed and synced, and the card sits at
-99 percent with a bar one cell short of full until the operation ends.
-On a large piece that tail is visible.
-
-Open: count bytes instead of files so the tail shows as progress, or
-give the tail its own operation label (for example `finishing`).
+The `Packing` counter counts packed files (`TarZstd::pack` in
+`src/archive/mod.rs`). One large file holds the bar still while it is
+packed. After the last file the tar writer and the zstd encoder finish
+and the caller syncs the archive, and the card sits at 99 percent with
+a bar one cell short of full until the operation ends.
 
 ## A resize does not reflow the region
 
