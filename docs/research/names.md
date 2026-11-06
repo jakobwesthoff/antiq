@@ -30,10 +30,12 @@ one name. `unpack_in` returns `Ok(true)` for such an overwrite.
 ## macOS archive, unearthed on Linux
 
 - NFD names arrive with their bytes unchanged (**measured**).
-- macOS limits a name to 255 characters, Linux to 255 bytes: a name of
-  255 two-byte characters (510 bytes) exists on APFS, while names of
-  256 and 300 bytes failed in the container with "File name too long",
-  GNU tar exit 2 (**measured**).
+- macOS limits a name to 255 UTF-16 code units, Linux to 255 bytes: a
+  name of 255 two-byte characters (510 bytes) exists on APFS, while
+  names of 256 and 300 bytes failed in the container with "File name too
+  long", GNU tar exit 2 (**measured**). On APFS, 127 emoji (254 units)
+  create and 128 (256 units) fail, so code points are not the unit
+  (**measured**, 2026-11-04).
 - Case collisions and non-UTF-8 names cannot originate on macOS.
 
 ## How often

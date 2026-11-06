@@ -118,9 +118,20 @@ pub struct WalkRules {
     pub staged: bool,
 }
 
-/// Rules for the target of an extraction. Filled in by the extraction.
-#[derive(Debug, Default)]
-pub struct TargetRules;
+/// What the volume that receives an extraction can hold. Extraction
+/// takes the rules as a value, so tests choose them and a real volume is
+/// probed for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRules {
+    /// `README` and `Readme` are one name.
+    pub case_insensitive: bool,
+    /// `café` spelled with one code point and with two are one name.
+    pub normalization_insensitive: bool,
+    /// A name that is not valid UTF-8 cannot be created.
+    pub requires_utf8: bool,
+    /// The longest name one directory entry can have.
+    pub name_limit: names::NameLimit,
+}
 
 /// The proof that a folder equals a package or a listing. Only the
 /// comparisons in [`verify`] make one.
@@ -318,7 +329,7 @@ mod tests {
     fn the_unfinished_operations_answer_not_implemented() {
         let (dir, root) = empty_root();
         let errors = [TarZstd
-            .unpack(dir.path(), &root, &TargetRules)
+            .unpack(dir.path(), &root, &TargetRules::linux())
             .expect_err("not implemented")
             .to_string()];
         assert_eq!(errors, ["unpacking a package is not implemented"]);

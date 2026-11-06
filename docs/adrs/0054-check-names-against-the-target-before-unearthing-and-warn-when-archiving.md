@@ -18,10 +18,12 @@ which macOS allows (`docs/research/names.md`).
 ## Decision
 
 Before extracting anything, unearthing checks every member name against
-the rules of the target: names the target cannot hold, name and path
-lengths, and names that collide under the target's case and Unicode
-rules. It refuses the piece with a list of the offending names and the
-reason. The strict verify (ADR 0033) stays as the backstop.
+the rules of the target: names the target cannot hold, name lengths, and
+names that collide under the target's case and Unicode rules. Paths are
+not checked for length: a path longer than the platform's path limit is
+extracted directory by directory. It refuses the piece with a list of the
+offending names and the reason. The strict verify (ADR 0033) stays as the
+backstop.
 
 Archiving checks the same rules for both macOS and Linux and warns about
 names that would not survive on the other system. It does not refuse.

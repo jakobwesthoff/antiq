@@ -1063,11 +1063,20 @@ The target is the stored relative path, or `--to`, a path inside the
 collection that the patterns select. A taken target refuses.
 
 Before extracting, `unearth` checks every member name against the
-target: names it cannot hold, name and path lengths, and names that
-collide under its case and Unicode rules, which come from a probe of
-the staging volume. It refuses the piece with a list of the offending
-names and the reason. Paths longer than the platform's path limit are
-extracted directory by directory. (ADR 0054)
+target: names it cannot hold, name lengths, and names that collide
+under its case and Unicode rules, which come from a probe of the
+staging volume. It refuses the piece with a list of the offending
+names and the reason. A name is too long when it exceeds 255 bytes on
+Linux or 255 UTF-16 code units, counted on the name as stored, on
+macOS; macOS also refuses a name that is not valid UTF-8. Two members
+collide when their paths are equal after Unicode normalisation (where
+the volume ignores it) and full case folding (where the volume ignores
+case); the refusal lists both names. Paths are not checked for length:
+a path longer than the platform's path limit is extracted directory by
+directory. (ADR 0054)
+
+`archive` runs the same check with the macOS rules and with the Linux
+rules and warns about each name that one of them would refuse. (ADR 0054)
 
 The remote copy is kept while the piece is live. The local archive is
 dropped only under the rule in "Several machines" and is always kept
