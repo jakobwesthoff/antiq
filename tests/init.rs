@@ -98,10 +98,8 @@ fn yes_with_json_creates_the_collection() {
     let config = config_of(tree.root());
     assert_eq!(json["id"], config.collection.id.to_string());
     assert_eq!(config.collection.patterns, ["*"]);
-    assert_eq!(
-        config.machine.name,
-        Some(antiq::machine::detect().expect("a name"))
-    );
+    let text = fs::read_to_string(tree.path(".antiq/config.toml")).expect("the config exists");
+    assert!(!text.contains("[machine]"), "{text}");
     let mut names: Vec<String> = fs::read_dir(tree.path(".antiq"))
         .expect("the marker can be listed")
         .map(|entry| {

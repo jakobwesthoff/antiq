@@ -254,7 +254,7 @@ pub fn apply(
     ids: &dyn IdSource,
 ) -> Result<InitReport, InitError> {
     let id = ids.mint(clock.now());
-    let config = ConfigDoc::new(id, Some(&plan.patterns), &plan.exclude, &plan.machine).render()?;
+    let config = ConfigDoc::new(id, Some(&plan.patterns), &plan.exclude).render()?;
 
     let staged = create_staging_directory(&plan.root)?;
     let published = fill_and_publish(&plan.root, &staged, &config);
@@ -762,7 +762,6 @@ mod tests {
         let config = Config::read(&tree.path(".antiq/config.toml")).expect("a readable config");
         assert_eq!(Some(config.collection.id), report.id);
         assert_eq!(config.collection.patterns, ["p*", "archive"]);
-        assert_eq!(config.machine.name.as_deref(), Some(MACHINE));
         assert_eq!(
             config
                 .collection
@@ -906,7 +905,6 @@ mod tests {
         let mut made = Config::read(&tree.path(".antiq/config.toml")).expect("readable");
         let fixture = Config::read(&minimal.root().join(".antiq/config.toml")).expect("readable");
         made.collection.id = fixture.collection.id;
-        made.machine.name = None;
         assert_eq!(made, fixture);
     }
 

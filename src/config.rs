@@ -4,16 +4,18 @@
 
 //! The collection's config file.
 //!
-//! `[collection]` holds the policy and is read leniently. `[machine]` and
-//! every `[[remote]]` entry are local to the machine and read strictly, so
-//! a misspelled key there fails the run instead of silently doing nothing.
+//! `[collection]` and `[target]` are read leniently: a key this version does
+//! not know is ignored, so that a config written by a newer version still
+//! reads, and callers warn about each one, since a misspelled key would
+//! otherwise pass unnoticed. The keys of the earlier multi-machine design
+//! are refused.
 
 use crate::id::ObjectId;
 use crate::relpath::RelPath;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// Errors of the config file.
 #[derive(Debug, thiserror::Error)]
@@ -33,27 +35,13 @@ pub enum ConfigError {
         path: Option<PathBuf>,
         source: toml_edit::TomlError,
     },
-    #[error("version 1 accepts exactly one [[remote]] entry")]
-    SecondRemote,
-    /// An empty path would name the collection root, which no list of
-    /// paths to leave out can mean.
-    #[error("{key} must not hold an empty entry")]
-    EmptyEntry { key: &'static str },
-    #[error("{key} must be {}, found {value}", describe_range(*min, *max))]
-    OutOfRange {
-        key: &'static str,
-        value: i64,
-        min: i64,
-        /// `None` where only a lower bound applies.
-        max: Option<i64>,
+    /// Keys and tables of the earlier design, all named at once so that one
+    /// edit of the file clears them.
+    #[error("invalid config{}: these settings no longer exist: {}", at(path), keys.join(", "))]
+    RemovedKeys {
+        path: Option<PathBuf>,
+        keys: Vec<String>,
     },
-}
-
-fn describe_range(min: i64, max: Option<i64>) -> String {
-    match max {
-        Some(max) => format!("{min} to {max}"),
-        None => format!("at least {min}"),
-    }
 }
 
 fn at(path: &Option<PathBuf>) -> String {
@@ -70,16 +58,13 @@ impl crate::error::HasKind for ConfigError {}
 pub struct Config {
     pub collection: CollectionConfig,
     #[serde(default)]
-    pub machine: MachineConfig,
-    /// The `[[remote]]` list. Version 1 accepts at most one entry.
-    #[serde(default, rename = "remote")]
-    pub remotes: Vec<RemoteConfig>,
-    /// Keys of `[collection]` that this version does not know. They are
-    /// ignored, so that a config written by a newer version still reads;
-    /// callers warn about each one, since a misspelled policy key would
-    /// otherwise pass unnoticed.
+    pub target: TargetConfig,
+    /// Keys of `[collection]` that this version does not know.
     #[serde(skip)]
     pub unknown_collection_keys: Vec<String>,
+    /// Keys of `[target]` that this version does not know.
+    #[serde(skip)]
+    pub unknown_target_keys: Vec<String>,
 }
 
 /// The `[collection]` table. Every key but `id` has a default.
@@ -89,49 +74,68 @@ pub struct CollectionConfig {
     #[serde(default = "defaults::patterns")]
     pub patterns: Vec<String>,
     /// Literal paths that are never pieces, in the escaped form of the
-    /// metadata.
+    /// listing format.
     #[serde(default)]
     pub exclude: Vec<RelPath>,
-    #[serde(default)]
+    /// Gitignore lines for ignored paths, anchored at each piece's top.
+    #[serde(default = "defaults::ignore")]
     pub ignore: Vec<String>,
-    #[serde(default = "defaults::junk")]
-    pub junk: Vec<String>,
+    /// Gitignore lines for timeless paths, anchored at each piece's top.
+    #[serde(default)]
+    pub timeless: Vec<String>,
     #[serde(default = "defaults::idle_days")]
     pub idle_days: u32,
-    #[serde(default = "defaults::remote_only_days")]
-    pub remote_only_days: u32,
-    #[serde(default = "defaults::backup_live")]
-    pub backup_live: bool,
-    /// Paths relative to the collection root, in the escaped form of the
-    /// metadata, that live packages leave out.
-    #[serde(default)]
-    pub live_exclude: Vec<RelPath>,
-    #[serde(default)]
-    pub replace_without_asking: bool,
-    #[serde(default = "defaults::brake_percent")]
-    pub brake_percent: u32,
-    #[serde(default = "defaults::grace_hours")]
-    pub grace_hours: u32,
-    #[serde(default = "defaults::away_warn_days")]
-    pub away_warn_days: u32,
-    /// Share of the RAM that compression may use. Kept as read so that the
-    /// range check can report any integer; see [`CollectionConfig::memory_percent`].
-    #[serde(default = "defaults::memory_percent")]
-    memory_percent: i64,
-    #[serde(default = "defaults::remote_jobs")]
-    pub remote_jobs: u32,
-    #[serde(default = "defaults::live_retries")]
-    pub live_retries: u32,
+    #[serde(default = "defaults::soon_days")]
+    pub soon_days: u32,
+}
+
+/// The `[target]` table: where `push` mirrors the collection and how.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TargetConfig {
+    /// An absolute path or `[user@]host:path`. Kept as written; the target
+    /// code parses it.
+    pub url: Option<String>,
+    /// The local rsync; `None` searches `PATH`.
+    pub rsync: Option<PathBuf>,
+    /// The target's rsync, passed as `--rsync-path`.
+    pub rsync_path: Option<String>,
+    /// Whether to pass `--fsync`.
+    pub fsync: bool,
+    /// Extra rsync options.
+    pub rsync_args: Vec<String>,
+}
+
+impl Default for TargetConfig {
+    fn default() -> Self {
+        TargetConfig {
+            url: None,
+            rsync: None,
+            rsync_path: None,
+            fsync: true,
+            rsync_args: Vec::new(),
+        }
+    }
 }
 
 /// Every key `CollectionConfig` reads.
-const COLLECTION_KEYS: [&str; 16] = [
+const COLLECTION_KEYS: [&str; 7] = [
     "id",
     "patterns",
     "exclude",
     "ignore",
-    "junk",
+    "timeless",
     "idle_days",
+    "soon_days",
+];
+
+/// Every key `TargetConfig` reads.
+const TARGET_KEYS: [&str; 5] = ["url", "rsync", "rsync_path", "fsync", "rsync_args"];
+
+/// The `[collection]` keys of the earlier design, in the order the spec
+/// lists them.
+const REMOVED_COLLECTION_KEYS: [&str; 11] = [
+    "junk",
     "remote_only_days",
     "backup_live",
     "live_exclude",
@@ -149,85 +153,52 @@ mod defaults {
     pub fn patterns() -> Vec<String> {
         vec!["*".to_string()]
     }
-    pub fn junk() -> Vec<String> {
+    pub fn ignore() -> Vec<String> {
         vec![".DS_Store".to_string()]
     }
     pub fn idle_days() -> u32 {
-        14
+        30
     }
-    pub fn remote_only_days() -> u32 {
-        180
-    }
-    pub fn backup_live() -> bool {
-        true
-    }
-    pub fn brake_percent() -> u32 {
-        20
-    }
-    pub fn grace_hours() -> u32 {
-        24
-    }
-    pub fn away_warn_days() -> u32 {
-        7
-    }
-    pub fn memory_percent() -> i64 {
-        25
-    }
-    pub fn remote_jobs() -> u32 {
-        4
-    }
-    pub fn live_retries() -> u32 {
+    pub fn soon_days() -> u32 {
         3
     }
 }
 
-impl CollectionConfig {
-    /// Share of the RAM that compression may use, 1 to 100.
-    pub fn memory_percent(&self) -> u8 {
-        u8::try_from(self.memory_percent).expect("the range check keeps it within 1 to 100")
+/// The settings of the earlier design that `table` still holds, named the
+/// way the spec names them. A setting counts as present by its key alone,
+/// whatever the value.
+fn removed_keys(table: &toml::Table) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Some(collection) = table.get("collection").and_then(toml::Value::as_table) {
+        found.extend(
+            REMOVED_COLLECTION_KEYS
+                .iter()
+                .filter(|key| collection.contains_key(**key))
+                .map(|key| format!("collection.{key}")),
+        );
     }
-}
-
-/// The `[machine]` table: settings of this machine, never uploaded.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct MachineConfig {
-    /// `None` until `init` stores the detected name.
-    pub name: Option<String>,
-    pub rsync: Option<PathBuf>,
-    /// Passed to rsync as `--rsync-path`.
-    pub remote_rsync: Option<String>,
-    pub connect_timeout: u32,
-    pub server_alive_interval: u32,
-    pub server_alive_count: u32,
-    pub control_persist: u32,
-    pub rsync_timeout: u32,
-}
-
-impl Default for MachineConfig {
-    fn default() -> Self {
-        MachineConfig {
-            name: None,
-            rsync: None,
-            remote_rsync: None,
-            connect_timeout: 30,
-            server_alive_interval: 15,
-            server_alive_count: 4,
-            control_persist: 60,
-            rsync_timeout: 300,
-        }
+    if table.contains_key("machine") {
+        found.push("[machine]".to_string());
     }
+    if table.contains_key("remote") {
+        found.push("[[remote]]".to_string());
+    }
+    found
 }
 
-/// One `[[remote]]` entry.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteConfig {
-    /// As given to `remote add`.
-    pub url: String,
-    /// The remote's ULID.
-    pub id: ObjectId,
-    pub host_key_alias: Option<String>,
+/// The keys of the table `name` in `table` that are not in `known`.
+fn unknown_keys(table: &toml::Table, name: &str, known: &[&str]) -> Vec<String> {
+    table
+        .get(name)
+        .and_then(toml::Value::as_table)
+        .map(|section| {
+            section
+                .keys()
+                .filter(|key| !known.contains(&key.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Config {
@@ -238,23 +209,14 @@ impl Config {
                 id,
                 patterns: defaults::patterns(),
                 exclude: Vec::new(),
-                ignore: Vec::new(),
-                junk: defaults::junk(),
+                ignore: defaults::ignore(),
+                timeless: Vec::new(),
                 idle_days: defaults::idle_days(),
-                remote_only_days: defaults::remote_only_days(),
-                backup_live: defaults::backup_live(),
-                live_exclude: Vec::new(),
-                replace_without_asking: false,
-                brake_percent: defaults::brake_percent(),
-                grace_hours: defaults::grace_hours(),
-                away_warn_days: defaults::away_warn_days(),
-                memory_percent: defaults::memory_percent(),
-                remote_jobs: defaults::remote_jobs(),
-                live_retries: defaults::live_retries(),
+                soon_days: defaults::soon_days(),
             },
-            machine: MachineConfig::default(),
-            remotes: Vec::new(),
+            target: TargetConfig::default(),
             unknown_collection_keys: Vec::new(),
+            unknown_target_keys: Vec::new(),
         }
     }
 
@@ -264,109 +226,21 @@ impl Config {
             path: path.map(Path::to_path_buf),
             source,
         };
-        let mut config: Config = toml::from_str(text).map_err(parse_error)?;
-        if config.remotes.len() > 1 {
-            return Err(ConfigError::SecondRemote);
-        }
-        config.check_ranges()?;
-        if config.collection.live_exclude.iter().any(RelPath::is_root) {
-            return Err(ConfigError::EmptyEntry {
-                key: "collection.live_exclude",
+        // The plain table is read first: the typed read below drops unknown
+        // keys, and a removed setting has to be refused before a type error
+        // in it could hide the refusal.
+        let table: toml::Table = toml::from_str(text).map_err(parse_error)?;
+        let removed = removed_keys(&table);
+        if !removed.is_empty() {
+            return Err(ConfigError::RemovedKeys {
+                path: path.map(Path::to_path_buf),
+                keys: removed,
             });
         }
-
-        // The typed read has dropped unknown `[collection]` keys, so they
-        // are found in the plain table.
-        let table: toml::Table = toml::from_str(text).map_err(parse_error)?;
-        let collection = table["collection"]
-            .as_table()
-            .expect("the typed read has required a [collection] table");
-        config.unknown_collection_keys = collection
-            .keys()
-            .filter(|key| !COLLECTION_KEYS.contains(&key.as_str()))
-            .cloned()
-            .collect();
+        let mut config: Config = toml::from_str(text).map_err(parse_error)?;
+        config.unknown_collection_keys = unknown_keys(&table, "collection", &COLLECTION_KEYS);
+        config.unknown_target_keys = unknown_keys(&table, "target", &TARGET_KEYS);
         Ok(config)
-    }
-
-    /// Refuses the values that would switch a setting off or make it
-    /// meaningless.
-    fn check_ranges(&self) -> Result<(), ConfigError> {
-        let collection = &self.collection;
-        let machine = &self.machine;
-        let ranged = [
-            (
-                "collection.memory_percent",
-                collection.memory_percent,
-                1,
-                Some(100),
-            ),
-            (
-                "collection.brake_percent",
-                collection.brake_percent.into(),
-                0,
-                Some(100),
-            ),
-            (
-                "collection.grace_hours",
-                collection.grace_hours.into(),
-                1,
-                None,
-            ),
-            (
-                "collection.remote_jobs",
-                collection.remote_jobs.into(),
-                1,
-                None,
-            ),
-            (
-                "collection.live_retries",
-                collection.live_retries.into(),
-                1,
-                None,
-            ),
-            (
-                "machine.connect_timeout",
-                machine.connect_timeout.into(),
-                1,
-                None,
-            ),
-            (
-                "machine.server_alive_interval",
-                machine.server_alive_interval.into(),
-                1,
-                None,
-            ),
-            (
-                "machine.server_alive_count",
-                machine.server_alive_count.into(),
-                1,
-                None,
-            ),
-            (
-                "machine.control_persist",
-                machine.control_persist.into(),
-                1,
-                None,
-            ),
-            (
-                "machine.rsync_timeout",
-                machine.rsync_timeout.into(),
-                1,
-                None,
-            ),
-        ];
-        for (key, value, min, max) in ranged {
-            if value < min || max.is_some_and(|max| value > max) {
-                return Err(ConfigError::OutOfRange {
-                    key,
-                    value,
-                    min,
-                    max,
-                });
-            }
-        }
-        Ok(())
     }
 
     pub fn read(path: &Path) -> Result<Config, ConfigError> {
@@ -390,12 +264,7 @@ impl ConfigDoc {
     /// The document `init` writes. Settings left at their default stay out
     /// of the file, so a later change of a default reaches this collection.
     /// `patterns` is always written; `None` writes the default pattern.
-    pub fn new(
-        id: ObjectId,
-        patterns: Option<&[String]>,
-        exclude: &[RelPath],
-        machine_name: &str,
-    ) -> ConfigDoc {
+    pub fn new(id: ObjectId, patterns: Option<&[String]>, exclude: &[RelPath]) -> ConfigDoc {
         let mut doc = DocumentMut::new();
 
         let mut collection = Table::new();
@@ -407,10 +276,6 @@ impl ConfigDoc {
             collection.insert("exclude", value(Array::from_iter(escaped)));
         }
         doc.insert("collection", Item::Table(collection));
-
-        let mut machine = Table::new();
-        machine.insert("name", value(machine_name));
-        doc.insert("machine", Item::Table(machine));
 
         ConfigDoc { doc, path: None }
     }
@@ -447,52 +312,6 @@ impl ConfigDoc {
     pub fn config(&self) -> Result<Config, ConfigError> {
         Config::parse(&self.doc.to_string(), self.path.as_deref())
     }
-
-    /// Appends the `[[remote]]` entry. Version 1 accepts one remote, so a
-    /// config that has one, in whatever spelling, is refused.
-    pub fn add_remote(&mut self, remote: &RemoteConfig) -> Result<(), ConfigError> {
-        if self.doc.contains_key("remote") {
-            return Err(ConfigError::SecondRemote);
-        }
-        let mut entry = Table::new();
-        entry.insert("url", value(remote.url.as_str()));
-        entry.insert("id", value(remote.id.to_string()));
-        if let Some(alias) = &remote.host_key_alias {
-            entry.insert("host_key_alias", value(alias.as_str()));
-        }
-        let mut entries = ArrayOfTables::new();
-        entries.push(entry);
-        self.doc.insert("remote", Item::ArrayOfTables(entries));
-        Ok(())
-    }
-
-    /// Detaches the remote, in whatever spelling the file holds it. A
-    /// comment directly above `[[remote]]` belongs to the entry and goes
-    /// with it.
-    pub fn remove_remote(&mut self) {
-        self.doc.remove("remote");
-    }
-
-    /// Sets `machine.rsync`. The comment of a value it replaces stays.
-    pub fn set_machine_rsync(&mut self, path: &str) {
-        // `IndexMut` on a missing `machine` would write an inline table at
-        // the top of the file, so the table is created explicitly.
-        let Some(machine) = self
-            .doc
-            .get_mut("machine")
-            .and_then(Item::as_table_like_mut)
-        else {
-            let mut machine = Table::new();
-            machine.insert("rsync", value(path));
-            self.doc.insert("machine", Item::Table(machine));
-            return;
-        };
-        let mut new = Value::from(path);
-        if let Some(old) = machine.get("rsync").and_then(Item::as_value) {
-            *new.decor_mut() = old.decor().clone();
-        }
-        machine.insert("rsync", Item::Value(new));
-    }
 }
 
 #[cfg(test)]
@@ -501,7 +320,6 @@ mod tests {
     use crate::testing::tree::COLLECTION_ID;
 
     const MINIMAL: &str = "[collection]\nid = \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"\n";
-    const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
 
     fn parse(text: &str) -> Config {
         Config::parse(text, None).expect("the config parses")
@@ -517,6 +335,10 @@ mod tests {
         format!("{MINIMAL}{line}\n")
     }
 
+    fn with_target_line(line: &str) -> String {
+        format!("{MINIMAL}[target]\n{line}\n")
+    }
+
     #[test]
     fn defaults_equal_the_spec_table() {
         let config = parse(MINIMAL);
@@ -524,29 +346,20 @@ mod tests {
         assert_eq!(collection.id, COLLECTION_ID.parse().expect("a ULID"));
         assert_eq!(collection.patterns, vec!["*".to_string()]);
         assert_eq!(collection.exclude, Vec::<RelPath>::new());
-        assert_eq!(collection.ignore, Vec::<String>::new());
-        assert_eq!(collection.junk, vec![".DS_Store".to_string()]);
-        assert_eq!(collection.idle_days, 14);
-        assert_eq!(collection.remote_only_days, 180);
-        assert!(collection.backup_live);
-        assert_eq!(collection.live_exclude, Vec::<RelPath>::new());
-        assert!(!collection.replace_without_asking);
-        assert_eq!(collection.brake_percent, 20);
-        assert_eq!(collection.grace_hours, 24);
-        assert_eq!(collection.away_warn_days, 7);
-        assert_eq!(collection.memory_percent(), 25);
-        assert_eq!(collection.remote_jobs, 4);
-        assert_eq!(collection.live_retries, 3);
-        let machine = &config.machine;
-        assert_eq!(machine.name, None);
-        assert_eq!(machine.rsync, None);
-        assert_eq!(machine.remote_rsync, None);
-        assert_eq!(machine.connect_timeout, 30);
-        assert_eq!(machine.server_alive_interval, 15);
-        assert_eq!(machine.server_alive_count, 4);
-        assert_eq!(machine.control_persist, 60);
-        assert_eq!(machine.rsync_timeout, 300);
-        assert!(config.remotes.is_empty());
+        assert_eq!(collection.ignore, vec![".DS_Store".to_string()]);
+        assert_eq!(collection.timeless, Vec::<String>::new());
+        assert_eq!(collection.idle_days, 30);
+        assert_eq!(collection.soon_days, 3);
+    }
+
+    #[test]
+    fn the_target_defaults_equal_the_spec_table() {
+        let target = parse(MINIMAL).target;
+        assert_eq!(target.url, None);
+        assert_eq!(target.rsync, None);
+        assert_eq!(target.rsync_path, None);
+        assert!(target.fsync);
+        assert_eq!(target.rsync_args, Vec::<String>::new());
     }
 
     #[test]
@@ -557,48 +370,27 @@ mod tests {
         );
     }
 
-    fn every_key_text() -> String {
-        format!(
+    #[test]
+    fn every_key_can_be_overridden() {
+        let config = parse(&format!(
             r#"
 [collection]
 id = "{COLLECTION_ID}"
 patterns = ["projects/*"]
 exclude = ["archive", "a%FFb"]
 ignore = ["target/"]
-junk = ["Thumbs.db"]
+timeless = ["*.iso"]
 idle_days = 1
-remote_only_days = 2
-backup_live = false
-live_exclude = ["cache"]
-replace_without_asking = true
-brake_percent = 3
-grace_hours = 4
-away_warn_days = 5
-memory_percent = 6
-remote_jobs = 7
-live_retries = 8
+soon_days = 2
 
-[machine]
-name = "laptop"
+[target]
+url = "nas.local:/volume1/antiq"
 rsync = "/opt/homebrew/bin/rsync"
-remote_rsync = "/usr/bin/rsync"
-connect_timeout = 9
-server_alive_interval = 10
-server_alive_count = 11
-control_persist = 12
-rsync_timeout = 13
-
-[[remote]]
-url = "ssh://nas/volume1/antiq"
-id = "{REMOTE_ID}"
-host_key_alias = "nas"
+rsync_path = "/usr/local/bin/rsync"
+fsync = false
+rsync_args = ["--bwlimit=100", "--no-perms"]
 "#
-        )
-    }
-
-    #[test]
-    fn every_key_can_be_overridden() {
-        let config = parse(&every_key_text());
+        ));
         let collection = &config.collection;
         assert_eq!(collection.patterns, vec!["projects/*".to_string()]);
         assert_eq!(
@@ -609,58 +401,118 @@ host_key_alias = "nas"
             ]
         );
         assert_eq!(collection.ignore, vec!["target/".to_string()]);
-        assert_eq!(collection.junk, vec!["Thumbs.db".to_string()]);
+        assert_eq!(collection.timeless, vec!["*.iso".to_string()]);
         assert_eq!(collection.idle_days, 1);
-        assert_eq!(collection.remote_only_days, 2);
-        assert!(!collection.backup_live);
+        assert_eq!(collection.soon_days, 2);
+        let target = &config.target;
+        assert_eq!(target.url.as_deref(), Some("nas.local:/volume1/antiq"));
         assert_eq!(
-            collection.live_exclude,
-            vec![RelPath::parse("cache").expect("valid path")]
-        );
-        assert!(collection.replace_without_asking);
-        assert_eq!(collection.brake_percent, 3);
-        assert_eq!(collection.grace_hours, 4);
-        assert_eq!(collection.away_warn_days, 5);
-        assert_eq!(collection.memory_percent(), 6);
-        assert_eq!(collection.remote_jobs, 7);
-        assert_eq!(collection.live_retries, 8);
-        let machine = &config.machine;
-        assert_eq!(machine.name.as_deref(), Some("laptop"));
-        assert_eq!(
-            machine.rsync.as_deref(),
+            target.rsync.as_deref(),
             Some(Path::new("/opt/homebrew/bin/rsync"))
         );
-        assert_eq!(machine.remote_rsync.as_deref(), Some("/usr/bin/rsync"));
-        assert_eq!(machine.connect_timeout, 9);
-        assert_eq!(machine.server_alive_interval, 10);
-        assert_eq!(machine.server_alive_count, 11);
-        assert_eq!(machine.control_persist, 12);
-        assert_eq!(machine.rsync_timeout, 13);
-        assert_eq!(config.remotes.len(), 1);
-        assert_eq!(config.remotes[0].url, "ssh://nas/volume1/antiq");
-        assert_eq!(config.remotes[0].id.to_string(), REMOTE_ID);
-        assert_eq!(config.remotes[0].host_key_alias.as_deref(), Some("nas"));
+        assert_eq!(target.rsync_path.as_deref(), Some("/usr/local/bin/rsync"));
+        assert!(!target.fsync);
+        assert_eq!(target.rsync_args, ["--bwlimit=100", "--no-perms"]);
+        assert!(config.unknown_collection_keys.is_empty());
+        assert!(config.unknown_target_keys.is_empty());
     }
 
     #[test]
-    fn unknown_machine_key_network_check_fails_naming_it() {
-        let text = format!("{MINIMAL}[machine]\nnetwork_check = true\n");
-        assert!(error_text(&text).contains("network_check"));
+    fn a_target_url_is_kept_as_written() {
+        let config = parse(&with_target_line("url = \"not a url at all\""));
+        assert_eq!(config.target.url.as_deref(), Some("not a url at all"));
+    }
+
+    // =====================================================================
+    // Keys of the earlier design
+    // =====================================================================
+
+    const REMOVED_COLLECTION_LINES: [&str; 11] = [
+        "junk = [\"Thumbs.db\"]",
+        "remote_only_days = 180",
+        "backup_live = true",
+        "live_exclude = [\"cache\"]",
+        "replace_without_asking = true",
+        "brake_percent = 20",
+        "grace_hours = 24",
+        "away_warn_days = 7",
+        "memory_percent = 25",
+        "remote_jobs = 4",
+        "live_retries = 3",
+    ];
+
+    #[test]
+    fn each_removed_collection_key_is_refused_naming_it() {
+        for line in REMOVED_COLLECTION_LINES {
+            let key = line.split(' ').next().expect("a key");
+            let error = Config::parse(&with_collection_line(line), None)
+                .expect_err("a removed key is refused");
+            assert!(
+                matches!(&error, ConfigError::RemovedKeys { keys, .. } if *keys == [format!("collection.{key}")]),
+                "{key}: {error}"
+            );
+        }
     }
 
     #[test]
-    fn unknown_machine_key_typo_fails_naming_it() {
-        let text = format!("{MINIMAL}[machine]\nrsyc = \"/usr/bin/rsync\"\n");
-        assert!(error_text(&text).contains("rsyc"));
-    }
-
-    #[test]
-    fn unknown_remote_key_fails_naming_it() {
-        let text = format!(
-            "{MINIMAL}[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\nhost_key_alais = \"x\"\n"
+    fn the_machine_table_and_the_remote_list_are_refused() {
+        assert_eq!(
+            error_text(&format!("{MINIMAL}[machine]\nname = \"laptop\"\n")),
+            "invalid config: these settings no longer exist: [machine]"
         );
-        assert!(error_text(&text).contains("host_key_alais"));
+        assert_eq!(
+            error_text(&format!("{MINIMAL}[[remote]]\nurl = \"/srv\"\n")),
+            "invalid config: these settings no longer exist: [[remote]]"
+        );
     }
+
+    #[test]
+    fn every_removed_setting_is_named_in_one_error_in_the_order_of_the_spec() {
+        let lines = REMOVED_COLLECTION_LINES.join("\n");
+        let text = format!("{MINIMAL}{lines}\n[machine]\n[[remote]]\n");
+        assert_eq!(
+            error_text(&text),
+            "invalid config: these settings no longer exist: collection.junk, \
+             collection.remote_only_days, collection.backup_live, collection.live_exclude, \
+             collection.replace_without_asking, collection.brake_percent, \
+             collection.grace_hours, collection.away_warn_days, collection.memory_percent, \
+             collection.remote_jobs, collection.live_retries, [machine], [[remote]]"
+        );
+    }
+
+    #[test]
+    fn a_removed_key_is_refused_by_its_presence_whatever_its_value() {
+        assert!(error_text(&format!("remote = []\n{MINIMAL}")).contains("[[remote]]"));
+        assert!(error_text(&format!("machine = {{}}\n{MINIMAL}")).contains("[machine]"));
+        assert!(error_text(&format!("{MINIMAL}[machine]\n")).contains("[machine]"));
+    }
+
+    #[test]
+    fn a_removed_setting_is_refused_before_a_missing_collection_id_is_noticed() {
+        let error = Config::parse("[machine]\nname = \"laptop\"\n", None).expect_err("refused");
+        assert!(matches!(error, ConfigError::RemovedKeys { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_removed_setting_is_refused_before_a_type_error_in_another_key() {
+        let error = error_text(&with_collection_line("junk = []\nidle_days = \"soon\""));
+        assert!(error.contains("collection.junk"), "{error}");
+    }
+
+    #[test]
+    fn a_collection_that_is_no_table_does_not_hide_the_refusal_or_panic() {
+        let error = error_text("collection = 5\n[machine]\n");
+        assert!(error.contains("[machine]"), "{error}");
+    }
+
+    #[test]
+    fn a_collection_that_is_no_table_fails_the_typed_read() {
+        assert!(error_text("collection = 5\n").contains("collection"));
+    }
+
+    // =====================================================================
+    // Unknown keys
+    // =====================================================================
 
     #[test]
     fn unknown_collection_key_is_ignored_and_listed() {
@@ -682,8 +534,15 @@ host_key_alias = "nas"
     }
 
     #[test]
-    fn known_keys_are_not_listed_as_unknown() {
-        assert!(parse(&every_key_text()).unknown_collection_keys.is_empty());
+    fn unknown_target_keys_are_ignored_and_listed() {
+        let config = parse(&with_target_line("rsynk = \"x\"\nfsync = false\nzzz = 1"));
+        assert_eq!(config.target.rsync, None);
+        assert!(!config.target.fsync);
+        assert_eq!(
+            config.unknown_target_keys,
+            vec!["rsynk".to_string(), "zzz".to_string()]
+        );
+        assert!(config.unknown_collection_keys.is_empty());
     }
 
     #[test]
@@ -692,175 +551,9 @@ host_key_alias = "nas"
         assert_eq!(config, parse(MINIMAL));
     }
 
-    #[test]
-    fn one_remote_parses_with_an_alias() {
-        let config = parse(&format!(
-            "{MINIMAL}[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\nhost_key_alias = \"nas\"\n"
-        ));
-        assert_eq!(config.remotes[0].host_key_alias.as_deref(), Some("nas"));
-    }
-
-    #[test]
-    fn one_remote_parses_without_an_alias() {
-        let config = parse(&format!(
-            "{MINIMAL}[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\n"
-        ));
-        assert_eq!(config.remotes[0].host_key_alias, None);
-    }
-
-    #[test]
-    fn a_second_remote_fails() {
-        let entry = format!("[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\n");
-        let error = Config::parse(&format!("{MINIMAL}{entry}{entry}"), None)
-            .expect_err("two remotes are refused");
-        assert!(matches!(error, ConfigError::SecondRemote), "{error}");
-    }
-
-    fn range_error(table: &str, key: &str, value: &str) -> String {
-        let line = format!("{key} = {value}");
-        match table {
-            "collection" => error_text(&with_collection_line(&line)),
-            _ => error_text(&format!("{MINIMAL}[{table}]\n{line}\n")),
-        }
-    }
-
-    #[test]
-    fn brake_percent_101_fails_naming_the_key() {
-        let text = range_error("collection", "brake_percent", "101");
-        assert!(text.contains("collection.brake_percent"), "{text}");
-    }
-
-    #[test]
-    fn grace_hours_0_fails_naming_the_key() {
-        let text = range_error("collection", "grace_hours", "0");
-        assert!(text.contains("collection.grace_hours"), "{text}");
-    }
-
-    #[test]
-    fn remote_jobs_0_fails_naming_the_key() {
-        let text = range_error("collection", "remote_jobs", "0");
-        assert!(text.contains("collection.remote_jobs"), "{text}");
-    }
-
-    #[test]
-    fn live_retries_0_fails_naming_the_key() {
-        let text = range_error("collection", "live_retries", "0");
-        assert!(text.contains("collection.live_retries"), "{text}");
-    }
-
-    #[test]
-    fn connect_timeout_0_fails_naming_the_key() {
-        let text = range_error("machine", "connect_timeout", "0");
-        assert!(text.contains("machine.connect_timeout"), "{text}");
-    }
-
-    #[test]
-    fn server_alive_interval_0_fails_naming_the_key() {
-        let text = range_error("machine", "server_alive_interval", "0");
-        assert!(text.contains("machine.server_alive_interval"), "{text}");
-    }
-
-    #[test]
-    fn server_alive_count_0_fails_naming_the_key() {
-        let text = range_error("machine", "server_alive_count", "0");
-        assert!(text.contains("machine.server_alive_count"), "{text}");
-    }
-
-    #[test]
-    fn control_persist_0_fails_naming_the_key() {
-        let text = range_error("machine", "control_persist", "0");
-        assert!(text.contains("machine.control_persist"), "{text}");
-    }
-
-    #[test]
-    fn rsync_timeout_0_fails_naming_the_key() {
-        let text = range_error("machine", "rsync_timeout", "0");
-        assert!(text.contains("machine.rsync_timeout"), "{text}");
-    }
-
-    #[test]
-    fn brake_percent_0_passes() {
-        let config = parse(&with_collection_line("brake_percent = 0"));
-        assert_eq!(config.collection.brake_percent, 0);
-    }
-
-    #[test]
-    fn brake_percent_100_passes() {
-        let config = parse(&with_collection_line("brake_percent = 100"));
-        assert_eq!(config.collection.brake_percent, 100);
-    }
-
-    #[test]
-    fn a_range_without_an_upper_bound_reads_at_least() {
-        assert_eq!(
-            error_text(&with_collection_line("remote_jobs = 0")),
-            "collection.remote_jobs must be at least 1, found 0"
-        );
-    }
-
-    #[test]
-    fn a_range_with_both_bounds_reads_from_to() {
-        assert_eq!(
-            error_text(&with_collection_line("brake_percent = 101")),
-            "collection.brake_percent must be 0 to 100, found 101"
-        );
-    }
-
-    fn memory_percent_error(value: &str) -> String {
-        error_text(&with_collection_line(&format!("memory_percent = {value}")))
-    }
-
-    #[test]
-    fn memory_percent_0_fails_naming_the_key() {
-        assert_eq!(
-            memory_percent_error("0"),
-            "collection.memory_percent must be 1 to 100, found 0"
-        );
-    }
-
-    #[test]
-    fn memory_percent_101_fails_naming_the_key() {
-        assert_eq!(
-            memory_percent_error("101"),
-            "collection.memory_percent must be 1 to 100, found 101"
-        );
-    }
-
-    #[test]
-    fn memory_percent_300_fails_naming_the_key() {
-        assert_eq!(
-            memory_percent_error("300"),
-            "collection.memory_percent must be 1 to 100, found 300"
-        );
-    }
-
-    #[test]
-    fn memory_percent_minus_5_fails_naming_the_key() {
-        assert_eq!(
-            memory_percent_error("-5"),
-            "collection.memory_percent must be 1 to 100, found -5"
-        );
-    }
-
-    #[test]
-    fn memory_percent_above_u32_fails_naming_the_key() {
-        assert_eq!(
-            memory_percent_error("4294967296"),
-            "collection.memory_percent must be 1 to 100, found 4294967296"
-        );
-    }
-
-    #[test]
-    fn memory_percent_1_passes() {
-        let config = parse(&with_collection_line("memory_percent = 1"));
-        assert_eq!(config.collection.memory_percent(), 1);
-    }
-
-    #[test]
-    fn memory_percent_100_passes() {
-        let config = parse(&with_collection_line("memory_percent = 100"));
-        assert_eq!(config.collection.memory_percent(), 100);
-    }
+    // =====================================================================
+    // Values
+    // =====================================================================
 
     #[test]
     fn a_missing_collection_id_fails() {
@@ -873,14 +566,19 @@ host_key_alias = "nas"
     }
 
     #[test]
-    fn a_remote_without_a_url_fails() {
-        let text = format!("{MINIMAL}[[remote]]\nid = \"{REMOTE_ID}\"\n");
-        assert!(error_text(&text).contains("url"));
+    fn a_type_error_carries_the_key_in_the_source_snippet() {
+        assert!(error_text(&with_collection_line("idle_days = \"soon\"")).contains("idle_days"));
     }
 
     #[test]
-    fn a_type_error_carries_the_key_in_the_source_snippet() {
-        assert!(error_text(&with_collection_line("idle_days = \"soon\"")).contains("idle_days"));
+    fn a_type_error_in_soon_days_names_the_key() {
+        assert!(error_text(&with_collection_line("soon_days = -1")).contains("soon_days"));
+    }
+
+    #[test]
+    fn type_errors_in_the_target_name_the_key() {
+        assert!(error_text(&with_target_line("fsync = \"yes\"")).contains("fsync"));
+        assert!(error_text(&with_target_line("rsync_args = \"-v\"")).contains("rsync_args"));
     }
 
     #[test]
@@ -902,32 +600,6 @@ host_key_alias = "nas"
     }
 
     #[test]
-    fn a_live_exclude_entry_is_read_in_the_escaped_form() {
-        let config = parse(&with_collection_line(
-            "live_exclude = [\"a%FFb\", \"Ünï/cache\"]",
-        ));
-        let bytes: Vec<&[u8]> = config
-            .collection
-            .live_exclude
-            .iter()
-            .map(|entry| entry.as_bytes())
-            .collect();
-        assert_eq!(bytes, vec![&b"a\xFFb"[..], "Ünï/cache".as_bytes()]);
-    }
-
-    #[test]
-    fn a_live_exclude_entry_with_a_bad_escape_fails_naming_the_key() {
-        let text = error_text(&with_collection_line("live_exclude = [\"a%ZZ\"]"));
-        assert!(text.contains("live_exclude"), "{text}");
-    }
-
-    #[test]
-    fn an_empty_live_exclude_entry_fails_naming_the_key() {
-        let text = error_text(&with_collection_line("live_exclude = [\"cache\", \"\"]"));
-        assert!(text.contains("collection.live_exclude"), "{text}");
-    }
-
-    #[test]
     fn reading_a_missing_file_reports_its_path() {
         let directory = tempfile::tempdir().expect("a temp dir");
         let path = directory.path().join("config.toml");
@@ -942,6 +614,15 @@ host_key_alias = "nas"
         let path = directory.path().join("config.toml");
         fs::write(&path, "[collection\n").expect("writable");
         let error = Config::read(&path).expect_err("the file is broken");
+        assert!(error.to_string().contains("config.toml"), "{error}");
+    }
+
+    #[test]
+    fn a_refusal_of_removed_settings_names_the_file() {
+        let directory = tempfile::tempdir().expect("a temp dir");
+        let path = directory.path().join("config.toml");
+        fs::write(&path, format!("{MINIMAL}[machine]\n")).expect("writable");
+        let error = Config::read(&path).expect_err("a removed table");
         assert!(error.to_string().contains("config.toml"), "{error}");
     }
 
@@ -961,22 +642,10 @@ host_key_alias = "nas"
 [collection]
 id = "01ARZ3NDEKTSV4RRFFQ69G5FAV" # never change this
 idle_days = 30
-
-# settings of this machine
-[machine]
-name = "laptop" # my laptop
 "#;
 
     fn doc(text: &str) -> ConfigDoc {
         ConfigDoc::parse(text, None).expect("the document parses")
-    }
-
-    fn remote(alias: Option<&str>) -> RemoteConfig {
-        RemoteConfig {
-            url: "ssh://nas/volume1/antiq".to_string(),
-            id: REMOTE_ID.parse().expect("a ULID"),
-            host_key_alias: alias.map(str::to_string),
-        }
     }
 
     fn collection_id() -> ObjectId {
@@ -985,12 +654,10 @@ name = "laptop" # my laptop
 
     #[test]
     fn a_new_document_holds_only_what_init_sets() {
-        let document = ConfigDoc::new(collection_id(), None, &[], "laptop");
+        let document = ConfigDoc::new(collection_id(), None, &[]);
         assert_eq!(
             document.render().expect("renders"),
-            format!(
-                "[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"*\"]\n\n[machine]\nname = \"laptop\"\n"
-            )
+            format!("[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"*\"]\n")
         );
     }
 
@@ -998,18 +665,18 @@ name = "laptop" # my laptop
     fn a_new_document_writes_the_given_patterns_and_the_escaped_excludes() {
         let patterns = ["projects/*".to_string(), ".*".to_string()];
         let exclude = [RelPath::from_bytes(b"a\xFFb".to_vec()).expect("valid")];
-        let document = ConfigDoc::new(collection_id(), Some(&patterns), &exclude, "laptop");
+        let document = ConfigDoc::new(collection_id(), Some(&patterns), &exclude);
         assert_eq!(
             document.render().expect("renders"),
             format!(
-                "[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"projects/*\", \".*\"]\nexclude = [\"a%FFb\"]\n\n[machine]\nname = \"laptop\"\n"
+                "[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"projects/*\", \".*\"]\nexclude = [\"a%FFb\"]\n"
             )
         );
     }
 
     #[test]
     fn a_new_document_writes_empty_patterns_as_given() {
-        let document = ConfigDoc::new(collection_id(), Some(&[]), &[], "laptop");
+        let document = ConfigDoc::new(collection_id(), Some(&[]), &[]);
         assert!(
             document
                 .render()
@@ -1020,11 +687,9 @@ name = "laptop" # my laptop
 
     #[test]
     fn a_new_document_reads_back_with_defaults_for_the_rest() {
-        let document = ConfigDoc::new(collection_id(), None, &[], "laptop");
+        let document = ConfigDoc::new(collection_id(), None, &[]);
         let config = document.config().expect("the document is a valid config");
-        let mut expected = Config::new(collection_id());
-        expected.machine.name = Some("laptop".to_string());
-        assert_eq!(config, expected);
+        assert_eq!(config, Config::new(collection_id()));
     }
 
     #[test]
@@ -1033,147 +698,10 @@ name = "laptop" # my laptop
     }
 
     #[test]
-    fn adding_a_remote_appends_an_entry_and_keeps_every_comment() {
-        let mut document = doc(COMMENTED);
-        document
-            .add_remote(&remote(Some("nas")))
-            .expect("no remote yet");
-        assert_eq!(
-            document.render().expect("renders"),
-            format!(
-                "{COMMENTED}\n[[remote]]\nurl = \"ssh://nas/volume1/antiq\"\nid = \"{REMOTE_ID}\"\nhost_key_alias = \"nas\"\n"
-            )
-        );
-    }
-
-    #[test]
-    fn adding_a_remote_without_an_alias_writes_no_alias() {
-        let mut document = doc(COMMENTED);
-        document.add_remote(&remote(None)).expect("no remote yet");
-        assert_eq!(
-            document.render().expect("renders"),
-            format!(
-                "{COMMENTED}\n[[remote]]\nurl = \"ssh://nas/volume1/antiq\"\nid = \"{REMOTE_ID}\"\n"
-            )
-        );
-    }
-
-    #[test]
-    fn adding_a_remote_to_a_document_without_a_trailing_newline_still_parses() {
-        let mut document = doc(MINIMAL.trim_end());
-        document.add_remote(&remote(None)).expect("no remote yet");
-        assert_eq!(document.config().expect("valid").remotes.len(), 1);
-    }
-
-    fn with_remote_entry() -> String {
-        format!("{COMMENTED}\n# the nas\n[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\n")
-    }
-
-    #[test]
-    fn adding_a_remote_refuses_when_one_is_present() {
-        let mut document = doc(&with_remote_entry());
-        let error = document
-            .add_remote(&remote(None))
-            .expect_err("one remote is attached");
-        assert!(matches!(error, ConfigError::SecondRemote), "{error}");
-    }
-
-    #[test]
-    fn adding_a_remote_refuses_when_one_is_present_as_an_inline_array() {
-        let text = format!("remote = [{{ url = \"/srv\", id = \"{REMOTE_ID}\" }}]\n{MINIMAL}");
-        let mut document = doc(&text);
-        let error = document
-            .add_remote(&remote(None))
-            .expect_err("one remote is attached");
-        assert!(matches!(error, ConfigError::SecondRemote), "{error}");
-    }
-
-    #[test]
-    fn removing_the_remote_takes_the_comment_above_it_along() {
-        let mut document = doc(&with_remote_entry());
-        document.remove_remote();
-        assert_eq!(document.render().expect("renders"), COMMENTED);
-    }
-
-    #[test]
-    fn removing_an_inline_remote_array_detaches_the_remote() {
-        let text = format!("remote = [{{ url = \"/srv\", id = \"{REMOTE_ID}\" }}]\n{MINIMAL}");
-        let mut document = doc(&text);
-        assert_eq!(document.config().expect("valid").remotes.len(), 1);
-        document.remove_remote();
-        assert!(document.config().expect("valid").remotes.is_empty());
-    }
-
-    #[test]
-    fn removing_a_remote_that_is_not_there_changes_nothing() {
-        let mut document = doc(COMMENTED);
-        document.remove_remote();
-        assert_eq!(document.render().expect("renders"), COMMENTED);
-    }
-
-    #[test]
-    fn setting_the_rsync_path_creates_the_machine_table_at_the_end() {
-        let text = "# first comment\n[collection]\nid = \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"\n";
-        let mut document = doc(text);
-        document.set_machine_rsync("/opt/rsync");
-        assert_eq!(
-            document.render().expect("renders"),
-            format!("{text}\n[machine]\nrsync = \"/opt/rsync\"\n")
-        );
-    }
-
-    #[test]
-    fn setting_the_rsync_path_adds_a_key_to_an_existing_machine_table() {
-        let mut document = doc(COMMENTED);
-        document.set_machine_rsync("/opt/rsync");
-        assert_eq!(
-            document.render().expect("renders"),
-            format!("{COMMENTED}rsync = \"/opt/rsync\"\n")
-        );
-    }
-
-    #[test]
-    fn setting_the_rsync_path_keeps_the_comment_of_the_value_it_replaces() {
-        let text = format!("{MINIMAL}[machine]\nrsync = \"/old\" # from remote add\n");
-        let mut document = doc(&text);
-        document.set_machine_rsync("/opt/rsync");
-        assert_eq!(
-            document.render().expect("renders"),
-            format!("{MINIMAL}[machine]\nrsync = \"/opt/rsync\" # from remote add\n")
-        );
-    }
-
-    #[test]
-    fn setting_the_rsync_path_keeps_an_inline_machine_table() {
-        let text = format!("machine = {{ name = \"laptop\" }}\n{MINIMAL}");
-        let mut document = doc(&text);
-        document.set_machine_rsync("/opt/rsync");
-        let config = document.config().expect("valid");
-        assert_eq!(config.machine.name.as_deref(), Some("laptop"));
-        assert_eq!(
-            config.machine.rsync.as_deref(),
-            Some(Path::new("/opt/rsync"))
-        );
-    }
-
-    #[test]
-    fn setting_the_rsync_path_replaces_a_machine_key_that_is_no_table() {
-        let text = format!("machine = 3\n{MINIMAL}");
-        let mut document = doc(&text);
-        document.set_machine_rsync("/opt/rsync");
-        let config = document.config().expect("valid");
-        assert_eq!(
-            config.machine.rsync.as_deref(),
-            Some(Path::new("/opt/rsync"))
-        );
-    }
-
-    #[test]
-    fn rendering_refuses_a_document_edited_into_an_invalid_state() {
-        let entry = format!("[[remote]]\nurl = \"/srv\"\nid = \"{REMOTE_ID}\"\n");
-        let document = doc(&format!("{MINIMAL}{entry}{entry}"));
-        let error = document.render().expect_err("two remotes are refused");
-        assert!(matches!(error, ConfigError::SecondRemote), "{error}");
+    fn rendering_refuses_a_document_with_a_removed_setting() {
+        let document = doc(&format!("{MINIMAL}[machine]\n"));
+        let error = document.render().expect_err("a removed table");
+        assert!(matches!(error, ConfigError::RemovedKeys { .. }), "{error}");
     }
 
     #[test]

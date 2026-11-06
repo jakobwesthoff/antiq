@@ -36,7 +36,8 @@ pub trait CommandReport: Serialize {
 
 /// What every command tells about the collection itself, before its own
 /// findings, in this order: the `[collection]` keys the config does not
-/// know, a collection on an SMB or NFS mount, and the run that holds the
+/// know, the `[target]` keys it does not know, a collection on an SMB or
+/// NFS mount, and the run that holds the
 /// lock. The filesystem is probed for real.
 pub fn notes(collection: &Collection) -> Vec<Warning> {
     notes_with(collection, device::fs_kind(collection.root()))
@@ -76,6 +77,13 @@ pub(crate) fn setting_notes_with(
     for key in &unknown_keys {
         warnings.push(Warning::new(format!(
             "the key `{key}` under [collection] is unknown and ignored"
+        )));
+    }
+    let mut unknown_target_keys = collection.config().unknown_target_keys.clone();
+    unknown_target_keys.sort();
+    for key in &unknown_target_keys {
+        warnings.push(Warning::new(format!(
+            "the key `{key}` under [target] is unknown and ignored"
         )));
     }
     match fs_kind {
@@ -136,6 +144,21 @@ mod tests {
             [
                 "the key `bogus` under [collection] is unknown and ignored",
                 "the key `idle_dyas` under [collection] is unknown and ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_unknown_target_key_is_a_note_after_the_collection_ones() {
+        let (_temp, collection) =
+            collection_with("bogus = 1\n[target]\nrsynk = \"x\"\nfsync = false\nalpha = 1");
+        let notes = notes_with(&collection, Ok(FsKind::Local));
+        assert_eq!(
+            messages(&notes),
+            [
+                "the key `bogus` under [collection] is unknown and ignored",
+                "the key `alpha` under [target] is unknown and ignored",
+                "the key `rsynk` under [target] is unknown and ignored",
             ]
         );
     }
