@@ -155,11 +155,6 @@ command_line!(
     ["archive", "piece", "--dry-run"]
 );
 command_line!(
-    unearth,
-    "unearth",
-    ["unearth", "piece", "--version", "2026-11-04T090211", "-n"]
-);
-command_line!(
     fork,
     "fork",
     ["fork", "piece", "--version", "v", "--name", "copy", "-n"]

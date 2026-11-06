@@ -553,10 +553,12 @@ through a symlink, and a name that is already taken fails the extraction.
 Directories keep owner access while their members are written; once all
 members exist, the stored modification time and then the stored mode of
 every directory are set, the deepest first, and the target's modification
-time last. A symlink gets its stored mode where the platform can change it
-(macOS) and keeps the platform's mode where it cannot (Linux). The
-compressed stream is read to its end, so a failing content checksum or
-data after the end of the tar stream fails the extraction. (ADR 0050)
+time last; an unearth writes `.antiq-restored` into the top after that,
+which changes the top's modification time. A symlink gets its stored mode
+where the platform can change it (macOS) and keeps the platform's mode
+where it cannot (Linux). The compressed stream is read to its end, so a
+failing content checksum or data after the end of the tar stream fails the
+extraction. (ADR 0050)
 
 Archives are compressed with zstd at level 19 with long-distance matching
 and a 128 MiB window, at the default job size of 64 MiB. (ADR 0051) Every
@@ -975,7 +977,10 @@ checks it would make. (ADR 0061)
   path that the volume finds under another spelling than the path's
   (another case, or another Unicode normalisation) refuses too. Folders
   above the destination that do not exist are created; a failure before the
-  rename removes what was created.
+  rename removes what was created; a crash between creating them and the
+  rename leaves them empty. A destination whose nearest existing folder is
+  on another volume than `.antiq/tmp/` is refused as a mount point, before
+  anything is extracted.
 - **Order:** extract into `.antiq/tmp/extract/<n>/`; verify every entry against the
   listing; write `.antiq-restored` at the staged top; flush every
   extracted file and directory; check the destination path; rename into place;
@@ -995,6 +1000,28 @@ checks it would make. (ADR 0061)
   run"). The idle clock starts at its time.
 - There is no reclaim: an unearthed folder that is archived again,
   changed or not, becomes a new version.
+- A failure after the rename (the flush of the folder, the deletion of the
+  version or the rewrite of the marker) leaves the folder in place. The run reports `unearthed` as
+  true with a warning that names what failed, exits 3, and the repairs of
+  the next run finish it. No room for the version (the unpacked size of the
+  listing against the free space of `.antiq/tmp/`) skips it before anything
+  is written: exit 3, `unearthed` false.
+- `-n` prints a `Would unearth` line for the unearth and one indented
+  `check` line per check. It makes the checks of the version, of the
+  destination and of the free space. A tree that repair 4 would give back to
+  the destination makes it taken, and a destination on another volume than
+  `.antiq/tmp/` is refused as a mount point. The checks of the member names
+  and of the extracted tree are named and not run, as they need the
+  extraction, which writes into `.antiq/tmp/`. Without room for the version
+  `-n` prints a `Would skip` line instead and exits 3. A dry run chooses
+  among the versions as they are, and a refusal is softened into a warning
+  only when a planned repair that deletes sidecars, a version or an empty
+  folder names the piece's path as given.
+- The top of the unearthed folder has the modification time of the last
+  write of `.antiq-restored`, not the archived one.
+- On a terminal the version is named by its local time, with the UTC offset
+  where another version of the piece renders alike; in a pipe it is named by
+  its stamp.
 
 Before extracting, `unearth` checks every member name against the volume it extracts to:
 names it cannot hold, name lengths, and names that collide under its case
@@ -1781,4 +1808,17 @@ and `damaged_versions` adds `"reasons"`, a list of texts. `doomed` holds
 `directory_not_writable` or `null`; `spelling` holds `{"live", "stored"}`.
 `recovered`, `trash`, `unparsable_files` and the paths of `doomed` are
 relative to `.antiq/`. While the lock is held, a `note` field names the
-holder. The keys that the other commands add are not yet established.
+holder.
+
+`unearth` has `unearthed` (false when the version did not fit), `piece`,
+`stamp`, `version` (the time of the stamp in UTC, RFC 3339), `path`,
+`bytes` (the unpacked size), `repairs` (the repairs done at the start of
+the run, as in a dry run), `warnings`, and, only when no room was found,
+`skipped` as `{"reason": "no_space", "needed", "available"}` in bytes.
+A dry run has `dry_run`, `actions` and `warnings`; after the repairs it
+lists one action `{"action": "unearth", "piece", "stamp", "version",
+"path", "bytes", "checks"}` with `checks` in the order `version`,
+`destination`, `free_space`, `member_names`, `extracted_tree`. Without room
+for the version the action has `skipped` as above and the exit status is 3.
+
+The keys that the other commands add are not yet established.

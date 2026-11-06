@@ -21,6 +21,7 @@ use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
 use crate::versions::VersionsError;
 use crate::versions::damage::Places;
+use crate::versions::stamp::Stamp;
 use crate::versions::store;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -87,6 +88,10 @@ pub struct UnearthAction {
     /// Set when the version would not fit: nothing would be unearthed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<SkippedNote>,
+    /// The complete versions of the piece, which tell the local labels of
+    /// the console apart.
+    #[serde(skip)]
+    pub siblings: Vec<Stamp>,
 }
 
 impl PlanAction for UnearthAction {
@@ -137,6 +142,9 @@ pub struct UnearthReport {
     /// not be dealt with.
     #[serde(skip)]
     pub unfinished: bool,
+    /// The complete versions of the piece before the run.
+    #[serde(skip)]
+    pub siblings: Vec<Stamp>,
 }
 
 impl CommandReport for UnearthReport {
@@ -257,6 +265,25 @@ impl Run<'_> {
         )
     }
 
+    /// The stamps of the complete versions of `piece`; none when the store
+    /// cannot be read, which only costs the console its disambiguation.
+    fn siblings(&self, piece: &RelPath) -> Vec<Stamp> {
+        store::scan(self.places.pieces_dir)
+            .ok()
+            .and_then(|scan| scan.pieces.into_iter().find(|stored| &stored.path == piece))
+            .map(|stored| {
+                let mut stamps: Vec<Stamp> = stored
+                    .versions
+                    .iter()
+                    .filter(|version| !version.is_incomplete())
+                    .map(|version| version.stamp)
+                    .collect();
+                stamps.sort();
+                stamps
+            })
+            .unwrap_or_default()
+    }
+
     /// What a run would start with and do, without changing anything. A
     /// refusal that a planned repair concerns is a warning, as the repair
     /// may remove its cause. The checks that write into `.antiq/tmp/` are
@@ -321,6 +348,7 @@ impl Run<'_> {
                 needed,
                 available,
             }),
+            siblings: self.siblings(&chosen.piece),
         });
         Ok(Outcome::DryRun(dry_plan(plan, warnings)))
     }
@@ -355,6 +383,7 @@ impl Run<'_> {
             repairs: guard.repaired().to_vec(),
             warnings: Vec::new(),
             unfinished: false,
+            siblings: self.siblings(&chosen.piece),
         };
         match brought {
             Brought::Skipped {

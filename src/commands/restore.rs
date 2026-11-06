@@ -2424,6 +2424,22 @@ mod bring_tests {
     }
 
     #[test]
+    fn the_top_carries_the_time_of_the_marker_write_not_the_archived_one() {
+        let mut world = World::new();
+        let archived = std::time::UNIX_EPOCH + std::time::Duration::from_secs(MTIME as u64);
+        fs::File::open(world.source.path("projects/scanner"))
+            .expect("opens the top")
+            .set_modified(archived)
+            .expect("sets the time");
+        let mut store = Store::new();
+        store.add_version(&world.source, "projects/scanner", STAMP);
+        world.store = store;
+        done(world.run(&world.spy()));
+        let top = fs::metadata(world.destination()).expect("destination");
+        assert_ne!(top.mtime(), MTIME);
+    }
+
+    #[test]
     fn the_marker_holds_the_time_and_the_version_and_staging_is_empty() {
         let world = World::new();
         let (time, warnings) = done(world.run(&world.spy()));

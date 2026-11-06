@@ -1,0 +1,352 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! `antiq unearth` seen from outside the binary, on stores the scenario
+//! harness writes by hand. The harness runs every command under
+//! `TZ=Pacific/Auckland`, which is +13:00 in November 2026 and +12:00 in
+//! September 2026.
+
+mod support;
+
+use std::fs;
+use support::cmd::{hold_lock, snapshot};
+use support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use support::scenario::world::{Mode, Setup, World};
+
+use serde_json::Value;
+
+const NEW: &str = "2026-11-04T090211";
+const OLD: &str = "2026-09-03T121500";
+
+fn world(mode: Mode, build: impl FnOnce(&mut CollectionBuilder)) -> World {
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["projects/*", "tools/*"]);
+    build(&mut builder);
+    World::new(Setup::new(builder.finish()), mode)
+}
+
+fn scanner(builder: &mut CollectionBuilder) {
+    builder
+        .version(
+            "projects/scanner",
+            OLD,
+            &[("src/main.rs", "fn main() {}\n")],
+        )
+        .version(
+            "projects/scanner",
+            NEW,
+            &[("src/main.rs", "fn main() {}\n"), ("README", "scan\n")],
+        )
+        .version("tools/scan-old", OLD, &[("run.sh", "echo\n")]);
+}
+
+fn marker(world: &World) -> String {
+    fs::read_to_string(world.collection().path("projects/scanner/.antiq-restored"))
+        .expect("the marker exists")
+}
+
+#[test]
+fn a_piece_by_path_comes_back_and_its_newest_version_goes() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, scanner);
+        let run = world.run(&["unearth", "projects/scanner"]);
+        run.expect_code(0)
+            .keys(&[
+                "format",
+                "command",
+                "unearthed",
+                "piece",
+                "stamp",
+                "version",
+                "path",
+                "bytes",
+                "repairs",
+                "warnings",
+            ])
+            .text_only(|out| {
+                assert_eq!(out, format!("Unearthed projects/scanner (version {NEW})\n"));
+            })
+            .json_only(|json| {
+                assert_eq!(json["command"], "unearth");
+                assert_eq!(json["unearthed"], true);
+                assert_eq!(json["stamp"], NEW);
+                assert_eq!(json["version"], "2026-11-04T09:02:11Z");
+                assert_eq!(json["path"], "projects/scanner");
+            });
+        assert!(world.collection().path("projects/scanner/README").exists());
+        assert!(marker(&world).starts_with("restored "));
+        assert!(!marker(&world).contains("version"), "{}", marker(&world));
+        let list = world.run(&["list"]);
+        list.text_only(|out| {
+            assert!(out.contains(OLD) && !out.contains(NEW), "{out:?}");
+        });
+    }
+}
+
+#[test]
+fn a_search_word_names_the_piece() {
+    let world = world(Mode::Text, scanner);
+    world.run(&["unearth", "scan-old"]).expect_code(0);
+    assert!(world.collection().path("tools/scan-old/run.sh").exists());
+}
+
+#[test]
+fn a_version_is_named_by_its_local_date() {
+    let world = world(Mode::Text, scanner);
+    // 12:15:00 UTC on September 3rd is 00:15 on the 4th at +12:00.
+    world
+        .run(&["unearth", "projects/scanner", "--version", "2026-09-04"])
+        .expect_code(0);
+    assert!(
+        world
+            .collection()
+            .path("projects/scanner/src/main.rs")
+            .exists()
+    );
+    assert!(!world.collection().path("projects/scanner/README").exists());
+}
+
+#[test]
+fn a_dry_run_names_the_version_the_destination_and_the_checks_and_changes_nothing() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, scanner);
+        let before = snapshot(&world.collection().root());
+        let run = world.run(&["unearth", "projects/scanner", "-n"]);
+        run.expect_code(0)
+            .keys(&["format", "command", "dry_run", "actions", "warnings"])
+            .text_only(|out| {
+                let lines: Vec<&str> = out.lines().collect();
+                assert_eq!(
+                    lines[0],
+                    format!("Would unearth projects/scanner (version {NEW})")
+                );
+                assert_eq!(lines.len(), 6, "{out:?}");
+                assert!(lines[1].starts_with("  check "), "{out:?}");
+                assert!(
+                    lines[3].starts_with("  check there is room for "),
+                    "{out:?}"
+                );
+                assert!(lines[4].contains("(not run by -n)"), "{out:?}");
+                assert!(lines[5].contains("(not run by -n)"), "{out:?}");
+            })
+            .json_only(|json| {
+                let action = &json["actions"][0];
+                assert_eq!(action["action"], "unearth");
+                assert_eq!(action["stamp"], NEW);
+                assert_eq!(action["path"], "projects/scanner");
+                assert_eq!(
+                    action["checks"],
+                    serde_json::json!([
+                        "version",
+                        "destination",
+                        "free_space",
+                        "member_names",
+                        "extracted_tree"
+                    ])
+                );
+            });
+        assert_eq!(snapshot(&world.collection().root()), before);
+    }
+}
+
+#[test]
+fn a_held_lock_stops_a_real_run_and_is_named_by_a_dry_run() {
+    let world = world(Mode::Json, scanner);
+    let _lock = hold_lock(&world.collection().root());
+    let run = world.run(&["unearth", "projects/scanner"]);
+    run.expect_code(1);
+    assert_eq!(run.error_kind().as_deref(), Some("lock_held"));
+    run.json_only(|json| {
+        assert!(json["error"]["pid"].is_u64(), "{json}");
+        assert!(json["error"]["started"].is_string(), "{json}");
+    });
+}
+
+#[test]
+fn a_dry_run_with_the_lock_held_names_the_holder() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, scanner);
+        let _lock = hold_lock(&world.collection().root());
+        let before = snapshot(&world.collection().root());
+
+        let run = world.run(&["unearth", "projects/scanner", "-n"]);
+
+        run.expect_code(0)
+            .keys(&["format", "command", "dry_run", "lock_held", "actions"]);
+        run.text_only(|out| {
+            let line = format!("The lock is held by pid {}, started ", std::process::id());
+            assert!(out.starts_with(&line), "{out:?}");
+            assert_eq!(out.lines().count(), 1);
+        });
+        run.json_only(|json| {
+            assert_eq!(json["dry_run"], true);
+            assert_eq!(json["lock_held"]["pid"], std::process::id());
+            assert!(json["lock_held"]["started"].is_string());
+            assert_eq!(json["actions"], Value::Array(Vec::new()));
+        });
+        assert_eq!(snapshot(&world.collection().root()), before);
+    }
+}
+
+#[test]
+fn a_damaged_version_is_refused_with_the_three_remedies() {
+    let world = world(Mode::Text, scanner);
+    world
+        .collection()
+        .damage_truncate_archive("projects/scanner", NEW);
+    let run = world.run(&["unearth", "projects/scanner"]);
+    run.expect_code(1);
+    for word in ["fork", "rebuild", "copied back"] {
+        assert!(run.stderr.contains(word), "{word}: {:?}", run.stderr);
+    }
+    assert!(!world.collection().path("projects").exists());
+}
+
+#[test]
+fn an_ambiguous_word_lists_its_candidates() {
+    let world = world(Mode::Json, scanner);
+    let run = world.run(&["unearth", "scan"]);
+    run.expect_code(1);
+    assert_eq!(run.error_kind().as_deref(), Some("ambiguous_reference"));
+    run.json_only(|json| {
+        assert_eq!(
+            json["error"]["candidates"].as_array().map(Vec::len),
+            Some(2)
+        );
+    });
+}
+
+#[test]
+fn an_unknown_piece_and_an_unknown_version_are_refused() {
+    let world = world(Mode::Json, scanner);
+    let run = world.run(&["unearth", "nothing-like-it"]);
+    run.expect_code(1);
+    assert_eq!(run.error_kind().as_deref(), Some("unknown_reference"));
+    let run = world.run(&["unearth", "projects/scanner", "--version", "1999"]);
+    run.expect_code(1);
+    run.json_only(|json| {
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(NEW)),
+            "{json}"
+        );
+    });
+    let run = world.run(&["unearth", "projects/scanner", "--version", "2026"]);
+    run.expect_code(1);
+}
+
+#[test]
+fn an_empty_piece_is_a_usage_error() {
+    let world = world(Mode::Json, scanner);
+    let run = world.run(&["unearth", ""]);
+    run.expect_code(2);
+    assert_eq!(run.error_kind().as_deref(), Some("usage"));
+}
+
+#[test]
+fn a_taken_destination_is_refused() {
+    let world = world(Mode::Text, scanner);
+    fs::create_dir_all(world.collection().path("projects/scanner")).expect("takes the place");
+    let run = world.run(&["unearth", "projects/scanner"]);
+    run.expect_code(1);
+    assert!(run.stderr.contains("it is taken"), "{:?}", run.stderr);
+}
+
+/// Makes the listing of the only version say that the file is far larger than
+/// any volume has room for. Its totals agree, so only the free-space check
+/// refuses.
+fn oversize_listing(world: &World) {
+    let path = world
+        .collection()
+        .version_files("projects/scanner", NEW)
+        .listing;
+    let text = zstd::stream::decode_all(&fs::read(&path).expect("reads")[..]).expect("decodes");
+    let text = String::from_utf8(text)
+        .expect("text")
+        .replace("# bytes         6", "# bytes         9000000000000000")
+        .replace("                 6  a.txt", "  9000000000000000  a.txt");
+    fs::write(
+        &path,
+        zstd::stream::encode_all(text.as_bytes(), 3).expect("compresses"),
+    )
+    .expect("writes");
+}
+
+#[test]
+fn a_dry_run_that_finds_no_room_names_the_skip_and_exits_3() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, |b| {
+            b.version("projects/scanner", NEW, &[("a.txt", "hello\n")]);
+        });
+        oversize_listing(&world);
+        let before = snapshot(&world.collection().root());
+
+        let run = world.run(&["unearth", "projects/scanner", "-n"]);
+
+        run.expect_code(3);
+        run.text_only(|out| {
+            assert_eq!(
+                out,
+                format!(
+                    "Would skip projects/scanner (version {NEW}): 9000 TB needed, {} free\n",
+                    out.rsplit_once(", ")
+                        .and_then(|(_, rest)| rest.strip_suffix(" free\n"))
+                        .expect("the free space ends the line")
+                )
+            );
+        });
+        run.json_only(|json| {
+            let skipped = &json["actions"][0]["skipped"];
+            assert_eq!(skipped["reason"], "no_space");
+            assert_eq!(skipped["needed"], 9_000_000_000_000_000_u64);
+            assert!(skipped["available"].is_u64(), "{json}");
+        });
+        assert_eq!(snapshot(&world.collection().root()), before);
+    }
+}
+
+#[test]
+fn a_version_that_does_not_fit_is_skipped_with_exit_3_and_nothing_changes() {
+    let world = world(Mode::Json, |b| {
+        b.version("projects/scanner", NEW, &[("a.txt", "hello\n")]);
+    });
+    oversize_listing(&world);
+    let before = snapshot(&world.collection().root());
+
+    let run = world.run(&["unearth", "projects/scanner"]);
+    let mut after = snapshot(&world.collection().root());
+    // A real run leaves the lock file behind.
+    after.remove(".antiq/lock");
+
+    run.expect_code(3).json_only(|json| {
+        assert_eq!(json["unearthed"], false);
+        assert_eq!(json["skipped"]["reason"], "no_space");
+        assert_eq!(json["skipped"]["needed"], 9_000_000_000_000_000_u64);
+    });
+    assert_eq!(after, before);
+    assert!(
+        fs::read_dir(world.collection().path(".antiq/tmp"))
+            .expect("lists")
+            .all(|item| item.expect("item").file_name() == "pack"),
+        "nothing is left in tmp/"
+    );
+}
+
+#[test]
+fn a_listing_of_a_newer_format_is_refused_with_its_own_kind() {
+    let world = world(Mode::Json, scanner);
+    fs::write(
+        world
+            .collection()
+            .version_files("projects/scanner", NEW)
+            .listing,
+        zstd::stream::encode_all(&b"# antiq listing 99\n#\n"[..], 3).expect("compresses"),
+    )
+    .expect("writes");
+    let run = world.run(&["unearth", "projects/scanner"]);
+    run.expect_code(1);
+    assert_eq!(run.error_kind().as_deref(), Some("format_too_new"));
+}
