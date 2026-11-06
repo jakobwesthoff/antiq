@@ -1689,6 +1689,7 @@ mod choice_tests {
         let mut tree = Tree::new();
         tree.file("projects/scanner/main.rs", "fn main() {}");
         tree.file("projects/scanner/src/lib.rs", "pub fn f() {}");
+        tree.file("projects/scanner-next/main.rs", "fn main() {}");
         tree.file("tools/scan-old/run.sh", "echo");
         tree
     }
@@ -1904,6 +1905,43 @@ mod choice_tests {
                 .expect("an explained error has a help");
             assert!(help.to_string().contains("forget"), "{error}");
         }
+    }
+
+    #[test]
+    fn the_path_of_an_incomplete_piece_is_not_taken_for_a_piece_that_fits_it_loosely() {
+        let mut world = World::new();
+        world.add("projects/scanner-next", NEW);
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Archive);
+        let error = world
+            .choose("projects/scanner", None)
+            .expect_err("no archive");
+        assert!(
+            matches!(
+                error,
+                RestoreError::Reference(ReferenceError::OnlyIncomplete { .. })
+            ),
+            "{error:?}"
+        );
+        let collection =
+            Collection::find(world.collection.root()).expect("the collection is found");
+        let error = choose_version_to_fork(
+            &collection,
+            &world.store.places(),
+            world.collection.root(),
+            OsStr::new("projects/scanner"),
+            None,
+            &TimeZone::UTC,
+        )
+        .expect_err("no archive");
+        assert!(
+            matches!(
+                error,
+                RestoreError::Reference(ReferenceError::OnlyIncomplete { .. })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

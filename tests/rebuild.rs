@@ -506,6 +506,23 @@ fn a_piece_whose_only_version_is_incomplete_is_unknown_to_rebuild() {
 }
 
 #[test]
+fn the_path_of_an_incomplete_piece_is_not_taken_for_a_piece_that_fits_it_loosely() {
+    let build = |builder: &mut CollectionBuilder| {
+        one_version(builder);
+        builder.version("projects/scanner-next", STAMP, &[("README", "next\n")]);
+    };
+    both(build, |world| {
+        remove(&files(world, STAMP).archive);
+        let run = assert_refused(world, &["rebuild", PIECE, STAMP]);
+        run.json_only(|_| assert_eq!(run.error_kind().as_deref(), Some("unknown_reference")));
+        assert_all_in(
+            &error_text(&run),
+            &["holds only incomplete versions", "forget"],
+        );
+    });
+}
+
+#[test]
 fn a_listing_of_a_newer_format_is_refused_also_beside_a_missing_or_corrupt_checksum_file() {
     for checksum in ["intact", "missing", "corrupt"] {
         both(one_version, |world| {

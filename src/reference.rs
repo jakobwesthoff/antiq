@@ -427,17 +427,26 @@ pub fn resolve_stored_piece(
     scan: &StoreScan,
     word: SearchWord,
 ) -> Result<RelPath, ReferenceError> {
-    match resolve_piece(
-        collection,
-        cwd,
-        given,
-        &CandidateSet::store(collection, scan),
-        word,
-    ) {
+    let store = CandidateSet::store(collection, scan);
+    let wider = CandidateSet::store_and_sidecar_only(collection, scan);
+
+    // The exact path of a sidecar-only folder is what the person meant, so
+    // no fuzzy match may steer them to another piece first.
+    let reference = escape(given.as_bytes());
+    let path = resolve_path(collection, cwd, Path::new(given))?;
+    if store.find_path(&path, &reference)?.is_none()
+        && let Some(piece) = wider.find_path(&path, &reference)?
+    {
+        return Err(ReferenceError::OnlyIncomplete {
+            reference,
+            piece: piece.to_string(),
+        });
+    }
+
+    match resolve_piece(collection, cwd, given, &store, word) {
         Err(ReferenceError::Unknown { reference, closest }) => {
             // Whatever this finds only words the error, it never acts, so a
             // search word may find its one folder here.
-            let wider = CandidateSet::store_and_sidecar_only(collection, scan);
             Err(
                 match resolve_piece(collection, cwd, given, &wider, SearchWord::Acts) {
                     Ok(piece) => ReferenceError::OnlyIncomplete {
@@ -1125,6 +1134,28 @@ mod tests {
             resolve_offering(&fx, &fx.root(), &set, &example).expect("acts"),
             path("notes/100%25")
         );
+    }
+
+    #[test]
+    fn the_exact_path_of_a_sidecar_only_folder_is_incomplete_whatever_else_fits_it() {
+        let mut fx = Fixture::new();
+        store_version(&mut fx, "projects/go-next-engine", &VersionFile::ALL);
+        store_version(&mut fx, "projects/gone", &[VersionFile::Listing]);
+        let found = scan(&fx.collection.pieces_dir()).expect("scans");
+        for word in [SearchWord::OnlyOffers, SearchWord::Acts] {
+            let error = resolve_stored_piece(
+                &fx.collection,
+                &fx.root(),
+                OsStr::new("projects/gone"),
+                &found,
+                word,
+            )
+            .expect_err("incomplete");
+            assert!(
+                matches!(&error, ReferenceError::OnlyIncomplete { piece, .. } if piece == "projects/gone"),
+                "{word:?}: {error:?}"
+            );
+        }
     }
 
     #[test]
