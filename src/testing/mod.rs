@@ -250,3 +250,28 @@ mod tests {
         assert!(extra.is_file());
     }
 }
+
+#[cfg(test)]
+mod version_fixture_tests {
+    use super::tree::Tree;
+    use super::versions::Store;
+    use crate::listing;
+    use crate::versions::names::VersionFile;
+    use std::fs::File;
+
+    #[test]
+    fn the_fixture_compiles_in_the_library_and_writes_a_readable_version() {
+        let mut source = Tree::new();
+        source.file("notes/a.txt", "alpha");
+        let mut store = Store::new();
+        let version = store.add_version(&source, "notes", "2026-11-04T090211");
+
+        let scan = store.scan();
+        assert_eq!(scan.pieces.len(), 1);
+        assert_eq!(scan.pieces[0].versions[0].stamp, version.stamp);
+        let file = File::open(version.path(VersionFile::Listing)).expect("the listing exists");
+        let read = listing::read_full(file).expect("the listing reads in full");
+        assert_eq!(read.header.archive, version.names.archive);
+        assert_eq!(read.files, 1);
+    }
+}
