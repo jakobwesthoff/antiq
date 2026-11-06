@@ -15,6 +15,8 @@ pub const YELLOW: Style = AnsiColor::Yellow.on_default();
 pub const GREEN: Style = AnsiColor::Green.on_default();
 pub const MAGENTA: Style = AnsiColor::Magenta.on_default();
 pub const CYAN: Style = AnsiColor::Cyan.on_default();
+/// A piece that failed or was refused.
+pub const FAILED: Style = AnsiColor::Red.on_default().bold();
 /// The part of a name a search matched.
 pub const MATCH: Style = AnsiColor::Red.on_default().bold();
 

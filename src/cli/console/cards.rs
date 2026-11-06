@@ -1,0 +1,702 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! The cards of a long run: what a piece shows while it works and the one
+//! line it leaves behind. The same formatter writes both, so the lines on
+//! the screen during a run and the lines that remain after it look alike.
+//!
+//! [`Cards`] is a pure state. The driver feeds it messages and the time and
+//! asks it for lines; it touches no terminal.
+
+#![allow(
+    dead_code,
+    reason = "the wiring of commit 7 is its caller and removes this"
+)]
+
+use crate::cli::console::symbols::Symbols;
+use crate::cli::console::theme;
+use crate::cli::output::Style;
+use crate::cli::table::{decimal_size, mid, pad_left, sanitize, wrap};
+use crate::cli::unresolved::pasteable_line;
+use anstyle::Style as Look;
+use antiq::pin::PIN_FILE;
+use antiq::progress::{Counter, Operation, Outcome};
+use std::path::PathBuf;
+use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
+
+/// Lines are laid out for at most this many columns.
+const MAX_WIDTH: usize = 100;
+/// The columns of the size, of the result and of the time of a line.
+const SIZE: usize = 8;
+const RESULT: usize = 20;
+const TIME: usize = 4;
+/// A name never gets less than this.
+const MIN_NAME: usize = 6;
+/// The lit part of a bar without a total.
+const HEAD: usize = 4;
+/// The time between two frames of the spinner and of the moving bar.
+const FRAME_MILLIS: u128 = 100;
+
+/// Which command the cards belong to. It decides the unit of a count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Archive,
+    Push,
+    Unearth,
+}
+
+pub(crate) struct Config {
+    pub kind: Kind,
+    pub style: Style,
+    /// The `-C` of the run, for the commands a card tells the reader to type.
+    pub directory: Option<PathBuf>,
+}
+
+/// An event of the library, owned so that it can cross a thread.
+pub(crate) enum Msg {
+    Planned(Vec<(String, u64)>),
+    Started {
+        name: String,
+        bytes: u64,
+        label: Option<String>,
+    },
+    Operation {
+        name: String,
+        operation: Operation,
+        counter: Counter,
+    },
+    Paused {
+        name: String,
+    },
+    Finished {
+        name: String,
+        bytes: u64,
+        outcome: Outcome,
+    },
+    Dropped {
+        name: String,
+    },
+}
+
+/// A piece that has finished and waits for its line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Ready {
+    pub name: String,
+    /// `None` for a piece that never sent an event.
+    pub bytes: Option<u64>,
+    pub label: Option<String>,
+    pub outcome: Outcome,
+    /// `None` for a piece that never sent an event.
+    pub elapsed: Option<Duration>,
+}
+
+/// How a part of a summary looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tone {
+    Ok,
+    Plain,
+    Bad,
+    Warn,
+}
+
+/// The last line of a run: its mark follows `tone`, its parts are joined
+/// by the separator, and the time the run took ends it.
+pub(crate) struct Summary {
+    pub tone: Tone,
+    pub parts: Vec<(String, Tone)>,
+    pub took: Duration,
+}
+
+/// Where a piece is in its run.
+enum Phase {
+    /// Expected, not started.
+    Waiting,
+    /// Has a card. The operation is unknown until the first one is sent.
+    Running(Option<(Operation, Counter)>),
+    /// Started, off its card until its next operation.
+    Paused,
+    Done,
+}
+
+struct Item {
+    name: String,
+    bytes: u64,
+    label: Option<String>,
+    phase: Phase,
+    /// The time of the segments that have closed.
+    elapsed: Duration,
+    /// When the open segment began, while the piece is running.
+    since: Option<Duration>,
+    /// The place in the row of cards: pieces keep the order they started in.
+    order: u64,
+}
+
+pub(crate) struct Cards {
+    config: Config,
+    items: Vec<Item>,
+    next_order: u64,
+    ready: Vec<Ready>,
+}
+
+/// The columns of a line at a terminal width.
+struct Layout {
+    name: usize,
+    size: bool,
+    bar: usize,
+    detail: bool,
+}
+
+impl Layout {
+    fn of(cols: usize) -> Layout {
+        let width = cols.min(MAX_WIDTH);
+        let size = width >= 50;
+        let fixed = 4 + 2 + RESULT + 2 + TIME + if size { 2 + SIZE } else { 0 };
+        Layout {
+            name: width.saturating_sub(fixed).max(MIN_NAME),
+            size,
+            bar: match width {
+                70.. => 40,
+                40.. => 12,
+                _ => 10,
+            },
+            detail: width >= 60,
+        }
+    }
+}
+
+impl Cards {
+    pub(crate) fn new(config: Config) -> Cards {
+        Cards {
+            config,
+            items: Vec::new(),
+            next_order: 0,
+            ready: Vec::new(),
+        }
+    }
+
+    fn position(&self, name: &str) -> Option<usize> {
+        self.items.iter().position(|item| item.name == name)
+    }
+
+    /// The index of the piece, which a message for an unknown one adds.
+    fn find_or_add(&mut self, name: &str) -> usize {
+        self.position(name).unwrap_or_else(|| {
+            self.items.push(Item {
+                name: name.to_string(),
+                bytes: 0,
+                label: None,
+                phase: Phase::Waiting,
+                elapsed: Duration::ZERO,
+                since: None,
+                order: 0,
+            });
+            self.items.len() - 1
+        })
+    }
+
+    /// Puts the piece on a card, opening a segment of its time.
+    fn open(&mut self, index: usize, now: Duration) {
+        let order = self.next_order;
+        let item = &mut self.items[index];
+        if matches!(item.phase, Phase::Running(_) | Phase::Done) {
+            return;
+        }
+        item.phase = Phase::Running(None);
+        item.since = Some(now);
+        item.order = order;
+        self.next_order += 1;
+    }
+
+    fn close_segment(item: &mut Item, now: Duration) {
+        if let Some(since) = item.since.take() {
+            item.elapsed += now.saturating_sub(since);
+        }
+    }
+
+    pub(crate) fn apply(&mut self, msg: Msg, now: Duration) {
+        match msg {
+            Msg::Planned(planned) => {
+                for (name, bytes) in planned {
+                    if self.position(&name).is_none() {
+                        let index = self.find_or_add(&name);
+                        self.items[index].bytes = bytes;
+                    }
+                }
+            }
+            Msg::Started { name, bytes, label } => {
+                let index = self.find_or_add(&name);
+                self.open(index, now);
+                let item = &mut self.items[index];
+                item.bytes = bytes;
+                item.label = label;
+            }
+            Msg::Operation {
+                name,
+                operation,
+                counter,
+            } => {
+                let index = self.find_or_add(&name);
+                self.open(index, now);
+                if let Phase::Running(current) = &mut self.items[index].phase {
+                    *current = Some((operation, counter));
+                }
+            }
+            Msg::Paused { name } => {
+                if let Some(index) = self.position(&name)
+                    && matches!(self.items[index].phase, Phase::Running(_))
+                {
+                    let item = &mut self.items[index];
+                    Self::close_segment(item, now);
+                    item.phase = Phase::Paused;
+                }
+            }
+            Msg::Finished {
+                name,
+                bytes,
+                outcome,
+            } => {
+                let index = self.find_or_add(&name);
+                let item = &mut self.items[index];
+                if matches!(item.phase, Phase::Done) {
+                    return;
+                }
+                Self::close_segment(item, now);
+                item.phase = Phase::Done;
+                self.ready.push(Ready {
+                    name,
+                    bytes: Some(bytes),
+                    label: item.label.clone(),
+                    outcome,
+                    elapsed: Some(item.elapsed),
+                });
+            }
+            Msg::Dropped { name } => {
+                if let Some(index) = self.position(&name)
+                    && matches!(self.items[index].phase, Phase::Waiting)
+                {
+                    self.items.remove(index);
+                }
+            }
+        }
+    }
+
+    /// The pieces that finished since the last call, in the order they did.
+    pub(crate) fn take_ready(&mut self) -> Vec<Ready> {
+        std::mem::take(&mut self.ready)
+    }
+
+    /// Whether the piece has finished, whether or not its line was taken.
+    pub(crate) fn has_finished(&self, name: &str) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.name == name && matches!(item.phase, Phase::Done))
+    }
+
+    // =====================================================
+    // Looks
+    // =====================================================
+
+    fn symbols(&self) -> Symbols {
+        self.config.style.symbols()
+    }
+
+    fn paint(&self, look: Look, text: &str) -> String {
+        if self.config.style.color && !text.is_empty() {
+            format!("{look}{text}{look:#}")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn tone_look(tone: Tone) -> Look {
+        match tone {
+            Tone::Ok => theme::GREEN,
+            Tone::Plain => Look::new(),
+            Tone::Bad => theme::FAILED,
+            Tone::Warn => theme::YELLOW,
+        }
+    }
+
+    fn tone_symbol(&self, tone: Tone) -> String {
+        let symbols = self.symbols();
+        let text = match tone {
+            Tone::Ok | Tone::Plain => symbols.done,
+            Tone::Bad => symbols.error,
+            Tone::Warn => symbols.warning,
+        };
+        self.paint(Self::tone_look(tone), text)
+    }
+
+    /// The name of a piece and, after an unearth, its version, cut to
+    /// `width` columns: the cell is returned painted with its display width.
+    fn name_cell(&self, name: &str, label: Option<&str>, width: usize) -> (String, usize) {
+        let ellipsis = self.symbols().ellipsis;
+        let name = sanitize(name);
+        let label = label.map(|label| format!("version {}", sanitize(label)));
+        if let Some(label) = label {
+            let room = width.saturating_sub(1 + label.width());
+            if room >= 12 {
+                let shown = mid(&name, room, ellipsis);
+                let cell_width = shown.width() + 1 + label.width();
+                return (
+                    format!(
+                        "{} {}",
+                        self.paint(theme::BOLD, &shown),
+                        self.paint(theme::DIM, &label)
+                    ),
+                    cell_width,
+                );
+            }
+        }
+        let shown = mid(&name, width, ellipsis);
+        let cell_width = shown.width();
+        (self.paint(theme::BOLD, &shown), cell_width)
+    }
+
+    fn size_cell(&self, bytes: Option<u64>, layout: &Layout) -> String {
+        if !layout.size {
+            return String::new();
+        }
+        let size = bytes.map(decimal_size).unwrap_or_default();
+        format!("  {}", pad_left(&size, SIZE))
+    }
+
+    fn time_text(elapsed: Duration) -> String {
+        let seconds = elapsed.as_secs();
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+
+    // =====================================================
+    // The line of a finished piece
+    // =====================================================
+
+    fn outcome_tone(outcome: &Outcome) -> Tone {
+        match outcome {
+            Outcome::Files(_) | Outcome::Changes { .. } => Tone::Ok,
+            Outcome::Refused(_) | Outcome::Unfinished(_) => Tone::Bad,
+            Outcome::Skipped(_) | Outcome::NoRoom { .. } => Tone::Warn,
+        }
+    }
+
+    fn result_text(outcome: &Outcome) -> String {
+        match outcome {
+            Outcome::Files(1) => "1 file".to_string(),
+            Outcome::Files(count) => format!("{count} files"),
+            Outcome::Changes {
+                created,
+                updated,
+                deleted,
+            } => {
+                let parts: Vec<String> = [
+                    (created, "created"),
+                    (updated, "updated"),
+                    (deleted, "deleted"),
+                ]
+                .into_iter()
+                .filter(|(count, _)| **count > 0)
+                .map(|(count, word)| format!("{count} {word}"))
+                .collect();
+                if parts.is_empty() {
+                    "no changes".to_string()
+                } else {
+                    parts.join(", ")
+                }
+            }
+            Outcome::Refused(_) => "refused".to_string(),
+            Outcome::Skipped(_) | Outcome::NoRoom { .. } => "skipped".to_string(),
+            Outcome::Unfinished(_) => "unfinished".to_string(),
+        }
+    }
+
+    /// The paragraphs under a piece that did not finish cleanly.
+    fn reasons(&self, ready: &Ready) -> Vec<String> {
+        match &ready.outcome {
+            Outcome::Refused(reasons) => reasons
+                .iter()
+                .map(|reason| self.reason_text(&ready.name, reason))
+                .collect(),
+            Outcome::Skipped(message) | Outcome::Unfinished(message) => vec![sanitize(message)],
+            Outcome::NoRoom { needed, available } => vec![format!(
+                "{} needed, {} free",
+                decimal_size(*needed),
+                decimal_size(*available)
+            )],
+            Outcome::Files(_) | Outcome::Changes { .. } => Vec::new(),
+        }
+    }
+
+    /// A named piece that carries a pin is told how to release it; every
+    /// other reason is shown as the library words it.
+    fn reason_text(&self, name: &str, reason: &str) -> String {
+        if reason == format!("pinned: {name}/{PIN_FILE}") {
+            let command = pasteable_line(
+                self.config.directory.as_deref(),
+                &["unpin".to_string(), name.to_string()],
+            );
+            return format!(
+                "pinned, so it stays as it is. {} releases it",
+                sanitize(&command)
+            );
+        }
+        sanitize(reason)
+    }
+
+    /// The one line of a finished piece and, under it, the reasons it did
+    /// not finish cleanly, wrapped to the width and never cut.
+    pub(crate) fn finished_lines(&self, ready: &Ready, cols: usize) -> Vec<String> {
+        let layout = Layout::of(cols);
+        let tone = Self::outcome_tone(&ready.outcome);
+        let (cell, cell_width) = self.name_cell(&ready.name, ready.label.as_deref(), layout.name);
+        let result = Self::result_text(&ready.outcome);
+        let result = format!(
+            "{}{}",
+            " ".repeat(RESULT.saturating_sub(result.width())),
+            self.paint(
+                if tone == Tone::Ok {
+                    Look::new()
+                } else {
+                    Self::tone_look(tone)
+                },
+                &result
+            )
+        );
+        let time = ready
+            .elapsed
+            .map(|elapsed| self.paint(theme::DIM, &Self::time_text(elapsed)))
+            .unwrap_or_default();
+        let line = format!(
+            "  {} {}{}{}  {}  {}",
+            self.tone_symbol(tone),
+            cell,
+            " ".repeat(layout.name.saturating_sub(cell_width)),
+            self.size_cell(ready.bytes, &layout),
+            result,
+            time
+        );
+        let mut lines = vec![line.trim_end().to_string()];
+        let room = cols.min(MAX_WIDTH).saturating_sub(4).max(10);
+        for reason in self.reasons(ready) {
+            for wrapped in wrap(&reason, room) {
+                lines.push(format!("    {}", self.bold_command(&wrapped)));
+            }
+        }
+        lines
+    }
+
+    /// Shows the `antiq ...` command of a line in bold when it is whole.
+    fn bold_command(&self, line: &str) -> String {
+        let Some(start) = line.find("antiq ") else {
+            return line.to_string();
+        };
+        let Some(end) = line.find(" releases it") else {
+            return line.to_string();
+        };
+        if end < start {
+            return line.to_string();
+        }
+        format!(
+            "{}{}{}",
+            &line[..start],
+            self.paint(theme::BOLD, &line[start..end]),
+            &line[end..]
+        )
+    }
+
+    // =====================================================
+    // The summary
+    // =====================================================
+
+    /// The last line of a run.
+    pub(crate) fn summary_line(&self, summary: &Summary) -> String {
+        let separator = format!(" {} ", self.symbols().separator);
+        let parts: Vec<String> = summary
+            .parts
+            .iter()
+            .map(|(text, tone)| self.paint(Self::tone_look(*tone), text))
+            .collect();
+        format!(
+            "{} {}   {}",
+            self.tone_symbol(summary.tone),
+            parts.join(&separator),
+            self.paint(
+                theme::DIM,
+                &format!("took {}", Self::time_text(summary.took))
+            )
+        )
+    }
+
+    // =====================================================
+    // The live region
+    // =====================================================
+
+    fn operation_word(operation: Operation) -> &'static str {
+        match operation {
+            Operation::Packing => "packing",
+            Operation::Verifying => "verifying",
+            Operation::Storing => "storing",
+            Operation::Removing => "removing",
+            Operation::Extracting => "extracting",
+        }
+    }
+
+    /// What the count of an operation counts.
+    fn unit(&self, operation: Operation) -> &'static str {
+        match (self.config.kind, operation) {
+            (Kind::Push, Operation::Storing) => "created",
+            (Kind::Push, Operation::Removing) => "deleted",
+            (Kind::Archive, Operation::Removing) => "entries",
+            _ => "files",
+        }
+    }
+
+    fn frame(now: Duration) -> usize {
+        usize::try_from(now.as_millis() / FRAME_MILLIS).unwrap_or(0)
+    }
+
+    /// The two lines of a running piece.
+    fn card(&self, item: &Item, now: Duration, layout: &Layout) -> [String; 2] {
+        let symbols = self.symbols();
+        let spinner = symbols.spinner[Self::frame(now) % symbols.spinner.len()];
+        let (cell, cell_width) = self.name_cell(&item.name, item.label.as_deref(), layout.name);
+        let current = match &item.phase {
+            Phase::Running(Some((operation, counter))) => Some((*operation, counter)),
+            _ => None,
+        };
+        let word = current.map_or("", |(operation, _)| Self::operation_word(operation));
+        let first = format!(
+            "  {} {}{}{}  {}",
+            self.paint(theme::CYAN, spinner),
+            cell,
+            " ".repeat(layout.name.saturating_sub(cell_width)),
+            self.size_cell(Some(item.bytes), layout),
+            self.paint(theme::CYAN, word)
+        );
+
+        let total = current.map_or(0, |(_, counter)| counter.total());
+        let second = if total == 0 {
+            format!("    {}", self.moving_bar(now, layout.bar))
+        } else {
+            let (operation, counter) = current.expect("a total comes from a counter");
+            let done = counter.done().min(total);
+            // Rounded, but 100 % is for a bar that is full.
+            let percent = ((u128::from(done) * 100 + u128::from(total) / 2) / u128::from(total))
+                .min(if done < total { 99 } else { 100 });
+            let mut line = format!(
+                "    {}  {}",
+                self.bar(done, total, layout.bar),
+                self.paint(theme::BOLD, &format!("{percent:>3}%"))
+            );
+            if layout.detail {
+                line.push_str("  ");
+                line.push_str(&self.paint(
+                    theme::DIM,
+                    &format!("{done}/{total} {}", self.unit(operation)),
+                ));
+            }
+            line
+        };
+        [first.trim_end().to_string(), second]
+    }
+
+    /// A bar `width` cells wide that is `done` of `total` full.
+    fn bar(&self, done: u64, total: u64, width: usize) -> String {
+        let symbols = self.symbols();
+        if done >= total {
+            return self.paint(theme::CYAN, &symbols.bar_fill.repeat(width));
+        }
+        let fill = usize::try_from(u128::from(done) * width as u128 / u128::from(total))
+            .unwrap_or(width)
+            .min(width - 1);
+        let lit = format!("{}{}", symbols.bar_fill.repeat(fill), symbols.bar_head);
+        let rest = symbols.bar_rest.repeat(width - fill - 1);
+        format!(
+            "{}{}",
+            self.paint(theme::CYAN, &lit),
+            self.paint(theme::DIM, &rest)
+        )
+    }
+
+    /// The bar of an operation whose total is not known: a short lit
+    /// stretch that runs along it and wraps around.
+    fn moving_bar(&self, now: Duration, width: usize) -> String {
+        let symbols = self.symbols();
+        let start = Self::frame(now) % width;
+        let mut lit = String::new();
+        let mut rest = String::new();
+        let mut line = String::new();
+        let flush = |cards: &Cards, lit: &mut String, rest: &mut String, line: &mut String| {
+            line.push_str(&cards.paint(theme::CYAN, lit));
+            line.push_str(&cards.paint(theme::DIM, rest));
+            lit.clear();
+            rest.clear();
+        };
+        let mut was_lit = false;
+        for cell in 0..width {
+            let is_lit = (cell + width - start) % width < HEAD;
+            if is_lit != was_lit {
+                flush(self, &mut lit, &mut rest, &mut line);
+            }
+            if is_lit {
+                lit.push_str(symbols.bar_fill);
+            } else {
+                rest.push_str(symbols.bar_rest);
+            }
+            was_lit = is_lit;
+        }
+        flush(self, &mut lit, &mut rest, &mut line);
+        line
+    }
+
+    /// The lines the screen shows while the run goes on: the cards of the
+    /// pieces that are working, then one line for the others. The region
+    /// never has more than `rows - 1` lines, so the line above it stays on
+    /// the screen.
+    pub(crate) fn region(&self, now: Duration, cols: usize, rows: usize) -> Vec<String> {
+        let layout = Layout::of(cols);
+        let mut running: Vec<&Item> = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.phase, Phase::Running(_)))
+            .collect();
+        running.sort_by_key(|item| item.order);
+        let waiting = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.phase, Phase::Waiting | Phase::Paused))
+            .count();
+
+        let cap = rows.saturating_sub(1);
+        let all_fit = running.len() * 2 + usize::from(waiting > 0) <= cap;
+        let shown = if all_fit {
+            running.len()
+        } else {
+            cap.saturating_sub(1) / 2
+        };
+        let hidden = running.len() - shown;
+
+        let mut lines = Vec::new();
+        for item in &running[..shown] {
+            lines.extend(self.card(item, now, &layout));
+        }
+        let mut counts = Vec::new();
+        if waiting > 0 {
+            counts.push(format!("{waiting} waiting"));
+        }
+        if hidden > 0 {
+            counts.push(format!("{hidden} more running"));
+        }
+        if !counts.is_empty() {
+            lines.push(format!(
+                "  {} {}",
+                self.paint(theme::DIM, self.symbols().waiting),
+                self.paint(theme::DIM, &counts.join(", "))
+            ));
+        }
+        lines
+    }
+}
+
+#[cfg(test)]
+mod tests;

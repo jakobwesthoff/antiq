@@ -26,6 +26,16 @@ pub struct Symbols {
     pub ellipsis: &'static str,
     /// Joins the parts of a one-line summary.
     pub separator: &'static str,
+    /// The frames of the mark in front of a piece that is working.
+    pub spinner: &'static [&'static str],
+    /// Marks a piece that has not started.
+    pub waiting: &'static str,
+    /// The finished part of a progress bar.
+    pub bar_fill: &'static str,
+    /// The end of the finished part of a progress bar.
+    pub bar_head: &'static str,
+    /// The part of a progress bar that is still to do.
+    pub bar_rest: &'static str,
 }
 
 const UNICODE: Symbols = Symbols {
@@ -41,6 +51,11 @@ const UNICODE: Symbols = Symbols {
     frame: "│",
     ellipsis: "…",
     separator: "·",
+    spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    waiting: "○",
+    bar_fill: "━",
+    bar_head: "╸",
+    bar_rest: "─",
 };
 
 const ASCII: Symbols = Symbols {
@@ -56,6 +71,11 @@ const ASCII: Symbols = Symbols {
     frame: "|",
     ellipsis: "...",
     separator: "-",
+    spinner: &["|", "/", "-", "\\"],
+    waiting: "o",
+    bar_fill: "=",
+    bar_head: ">",
+    bar_rest: "-",
 };
 
 impl Symbols {
