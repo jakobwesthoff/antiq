@@ -48,7 +48,12 @@ workflows), Markdown documents and the todo notes carry no header.
 
 Third-party files copied into the repository keep their own license and
 header and are listed here as exceptions, together with where their
-license text lives. There are none yet.
+license text lives.
+
+- `assets/social/fonts/Inter-Variable.ttf`: Inter, SIL Open Font License
+  1.1, text in `assets/social/fonts/Inter-OFL.txt`.
+- `assets/social/fonts/VictorMono-Variable.ttf`: Victor Mono, SIL Open
+  Font License 1.1, text in `assets/social/fonts/VictorMono-OFL.txt`.
 
 ## Documentation conventions
 
