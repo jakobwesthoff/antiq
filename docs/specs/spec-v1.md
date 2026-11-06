@@ -2112,7 +2112,9 @@ after the checks of a reclaim, and a changed one is archived with the
 loss it has at that moment, its new archive getting the history action
 `resolve`. A piece that is in use is not touched: a note says that the
 next archive takes it, the decision stays pending and the command exits
-0. A pinned piece is refused. `--fork` forks the piece, and `--skip`
+0. A pinned piece is refused. With `--dry-run`, `--replace` refuses a
+pinned piece the same way, and for a piece in use it plans nothing and
+prints the same note. `--fork` forks the piece, and `--skip`
 removes the pending decision and exits 0, while the skip of a question
 `archive` asks leaves the run at exit 3. Every executed answer removes the
 pending decision. Interactively, each pending decision is asked through

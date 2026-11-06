@@ -391,7 +391,7 @@ mod tests {
     use crate::id::{IdSource, SeqIds};
     use crate::interact::ScriptedInteraction;
     use crate::ops::archive::unearthed::tests::{At, FILE_TIME, PIECE, Scene, TITLE, asker, scene};
-    use crate::ops::archive::{RealSeams, SkipReason, Step};
+    use crate::ops::archive::{ArchiveError, RealSeams, SkipReason, Step};
     use crate::ops::unearth::tests::{ID, id, path};
     use crate::testing::{rerun_while_lock_unattributed, shared_pool};
     use crate::tracking::PendingDecision;
@@ -929,10 +929,10 @@ mod tests {
     // The dry run of an answer
     // =========================================================
 
-    fn planned(scene: &Scene, answer: Answer) -> Vec<ResolveAction> {
+    fn dry_run_of(scene: &Scene, answer: Answer) -> Result<Resolved, Error> {
         let ids = SeqIds::new(1);
         let piece = OsString::from(PIECE);
-        let resolved = rerun_while_lock_unattributed(|| {
+        rerun_while_lock_unattributed(|| {
             resolve_with(
                 &request(
                     scene,
@@ -947,11 +947,89 @@ mod tests {
                 &RealSeams,
             )
         })
-        .expect("the plan is made");
-        match resolved {
-            Resolved::Planned { plan, .. } => plan.actions,
+    }
+
+    /// The actions and the notes of the plan a dry run makes.
+    fn plan_and_notes(resolved: Result<Resolved, Error>) -> (Vec<ResolveAction>, Vec<String>) {
+        match resolved.expect("the plan is made") {
+            Resolved::Planned { plan, notes, .. } => (
+                plan.actions,
+                notes.into_iter().map(|note| note.message).collect(),
+            ),
             other => panic!("expected a plan, got {other:?}"),
         }
+    }
+
+    fn planned(scene: &Scene, answer: Answer) -> Vec<ResolveAction> {
+        plan_and_notes(dry_run_of(scene, answer)).0
+    }
+
+    #[test]
+    fn a_dry_run_replace_of_a_pinned_piece_is_refused_as_a_real_run_is() {
+        let scene = undecided();
+        let root = crate::fsx::tree::TreeRoot::open(scene.temp.root()).expect("opens");
+        crate::pin::create(&root, &path(PIECE)).expect("pinned");
+
+        let error = dry_run_of(&scene, Answer::Replace).expect_err("refused");
+
+        assert!(matches!(error, Error::Resolve(ResolveError::Pinned { .. })));
+    }
+
+    #[test]
+    fn a_dry_run_replace_of_a_piece_in_use_plans_nothing_and_says_so() {
+        let scene = undecided();
+        // The clock is at 2026-11-04T12:00:00Z.
+        filetime::set_file_mtime(
+            scene.folder().join("src/main.rs"),
+            filetime::FileTime::from_unix_time(1_793_707_200 - 3_600, 0),
+        )
+        .expect("the time is set");
+
+        let (actions, notes) = plan_and_notes(dry_run_of(&scene, Answer::Replace));
+
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(notes, ["the piece is in use; the next archive takes it"]);
+    }
+
+    #[test]
+    fn a_dry_run_replace_of_a_piece_the_walk_cannot_read_says_it_would_be_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let scene = undecided();
+        let unreadable = scene.folder().join("src");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let denied = fs::read_dir(&unreadable).is_err();
+
+        let resolved = dry_run_of(&scene, Answer::Replace);
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(
+            denied,
+            "the test needs a user for whom mode 000 denies reading; run it as a non-root user"
+        );
+        let (actions, notes) = plan_and_notes(resolved);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(
+            notes,
+            [format!(
+                "`{PIECE}` would be skipped: the piece has entries the walk could not read or may not enter"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_replace_fails_where_the_idle_check_fails() {
+        let scene = undecided();
+        fs::write(scene.folder().join(".antiqignore"), [0xff, 0xfe]).expect("an ignore file");
+
+        let error = dry_run_of(&scene, Answer::Replace).expect_err("the check fails");
+
+        assert!(
+            matches!(
+                error,
+                Error::Archive(ArchiveError::Idle(crate::idle::IdleError::NotUtf8 { .. }))
+            ),
+            "{error}"
+        );
     }
 
     #[test]

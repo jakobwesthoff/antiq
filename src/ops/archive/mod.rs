@@ -20,6 +20,7 @@ use crate::fsx::device::{self, FsKind};
 use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
 use crate::id::{IdSource, ObjectId};
+use crate::idle::{self, IdleError, IdleVerdict};
 use crate::index;
 use crate::interact::Interaction;
 use crate::machine::MachineError;
@@ -588,10 +589,16 @@ fn plan_unearthed(
     }
 }
 
+/// The note for a piece that is not idle when it is judged again.
+pub(crate) const IN_USE_NOTE: &str = "the piece is in use; the next archive takes it";
+
 /// What a run would do with the one unearthed piece `candidate`, as
-/// `resolve` plans it. Nothing is locked and nothing is written.
+/// `resolve` plans it. Nothing is locked and nothing is written. A piece
+/// that a real run would leave alone because it is in use, or skip because
+/// the walk cannot read it, gets no action and a note.
 pub(crate) fn plan_one(
     collection: &Collection,
+    clock: &dyn Clock,
     seams: &dyn Seams,
     candidate: &Candidate,
 ) -> Result<(Option<ArchiveAction>, Vec<Warning>), ArchiveError> {
@@ -604,6 +611,21 @@ pub(crate) fn plan_one(
         &status::junk_names(&config.junk, &mut Vec::new()),
     );
     let tree = walk::walk_piece_with(&root, &candidate.path, &junk, &rules, seams.walk_hooks())?;
+    let settings = idle::Settings::new(config.idle_days, &config.ignore)?;
+    match idle::check(&root, &tree, candidate.unearthed, &settings, clock.now()) {
+        Ok(check) if matches!(check.verdict, IdleVerdict::Idle { .. }) => {}
+        Ok(_) => return Ok((None, vec![Warning::new(IN_USE_NOTE)])),
+        Err(error @ IdleError::Problems) => {
+            return Ok((
+                None,
+                vec![Warning::new(format!(
+                    "`{}` would be skipped: {error}",
+                    candidate.path
+                ))],
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
     Ok(plan_unearthed(
         collection,
         &junk,

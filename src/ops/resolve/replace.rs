@@ -16,7 +16,9 @@ use crate::lock::RunLock;
 use crate::meta::HistoryAction;
 use crate::ops::archive::new::{Mode, PieceOutcome, PieceResult, Run};
 use crate::ops::archive::unearthed::fork_unearthed;
-use crate::ops::archive::{ArchiveAction, Candidate, SkipReason, archive_one, nobody, plan_one};
+use crate::ops::archive::{
+    ArchiveAction, Candidate, IN_USE_NOTE, SkipReason, archive_one, nobody, plan_one,
+};
 use crate::ops::status::PieceKind;
 use crate::pin;
 use crate::report::Warning;
@@ -93,7 +95,15 @@ fn plan(
     if answer == Answer::Fork {
         return Ok((Some(ResolveAction::Fork { path, id }), Vec::new()));
     }
-    let (action, notes) = plan_one(ctx.request.collection, ctx.seams, &candidate_of(entry))?;
+    if is_pinned(ctx, entry)? {
+        return Err(ResolveError::Pinned { path }.into());
+    }
+    let (action, notes) = plan_one(
+        ctx.request.collection,
+        ctx.request.clock,
+        ctx.seams,
+        &candidate_of(entry),
+    )?;
     let action = action.map(|action| match action {
         ArchiveAction::Reclaim { path, id, size } => ResolveAction::Reclaim { path, id, size },
         ArchiveAction::Replace { path, id, size } => ResolveAction::Replace {
@@ -199,9 +209,7 @@ fn archive_step(
 fn fold(report: &mut ResolveReport, result: PieceResult) {
     report.warnings.extend(result.warnings);
     match result.outcome {
-        PieceOutcome::Dropped => report.warnings.push(Warning::new(
-            "the piece is in use; the next archive takes it",
-        )),
+        PieceOutcome::Dropped => report.warnings.push(Warning::new(IN_USE_NOTE)),
         PieceOutcome::Skipped(row) if row.reason == SkipReason::Declined => {
             report.resolved = resolution(Answer::Skip);
         }
