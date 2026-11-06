@@ -4,6 +4,7 @@
 
 //! The `archive` operation.
 
+mod remove;
 mod seams;
 mod store;
 
@@ -11,6 +12,7 @@ use crate::archive::PackError;
 use crate::error::HasKind;
 use crate::filesystem::FilesystemError;
 use crate::listing::ListingError;
+use crate::repair::RepairError;
 use crate::versions::VersionsError;
 
 /// Why archiving a piece failed. Each variant names the step and the
@@ -81,6 +83,45 @@ pub enum ArchiveError {
         stamp: String,
         #[source]
         source: VersionsError,
+    },
+    #[error("cannot move {piece} into trash/{stamp}")]
+    Trash {
+        piece: String,
+        stamp: String,
+        #[source]
+        source: FilesystemError,
+    },
+    #[error(
+        "cannot put the version {stamp} of {piece} back into tmp/pack after it failed ({cause}), so it stays in the store"
+    )]
+    Rollback {
+        piece: String,
+        stamp: String,
+        cause: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("cannot give {piece} back from trash/{stamp} after it changed ({reason})")]
+    GiveBack {
+        piece: String,
+        stamp: String,
+        reason: String,
+        #[source]
+        source: RepairError,
+    },
+    #[error("cannot move {piece} into doomed/{stamp}")]
+    Doomed {
+        piece: String,
+        stamp: String,
+        #[source]
+        source: FilesystemError,
+    },
+    #[error("cannot delete doomed/{stamp}/{piece}")]
+    Delete {
+        piece: String,
+        stamp: String,
+        #[source]
+        source: FilesystemError,
     },
 }
 

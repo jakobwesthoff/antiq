@@ -156,12 +156,12 @@ pub(crate) fn store_version(
     let result = stage_and_store(context, request, &stamp, &chain, lease);
     match result {
         Ok(stored) => {
-            remove_staging(context, &tmp_dir, &chain);
+            remove_staging(context.run_dirs, &tmp_dir, &chain);
             Ok(stored)
         }
         Err(abort) => {
             if !abort.keep_staging {
-                remove_staging(context, &tmp_dir, &chain);
+                remove_staging(context.run_dirs, &tmp_dir, &chain);
             }
             Err(abort.failure)
         }
@@ -191,7 +191,7 @@ impl Abort {
 }
 
 /// `pack/<stamp>/<piece>` below `tmp/`.
-fn staging_chain(stamp: &Stamp, stored: &RelPath) -> RelPath {
+pub(super) fn staging_chain(stamp: &Stamp, stored: &RelPath) -> RelPath {
     let pack = Name::from_bytes(b"pack".to_vec()).expect("`pack` is a name");
     let stamp = Name::from_bytes(stamp.to_string().into_bytes()).expect("a stamp is a name");
     RelPath::root().join(&pack).join(&stamp).concat(stored)
@@ -440,14 +440,11 @@ fn stage_and_store(
 ///
 /// A failure leaves the folder for repair 2, which deletes what `tmp/` holds,
 /// so it is not reported.
-fn remove_staging(context: &StoreContext<'_>, tmp_dir: &Path, chain: &RelPath) {
+pub(super) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPath) {
     let Ok(tmp) = TreeRoot::open(tmp_dir) else {
         return;
     };
-    let _guard = context
-        .run_dirs
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _guard = run_dirs.lock().unwrap_or_else(PoisonError::into_inner);
     if remove_tree(&tmp, chain).is_err() {
         return;
     }

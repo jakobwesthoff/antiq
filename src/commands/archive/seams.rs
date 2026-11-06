@@ -13,7 +13,11 @@
 
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
+use crate::filesystem::remove::remove_tree;
 use crate::filesystem::space::available_space;
+use crate::filesystem::tree::TreeRoot;
+use crate::relpath::RelPath;
+use crate::walk::{Hooks, RealFs};
 use std::io::Write;
 use std::path::Path;
 
@@ -40,6 +44,20 @@ pub(crate) trait Seams: Send + Sync {
     /// Runs after the hash of the archive was read back, before the
     /// folder is compared with the archive.
     fn before_verify(&self, _staging: &Path) {}
+
+    /// Runs after the folder was renamed into `trash/`, before it is
+    /// walked again. `tree` is its path there.
+    fn after_trash_rename(&self, _tree: &Path) {}
+
+    /// What the walk of the trashed tree asks about the disk.
+    fn walk_hooks(&self) -> &dyn Hooks {
+        &RealFs
+    }
+
+    /// Deletes the tree at `path` below `root`.
+    fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
+        remove_tree(root, path)
+    }
 }
 
 /// The real run.
