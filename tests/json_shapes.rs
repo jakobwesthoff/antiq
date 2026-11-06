@@ -292,3 +292,45 @@ fn an_unreachable_dry_push_keeps_dry_run() {
     assert_eq!(json["result"], "unreachable");
     assert_eq!(json["dry_run"], true, "{json}");
 }
+
+// =========================================================
+// init
+// =========================================================
+
+fn init(tree: &Tree, args: &[&str]) -> Value {
+    let run = Antiq::new()
+        .arg("-C")
+        .arg(tree.root())
+        .arg("init")
+        .arg("--json")
+        .args(args)
+        .run();
+    assert_eq!(run.code(), 0, "{}", run.stdout);
+    run.json()
+}
+
+#[test]
+fn a_real_init_has_no_actions() {
+    let mut tree = Tree::new();
+    tree.dir("a");
+
+    let json = init(&tree, &[]);
+
+    assert_eq!(json["created"], true);
+    assert!(json.get("actions").is_none(), "{json}");
+    assert!(json.get("dry_run").is_none(), "{json}");
+}
+
+#[test]
+fn a_dry_init_names_its_action_by_kind() {
+    let mut tree = Tree::new();
+    tree.dir("a");
+
+    let json = init(&tree, &["-n"]);
+
+    assert_eq!(json["dry_run"], true);
+    let actions = json["actions"].as_array().expect("a list of actions");
+    assert_eq!(actions.len(), 1, "{json}");
+    assert!(actions[0].get("action").is_none(), "{}", actions[0]);
+    assert_eq!(actions[0]["kind"], "create_collection");
+}

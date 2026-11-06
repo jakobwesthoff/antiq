@@ -89,10 +89,7 @@ fn init_with_json_describes_the_new_collection() {
         canonical(tree.root()).to_str().expect("UTF-8")
     );
     assert_eq!(json["patterns"], json!(["*"]));
-    assert_eq!(
-        json["actions"],
-        json!([{"action": "create_collection", "path": canonical(tree.root())}])
-    );
+    assert!(json.get("actions").is_none(), "{json}");
 
     let config = config_of(tree.root());
     assert_eq!(json["id"], config.collection.id.to_string());
@@ -128,7 +125,7 @@ fn the_json_of_a_created_collection_has_its_keys_in_order() {
     assert_eq!(
         keys(&run.json()),
         [
-            "format", "command", "created", "id", "path", "patterns", "due", "actions", "warnings"
+            "format", "command", "created", "id", "path", "patterns", "due", "warnings"
         ]
     );
 }
@@ -361,6 +358,7 @@ fn a_json_dry_run_carries_the_config() {
             "warnings"
         ]
     );
+    assert_eq!(json["actions"][0]["kind"], "create_collection");
     let config = Config::parse(json["config"].as_str().expect("the config text"), None)
         .expect("the text is a config");
     assert_eq!(config.collection.patterns, ["*"]);

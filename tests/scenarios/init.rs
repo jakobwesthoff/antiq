@@ -44,7 +44,6 @@ fn init_writes_the_defaults_names_the_due_count_and_refuses_a_second_run() {
                     .expect("the output is an object")
                     .keys()
                     .map(String::as_str)
-                    .filter(|key| *key != "actions")
                     .collect();
                 assert_eq!(
                     keys,

@@ -1923,9 +1923,9 @@ action.
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
 collection root), `patterns`, `due` (the number of folders the next `archive`
 would archive; absent in a dry run and when the survey failed) and
-`warnings`, and in a dry run `config`, the text of the config that would be
-written, before `actions`. The action is
-`{"action": "create_collection", "path": ...}`.
+`warnings`. A dry run also has `config`, the text of the config that would be
+written, and `actions`, both before `warnings`; a real run has no `actions`.
+The action is `{"kind": "create_collection", "path": ...}`.
 
 `status` has these keys, all of them present with an empty list when there
 is nothing to list: `folders`, `versions` and `archive_bytes` (the last two

@@ -59,7 +59,7 @@ impl crate::error::HasKind for InitError {}
 
 /// What `init` is going to do, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InitAction {
     CreateCollection { path: String },
 }
@@ -92,6 +92,8 @@ pub struct InitReport {
     /// The `config.toml` a dry run would write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
+    /// What a dry run would do; a real run lists nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<InitAction>,
     pub warnings: Vec<Warning>,
 }
@@ -339,7 +341,11 @@ impl InitPlan {
             patterns: self.patterns.clone(),
             due: None,
             config,
-            actions: vec![InitAction::CreateCollection { path: path.clone() }],
+            actions: if dry_run {
+                vec![InitAction::CreateCollection { path: path.clone() }]
+            } else {
+                Vec::new()
+            },
             path,
             warnings: self.warnings.clone(),
         }
@@ -887,9 +893,7 @@ mod tests {
             serde_json::to_string(&report).expect("serialises"),
             format!(
                 "{{\"created\":true,\"id\":\"{id}\",\"path\":\"{root}\",\
-                 \"patterns\":[\"a*\"],\"due\":0,\
-                 \"actions\":[{{\"action\":\"create_collection\",\"path\":\"{root}\"}}],\
-                 \"warnings\":[]}}"
+                 \"patterns\":[\"a*\"],\"due\":0,\"warnings\":[]}}"
             )
         );
     }
