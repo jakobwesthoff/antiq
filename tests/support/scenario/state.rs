@@ -198,6 +198,13 @@ fn blank_digests(text: &str) -> String {
 }
 
 impl State {
+    /// Nothing: the state of a directory that does not exist.
+    pub fn empty() -> State {
+        State {
+            entries: BTreeMap::new(),
+        }
+    }
+
     /// Everything below `root`, exactly as it is: for a command that
     /// must change nothing.
     pub fn raw(root: &Path) -> State {

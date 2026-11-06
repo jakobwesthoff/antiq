@@ -776,3 +776,220 @@ fn a_missing_path_is_none() {
     assert!(State::raw(&collection.root()).entry("nothing").is_none());
     let _ = Path::new("");
 }
+
+// =========================================================
+// Worlds, modes and the comparison of end states
+// =========================================================
+
+use crate::support::scenario::world::{Mode, Setup, World, both_modes};
+use std::cell::{Cell, RefCell};
+
+const FAKE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/scenario-fake.sh"
+);
+
+fn standin(clock: &Clock) -> Setup {
+    Setup::new(Collection::build(clock).finish()).with_program(FAKE)
+}
+
+fn standin_world(mode: Mode) -> World {
+    World::new(standin(&Clock::now()), mode)
+}
+
+#[test]
+fn the_script_runs_once_per_mode_and_each_run_answers_in_its_mode() {
+    let seen = RefCell::new(Vec::new());
+    both_modes(standin, |world| {
+        let outcome = world.run(&["put", "out", "a.txt"]);
+        outcome.expect_code(0);
+        outcome.text_only(|out| assert_eq!(out, "a.txt\n"));
+        outcome.json_only(|value| assert_eq!(value["path"], "a.txt"));
+        seen.borrow_mut().push((world.mode(), outcome.mode));
+    });
+    assert_eq!(
+        *seen.borrow(),
+        [(Mode::Text, Mode::Text), (Mode::Json, Mode::Json)]
+    );
+}
+
+#[test]
+#[should_panic(expected = "in the collection:\nchanged: out/a.txt")]
+fn end_states_that_differ_between_the_modes_fail() {
+    both_modes(standin, |world| {
+        world.run(&["put", "out", "a.txt", "modedep"]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "in the target:\nchanged: a.txt")]
+fn a_target_that_differs_between_the_modes_fails() {
+    both_modes(
+        |clock| standin(clock).with_target(Target::new()),
+        |world| {
+            let target = world.target().expect("the setup has a target").path();
+            world.run(&["put", target.to_str().expect("UTF-8"), "a.txt", "modedep"]);
+        },
+    );
+}
+
+#[test]
+fn a_removed_target_compares_as_empty() {
+    both_modes(
+        |clock| standin(clock).with_target(Target::new()),
+        |world| world.target().expect("the setup has a target").remove(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "stdout is not JSON")]
+fn output_that_breaks_the_envelope_fails_the_run_in_json_mode() {
+    standin_world(Mode::Json).run(&["badjson"]);
+}
+
+#[test]
+fn text_mode_does_not_check_the_envelope() {
+    let outcome = standin_world(Mode::Text).run(&["badjson"]);
+    assert_eq!(outcome.stdout, "this is not json\n");
+}
+
+#[test]
+fn a_failing_command_reports_its_exit_code_and_error_kind() {
+    let text = standin_world(Mode::Text).run(&["fail"]);
+    assert_eq!(text.code(), 1);
+    assert_eq!(text.stderr, "error: it failed\n");
+    assert_eq!(text.error_kind(), None);
+    let json = standin_world(Mode::Json).run(&["fail"]);
+    assert_eq!(json.code(), 1);
+    assert_eq!(json.error_kind().as_deref(), Some("other"));
+}
+
+#[test]
+fn commands_run_in_a_fixed_time_zone() {
+    let outcome = standin_world(Mode::Text).run(&["tz"]);
+    assert_eq!(outcome.stdout, "Pacific/Auckland\n");
+}
+
+#[test]
+fn directory_times_are_restored_after_every_run() {
+    let clock = Clock::now();
+    let setup = Setup::new(
+        Collection::build(&clock)
+            .piece("p", |piece| {
+                piece.file("sub/f", "x");
+            })
+            .finish(),
+    )
+    .with_program(FAKE);
+    let world = World::new(setup, Mode::Text);
+    world.run(&["touchdir", "p/sub"]);
+    assert!(world.collection().path("p/sub/.touched").exists());
+    assert_eq!(
+        mtime(&world.collection().path("p/sub")),
+        clock.dir_time(),
+        "settle gives the touched directory its time again"
+    );
+}
+
+#[test]
+fn run_in_runs_with_the_given_directory_as_the_current_one() {
+    for mode in [Mode::Text, Mode::Json] {
+        let clock = Clock::now();
+        let setup = Setup::new(
+            Collection::build(&clock)
+                .piece("p", |piece| {
+                    piece.file("f", "x");
+                })
+                .finish(),
+        )
+        .with_program(FAKE);
+        let world = World::new(setup, mode);
+        world
+            .run_in(&world.collection().path("p"), &["put", "out", "a.txt"])
+            .expect_code(0);
+        assert_eq!(
+            fs::read_to_string(world.collection().path("p/out/a.txt")).expect("the file exists"),
+            "same"
+        );
+    }
+}
+
+#[test]
+fn run_as_runs_against_another_collection() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = standin_world(mode);
+        let other = Collection::build(world.collection().clock()).finish();
+        world
+            .run_as(&other, &["put", "out", "a.txt"])
+            .expect_code(0);
+        assert!(other.path("out/a.txt").exists());
+        assert!(!world.collection().path("out/a.txt").exists());
+    }
+}
+
+#[test]
+#[should_panic(expected = "expected exit 3")]
+fn an_unexpected_exit_code_fails() {
+    standin_world(Mode::Text)
+        .run(&["put", "out", "a.txt"])
+        .expect_code(3);
+}
+
+#[test]
+fn keys_are_the_ordered_keys_of_the_json_object_and_ignored_in_text() {
+    standin_world(Mode::Json)
+        .run(&["put", "out", "a.txt"])
+        .keys(&["format", "command", "path"]);
+    standin_world(Mode::Text)
+        .run(&["put", "out", "a.txt"])
+        .keys(&["anything"]);
+}
+
+#[test]
+#[should_panic(expected = "keys of the JSON object")]
+fn other_keys_fail() {
+    standin_world(Mode::Json)
+        .run(&["put", "out", "a.txt"])
+        .keys(&["format", "path", "command"]);
+}
+
+#[test]
+fn json_only_and_text_only_run_in_their_mode_only() {
+    for mode in [Mode::Text, Mode::Json] {
+        let ran = Cell::new((false, false));
+        let outcome = standin_world(mode).run(&["put", "out", "a.txt"]);
+        outcome.json_only(|_| ran.set((true, ran.get().1)));
+        outcome.text_only(|_| ran.set((ran.get().0, true)));
+        assert_eq!(ran.get(), (mode == Mode::Json, mode == Mode::Text));
+    }
+}
+
+#[test]
+fn commands_that_change_nothing_pass_the_unchanged_check() {
+    let world = standin_world(Mode::Text);
+    world.assert_unchanged(|| {
+        world.run(&["tz"]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "changed the collection:\nonly in the second: out")]
+fn a_change_of_the_collection_fails_the_unchanged_check() {
+    let world = standin_world(Mode::Text);
+    world.assert_unchanged(|| {
+        world.run(&["put", "out", "a.txt"]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "changed the target:\nonly in the second: a.txt")]
+fn a_change_of_the_target_fails_the_unchanged_check() {
+    let world = World::new(
+        standin(&Clock::now()).with_target(Target::new()),
+        Mode::Text,
+    );
+    let target = world.target().expect("the setup has a target").path();
+    world.assert_unchanged(|| {
+        world.run(&["put", target.to_str().expect("UTF-8"), "a.txt"]);
+    });
+}
