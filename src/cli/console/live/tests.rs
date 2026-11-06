@@ -698,4 +698,15 @@ fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling
         "no card is left on the screen: {:?}",
         screen.visible()
     );
+
+    // With no run to halt, the hook passes the panic on at once, and asking
+    // for the hook again changes nothing.
+    install_hook();
+    let before = capture.stdout_bytes().len();
+    assert!(panic::catch_unwind(|| panic!("after the run")).is_err());
+    let after = capture.stdout();
+    assert!(
+        after[before..].starts_with("panicked: after the run"),
+        "{after:?}"
+    );
 }
