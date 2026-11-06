@@ -133,6 +133,19 @@ open, so the discussion survives without the conversation.
 - `grep`: measure an embedded search, using ripgrep's library crates
   (or a comparable Rust crate) inside antiq, not the system `grep`.
 
+## Decided in round 7 (asqr 01M6K2MRX043QTZTSTCP22HKR9, 2026-11-04)
+
+- Listing comment format as shown: `# antiq listing 1` header lines
+  (piece, archived, archive file), then per entry an aligned comment
+  line `# <type> <octal mode> <UTC time with T> <exact bytes or -> <path>`
+  before the `<sha256>  <path>` line; directories end in `/`, links
+  show `-> target`. Fixed generous widths; fields contain no spaces; the
+  path comes last.
+- `status` shows only pieces with a state (due, soon, pinned), one row
+  each, sorted by path, the state coloured in the first column; plain
+  live folders are only counted. No `--all`.
+- "soon" means due within 3 days.
+
 ## Pending presentations to the user
 
 - After round 7 (asqr 01M6K2MRX043QTZTSTCP22HKR9: listing variant,
