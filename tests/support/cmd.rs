@@ -96,6 +96,18 @@ pub fn make_hermetic(command: &mut Command) {
         "LC_ALL",
         "LC_CTYPE",
         "LANG",
+        // What the progress cards read to tell a terminal that lays old
+        // lines out again from one that does not, so that the terminal of
+        // the developer does not decide a test.
+        "XTERM_VERSION",
+        "STY",
+        "INSIDE_EMACS",
+        "VIM_TERMINAL",
+        "TMUX",
+        "VTE_VERSION",
+        "KITTY_WINDOW_ID",
+        "ALACRITTY_LOG",
+        "TERM_PROGRAM",
     ] {
         command.env_remove(name);
     }

@@ -32,8 +32,10 @@ pub(crate) enum Reflow {
 const REFLOWING_PROGRAMS: [&str; 4] = ["iTerm.app", "Apple_Terminal", "WezTerm", "ghostty"];
 
 impl Reflow {
-    /// Every variable [`Reflow::detect`] reads. A test that needs a known
-    /// answer removes these from the environment it hands to a program.
+    /// Every variable [`Reflow::detect`] reads. `make_hermetic` in
+    /// `tests/support/cmd.rs` removes them (and sets `TERM`) from the
+    /// environment of every antiq the tests start, and a unit test holds the
+    /// two lists together.
     #[cfg(test)]
     pub(crate) const VARIABLES: [&str; 10] = [
         "XTERM_VERSION",

@@ -286,3 +286,14 @@ fn detect_reads_only_the_variables_that_are_listed() {
     let listed: BTreeSet<String> = Reflow::VARIABLES.iter().map(|v| v.to_string()).collect();
     assert!(asked.into_inner().is_subset(&listed));
 }
+
+#[test]
+fn the_tests_that_run_antiq_clear_every_listed_variable_from_its_environment() {
+    // `make_hermetic` removes them and sets `TERM` itself.
+    let hermetic = include_str!("../../../../tests/support/cmd.rs");
+    for name in Reflow::VARIABLES {
+        let handled = hermetic.contains(&format!("\"{name}\""))
+            || hermetic.contains(&format!("command.env(\"{name}\""));
+        assert!(handled, "{name}");
+    }
+}

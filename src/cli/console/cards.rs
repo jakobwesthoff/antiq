@@ -740,8 +740,9 @@ impl Cards {
     /// The lines the screen shows while the run goes on: the cards of the
     /// pieces that are working, then one line for the others. The region
     /// never has more than `rows - 1` lines, so the line above it stays on
-    /// the screen, and no line is wider than `cols`, so each is one row and
-    /// the redraw moves up by exactly the number of lines.
+    /// the screen. No line is wider than `cols`, so each takes one row at
+    /// the width it is drawn for; how far a later redraw climbs is decided in
+    /// `reflow::rows_to_climb`.
     pub(crate) fn region(&self, now: Duration, cols: usize, rows: usize) -> Vec<String> {
         let layout = Layout::of(cols);
         let mut running: Vec<&Item> = self
