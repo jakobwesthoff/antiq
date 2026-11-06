@@ -414,7 +414,7 @@ one item per wave edits `Cargo.toml` after that. I01 runs `cargo audit`
 | insta (dev) | 1.49.0 | filters | console output snapshots | not researched; ntropy uses 1.48.0 | I01 |
 | unicode-normalization | 0.1.26 | | NFD folding for name collisions (ADR 0054) | not researched (T11) | I13 |
 | crossterm | 0.29.0 | | picker drawing | ntropy's version (ADR 0057); advisories to check with `cargo audit` | I36 |
-| nucleo | 0.5.0 | | picker matching | ntropy's version | I36 |
+| nucleo | 0.5.0 | | search and picker matching | ntropy's version | I15 (added), I36 |
 | unicode-width | 0.2.3 | | picker layout | ntropy pins 0.2.2 | I36 |
 | unicode-segmentation | 1.13.x | | picker layout | ntropy's version 1.13.3 | I36 |
 | rustix features `pty`, `termios` | 1.1.6 | | pty harness for the terminal glue (T16) | `openpt`, `grantpt`, `unlockpt`, `ptsname`, `tcsetwinsize`, `ioctl_tiocsctty` exist in rustix 1.1.6 | I36 |
@@ -2603,6 +2603,15 @@ the same commit; the lead checks that at acceptance.
   a changed tree. A walk problem inside a `live_exclude` directory still
   blocks the piece. The live stream check in `live.rs` is separate from
   I12's in `read.rs`.
+
+### I15
+
+- 2026-11-04: search matches with `nucleo` 0.5.0 (`nucleo::pattern`,
+  `nucleo::Matcher`), as ntropy does; I36 reuses it. The current payload
+  for `find`'s `size` and listing is the newest archive that is not
+  superseded, else the newest live package. A path that names an object
+  wins over a ULID prefix; a folder without an object is an unknown
+  reference; I15 exposes `resolve_path` for `pin` on new pieces (I18).
 
 ### I16
 
