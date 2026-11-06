@@ -34,6 +34,7 @@ use crate::pack::read::read_package_from;
 use crate::plan::PlanAction;
 use crate::reference::{ReferenceError, resolve_path};
 use crate::relpath::{self, Name, RelPath, escape};
+use crate::repair;
 use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::{Rules, SelectError};
@@ -720,6 +721,8 @@ fn settle(collection: &Collection, candidates: Vec<Candidate>) -> Result<Settled
 /// that this machine writes last: its own, with the archive file in the
 /// object directory and no entry.
 ///
+/// An import that the start-of-run repairs complete is not one of those.
+///
 /// An entry that cannot be read counts as present: nothing is completed
 /// over it, and the file is skipped as already imported with a warning
 /// that names the entry. One damaged entry does not end the run.
@@ -757,6 +760,12 @@ fn completion_of(
         })
         .unwrap_or(false);
     if !intact {
+        return None;
+    }
+    // The start of every real run writes the entry of an import that
+    // stopped after its metadata, so a dry run reports what that run will
+    // find: an object that is already imported.
+    if repair::unfinished_import(collection, existing.id, metadata, existing.source).is_some() {
         return None;
     }
     Some(Completion {
@@ -1882,6 +1891,33 @@ mod tests {
         assert_eq!(entry.state, EntryState::Gone);
         assert_eq!(entry.local_payloads.len(), 1);
         assert_eq!(world.store().objects().expect("lists").len(), 1);
+    }
+
+    #[test]
+    fn a_dry_run_after_a_crash_between_the_metadata_and_the_entry_says_what_the_real_run_says() {
+        let world = World::new();
+        let file = world.simple("proj.tar.zst");
+        world
+            .run_with(
+                std::slice::from_ref(&file),
+                None,
+                &StopAfter(Step::MetadataWritten),
+            )
+            .expect_err("the run stops");
+        let id = world.store().objects().expect("lists")[0];
+
+        let report = world.dry(&[file]);
+
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::AlreadyImported);
+        assert_eq!(report.skipped[0].id, Some(id));
+        assert!(report.warnings.is_empty(), "{report:?}");
+        assert!(
+            tracking::read(&world.collection, id)
+                .expect("reads")
+                .is_none(),
+            "a dry run writes no entry"
+        );
     }
 
     #[test]

@@ -196,6 +196,36 @@ pub(crate) fn records_unearth(metadata: &Metadata, machine: &str, time: Timestam
     })
 }
 
+/// The archive payload of an import that is still a recorded change, if
+/// `metadata` is one.
+///
+/// It has one history entry, `import`, and one archive payload of version
+/// 1, in this collection's name, with its file in the object directory at
+/// the recorded size. Once a version is committed, the remote holds the
+/// archive, and a missing entry is a state this does not recognise;
+/// `import` completes those entries itself when it meets the same bytes
+/// again.
+pub(crate) fn unfinished_import<'a>(
+    collection: &Collection,
+    id: ObjectId,
+    metadata: &'a Metadata,
+    source: Source,
+) -> Option<&'a Payload> {
+    if source != Source::Pending {
+        return None;
+    }
+    let ([payload], [only]) = (metadata.payloads.as_slice(), metadata.history.as_slice()) else {
+        return None;
+    };
+    let is_import = only.action == HistoryAction::Import.as_str()
+        && metadata.collection == collection.id()
+        && payload.kind == PayloadKind::Archive
+        && payload.version == 1;
+    let stored = Store::new(collection).file_path(id, &payload.file);
+    let same_size = fs::metadata(&stored).is_ok_and(|found| found.len() == payload.size);
+    (is_import && same_size).then_some(payload)
+}
+
 /// Runs the repairs in the order of spec "Operations". The lock proves
 /// that no other run changes the collection meanwhile.
 ///
@@ -995,13 +1025,7 @@ impl Repairs<'_> {
     // =========================================================
 
     /// Writes the entry of an import that stopped between its metadata and
-    /// its entry.
-    ///
-    /// Only an import that is still a recorded change qualifies: one
-    /// history entry, `import`, and one archive payload of version 1, in
-    /// this collection's name and with its file in the object directory at
-    /// the recorded size and SHA-256. Once a version is committed, the
-    /// remote holds the archive, and a missing entry is a different state.
+    /// its entry, for the objects [`unfinished_import`] recognises.
     fn complete_imports(&mut self) -> Result<(), RepairError> {
         let store = Store::new(self.collection);
         for id in store.objects()? {
@@ -1016,23 +1040,12 @@ impl Repairs<'_> {
                     continue;
                 }
             };
-            if current.source != Source::Pending {
-                continue;
-            }
             let metadata = &current.metadata;
-            let ([payload], [only]) = (metadata.payloads.as_slice(), metadata.history.as_slice())
+            let Some(payload) = unfinished_import(self.collection, id, metadata, current.source)
             else {
                 continue;
             };
-            let is_import = only.action == HistoryAction::Import.as_str()
-                && metadata.collection == self.collection.id()
-                && payload.kind == PayloadKind::Archive
-                && payload.version == 1;
             let stored = store.file_path(id, &payload.file);
-            let same_size = fs::metadata(&stored).is_ok_and(|found| found.len() == payload.size);
-            if !is_import || !same_size {
-                continue;
-            }
             let digest = File::open(&stored).and_then(|mut file| {
                 let mut reader = HashingReader::new(&mut file);
                 io::copy(&mut reader, &mut io::sink())?;
