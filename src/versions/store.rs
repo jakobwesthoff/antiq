@@ -1979,6 +1979,20 @@ mod tests {
     }
 
     #[test]
+    fn move_back_failing_to_flush_after_the_archive_arrived_is_partly_moved() {
+        let env = Env::new();
+        env.move_in(&Recording::new(), "p").expect("moved");
+        let recording = Recording::new();
+        recording.fail_dirs_at(0);
+        let error = env.move_back(&recording, "p").expect_err("fails");
+        assert!(
+            matches!(error, VersionsError::PartlyMoved { .. }),
+            "{error:?}"
+        );
+        assert_eq!(env.staged(), [ARCHIVE]);
+    }
+
+    #[test]
     fn move_back_failing_in_its_first_flush_is_not_partly_moved() {
         let env = Env::new();
         env.move_in(&Recording::new(), "p").expect("moved");
