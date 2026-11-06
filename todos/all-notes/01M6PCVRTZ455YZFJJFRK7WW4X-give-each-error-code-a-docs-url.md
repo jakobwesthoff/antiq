@@ -16,7 +16,7 @@ explains that code.
 
 ## Open
 
-- Which page a code points to. The README, now a tutorial and a reference,
+- Which page a code points to. The README, now a set of chapters and a reference,
   has no section that explains the error codes; it needs a stable anchor per
   code first.
 - Whether the JSON error gets the url as a key next to `code` and `fix`, and

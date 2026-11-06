@@ -57,13 +57,7 @@ real one, for example with `brew install rsync`. antiq takes the first
 `/usr/local/bin`. `[target] rsync` names one by its absolute path.
 
 <!-- docs:start -->
-## Tutorial
-
-The tutorial goes from a first collection to a mirror on another disk. Each
-step uses what the one before left behind, so read it front to back. The
-images show the output of antiq on a terminal.
-
-### 1. Make a folder a collection
+## A collection
 
 A collection is a folder that antiq looks after. Each folder inside it that
 you want archived is a piece. To try antiq without touching your own
@@ -87,9 +81,9 @@ age 100 keep-me/draft.txt
 ```
 
 The folders in the images hold a few hundred megabytes, so their sizes
-differ from the ones you see. Everything else is the same, and the steps
-work on your own experiments folder too: run the dry run of step 4 first
-and read what it would archive.
+differ from the ones you see. Everything else is the same. The commands
+work on your own experiments folder too: run the dry run from "Archiving
+idle folders" first and read what it would archive.
 
 Make the folder a collection. `--pattern` says which folders are pieces:
 `*` selects the folders directly inside it.
@@ -104,7 +98,7 @@ antiq init --pattern '*'
 Commands find the collection by searching upwards from the current
 directory, or from the path given with `-C`.
 
-### 2. See what is idle
+## What is idle
 
 ```bash
 antiq status
@@ -118,7 +112,7 @@ the newest modification time of the piece's regular files. `ledger-cli`,
 `fresh-idea` has no state, so it is not listed. `status` lists the pieces
 that are `due`, `soon`, `pinned` or `refused`, each with the reason.
 
-### 3. Keep what must stay
+## Keeping what must stay
 
 `keep-me` is due, but it is a draft you are still using. Pin it:
 
@@ -147,7 +141,7 @@ Other ways to keep files out of the way are in the configuration, which
 A piece can also carry `.antiqignore` and `.antiq-timeless` files with the
 same gitignore lines. The reference below has the whole table.
 
-### 4. Archive
+## Archiving idle folders
 
 Look at what the next run would do before it does it. A dry run, with `-n`,
 changes nothing:
@@ -181,7 +175,7 @@ control file that is not a regular file. `status` names the reason. A piece
 without a file that counts for the idle check is empty and is not archived
 either.
 
-### 5. Find it again
+## Finding a version
 
 The folders are gone from `experiments`, and every piece has a version.
 `list` prints one row per version, and `grep` matches a regular expression
@@ -200,7 +194,7 @@ path or by a search word, and a search word has to match exactly one piece.
 as `unearth`, fail when the word matches none, and when it matches several
 they also list the candidates.
 
-### 6. Bring a version back
+## Bringing a version back
 
 `fork` extracts a working copy of a version and keeps the version:
 
@@ -235,7 +229,7 @@ instead.
 `import <folder> [--as <path>]` packs a folder from outside the collection
 directly as a version and leaves the source in place.
 
-### 7. Mirror the collection
+## Mirroring
 
 Everything in the collection, the live folders and the versions, can be
 mirrored to one target. Add a `[target]` block to `.antiq/config.toml`,
@@ -271,7 +265,7 @@ The target is a mirror, not a backup: whatever is deleted in the
 collection is deleted on the target by the next push. The reference below
 says more under "Good to know".
 
-### 8. Run it unattended
+## Running unattended
 
 Run the two commands one after the other from a scheduler:
 
@@ -284,7 +278,7 @@ push's exit status. `--if-reachable` makes an unreachable target exit 0
 instead of 4. A held lock, a damaged version or any failure after the
 target was reached still exits 1. The exit codes are in the reference.
 
-### 9. When something is damaged
+## Damaged versions
 
 A version is damaged when, among other causes, its archive lacks its
 listing or checksum file. Files deleted by hand and incomplete copies from
@@ -312,7 +306,7 @@ The version argument is a prefix of the version's time, so `20` is the one
 version here. The reference lists what makes a version damaged or
 incomplete, and `forget` removes an incomplete one.
 
-### 10. Read it without antiq
+## Reading archives without antiq
 
 Everything antiq writes can be read without it. The files of a version are
 in `.antiq/pieces/<piece>/`. Unpack the archive into a scratch directory,
@@ -558,7 +552,7 @@ versions and come back fully allocated.
 **Symlinks on the target.** A symlink in a piece is copied as a symlink
 and points to whatever its path names on the target.
 
-**Checking a version by hand.** Step 10 of the tutorial shows the
+**Checking a version by hand.** "Reading archives without antiq" shows the
 commands. Use `shasum`: the `sha256sum` that macOS ships is not GNU's and
 fails on a listing.
 
@@ -595,7 +589,7 @@ directory of the collection, it deletes nothing on the target at all
 until the directory is readable. `push` says that no deletion reached
 the target and names the directories.
 
-**Scheduling.** See step 8 of the tutorial.
+**Scheduling.** See "Running unattended".
 
 ### Exit codes
 
