@@ -472,6 +472,30 @@ fn a_dry_run_names_the_version_the_destination_and_the_checks_and_changes_nothin
     }
 }
 
+#[test]
+fn the_repairs_run_first_and_a_real_fork_reports_them() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, scanner);
+        let leftover = world.collection().path(".antiq/tmp/leftover");
+        fs::write(&leftover, "x").expect("the leftover");
+
+        let run = world.run(&["fork", "projects/scanner"]);
+
+        run.expect_code(0);
+        assert!(!leftover.exists());
+        assert!(world.collection().path("projects/scanner/README").exists());
+        run.text_only(|_| {
+            assert_eq!(run.stderr, "note: repaired: delete .antiq/tmp/leftover\n");
+        });
+        run.json_only(|json| {
+            let repairs = json["repairs"].as_array().expect("a list of repairs");
+            assert_eq!(repairs.len(), 1, "{json}");
+            assert_eq!(repairs[0]["repair"], "delete_temporary");
+            assert_eq!(repairs[0]["entry"], "leftover");
+        });
+    }
+}
+
 // ----- the lock
 
 #[test]
