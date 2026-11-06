@@ -653,7 +653,10 @@ impl TreeFlush {
         // Opened before the extraction starts, so that on Linux the
         // descriptor's error state is older than every write it must report.
         let tried = (platform.barrier)(&probe);
-        let method = choose_method(platform.os, platform.kernel, &tried)?;
+        let method = choose_method(platform.os, platform.kernel, &tried).inspect_err(|_| {
+            // No `TreeFlush` exists to remove the probe on drop.
+            let _ = fs::remove_file(&probe_path);
+        })?;
         Ok(TreeFlush {
             method,
             os: platform.os,
@@ -749,6 +752,9 @@ pub(crate) enum Step {
     /// The marker holds the time alone (reached by `unearth`).
     MarkerRewritten,
 }
+
+/// The folder below which `bring_back` stages an extraction.
+const EXTRACT: &str = ".antiq/tmp/extract";
 
 /// Everything `bring_back` takes from the system. The real one is
 /// [`RealHooks`]; tests override single parts.
@@ -895,7 +901,7 @@ pub(crate) fn bring_back(
         &root,
         &mut placed,
     );
-    match result {
+    let brought = match result {
         Ok(()) => Ok(Brought::Done {
             time,
             warnings: placed.warnings,
@@ -920,7 +926,17 @@ pub(crate) fn bring_back(
                 Err(error)
             }
         }
-    }
+    };
+    remove_extract_dir(&root);
+    brought
+}
+
+/// Removes `.antiq/tmp/extract/` once no staging is left in it, so that a
+/// run leaves `tmp/` empty. A staging that stays keeps the folder; repair 2
+/// empties both at the start of the next run.
+fn remove_extract_dir(root: &TreeRoot) {
+    let extract = RelPath::parse(EXTRACT).expect("a valid path");
+    let _ = root.remove_dir(&extract);
 }
 
 /// Removes the staging and the folders this run made above the
@@ -955,7 +971,7 @@ fn place(
     placed: &mut Placed,
 ) -> Result<(), RestoreError> {
     let target = &chosen.piece;
-    let extract = RelPath::parse(".antiq/tmp/extract").expect("a valid path");
+    let extract = RelPath::parse(EXTRACT).expect("a valid path");
     create_dir_chain(hooks.durable(), root, &extract)?;
     let staged = make_staging(root, &extract)?;
     placed.staged = Some(staged.clone());
@@ -1247,6 +1263,17 @@ mod tests {
         let flush = TreeFlush::begin_with(dir.path(), platform).unwrap();
         assert_eq!(flush.method(), Method::Barrier);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn begin_removes_the_probe_when_the_barrier_fails_for_another_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let (platform, _, _) = counting(System::Linux, Some((6, 1)), errno(Errno::IO));
+        assert!(TreeFlush::begin_with(dir.path(), platform).is_err());
+        assert!(
+            !dir.path().join(".flush-probe").exists(),
+            "the probe is removed"
+        );
     }
 
     #[test]
@@ -2173,6 +2200,7 @@ mod bring_tests {
         space: Option<u64>,
         durable: Flaky,
         barrier_fault: Option<io::Error>,
+        probe_fault: bool,
         move_fault: Option<fn() -> FilesystemError>,
         volume: Option<TargetRules>,
         device: Option<fn(&RelPath) -> u64>,
@@ -2194,6 +2222,7 @@ mod bring_tests {
                     fault: Arc::new(|_, _| None),
                 },
                 barrier_fault: None,
+                probe_fault: false,
                 move_fault: None,
                 volume: None,
                 device: None,
@@ -2261,6 +2290,7 @@ mod bring_tests {
         fn platform(&self) -> Platform {
             let log = self.log.clone();
             let barrier_fault = self.barrier_fault.as_ref().map(|e| e.raw_os_error());
+            let probe_fault = self.probe_fault;
             let calls = Arc::new(Mutex::new(0));
             let extract = self.root.join(".antiq/tmp/extract");
             let barrier: Barrier = Box::new(move |file: &File| {
@@ -2274,6 +2304,9 @@ mod bring_tests {
                     "barrier on another volume".to_string()
                 });
                 // The first call is the try of `begin`.
+                if probe_fault && *calls == 1 {
+                    return Err(io::Error::from_raw_os_error(Errno::IO.raw_os_error()));
+                }
                 match barrier_fault {
                     Some(code) if *calls > 1 => {
                         Err(io::Error::from_raw_os_error(code.expect("an errno")))
@@ -2421,20 +2454,6 @@ mod bring_tests {
                 hooks,
             )
         }
-
-        fn left_in_extract(&self) -> Vec<String> {
-            match fs::read_dir(self.extract_dir()) {
-                Ok(items) => items
-                    .map(|item| {
-                        item.expect("item")
-                            .file_name()
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        }
     }
 
     fn done(result: Result<Brought, RestoreError>) -> (Timestamp, Vec<String>) {
@@ -2496,7 +2515,7 @@ mod bring_tests {
             fs::read_to_string(world.destination().join(".antiq-restored")).expect("marker"),
             format!("restored 2026-11-05T10:00:00Z version {STAMP}\n")
         );
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2594,7 +2613,7 @@ mod bring_tests {
         let error = world.run(&spy).expect_err("the tree differs");
         assert!(matches!(error, RestoreError::Differs { .. }), "{error:?}");
         assert!(!world.root().join("projects").exists());
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2610,7 +2629,7 @@ mod bring_tests {
             other => panic!("expected taken, got {other:?}"),
         }
         assert_eq!(fs::read_dir(world.destination()).expect("lists").count(), 0);
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2637,7 +2656,7 @@ mod bring_tests {
             other => panic!("expected a target problem, got {other:?}"),
         }
         assert_eq!(fs::read_dir(elsewhere.root()).expect("lists").count(), 0);
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2648,7 +2667,7 @@ mod bring_tests {
         let error = world.run(&spy).expect_err("the rename fails");
         assert!(matches!(error, RestoreError::Filesystem(_)), "{error:?}");
         assert!(!world.root().join("projects").exists());
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2754,14 +2773,14 @@ mod bring_tests {
             }
         }
         assert!(!spy.entries().contains(&"StagingMade".to_string()));
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
         assert!(!world.root().join("projects").exists());
     }
 
     fn assert_no_space_and_clean(world: &World, spy: &Spy) {
         let reason = skipped(world.run(spy));
         assert!(matches!(reason, Skipped::NoSpace { .. }));
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
         assert!(!world.root().join("projects").exists());
     }
 
@@ -2853,7 +2872,7 @@ mod bring_tests {
         assert!(space::is_out_of_space(&error), "{error:?}");
         assert_eq!(time.to_string(), "2026-11-05T10:00:00Z");
         assert!(world.destination().join("main.rs").exists());
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2865,7 +2884,7 @@ mod bring_tests {
         spy.mode = Mode::PerItem;
         let error = world.run(&spy).expect_err("fails");
         assert!(matches!(error, RestoreError::Pack(_)), "{error:?}");
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2890,7 +2909,7 @@ mod bring_tests {
             matches!(error, RestoreError::Pack(PackError::UnholdableNames(_))),
             "{error:?}"
         );
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2909,7 +2928,7 @@ mod bring_tests {
             other => panic!("expected a target problem, got {other:?}"),
         }
         assert!(!spy.entries().contains(&"Extracted".to_string()));
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2955,7 +2974,7 @@ mod bring_tests {
         let world = World::new();
         done(world.run(&RealHooks));
         assert!(world.destination().join("main.rs").exists());
-        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]
@@ -2979,7 +2998,7 @@ mod bring_tests {
             });
             world.run(&spy).expect_err("the run stops");
             assert!(!world.root().join("projects").exists(), "{step:?}");
-            assert_eq!(world.left_in_extract(), Vec::<String>::new(), "{step:?}");
+            assert!(!world.extract_dir().exists(), "{step:?}: extract/ is gone");
         }
     }
 
@@ -3027,6 +3046,30 @@ mod bring_tests {
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
+        assert!(
+            world.extract_dir().join("1").is_dir(),
+            "the staging that cannot go keeps extract/ for repair 2"
+        );
+    }
+
+    #[test]
+    fn a_flush_probe_that_fails_leaves_neither_the_probe_nor_extract() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.probe_fault = true;
+        assert!(world.run(&spy).is_err(), "the failed probe ends the run");
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_leaves_no_extract() {
+        let world = World::new();
+        let spy = world.spy().on(Step::Renamed, || Err(at_error("fill")));
+        match world.run(&spy).expect("the folder is in place") {
+            Brought::Done { failure, .. } => assert!(failure.is_some()),
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
     }
 
     #[test]

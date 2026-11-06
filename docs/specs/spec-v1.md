@@ -745,6 +745,10 @@ or `doomed/`, the parents that became empty go too. (ADR 0059)
    (the store, the staging, a folder of either), every folder of
    `.antiq/tmp/pack/` stays. A dry run warns for each such folder as well.
    The staged archive stays until the next run repairs the sidecars.
+   A run that ends removes what it staged in `.antiq/tmp/`, whether it
+   succeeded or stopped on a handled failure, so this repair finds work only
+   after a crash and after a move into the store that stopped half way and
+   could not be undone.
 3. **`doomed/`:** delete every tree there without a comparison, and every
    entry that is no directory. Directory chains that hold no
    non-directory entry are removed as they are.

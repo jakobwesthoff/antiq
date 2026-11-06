@@ -84,6 +84,15 @@ fn archive_of_two_pieces_leaves_tmp_empty() {
 }
 
 #[test]
+fn unearth_leaves_tmp_empty() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, stored);
+        world.run(&["unearth", PIECE]).expect_code(0);
+        assert_tmp_empty_and_no_repair(&world);
+    }
+}
+
+#[test]
 fn rebuild_leaves_tmp_empty() {
     for mode in [Mode::Text, Mode::Json] {
         let world = world(mode, stored);
