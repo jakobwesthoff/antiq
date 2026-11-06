@@ -4,6 +4,7 @@
 
 //! Verifying a package against a folder or a listing.
 
+use super::check::FileDigest;
 use super::hashing::{HashingReader, hex};
 use super::read::{Package, read_package_observing};
 use super::tar_write::{DirectoryStack, listing_line};
@@ -316,38 +317,64 @@ fn read_stream(
     meter: Option<&Counter>,
     on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
 ) -> Result<Package, PackError> {
+    let Some(archive) = archive else {
+        return read_package_observing(source, meter, on_file);
+    };
+    let Hashed { package, digest } = read_hashed(package, source, meter, on_file)?;
+    if digest.sha256 != archive.sha256 {
+        return Err(PackError::ArchiveDiffers {
+            file: archive.file.to_string(),
+            what: format!(
+                "it reads back with the hash {}, and {} was computed while writing it",
+                digest.sha256, archive.sha256
+            ),
+        });
+    }
+    package
+}
+
+/// What reading a file once found: the package, or why it did not read, and
+/// the size and hash of every byte of the file.
+pub(super) struct Hashed {
+    pub package: Result<Package, PackError>,
+    pub digest: FileDigest,
+}
+
+/// Reads the package that `source` holds, which is the file `path`, and then
+/// the rest of the file into the hash: the stream stops at the end of its
+/// frame, and the hash is of the file. `content` and `on_file` are as for
+/// [`read_package_observing`].
+///
+/// A hash of a partial read says nothing about the file, so a failed read
+/// of the file is the error of this call. The decoder may have turned the
+/// failure into a damaged stream, which is why the reader keeps it.
+pub(super) fn read_hashed(
+    path: &Path,
+    source: impl io::Read,
+    content: Option<&Counter>,
+    on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
+) -> Result<Hashed, PackError> {
     let failure = Rc::new(RefCell::new(None));
     let mut hashed = HashingReader::new(Remembering {
         inner: source,
         failure: Rc::clone(&failure),
     });
-    let read = read_package_observing(&mut hashed, meter, on_file);
-    let Some(archive) = archive else {
-        return read;
-    };
+    let package = read_package_observing(&mut hashed, content, on_file);
     let drained = io::copy(&mut hashed, &mut io::sink());
-    // A hash of a partial read says nothing about the file, so a failed
-    // read ends here, before the hash is compared. The decoder may have
-    // turned the failure into a damaged stream, which is why the reader
-    // kept it.
     // A failed drain left its error in `failure` as well.
     if let Some(source) = failure.take().or(drained.err()) {
         return Err(PackError::ReadFile {
-            path: package.to_path_buf(),
+            path: path.to_path_buf(),
             source,
         });
     }
-    let actual = hashed.sha256();
-    if actual != archive.sha256 {
-        return Err(PackError::ArchiveDiffers {
-            file: archive.file.to_string(),
-            what: format!(
-                "it reads back with the hash {actual}, and {} was computed while writing it",
-                archive.sha256
-            ),
-        });
-    }
-    read
+    Ok(Hashed {
+        package,
+        digest: FileDigest {
+            bytes: hashed.bytes_read(),
+            sha256: hashed.sha256(),
+        },
+    })
 }
 
 /// A reader that keeps a copy of the first error of its source, apart from
