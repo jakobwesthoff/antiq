@@ -1015,9 +1015,12 @@ one script for all objects: for each object it prints the
 `meta.<digits>` files (no leading zero) above the highest version this
 machine has, and antiq then applies the version rules to the names. The
 checksum of a file is computed on the NAS by the first of `sha256sum`,
-`shasum -a 256`, `sha256 -q` and `openssl dgst -sha256 -r` that prints
-exactly 64 lower-case hexadecimal digits; no such tool makes the remote
-broken. So does a NAS whose `stat` works in neither the GNU (`-c`) nor
+`shasum -a 256`, `sha256 -q` and `openssl dgst -sha256 -r` that hashes
+`abc` to its known digest; no such tool makes the remote broken. That
+tool alone then hashes the file. A file it cannot read, a result that is
+not 64 lower-case hexadecimal digits, or a name that is not a regular
+file is an I/O error with the tool's message and does not make the
+remote broken. So does a NAS whose `stat` works in neither the GNU (`-c`) nor
 the BSD (`-f`) form. Every file name given to the remote is one path component, as
 on the path remote. The SSH remote accepts only names from
 `[A-Za-z0-9._%-]` other than `.`, `..` and a name with a leading `-`,

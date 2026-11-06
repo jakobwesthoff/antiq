@@ -130,6 +130,10 @@ antiq_emit file "$_f" || exit $?
 
 const CHECKSUM: &str = r#"_f="$1/objects/$2/$3"
 [ -e "$_f" ] || exit 44
+if [ ! -f "$_f" ]; then
+    printf '%s is not a regular file\n' "$_f" >&2
+    exit 1
+fi
 _h=$(antiq_sha256 "$_f")
 _rc=$?
 [ "$_rc" -eq 0 ] || exit "$_rc"
@@ -260,13 +264,14 @@ const FETCH_CHECK: &str = r#"[ -f "$1/objects/$2/$3" ] || exit 44
 ///   which form of `stat` works.
 /// - `antiq_stat FILE` prints `<size> <mtime>`; status 43 when `stat`
 ///   knows neither the GNU nor the BSD form.
-/// - `antiq_sha256 FILE` prints the SHA-256 as 64 lower-case hex digits
-///   from the first tool of `sha256sum`, `shasum`, `sha256` and `openssl`
-///   that gives exactly that; status 42 when none does. Tools differ in
-///   what they print and a NAS may carry a broken one, so only a result
-///   of the right shape counts. Without an argument it hashes `abc` from
-///   a pipe and counts only the known digest, which proves a tool
-///   without needing a file; `_tool` names the tool that passed.
+/// - `antiq_sha256 [FILE]` prints the SHA-256 as 64 lower-case hex digits.
+///   The tool is the first of `sha256sum`, `shasum`, `sha256` and
+///   `openssl` that hashes `abc` from a pipe to the known digest, since
+///   tools differ in what they print and a NAS may carry a broken one;
+///   status 42 when none does. `_tool` names that tool. FILE is hashed by
+///   that tool alone: a file it cannot read or a result of the wrong
+///   shape is status 1 with the tool's message, as the fault is the file's
+///   and not the NAS's.
 /// - `antiq_root_kind ROOT` sets `_root_kind` to `dir`, `missing` (absent
 ///   below a directory that can be searched) or `unusable`, and
 ///   `_root_why` to the reason for `unusable`.
@@ -292,24 +297,31 @@ antiq_stat() {
     esac
 }
 antiq_sha256() {
+    _found=
     for _tool in 'sha256sum' 'shasum -a 256' 'sha256 -q' 'openssl dgst -sha256 -r'; do
-        if [ "$#" -eq 0 ]; then
-            _hash=$(printf abc | $_tool 2>/dev/null) || continue
-        else
-            _hash=$($_tool "$1" 2>/dev/null) || continue
-        fi
+        _hash=$(printf abc | $_tool 2>/dev/null) || continue
         _hash=${_hash%% *}
-        case $_hash in *[!0-9a-f]*) continue ;; esac
-        if [ "$#" -eq 0 ] && [ "$_hash" != ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ]; then
-            continue
-        fi
-        if [ "${#_hash}" -eq 64 ]; then
-            printf '%s
-' "$_hash"
-            return 0
+        if [ "$_hash" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ]; then
+            _found=1
+            break
         fi
     done
-    return 42
+    [ -n "$_found" ] || return 42
+    if [ "$#" -eq 0 ]; then
+        printf '%s
+' "$_hash"
+        return 0
+    fi
+    _hash=$($_tool "$1") || return 1
+    _hash=${_hash%% *}
+    case $_hash in *[!0-9a-f]*) _hash= ;; esac
+    if [ "${#_hash}" -ne 64 ]; then
+        printf 'cannot hash %s
+' "$1" >&2
+        return 1
+    fi
+    printf '%s
+' "$_hash"
 }
 antiq_emit() {
     _kind=$1
@@ -2026,6 +2038,32 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_hashed_by_the_tool_the_proof_chose_and_by_no_other() {
+        let dir = bare_path(&["sh", "cat"]);
+        tool(
+            dir.path(),
+            "sha256sum",
+            &format!("[ \"$#\" -eq 0 ] && {{ echo '{ABC}  -'; exit 0; }}; exit 1"),
+        );
+        tool(dir.path(), "shasum", &format!("echo '{ABC}  x'"));
+        let (status, out) = run_with_only(dir.path(), "antiq_sha256 abc");
+        assert_eq!((status, out.as_str()), (1, ""));
+    }
+
+    #[test]
+    fn a_file_result_of_the_wrong_shape_is_status_1_and_not_a_next_tool() {
+        let dir = bare_path(&["sh", "cat"]);
+        tool(
+            dir.path(),
+            "sha256sum",
+            &format!("[ \"$#\" -eq 0 ] && {{ echo '{ABC}  -'; exit 0; }}; echo junk"),
+        );
+        tool(dir.path(), "shasum", &format!("echo '{ABC}  x'"));
+        let (status, out) = run_with_only(dir.path(), "antiq_sha256 abc");
+        assert_eq!((status, out.as_str()), (1, ""));
+    }
+
+    #[test]
     fn without_a_hash_tool_the_status_is_42() {
         let dir = bare_path(&["sh"]);
         let (status, out) = run_with_only(dir.path(), "antiq_sha256 abc");
@@ -2503,6 +2541,54 @@ mod tests {
             .remote()
             .read_file(object(), "locked")
             .expect_err("unreadable");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+    }
+
+    /// Takes the read permission from `file`, and checks that it is gone, as
+    /// a test run by the superuser would not see the failure it is after.
+    fn make_unreadable(file: &Path) {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        assert!(std::fs::File::open(file).is_err(), "the test runs as root");
+    }
+
+    #[test]
+    fn the_checksum_of_an_unreadable_file_is_an_io_error_and_the_remote_stays_sound() {
+        let far = Far::new();
+        let file = far.object_dir(OBJECT).join("payload");
+        std::fs::write(&file, "abc").expect("file");
+        make_unreadable(&file);
+        let error = far
+            .remote()
+            .checksum(object(), "payload")
+            .expect_err("unreadable");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn the_checksum_of_a_directory_is_an_io_error() {
+        let far = Far::new();
+        std::fs::create_dir(far.object_dir(OBJECT).join("payload")).expect("directory");
+        let error = far
+            .remote()
+            .checksum(object(), "payload")
+            .expect_err("directory");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_put_over_an_unreadable_file_is_an_io_error() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let source = far.local("pack.tar", b"x");
+        let there = far_file(&far, "pack.tar");
+        std::fs::write(&there, "other").expect("there already");
+        make_unreadable(&there);
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(b"x")))
+            .expect_err("unreadable");
+        std::fs::set_permissions(&there, std::fs::Permissions::from_mode(0o600)).expect("chmod");
         assert!(matches!(error, RemoteError::Io { .. }), "{error}");
     }
 
