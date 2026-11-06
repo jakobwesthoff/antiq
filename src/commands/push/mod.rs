@@ -366,6 +366,14 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
 
     #[test]
+    fn errors_of_the_checks_have_their_kinds() {
+        let unavailable = MachineError::Unavailable {
+            reason: "no name".into(),
+        };
+        assert_eq!(PushError::Machine(unavailable).kind(), ErrorKind::Other);
+    }
+
+    #[test]
     fn only_a_path_target_with_an_inspected_directory_is_rechecked() {
         let temp = tempfile::tempdir().expect("a temp dir");
         let url = TargetUrl::Path {

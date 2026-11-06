@@ -1379,6 +1379,12 @@ fn a_dry_run_with_init_over_ssh_sends_no_marker_and_mirrors_with_n() {
         calls[2]
     );
     assert_eq!(run.json()["actions"][0]["action"], "write_marker");
+    let text = push_text(&collection, &["--init", "-n"]);
+    assert!(
+        text.stdout.contains("Would write the marker"),
+        "{}",
+        text.stdout
+    );
 }
 
 // =========================================================

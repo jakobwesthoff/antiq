@@ -238,11 +238,7 @@ pub(super) fn inspect_path(root: &Path, collection: &Path) -> Result<Inspected, 
         Ok((meta.dev(), meta.ino()))
     };
     let mount_root = |path: &Path| device::is_mount_point(path).map_err(io::Error::other);
-    let is_empty = |path: &Path| match fs::read_dir(path)?.next() {
-        None => Ok(true),
-        Some(Ok(_)) => Ok(false),
-        Some(Err(error)) => Err(error),
-    };
+    let is_empty = |path: &Path| Ok(fs::read_dir(path)?.next().transpose()?.is_none());
     inspect_path_with(
         root,
         collection,
@@ -1064,6 +1060,7 @@ mod tests {
             [entry('?', None, "surprise")]
         );
         assert_eq!(parse_listing(b"a b c d"), [entry('?', None, "a b c d")]);
+        assert_eq!(parse_listing(b"a b c d\t"), [entry('?', None, "a b c d\t")]);
         assert_eq!(parse_listing(b""), []);
     }
 

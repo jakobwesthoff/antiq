@@ -6,7 +6,7 @@
 
 use super::summary::{Changes, Counts};
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step};
-use crate::report::{CommandReport, Warning};
+use crate::report::Warning;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
@@ -170,16 +170,6 @@ impl PushReport {
 impl Serialize for PushReport {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.to_value().serialize(serializer)
-    }
-}
-
-impl CommandReport for PushReport {
-    fn partial(&self) -> bool {
-        false
-    }
-
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
     }
 }
 
