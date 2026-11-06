@@ -6,7 +6,9 @@
 # Expects: keep-me is pinned, nothing archived. Leaves: the same.
 
 Output out/discard.txt
-Set Height 400
+# The picture shows the command, 5 lines of output and the prompt: 7 rows of
+# 38.46 pixels and the padding of 80 make 350.
+Set Height 350
 Source common.tape
 
 Type "antiq archive -n"

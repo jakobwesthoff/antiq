@@ -7,7 +7,10 @@
 # not a folder any more.
 
 Output out/discard.txt
-Set Height 340
+# The fork picture and the versions picture each show the command, 2 lines of
+# output and the prompt: 5 rows of 38.46 pixels and the padding of 80 make
+# 274.
+Set Height 274
 Source common.tape
 
 # The run of fork ends in the line "Forked ..." or, where it shows progress

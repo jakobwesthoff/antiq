@@ -9,7 +9,10 @@
 # recipe-api are archived and gone from the folder.
 
 Output out/discard.txt
-Set Height 640
+# The cards while packing need the most: the command, three cards of two lines
+# and the cursor line, 8 rows of 38.46 pixels. With the padding of 80 that makes
+# 388. The finished picture needs 7 rows and shares the height of the tape.
+Set Height 388
 Source common.tape
 
 Type "antiq archive"

@@ -6,7 +6,9 @@
 # Expects: three pieces archived. Leaves: the same.
 
 Output out/discard.txt
-Set Height 520
+# The picture shows both commands, their output and the prompt: 12 rows of
+# 38.46 pixels and the padding of 80 make 542.
+Set Height 542
 Source common.tape
 
 Type "antiq list scan"

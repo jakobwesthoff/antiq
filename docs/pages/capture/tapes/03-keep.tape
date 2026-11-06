@@ -6,7 +6,9 @@
 # Expects: a collection, nothing archived. Leaves: keep-me is pinned.
 
 Output out/discard.txt
-Set Height 780
+# The picture shows both commands, their output and the prompt: 22 rows of
+# 38.46 pixels and the padding of 80 make 928.
+Set Height 928
 Source common.tape
 
 Type "antiq pin keep-me"

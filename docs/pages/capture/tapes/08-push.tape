@@ -8,7 +8,9 @@
 # the collection.
 
 Output out/discard.txt
-Set Height 650
+# The picture shows the command, 12 lines of output and the prompt: 14 rows
+# of 38.46 pixels and the padding of 80 make 620.
+Set Height 620
 Source common.tape
 
 Hide

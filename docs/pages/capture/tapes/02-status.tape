@@ -6,7 +6,9 @@
 # Expects: a collection, nothing archived. Leaves: the same.
 
 Output out/discard.txt
-Set Height 500
+# The picture shows the command, 10 lines of output and the prompt: 12 rows
+# of 38.46 pixels and the padding of 80 make 542.
+Set Height 542
 Source common.tape
 
 Type "antiq status"

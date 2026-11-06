@@ -135,7 +135,7 @@ if [ "$columns" != "$expected_columns" ]; then
 fi
 
 if [ "$mode" = all ]; then
-    for tape in tapes/0[1-9]-*.tape; do
+    for tape in tapes/0[1-9]-*.tape tapes/10-*.tape; do
         echo "rendering $tape"
         run_tape "$tape"
     done
@@ -155,8 +155,8 @@ fi
 if [ "$mode" = all ]; then
     "$here/world.sh"
 fi
-echo "rendering tapes/10-demo.tape"
-run_tape tapes/10-demo.tape
+echo "rendering tapes/11-demo.tape"
+run_tape tapes/11-demo.tape
 for video in demo.webm demo.mp4; do
     if [ ! -s "$capture/../assets/$video" ]; then
         echo "render.sh: the demo tape wrote no $video" >&2
