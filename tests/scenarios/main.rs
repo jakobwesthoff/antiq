@@ -14,6 +14,7 @@ mod grep;
 mod harness;
 mod init;
 mod list;
+mod pin;
 mod status;
 mod unearth;
 mod verify;
