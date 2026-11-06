@@ -150,6 +150,20 @@ impl CandidateSet {
         CandidateSet::new(selection.pieces().to_vec(), collection.root().to_path_buf())
     }
 
+    /// The live pieces and the paths `extra`, which are not live yet but
+    /// will be: a dry run adds the folders that a repair would give back.
+    pub fn live_with(
+        collection: &Collection,
+        selection: &Selection,
+        extra: &[RelPath],
+    ) -> CandidateSet {
+        let mut paths = selection.pieces().to_vec();
+        paths.extend(extra.iter().cloned());
+        paths.sort();
+        paths.dedup();
+        CandidateSet::new(paths, collection.root().to_path_buf())
+    }
+
     /// The pieces of the store, for `unearth`, `fork` and `rebuild`.
     pub fn store(collection: &Collection, scan: &StoreScan) -> CandidateSet {
         let paths = scan.pieces.iter().map(|piece| piece.path.clone());
@@ -573,6 +587,16 @@ mod tests {
         let selection = live_selection(&fx, &["projects/*"]);
         let set = CandidateSet::live(&fx.collection, &selection);
         assert_eq!(texts(&set), ["projects/alpha", "projects/beta"]);
+    }
+
+    #[test]
+    fn extra_paths_join_the_live_set_once_and_in_path_order() {
+        let mut fx = Fixture::new();
+        fx.temp.tree().dir("projects/beta");
+        let selection = live_selection(&fx, &["projects/*"]);
+        let extra = [path("projects/gamma"), path("projects/beta")];
+        let set = CandidateSet::live_with(&fx.collection, &selection, &extra);
+        assert_eq!(texts(&set), ["projects/beta", "projects/gamma"]);
     }
 
     #[test]
