@@ -71,8 +71,8 @@ pub enum ForkError {
     },
     #[error("{id} has no metadata on this machine")]
     NoMetadata { id: ObjectId },
-    #[error("`{name}` is not a name for a piece: {source}")]
-    InvalidName { name: String, source: RelPathError },
+    #[error("`{name}` is not a name for a piece: {reason}")]
+    InvalidName { name: String, reason: RelPathError },
     #[error("cannot fork `{path}`: {why}")]
     Refused { path: RelPath, why: Refusal },
     #[error("cannot rename the folder to `{path}`: {problem}")]
@@ -292,9 +292,9 @@ pub fn plan(collection: &Collection, request: &ForkRequest) -> Result<ForkPlan, 
 }
 
 fn parse_name(name: &std::ffi::OsStr) -> Result<Name, ForkError> {
-    Name::from_bytes(name.as_bytes().to_vec()).map_err(|source| ForkError::InvalidName {
+    Name::from_bytes(name.as_bytes().to_vec()).map_err(|reason| ForkError::InvalidName {
         name: escape(name.as_bytes()),
-        source,
+        reason,
     })
 }
 

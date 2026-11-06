@@ -193,7 +193,7 @@ accepts_and_needs_a_collection!(
     "find",
     ["find", "q", "--print"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     fork_takes_a_name_and_dry_run,
     "fork",
     ["fork", "piece", "--name", "copy", "--dry-run"]

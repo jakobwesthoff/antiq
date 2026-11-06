@@ -574,10 +574,10 @@ mod tests {
 
     #[test]
     fn a_plain_run_reports_on_stderr() {
-        let (code, stdout, stderr) = run_captured(&["fork", "piece"]);
+        let (code, stdout, stderr) = run_captured(&["sync"]);
         assert_eq!(code, 1);
         assert_eq!(stdout, "");
-        assert_eq!(stderr, "error: fork is not implemented\n");
+        assert_eq!(stderr, "error: sync is not implemented\n");
     }
 
     #[test]

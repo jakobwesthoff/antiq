@@ -1778,7 +1778,15 @@ with `id`, `path` and `payload_version`, or a `skip` action with `id`,
 `path`, `reason`, `needed` and `available` when the volume has no room,
 and no action for a piece that is unearthed already.
 
-`fork` has no payload defined yet.
+`fork` adds `id` (the new ID), `from` (the ID the piece had), `path`
+(where the piece is now), `old_path`, `abs_path` and `warnings`. A piece
+that cannot be forked, a taken or unselected new path and a metadata
+version that cannot be written on top of are errors of kind `other`;
+metadata of a higher `format` is `format_too_new`, a `--name` that is not
+a name is `usage`, and a piece path outside the collection is
+`outside_collection`. The plan of a `--dry-run` has one `fork` action
+with `from` (the ID the piece has now), `path` (where it will be) and
+`old_path`; the new ID is minted by the run and is not in the plan.
 
 `pin` and `unpin` add `id` (null for a new piece), `path`, `pinned` (whether
 the piece is pinned afterwards), `changed` (whether the command changed the
