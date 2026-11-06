@@ -6,6 +6,7 @@
 //! given version, and archiving the folder again.
 
 use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::outsider::{shasum_check, store_files, tar_members};
 use crate::support::scenario::world::{Mode, Setup, World, both_modes};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,6 +111,22 @@ impl Likeness {
             })
             .sum();
         total - repeated
+    }
+
+    /// The number of regular files in the folder, a file with several names
+    /// counted once, as the `files` of a listing counts them.
+    fn stored_files(&self) -> u64 {
+        let files = self
+            .items
+            .values()
+            .filter(|item| matches!(item, Item::File { .. }))
+            .count() as u64;
+        let repeated: u64 = self
+            .hard_links
+            .iter()
+            .map(|group| group.len() as u64 - 1)
+            .sum();
+        files - repeated
     }
 
     /// The same record without the path, for the files a comparison does
@@ -636,6 +653,119 @@ fn unearth_a_given_version_by_local_text_or_stamp_across_the_repeated_hour() {
 
         assert_eq!(world.collection().versions(JOURNAL), Vec::<String>::new());
         assert!(!world.collection().path(".antiq/pieces/notes").exists());
+        no_staging_left(world);
+    });
+}
+
+#[test]
+fn an_unearthed_folder_that_is_archived_again_becomes_a_new_version() {
+    both_modes(scanner_world, |world| {
+        let original = folder(world, SCANNER);
+        world.run(&["archive", SCANNER]).expect_code(0);
+        world.run(&["unearth", "scanner"]).expect_code(0);
+        original.assert_like(&unearthed(world, SCANNER));
+        assert_eq!(world.collection().versions(SCANNER), Vec::<String>::new());
+
+        // The idle clock starts again at the unearth: every file is forty
+        // days old, and the piece is not due.
+        world.assert_unchanged(|| {
+            let dry = world.run(&["archive", "-n"]);
+            dry.expect_code(0);
+            dry.keys(&[
+                "format", "command", "dry_run", "actions", "refused", "warnings",
+            ]);
+            dry.text_only(|out| assert_eq!(out, "Nothing to do.\n"));
+            dry.json_only(|json| {
+                assert_eq!(json["actions"], json!([]));
+                assert_eq!(json["refused"], json!([]));
+            });
+            let bare = world.run(&["archive"]);
+            bare.expect_code(0);
+            bare.keys(&[
+                "format", "command", "archived", "skipped", "refused", "repairs", "warnings",
+            ]);
+            bare.text_only(|out| assert_eq!(out, "Archived 0, skipped 0, refused 0.\n"));
+            bare.json_only(|json| assert_eq!(json["archived"], json!([])));
+            let status = world.run(&["status"]);
+            status.expect_code(0);
+            status.text_only(|out| assert!(!out.contains("scanner"), "{out:?}"));
+            status.json_only(|json| assert_eq!(json["pieces"], json!([])));
+        });
+
+        // Work on the folder: an edit through one name of the hard link, a
+        // new file in a new directory, a file removed. Then the folder is
+        // left alone for forty days.
+        let root = world.collection().path(SCANNER);
+        fs::write(root.join("src/main.rs"), "fn main() { scan(); }\n").expect("the edit");
+        fs::create_dir(root.join("notes")).expect("the directory is made");
+        fs::write(root.join("notes/new.md"), "# new\n").expect("the file is written");
+        fs::remove_file(root.join("old.txt")).expect("the file goes");
+        world.collection().set_age(SCANNER, 40);
+        let edited = unearthed(world, SCANNER);
+
+        // Now it is due, and the next run archives the changed folder.
+        let archived = world.run(&["archive"]);
+        archived.expect_code(0);
+        archived.keys(&[
+            "format", "command", "archived", "skipped", "refused", "repairs", "warnings",
+        ]);
+        archived.text_only(|out| {
+            assert_eq!(
+                out,
+                format!("archived {SCANNER}\nArchived 1, skipped 0, refused 0.\n")
+            );
+        });
+        let stamps = world.collection().versions(SCANNER);
+        assert_eq!(stamps.len(), 1, "{stamps:?}");
+        let stored = store_files(world.collection(), SCANNER).remove(0);
+        let archive = stored.archive.expect("the archive");
+        archived.json_only(|json| {
+            let entry = json["archived"][0].as_object().expect("an archived piece");
+            let keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+            assert_eq!(
+                keys,
+                [
+                    "piece",
+                    "stamp",
+                    "version",
+                    "archive_bytes",
+                    "files",
+                    "bytes"
+                ]
+            );
+            assert_eq!(entry["piece"], SCANNER);
+            assert_eq!(entry["stamp"], stamps[0].as_str());
+            assert_eq!(entry["version"], utc_of(&stamps[0]));
+            assert_eq!(
+                entry["archive_bytes"],
+                fs::metadata(&archive).expect("the archive exists").len()
+            );
+            assert_eq!(entry["files"], edited.stored_files());
+            assert_eq!(entry["bytes"], edited.unpacked_bytes());
+        });
+        assert!(!world.collection().path(SCANNER).exists());
+
+        // The old version is gone and the new one holds the changes.
+        let members = tar_members(&archive);
+        for present in ["scanner/notes/new.md", "scanner/src/main-copy.rs"] {
+            assert!(members.iter().any(|name| name == present), "{members:?}");
+        }
+        for absent in ["scanner/old.txt", "scanner/.antiq-restored"] {
+            assert!(!members.iter().any(|name| name == absent), "{members:?}");
+        }
+        let checksum = stored.checksum.expect("the checksum file");
+        shasum_check(checksum.parent().expect("a store folder"), &checksum);
+
+        // Unearthing it again gives the changed folder back.
+        world.run(&["unearth", "scanner"]).expect_code(0);
+        edited.assert_like(&unearthed(world, SCANNER));
+        for name in ["src/main.rs", "src/main-copy.rs"] {
+            let text = fs::read_to_string(root.join(name)).expect("the file reads");
+            assert_eq!(text, "fn main() { scan(); }\n", "{name}");
+        }
+        assert!(!root.join("old.txt").exists());
+        assert_eq!(world.collection().versions(SCANNER), Vec::<String>::new());
+        assert!(!world.collection().path(".antiq/pieces/projects").exists());
         no_staging_left(world);
     });
 }
