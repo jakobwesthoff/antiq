@@ -574,9 +574,11 @@ impl Cards {
         } else {
             let (operation, counter) = current.expect("a total comes from a counter");
             let done = counter.done().min(total);
-            // Rounded, but 100 % is for a bar that is full.
-            let percent = ((u128::from(done) * 100 + u128::from(total) / 2) / u128::from(total))
-                .min(if done < total { 99 } else { 100 });
+            // A card whose counter is at its total is still working: the
+            // operation after it, or the finished line, replaces it. So the
+            // bar and the percentage stop one step short of full.
+            let percent =
+                ((u128::from(done) * 100 + u128::from(total) / 2) / u128::from(total)).min(99);
             let mut line = format!(
                 "    {}  {}",
                 self.bar(done, total, layout.bar),
@@ -594,12 +596,10 @@ impl Cards {
         [first.trim_end().to_string(), second]
     }
 
-    /// A bar `width` cells wide that is `done` of `total` full.
+    /// A bar `width` cells wide that is `done` of `total` full, never
+    /// quite: its last cell stays unlit.
     fn bar(&self, done: u64, total: u64, width: usize) -> String {
         let symbols = self.symbols();
-        if done >= total {
-            return self.paint(theme::CYAN, &symbols.bar_fill.repeat(width));
-        }
         let fill = usize::try_from(u128::from(done) * width as u128 / u128::from(total))
             .unwrap_or(width)
             .min(width - 1);

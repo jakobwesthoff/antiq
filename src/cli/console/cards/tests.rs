@@ -474,16 +474,16 @@ fn an_operation_without_a_total_draws_a_moving_bar_without_figures() {
 }
 
 #[test]
-fn a_counter_above_its_total_stops_at_one_hundred_percent() {
+fn a_counter_at_or_above_its_total_shows_99_percent_until_the_card_is_replaced() {
     let mut cards = cards(Kind::Archive);
     cards.apply(started("a", 10), secs(0));
-    let (verifying, _k) = operation("a", Operation::Verifying, 9, 4);
+    let (verifying, counter) = operation("a", Operation::Verifying, 4, 4);
     cards.apply(verifying, secs(0));
-    let region = cards.region(secs(0), MOCKUP, 24);
-    assert_eq!(
-        region[1],
-        format!("    {}  100%  4/4 files", "━".repeat(40))
-    );
+    let at_total = format!("    {}╸   99%  4/4 files", "━".repeat(39));
+    assert_eq!(cards.region(secs(0), MOCKUP, 24)[1], at_total);
+
+    counter.add(5);
+    assert_eq!(cards.region(secs(0), MOCKUP, 24)[1], at_total);
 }
 
 #[test]
