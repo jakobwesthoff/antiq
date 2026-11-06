@@ -4,7 +4,6 @@
 
 //! The rsync executable.
 
-use crate::config::MachineConfig;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -143,15 +142,7 @@ impl Rsync {
         resolve_in(configured, &search_dirs(path_var))
     }
 
-    /// The rsync a run uses: the stored `machine.rsync`, probed again
-    /// because the executable may have changed since `remote add`.
-    pub fn from_machine(machine: &MachineConfig) -> Result<Rsync, RsyncError> {
-        let path = machine.rsync.as_deref().ok_or(RsyncError::NotResolved)?;
-        require_absolute(path)?;
-        Rsync::probe(path)
-    }
-
-    /// The absolute path to store in `machine.rsync`.
+    /// The absolute path of the rsync that passed the probe.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -209,21 +200,6 @@ pub struct TransferSettings {
     /// Keep an interrupted file in `.antiq-partial` so that the next call
     /// resumes it. Archive uploads set this.
     pub resumable: bool,
-}
-
-impl TransferSettings {
-    pub fn for_machine(
-        machine: &MachineConfig,
-        ssh_command: Vec<OsString>,
-        resumable: bool,
-    ) -> TransferSettings {
-        TransferSettings {
-            ssh_command,
-            timeout_seconds: machine.rsync_timeout,
-            remote_rsync: machine.remote_rsync.clone(),
-            resumable,
-        }
-    }
 }
 
 /// One prepared rsync call.
@@ -804,12 +780,6 @@ mod tests {
         assert_eq!(rsync.path(), fake.path());
     }
 
-    #[test]
-    fn from_machine_without_a_path_is_not_resolved() {
-        let error = Rsync::from_machine(&MachineConfig::default()).expect_err("no path");
-        assert!(matches!(error, RsyncError::NotResolved), "{error:?}");
-    }
-
     // =========================================================
     // The command line
     // =========================================================
@@ -925,33 +895,6 @@ mod tests {
                 "host:/dest/a",
             ]
         );
-    }
-
-    #[test]
-    fn the_settings_come_from_the_machine_config() {
-        let machine = MachineConfig {
-            rsync_timeout: 42,
-            remote_rsync: Some("/usr/local/bin/rsync".to_string()),
-            ..MachineConfig::default()
-        };
-        let settings = TransferSettings::for_machine(&machine, names(&["ssh"]), true);
-        assert_eq!(
-            settings,
-            TransferSettings {
-                ssh_command: names(&["ssh"]),
-                timeout_seconds: 42,
-                remote_rsync: Some("/usr/local/bin/rsync".to_string()),
-                resumable: true,
-            }
-        );
-    }
-
-    #[test]
-    fn the_default_machine_config_gives_the_default_timeout() {
-        let settings =
-            TransferSettings::for_machine(&MachineConfig::default(), names(&["ssh"]), false);
-        assert_eq!(settings.timeout_seconds, 300);
-        assert_eq!(settings.remote_rsync, None);
     }
 
     // =========================================================
@@ -1303,41 +1246,6 @@ total size is 2568  speedup is 0.96\n";
         );
         assert!(stats.bytes_received.is_some(), "{stats:?}");
         assert_eq!(fs::read(&destination).expect("copied"), vec![b'x'; 5000]);
-    }
-
-    #[test]
-    fn from_machine_refuses_a_relative_path() {
-        let machine = MachineConfig {
-            rsync: Some(PathBuf::from("rsync")),
-            ..MachineConfig::default()
-        };
-        let error = Rsync::from_machine(&machine).expect_err("it is refused");
-        assert!(matches!(error, RsyncError::RelativePath(_)), "{error:?}");
-    }
-
-    #[test]
-    fn from_machine_probes_the_stored_path() {
-        let fake = Fake::new(RSYNC_3_5_1);
-        let machine = MachineConfig {
-            rsync: Some(fake.path()),
-            ..MachineConfig::default()
-        };
-        assert_eq!(
-            Rsync::from_machine(&machine).expect("it passes").path(),
-            fake.path()
-        );
-        fs::write(fake.dir().join("version"), OPENRSYNC).expect("the directory is writable");
-        let error = Rsync::from_machine(&machine).expect_err("it is refused now");
-        assert!(
-            matches!(
-                error,
-                RsyncError::Refused {
-                    reason: Refusal::OpenRsync,
-                    ..
-                }
-            ),
-            "{error:?}"
-        );
     }
 
     #[test]
