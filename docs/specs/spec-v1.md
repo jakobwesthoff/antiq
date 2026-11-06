@@ -702,11 +702,31 @@ does not fit is a usage error. The config keeps the URL as given.
 is attached, and refuses with the reason when a probe fails: no rsync
 3.1 or later, openrsync, no SHA-256 tool on the NAS, a failing
 exclusive create, the remote unreachable. It writes nothing then.
+
+On a path remote `remote add` decides every refusal before it writes
+anything: a URL that does not fit, `--host-key-alias` (which applies to
+ssh remotes only), an ssh URL (not supported yet), a remote already
+attached, and what the root holds. Without `--init`, a missing root and a
+root without a marker that is no mount point are away, a mount point
+without a marker is broken, and a marker names the remote's ULID, as
+under "Path remote". With `--init`, a missing root is created when its
+parent exists, and a root that already holds a marker, an `objects`
+entry or a `.antiq-clock.*` file is refused with the name it holds; any
+other directory is accepted. The probe for exclusive creation makes a
+file named `.antiq-probe.<machine part>.<pid>.<lower-case ULID>` in the
+root, makes it again, which has to fail, and removes it; a root that a
+refused `--init` made is removed again. Then `--init` writes the
+marker, the `[[remote]]` entry goes into the config, and the metadata of
+the remote is copied into `.antiq/objects/`. A copy that fails leaves the
+remote attached, and `sync` brings in the rest. A config that cannot be
+written after `--init` leaves the marker, and `remote add <url>` without
+`--init` attaches it.
+
 `remote show` prints kind, URL, remote ULID, reachability and the probed
 versions. `remote remove` only detaches: it deletes nothing on the
 remote and keeps the local metadata, lists the remote-only pieces that
 become unreachable, and goes through the brake. A path remote whose root
-is not a mount point gets a warning.
+is not a mount point gets a warning at `remote add` and at `remote show`.
 
 Without a remote, `sync` fails with exit 1 and the error kind
 `no_remote`, `remote show` reports that none is attached and exits 0,
@@ -1610,7 +1630,7 @@ brake would hold.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, or the URL of `remote add` is invalid | |
+| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, the URL of `remote add` is invalid, or `--host-key-alias` is given with a path URL | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
 | `unknown_reference` | 1 | a piece reference matches no object | |
@@ -1620,6 +1640,7 @@ brake would hold.
 | `no_remote` | 1 | a command needs a remote and none is attached | |
 | `remote_away` | 4 | the remote cannot be reached | |
 | `remote_broken` | 1 | the remote is broken, as "Remotes" defines | |
+| `unsupported` | 1 | a command needs something this version does not have yet, such as an ssh remote | |
 | `format_too_new` | 1 | a write meets metadata of a higher `format` | |
 | `other` | 1 | any other failure | |
 
@@ -1719,8 +1740,18 @@ pin file) and `warnings`.
 terminal, or with `--json`, it lists the pending decisions and exits 3
 when there are any.
 
-`remote add`, `remote show` and `remote remove` have no payload defined
-yet.
+`remote add` adds `kind` (`path`), `url` (as given), `id` (the remote's
+ULID; a dry run of `--init` has none yet), `attached`, `created` (whether
+the run made the marker), `pulled` (the number of objects whose metadata
+was copied; left out in a dry run), `dry_run` (present, and true, under
+`--dry-run`), `actions` and `warnings`. An action is `create_remote` or
+`attach_remote`, each with a `url`, or `copy_metadata` with `objects`.
+The errors are `remote_away` for a missing root or a root without a
+marker that is no mount point, `remote_broken` for the other roots that
+cannot be used, `unsupported` for an ssh URL, `usage` for an invalid URL
+or for `--host-key-alias` with a path URL, and `other` for the rest.
+
+`remote show` and `remote remove` have no payload defined yet.
 
 `reconcile` adds `index` (`written` and `removed`, the numbers of files
 written to and removed from the index, and `skipped`, a list of `{id,

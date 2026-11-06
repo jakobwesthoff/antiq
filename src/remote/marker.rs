@@ -4,10 +4,6 @@
 
 //! The marker file at the root of a remote.
 
-// TODO: the path remote and `remote add` (the commits that follow) call
-// the writer; until they land the library has no caller.
-#![allow(dead_code)]
-
 use crate::error::HasKind;
 use crate::fsx::FsxError;
 use crate::fsx::tree::TreeRoot;

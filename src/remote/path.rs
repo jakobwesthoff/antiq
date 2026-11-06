@@ -35,10 +35,13 @@ pub(crate) struct Seams {
     pub durable: Arc<dyn Durable>,
     /// How a file is opened to be read back for its checksum.
     pub read_back: Arc<ReadBack>,
+    /// Creates a file that must not exist yet, the way a claim is created.
+    pub exclusive: Arc<Exclusive>,
 }
 
 type MountTest = dyn Fn(&Path) -> Result<bool, FsxError> + Send + Sync;
 type ReadBack = dyn Fn(&Path) -> io::Result<File> + Send + Sync;
+type Exclusive = dyn Fn(&Path) -> io::Result<()> + Send + Sync;
 
 impl Default for Seams {
     fn default() -> Seams {
@@ -46,7 +49,49 @@ impl Default for Seams {
             mount: Arc::new(is_mount_point),
             durable: Arc::new(RealDurable),
             read_back: Arc::new(open_uncached),
+            exclusive: Arc::new(|path| {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map(drop)
+            }),
         }
+    }
+}
+
+/// Why exclusive creation does not work in a directory.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ProbeFailed(pub String);
+
+/// Checks that the filesystem under `root` refuses to create a file that is
+/// there: a claim is made that way (ADR 0030), and a filesystem that
+/// accepted the second create would let two machines both win. The probe
+/// file is named for this machine and run, and removed again whatever the
+/// outcome, but only if this run created it.
+pub(crate) fn probe_exclusive(
+    root: &Path,
+    machine_part: &str,
+    seams: &Seams,
+) -> Result<(), ProbeFailed> {
+    let name = format!(
+        ".antiq-probe.{machine_part}.{}.{}",
+        std::process::id(),
+        ulid::Ulid::from_datetime(std::time::SystemTime::now())
+            .to_string()
+            .to_lowercase()
+    );
+    let path = root.join(name);
+    (seams.exclusive)(&path).map_err(|error| ProbeFailed(error.to_string()))?;
+    let second = (seams.exclusive)(&path);
+    // Whatever the removal says does not change what the probe found.
+    let _ = fs::remove_file(&path);
+    match second {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(ProbeFailed(error.to_string())),
+        Ok(()) => Err(ProbeFailed(
+            "a second create of the same file succeeded".into(),
+        )),
     }
 }
 

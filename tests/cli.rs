@@ -241,19 +241,29 @@ accepts!(
     "resolve",
     ["resolve", "piece", "--drop-superseded"]
 );
-accepts!(
-    remote_add_takes_its_options,
-    "remote add",
-    [
+/// `remote add` is implemented, so a command line it accepts runs and, away
+/// from a collection, fails there.
+#[test]
+fn remote_add_takes_its_options() {
+    let run = json_run(&[
         "remote",
         "add",
         "--init",
         "--host-key-alias",
         "nas",
         "ssh://nas/backup",
-        "--dry-run"
-    ]
-);
+        "--dry-run",
+    ]);
+    assert_eq!(
+        run.code(),
+        1,
+        "stdout: {}, stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(run.error_kind(), "not_a_collection");
+    assert_eq!(run.json()["command"], "remote add");
+}
 accepts!(remote_show_takes_nothing, "remote show", ["remote", "show"]);
 accepts!(
     remote_remove_takes_force_and_dry_run,

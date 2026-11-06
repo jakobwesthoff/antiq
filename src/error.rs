@@ -180,8 +180,10 @@ pub enum Error {
     RelPath(#[from] RelPathError),
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    /// Boxed, since the refusals of `remote add` carry paths and URLs and
+    /// would make every `Result` of the crate this large.
     #[error(transparent)]
-    RemoteOp(#[from] RemoteOpError),
+    RemoteOp(Box<RemoteOpError>),
     #[error(transparent)]
     Repair(#[from] RepairError),
     #[error(transparent)]
@@ -204,6 +206,12 @@ pub enum Error {
     Unearth(#[from] UnearthError),
     #[error(transparent)]
     Walk(#[from] WalkError),
+}
+
+impl From<RemoteOpError> for Error {
+    fn from(error: RemoteOpError) -> Self {
+        Error::RemoteOp(Box::new(error))
+    }
 }
 
 impl Error {
