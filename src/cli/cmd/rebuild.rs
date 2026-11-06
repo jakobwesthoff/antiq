@@ -7,11 +7,11 @@
 use super::progress;
 use super::unearth::description_with;
 use crate::cli::console::block::Block;
-use crate::cli::console::cards::{Count, Summary, Tone, sizes};
+use crate::cli::console::cards::{Count, Summary, Tone, sizes_or_bytes};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::{decimal_size, sanitize};
+use crate::cli::table::sanitize;
 use crate::cli::{Context, RebuildArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -33,11 +33,7 @@ const RESULT_WIDTH: usize = 18;
 const COUNTS: &[(Operation, Count)] = &[(
     Operation::Verifying,
     Count {
-        text: |done, total| match total {
-            Some(_) => sizes(done, total),
-            None if done == 0 => String::new(),
-            None => decimal_size(done),
-        },
+        text: sizes_or_bytes,
         percent: true,
     },
 )];

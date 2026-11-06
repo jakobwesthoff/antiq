@@ -6,7 +6,7 @@
 
 use super::progress::{self, Description, Restored};
 use crate::cli::console::block::Block;
-use crate::cli::console::cards::{Count, Summary, sizes};
+use crate::cli::console::cards::{Count, Summary, sizes, sizes_or_bytes};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
@@ -33,7 +33,7 @@ pub(super) const COUNTS: &[(Operation, Count)] = &[
     (
         Operation::Extracting,
         Count {
-            text: sizes,
+            text: sizes_or_bytes,
             percent: true,
         },
     ),
@@ -332,6 +332,15 @@ mod tests {
             assert!(first.ends_with(&format!("  {word}")), "{first:?}");
             assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
         }
+    }
+
+    #[test]
+    fn extracting_without_a_total_says_the_bytes_written_under_a_moving_bar() {
+        let [_, second] = progress::card_of(COUNTS, Operation::Extracting, 412_000_000, 0);
+        assert!(second.ends_with("  412 MB"), "{second:?}");
+        assert!(!second.contains('%'), "{second:?}");
+        let [_, second] = progress::card_of(COUNTS, Operation::Extracting, 0, 0);
+        assert!(!second.contains("B"), "{second:?}");
     }
 
     fn summary(report: &UnearthReport) -> (Tone, String) {

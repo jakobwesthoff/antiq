@@ -67,6 +67,17 @@ pub(crate) fn sizes(done: u64, total: Option<u64>) -> String {
     })
 }
 
+/// [`sizes`], and the bytes alone while the total is not known and some
+/// are done. For an operation that can run on a piece with no listing to
+/// measure against.
+pub(crate) fn sizes_or_bytes(done: u64, total: Option<u64>) -> String {
+    match total {
+        Some(_) => sizes(done, total),
+        None if done == 0 => String::new(),
+        None => decimal_size(done),
+    }
+}
+
 /// The count of an operation that its command does not list.
 const FILES: Count = Count {
     text: |done, total| items(done, total, "files"),
