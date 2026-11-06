@@ -231,7 +231,17 @@ fn verify_strict_observed(
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Verified, PackError> {
     let (folder, moved, package) = read_folder_granted(root, rules, |modes| {
-        let entries = walk_entries(root, rules, hooks, modes)?;
+        let entries = match walk_entries(root, rules, hooks, modes) {
+            Ok(entries) => entries,
+            Err(walk_error) => {
+                // A file that is not what was written is the first thing to
+                // tell, whatever the folder looks like.
+                if archive.is_some() {
+                    read_archive(package, archive, &mut |_| Ok(()))?;
+                }
+                return Err(walk_error);
+            }
+        };
         let mut directories = DirectoryStack::new(root);
         let mut reads: HashMap<RelPath, Read> = HashMap::new();
         let package = {
@@ -1268,6 +1278,39 @@ mod tests {
             matches!(&error, PackError::ArchiveDiffers { .. }),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_damaged_archive_is_reported_even_when_the_walk_of_the_folder_fails() {
+        let (_dir, archive, package, mut tree) = archived();
+        let mut bytes = package.bytes.clone();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        std::fs::write(&archive, &bytes).expect("the archive is damaged");
+        let locked = tree.unreadable_dir("proj/locked");
+        assert!(
+            std::fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let error = verify_against(&archive, &tree, &package.packed.sha256)
+            .expect_err("the archive is damaged");
+
+        assert!(
+            matches!(&error, PackError::ArchiveDiffers { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_a_failing_walk_is_reported_when_the_archive_is_whole() {
+        let (_dir, archive, package, mut tree) = archived();
+        tree.unreadable_dir("proj/locked");
+
+        let error = verify_against(&archive, &tree, &package.packed.sha256)
+            .expect_err("the walk has a problem");
+
+        assert!(matches!(&error, PackError::TreeHasProblems(_)), "{error:?}");
     }
 
     #[test]
