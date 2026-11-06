@@ -65,18 +65,6 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
         out.json(Some("grep"), &json_report(printed.pattern, found))
             .context("print the result")?;
     } else {
-        // Notes on the settings, then the lock, as `list` orders them.
-        let mut notices = notice::warnings(&found.warnings);
-        notices.extend(found.note.iter().cloned().map(Notice::Note));
-        notices.extend(found.skipped.iter().map(|skipped| {
-            Notice::Warning(Warning::new(format!(
-                "cannot search version {} of {}: {}",
-                skipped.stamp,
-                sanitize(&skipped.piece.to_string()),
-                skipped.reason
-            )))
-        }));
-        out.notices(&notices).context("print the notes")?;
         let style = out.stdout_style();
         if style.terminal {
             for line in render_terminal(found, printed.regex, style, printed.zone) {
@@ -88,6 +76,19 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
                     .context("print the hits")?;
             }
         }
+        // Warnings follow the hits: the hits are what was asked for. The
+        // notes on the settings come first, then the one on the lock.
+        let mut notices = notice::warnings(&found.warnings);
+        notices.extend(found.note.iter().cloned().map(Notice::Note));
+        notices.extend(found.skipped.iter().map(|skipped| {
+            Notice::Warning(Warning::new(format!(
+                "cannot search version {} of {}: {}",
+                skipped.stamp,
+                sanitize(&skipped.piece.to_string()),
+                skipped.reason
+            )))
+        }));
+        out.notices(&notices).context("print the notes")?;
     }
     if found.pieces.is_empty() {
         out.note(&format!(

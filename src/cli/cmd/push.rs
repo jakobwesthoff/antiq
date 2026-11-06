@@ -65,7 +65,6 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 notices.extend(report.note_lines().into_iter().map(|line| {
                     Notice::Note(line.strip_prefix("note: ").unwrap_or(&line).to_string())
                 }));
-                out.notices(&notices).context("print the result")?;
                 let env = out.stdout_env();
                 let lines = if env.rich && report.initialized && report.plan.is_none() {
                     claimed(&report, &env)
@@ -80,6 +79,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                         out.line(&line).context("print the result")?;
                     }
                 }
+                out.notices(&notices).context("print the notes")?;
             }
         }
     }

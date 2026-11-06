@@ -178,6 +178,34 @@ impl World {
         self.run_stderr_terminal(antiq, envs)
     }
 
+    /// Runs the command with stdout and stderr on the same pseudo-terminal.
+    /// What both wrote comes back as `stdout` in the order it was written,
+    /// and `stderr` is empty.
+    pub fn run_tty_merged(&self, args: &[&str], envs: &[(&str, &str)]) -> Outcome {
+        let mut terminal = Terminal::open();
+        let (out, err) = terminal.slave_twice();
+        let mut antiq = Antiq::new()
+            .arg("-C")
+            .arg(self.collection.root())
+            .args(args)
+            .env("TZ", TIME_ZONE)
+            .stdout(out)
+            .stderr(err);
+        for (key, value) in envs {
+            antiq = antiq.env(key, value);
+        }
+        let run = antiq
+            .run_within(TTY_DEADLINE)
+            .expect("the command finishes on a terminal");
+        Outcome {
+            code: run.code(),
+            stdout: terminal.finish(),
+            stderr: run.stderr,
+            mode: Mode::Text,
+            value: None,
+        }
+    }
+
     /// `run_tty_stderr` started inside the collection without `-C`, so that
     /// a command antiq suggests to copy has no directory in it and its
     /// text does not depend on the length of the temporary path.
@@ -483,6 +511,15 @@ impl Terminal {
     /// only copy, so the reader sees the end when the command is gone.
     fn slave(&mut self) -> Stdio {
         Stdio::from(self.slave.take().expect("the slave is taken once"))
+    }
+
+    /// Two copies of the slave end, to become stdout and stderr of one
+    /// command so that the terminal shows them in the order they were
+    /// written.
+    fn slave_twice(&mut self) -> (Stdio, Stdio) {
+        let slave = self.slave.take().expect("the slave is taken once");
+        let copy = slave.try_clone().expect("the slave descriptor duplicates");
+        (Stdio::from(slave), Stdio::from(copy))
     }
 
     /// What the command printed, with the terminal's `\r\n` as `\n`.
