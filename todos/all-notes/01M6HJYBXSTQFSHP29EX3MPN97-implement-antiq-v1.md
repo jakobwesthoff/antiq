@@ -415,7 +415,7 @@ one item per wave edits `Cargo.toml` after that. I01 runs `cargo audit`
 | unicode-normalization | 0.1.26 | | NFD folding for name collisions (ADR 0054) | not researched (T11) | I13 |
 | crossterm | 0.29.0 | | picker drawing | ntropy's version (ADR 0057); advisories to check with `cargo audit` | I36 |
 | nucleo | 0.5.0 | | search and picker matching | ntropy's version | I15 (added), I36 |
-| unicode-width | 0.2.3 | | picker layout | ntropy pins 0.2.2 | I36 |
+| unicode-width | 0.2.3 | | status and picker layout | ntropy pins 0.2.2 | I16 (added), I36 |
 | unicode-segmentation | 1.13.x | | picker layout | ntropy's version 1.13.3 | I36 |
 | rustix features `pty`, `termios` | 1.1.6 | | pty harness for the terminal glue (T16) | `openpt`, `grantpt`, `unlockpt`, `ptsname`, `tcsetwinsize`, `ioctl_tiocsctty` exist in rustix 1.1.6 | I36 |
 
@@ -2656,6 +2656,19 @@ the same commit; the lead checks that at acceptance.
   with action `archive`, `import`, `resolve` or `fork`; reuse or move it.
   `derive_state` gives a `gone` entry its folder back only for live
   metadata of this collection (I16 fixes I09's code).
+
+### I17
+
+- 2026-11-04: `Manifest::remove` (in `src/pack/manifest.rs`) removes a
+  manifest whose ULID has no tracking entry file; an `unearthing` entry
+  from a live package has no listing and is dropped, its folder
+  reported once as a new piece; own live metadata with neither entry
+  nor folder gets a `gone` entry from the repair; `run::start` with a
+  dry run returns the lock holder and the commands print the note.
+  Plans render as "Would <action>" lines, "Nothing to do." and brake
+  lines, as JSON `{"dry_run": true, "actions": [...], "brake"?}`;
+  the wording sits in one place and the user sees it rendered with the
+  first command that uses it.
 
 ### I12
 
