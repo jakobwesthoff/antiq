@@ -347,30 +347,57 @@ fn a_held_lock_is_a_note_field_in_json_and_nothing_on_stderr() {
 }
 
 #[test]
-fn a_listing_that_cannot_be_read_fails_the_run() {
-    let world = world(Mode::Json, |builder| {
-        builder.version("notes", SCANNER_NEW, &[("a.txt", "a")]);
-    });
-    let listing = world
-        .collection()
-        .version_files("notes", SCANNER_NEW)
-        .listing;
-    fs::set_permissions(&listing, fs::Permissions::from_mode(0o000)).expect("the mode changes");
-    struct Restore(std::path::PathBuf);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+fn a_listing_that_cannot_be_read_keeps_its_row_and_is_a_warning() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, |builder| {
+            builder
+                .version("notes", SCANNER_NEW, &[("a.txt", "a")])
+                .version("other", SCANNER_NEW, &[("a.txt", "a")]);
+        });
+        let listing = world
+            .collection()
+            .version_files("notes", SCANNER_NEW)
+            .listing;
+        fs::set_permissions(&listing, fs::Permissions::from_mode(0o000)).expect("the mode changes");
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+            }
         }
-    }
-    let _restore = Restore(listing.clone());
-    assert!(
-        fs::File::open(&listing).is_err(),
-        "the test needs a non-root user"
-    );
+        let _restore = Restore(listing.clone());
+        assert!(
+            fs::File::open(&listing).is_err(),
+            "the test needs a non-root user"
+        );
 
-    let run = world.run(&["list"]);
-    run.expect_code(1);
-    assert_eq!(run.error_kind().as_deref(), Some("other"));
+        let run = world.run(&["list"]);
+        run.expect_code(0);
+        run.text_only(|out| {
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines.len(), 2, "{out:?}");
+            assert_eq!(
+                fields(lines[0]),
+                ["notes", SCANNER_NEW, "-", "-", "unreadable"]
+            );
+            assert_eq!(fields(lines[1])[4], "ok");
+            assert!(
+                run.stderr.starts_with("note: cannot open notes/"),
+                "{:?}",
+                run.stderr
+            );
+            assert!(run.stderr.contains("notes--"), "{:?}", run.stderr);
+        });
+        run.json_only(|json| {
+            assert_eq!(json["versions"][0]["state"], "unreadable");
+            assert_eq!(json["versions"][0]["files"], Value::Null);
+            let warnings = json["warnings"].as_array().expect("a list");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            let message = warnings[0]["message"].as_str().expect("a text");
+            assert!(message.starts_with("cannot open notes/"), "{message}");
+            assert_eq!(run.stderr, "");
+        });
+    }
 }
 
 #[test]

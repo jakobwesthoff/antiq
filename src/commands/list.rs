@@ -40,6 +40,8 @@ pub enum State {
     Incomplete,
     /// The listing is of a newer format than antiq reads.
     NewerFormat,
+    /// A file of the version could not be read, so nothing is known of it.
+    Unreadable,
 }
 
 /// One version.
@@ -70,6 +72,8 @@ pub struct Rows {
     /// False for a store without a version, a version being stored apart.
     /// It tells "nothing to list" from "nothing matches".
     pub store_has_versions: bool,
+    /// The files that could not be read.
+    pub warnings: Vec<Warning>,
 }
 
 /// The rows of the pieces whose path matches `query`, pieces by path and
@@ -96,9 +100,16 @@ pub fn gather(places: &Places, query: Option<&str>) -> Result<Rows, ListError> {
     let workers = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
     let inspections = damage::inspect_all(places, &items, Check::Head, workers);
     let mut versions = Vec::new();
+    let mut warnings = Vec::new();
     for ((piece, version), inspection) in items.iter().zip(inspections) {
-        if let Some(row) = row_of(piece, version, inspection?) {
-            versions.push(row);
+        match inspection {
+            Ok(inspection) => versions.extend(row_of(piece, version, inspection)),
+            // A file that cannot be read says nothing about the version,
+            // but it is there and listed.
+            Err(error) => {
+                warnings.push(Warning::new(error.to_string()));
+                versions.push(unreadable_row(piece, version));
+            }
         }
     }
 
@@ -111,19 +122,33 @@ pub fn gather(places: &Places, query: Option<&str>) -> Result<Rows, ListError> {
                 folder
                     .versions
                     .iter()
-                    .map(|v| (folder.path.clone(), v.clone()))
+                    .map(|version| (folder.path.clone(), version.clone()))
             })
             .collect();
         damage::inspect_all(places, &everything, Check::Head, workers)
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .any(|inspection| inspection.condition != Condition::BeingStored)
+            .any(|inspection| {
+                inspection.map_or(true, |found| found.condition != Condition::BeingStored)
+            })
     };
     Ok(Rows {
         versions,
         store_has_versions,
+        warnings,
     })
+}
+
+fn unreadable_row(piece: &RelPath, version: &StoreVersion) -> Row {
+    Row {
+        piece: piece.clone(),
+        stamp: version.stamp,
+        version: version.stamp.time(),
+        state: State::Unreadable,
+        archive_bytes: None,
+        bytes: None,
+        files: None,
+        damage: Vec::new(),
+    }
 }
 
 /// The row of an inspected version, or `None` for one that is being moved in.
@@ -183,6 +208,7 @@ pub fn list(collection: &Collection, query: Option<&str>) -> Result<ListReport, 
     let rows = gather(&places, query)?;
 
     let mut warnings = report::setting_notes(collection);
+    warnings.extend(rows.warnings);
     let mut note = None;
     match lock::holder(&collection.lock_path()) {
         Ok(Some(holder)) => note = Some(lock_note(&holder).message),
@@ -410,47 +436,82 @@ mod tests {
         );
     }
 
-    /// Takes the mode away from a file and gives it back when dropped, also
-    /// on a panic.
-    struct Unreadable(std::path::PathBuf);
+    /// Takes the mode away from a file or folder and gives it back when
+    /// dropped, also on a panic.
+    struct Unreadable(std::path::PathBuf, fs::Permissions);
 
     impl Unreadable {
         fn new(path: std::path::PathBuf) -> Unreadable {
+            let before = fs::metadata(&path).expect("the path exists").permissions();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o000))
                 .expect("the mode changes");
-            Unreadable(path)
+            Unreadable(path, before)
         }
     }
 
     impl Drop for Unreadable {
         fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+            let _ = fs::set_permissions(&self.0, self.1.clone());
         }
     }
 
     #[test]
-    fn a_file_that_cannot_be_read_fails_the_listing() {
-        let (store, version) = one_version("notes");
+    fn a_file_that_cannot_be_read_leaves_its_row_unreadable_and_is_a_warning() {
+        let mut store = Store::new();
+        let tree = source();
+        store.add_version(&tree, "projects/scanner", "2026-11-04T090211");
+        let version = store.add_version(&tree, "notes", "2026-11-04T090211");
         let _guard = Unreadable::new(version.path(VersionFile::Listing));
         assert!(
             fs::File::open(version.path(VersionFile::Listing)).is_err(),
             "the test needs a non-root user"
         );
-        let error = gather(&store.places(), None).expect_err("the listing cannot be opened");
-        assert!(matches!(error, ListError::Versions(_)), "{error}");
-        assert_eq!(error.kind(), crate::error::ErrorKind::Other);
+        let rows = rows(&store, None);
+        assert_eq!(
+            found(&rows),
+            [
+                "notes 2026-11-04T090211",
+                "projects/scanner 2026-11-04T090211"
+            ]
+        );
+        let row = &rows.versions[0];
+        assert_eq!(row.state, State::Unreadable);
+        assert_eq!(
+            (row.archive_bytes, row.bytes, row.files),
+            (None, None, None)
+        );
+        assert_eq!(rows.versions[1].state, State::Ok);
+        assert_eq!(rows.warnings.len(), 1, "{:?}", rows.warnings);
+        let message = &rows.warnings[0].message;
+        assert!(message.starts_with("cannot open notes/"), "{message}");
+        assert!(message.contains(&version.names.listing), "{message}");
     }
 
     #[test]
-    fn a_file_that_cannot_be_read_fails_a_listing_that_matched_nothing_too() {
+    fn a_file_that_cannot_be_read_still_counts_as_a_version_when_a_query_matches_nothing() {
         let (store, version) = one_version("notes");
         let _guard = Unreadable::new(version.path(VersionFile::Listing));
         assert!(
             fs::File::open(version.path(VersionFile::Listing)).is_err(),
             "the test needs a non-root user"
         );
-        let error = gather(&store.places(), Some("zzz")).expect_err("the store is asked");
+        let rows = rows(&store, Some("zzz"));
+        assert!(rows.versions.is_empty());
+        assert!(rows.store_has_versions);
+        assert!(rows.warnings.is_empty(), "{:?}", rows.warnings);
+    }
+
+    #[test]
+    fn a_store_folder_that_cannot_be_read_fails_the_listing() {
+        let (store, _) = one_version("notes");
+        let _guard = Unreadable::new(store.pieces_dir().join("notes"));
+        assert!(
+            fs::read_dir(store.pieces_dir().join("notes")).is_err(),
+            "the test needs a non-root user"
+        );
+        let error = gather(&store.places(), None).expect_err("the folder cannot be listed");
         assert!(matches!(error, ListError::Versions(_)), "{error}");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Other);
     }
 
     #[test]

@@ -110,6 +110,7 @@ fn state_name(state: State) -> &'static str {
         State::Damaged => "damaged",
         State::Incomplete => "incomplete",
         State::NewerFormat => "newer-format",
+        State::Unreadable => "unreadable",
     }
 }
 
@@ -132,6 +133,7 @@ fn mark(state: State) -> Option<(&'static str, Color)> {
         State::Damaged => Some(("damaged", Color::Red)),
         State::Incomplete => Some(("incomplete", Color::Yellow)),
         State::NewerFormat => Some(("newer format", Color::Magenta)),
+        State::Unreadable => Some(("unreadable", Color::Red)),
     }
 }
 
@@ -359,6 +361,7 @@ mod tests {
             row("b", "2026-11-04T090211", State::Incomplete, None),
             row("c", "2026-11-04T090211", State::NewerFormat, None),
             sound("d", "2026-11-04T090211", 5, 1),
+            row("e", "2026-11-04T090211", State::Unreadable, None),
         ])
     }
 
@@ -371,6 +374,7 @@ mod tests {
         b       2026-11-04T090211        -       -   incomplete
         c       2026-11-04 10:02:11      -       -   newer format
         d       2026-11-04 10:02:11    5 B       1
+        e       2026-11-04 10:02:11      -       -   unreadable
         ");
     }
 
@@ -397,6 +401,7 @@ mod tests {
                 "b\t2026-11-04T090211\t-\t-\tincomplete",
                 "c\t2026-11-04T090211\t-\t-\tnewer-format",
                 "d\t2026-11-04T090211\t5\t1\tok",
+                "e\t2026-11-04T090211\t-\t-\tunreadable",
             ]
         );
     }

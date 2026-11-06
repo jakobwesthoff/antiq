@@ -1051,10 +1051,13 @@ the `state` field in a pipe and in the `state` key of `--json`:
 | `damaged` | `damaged` | red | a damaged version (see "Damage") |
 | `incomplete` | `incomplete` | yellow | an incomplete version; its VERSION is the stamp, as it is named by its stamp only |
 | `newer-format` | `newer format` | magenta | a listing of a newer format than antiq reads |
+| `unreadable` | `unreadable` | red | a file of the version cannot be read; SIZE and FILES are `-` |
 
 SIZE and FILES are `-` on a terminal and in a pipe, and null in `--json`,
 where the head of the listing lacks the number; SIZE is the size the listing
-records, also when the archive on disk has another. Each fault of a damaged version
+records, also when the archive on disk has another. A file that cannot be read does not fail the run: its version is
+listed as `unreadable`, and a warning names the file and the reason, as a note on
+stderr and in the `warnings` of `--json`. Each fault of a damaged version
 is a note on stderr, `note: <piece> <stamp> is damaged: <fault>`, and the
 `damage` list of its `--json` row. A folder that holds sidecars only is
 searched too, and its incomplete versions are listed. A version whose archive
