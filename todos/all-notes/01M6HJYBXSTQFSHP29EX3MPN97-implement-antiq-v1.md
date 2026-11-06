@@ -3037,6 +3037,29 @@ Notes for the items that call the strict verify and the listing comparison
   Rows show no pin state. `reference_directory` is `pub(super)` for
   I40.
 
+### I34
+
+- 2026-11-04 (finished): `ops::unearth::remote::{prepare, refresh,
+  overdue}` and `apply_with_remote(collection, plan, guard, clock, ids,
+  remote)`. `refresh` pulls with `Remote::pull_metadata` and keeps the
+  versions of the piece; a real run stores them, a dry run merges them
+  into the `Current` it plans from. Every remote result of a command
+  goes through `overdue`, which counts a failing `status()` as pending
+  work. `UnearthError::into_error` keeps a remote error as
+  `Error::Remote`, which `--if-reachable` looks at.
+- The unearth of another collection's live piece (a fork) records the
+  new ID's metadata after the rename, not before (spec "States"); a
+  rename that fails then leaves nothing behind. The three crash points
+  have a repair test each (`ops::unearth::live`).
+- What a live package left out is read from `Payload::extra["left_out"]`
+  in `live.rs`; I32's typed field replaces it (TODO there).
+- `listing::Reader` has no cap on the length of a line or the number of
+  entries, so a listing fetched from the remote is read whole. Left for a
+  follow-up.
+- A crash after the rename of a restore with `--to` and before the
+  metadata leaves the entry at the metadata's old path and the folder at
+  `--to` a new piece.
+
 ## Relations
 
 - Relates to: [Define the v1 scope and architecture of antiq](01M6E17PET32XD9PC04AJ2PBZY-define-the-v1-scope-and-architecture-of-antiq.md)

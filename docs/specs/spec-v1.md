@@ -459,7 +459,9 @@ metadata comes before its entry. `archive` makes payload, listing,
 metadata and the entry (`pending`) durable, then sets `removing` with
 the payload, renames the folder and sets `gone`. `unearth` writes
 `unearthing`, renames, records the metadata change, and only then
-writes `live`. `fork` renames the folder first when `--name` is
+writes `live`. The unearth of another collection's live piece as a fork
+records the new ID's metadata after the rename, since a metadata-first
+order leaves a gone piece behind when the rename fails. `fork` renames the folder first when `--name` is
 given, records the old ID's archived metadata, sets its entry `gone`
 with its local payloads, then records the new ID's metadata and entry.
 
@@ -1535,19 +1537,43 @@ deleted through the trash and the time of the check is recorded.
 
 ### unearth
 
-`unearth <piece> [--to <path>] [--version <n>]` takes the current
-archive of an archived ID, or the archive with payload version `n`. When
-the remote is reachable it first pulls the ID's metadata and says when
-the remote has a newer version; with the remote away it proceeds from
-local data and warns. An archive that is not on this machine is fetched
-into `.antiq/tmp/` first. `unearth` checks the archive's size and
+`unearth <piece> [--to <path>] [--version <n>] [--if-reachable]`
+takes the current archive of an archived ID, or the archive with payload
+version `n`. When the remote is reachable it first pulls the metadata
+versions of the ID that this machine lacks, stores them, and says when
+the remote has a newer version than the one this machine had. A change
+recorded here that no sync has committed stays the metadata in use; the
+note then says that `sync` applies it on top. The versions of other IDs
+are left for `sync`. An archive that is not on this machine is fetched
+into `.antiq/tmp/` first, with its listing when the store lacks it.
+`unearth` checks the archive's size and
 checksum, extracts it into the staging directory, verifies the staged
-tree strictly, sets the staged top directory's mode, writes a tracking
-entry `unearthing`, checks the target again (missing parents are created;
-a file, symlink or piece in the path refuses), renames the tree into
-place, records the metadata change, and sets the entry to `live` with the
-time of unearthing. Unearthing an ID that is already unearthed does
-nothing and says where it is. (ADR 0034)
+tree strictly, compares the listing with the members of the staged
+tree (a difference refuses the piece, for a listing held here and for a
+fetched one), sets the staged top directory's mode, stores a fetched
+archive and listing, writes a tracking entry `unearthing`, checks the
+target again (missing parents are created; a file, symlink or piece in
+the path refuses), renames the tree into place, records the metadata
+change, and sets the entry to `live` with the time of unearthing. When
+the rename fails, the previous entry is written back, and only then are
+the files this run stored removed. Unearthing an ID that is already
+unearthed does nothing and says where it is. (ADR 0034)
+
+A plan that needs no remote (an archive this machine holds) goes ahead
+when the remote is away or broken: a note says that the remote is away,
+or is broken and why, and that the unearth works from local data; a
+broken remote's metadata is not read. A plan that needs the remote (an
+archive that is not on this machine, a live package, a fork) fails when
+the remote is away with `remote_away` (exit 4, which `--if-reachable`
+turns into exit 0 unless the remote has been away longer than
+`away_warn_days` while remote work is pending), when it is broken with
+`remote_broken` (exit 1, whatever the flag), and when none is attached
+with `no_remote` (exit 1). A run that holds the lock records whether the
+remote was reachable or away; a state file that cannot be read fails the
+run before anything is pulled. A `--dry-run` plans against the pulled
+versions without storing them, records nothing, counts the room for the
+listing of a remote archive from the remote's copy, and exits with the
+code the real run would get.
 
 The entry of an unearthed folder is not diverged, whatever the entry of
 the gone piece said.
@@ -1607,14 +1633,18 @@ The remote copy is kept while the piece is live. The local archive is
 dropped only under the rule in "Several machines" and is always kept
 without a remote. (ADR 0043) An archive fetched from the remote, with its
 listing, stays as the local archive while the piece is within the local
-tier, and the recorded check of the remote copy stays with it.
+tier, and the recorded check of the remote copy stays with it. The
+volume needs room for the listing's total size and for the archive
+before the archive is fetched; a file that is gone from the remote
+fails the run with a note to run `unearth` again.
 
 An ID without an archive (a gone piece, or another collection's live
 piece unearthed as a fork) is unearthed from its current live package:
 its stream checksum is checked and the staged tree is verified against
 the package's members. A fork of another collection's piece creates a
-new ID owned here. `unearth` warns when the package was marked stale or
-made with the live exclude list. The result has no archive payload until
+new ID owned here. `unearth` warns when the package of a piece of this
+collection was marked stale, and for each path the live exclude list left
+out of the package. The result has no archive payload until
 it is archived. A live piece without a live package, as with
 `backup_live = false`, cannot be unearthed this way, and `unearth` says
 so. A fork of another collection's piece writes nothing to that
@@ -2111,16 +2141,22 @@ when `skipped` or `unfinished` is not empty; a `kept` row alone does not
 make it partial.
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before
-and for a piece that was skipped), `id`, `path` (where the piece is, or
-would have been put), `abs_path`, `payload_version` (the archive that was
-unearthed, left out when nothing was), `skipped` (`{"reason": "no_space",
+and for a piece that was skipped), `id` (the new ID for a fork), `path`
+(where the piece is, or would have been put), `abs_path`,
+`payload_version` (the archive that was unearthed, left out when nothing
+was and for a live package), `from` (a fork only: the ID of the other
+collection's piece), `skipped` (`{"reason": "no_space",
 "needed", "available"}` for a piece left alone for want of room, which
-exits 3) and `warnings`. A refused target, an archive that is not on this
-machine, a version that does not exist and an archive that does not match
+exits 3) and `warnings`. An archive that is not on this machine with no
+remote attached is `no_remote`, with the remote away `remote_away` and
+with it broken `remote_broken`; a live package is subject to the same
+three. A refused target, a version that does not exist and an archive that does not match
 its metadata are errors of kind `other`; metadata or a listing of a higher
 `format` is `format_too_new`, and a path outside the collection is
 `outside_collection`. The plan of a `--dry-run` has one `unearth` action
-with `id`, `path` and `payload_version`, or a `skip` action with `id`,
+with `id`, `path`, `source` (`remote_archive`, `live_package` or `fork`;
+left out for an archive this machine holds) and `payload_version` (left
+out for a live package), or a `skip` action with `id`,
 `path`, `reason`, `needed` and `available` when the volume has no room,
 and no action for a piece that is unearthed already.
 

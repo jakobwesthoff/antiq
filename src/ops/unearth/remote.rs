@@ -526,6 +526,9 @@ impl Refreshed {
                     ..stored
                 })
             }
+            // The reference resolved to an object this machine has metadata
+            // of, so a store without any cannot meet unreadable pulled
+            // versions here.
             (None, None) => None,
         })
     }
