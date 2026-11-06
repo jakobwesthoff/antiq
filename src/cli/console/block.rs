@@ -43,7 +43,6 @@ pub struct Block {
     pub(super) title: Rich,
     pub(super) text: Vec<Para>,
     pub(super) fix: Option<Rich>,
-    pub(super) why: Vec<Para>,
     pub(super) how: Vec<Para>,
     pub(super) doing: Vec<String>,
     pub(super) candidates: Vec<String>,
@@ -58,7 +57,6 @@ impl Block {
             title,
             text: Vec::new(),
             fix: None,
-            why: Vec::new(),
             how: Vec::new(),
             doing: Vec::new(),
             candidates: Vec::new(),
@@ -107,12 +105,6 @@ impl Block {
     /// The `→` line of a warning or info: what repairs the situation.
     pub fn fix(mut self, fix: Rich) -> Block {
         self.fix = Some(fix);
-        self
-    }
-
-    /// A paragraph of the "Why it happened" section of an error.
-    pub fn why(mut self, paragraph: impl Into<Para>) -> Block {
-        self.why.push(paragraph.into());
         self
     }
 

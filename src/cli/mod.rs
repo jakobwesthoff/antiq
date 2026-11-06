@@ -27,7 +27,12 @@ use std::path::{Path, PathBuf};
 
 /// Your idle folders, kept like antiques.
 #[derive(Debug, Parser)]
-#[command(version, about, disable_help_subcommand = true)]
+#[command(
+    version,
+    about,
+    disable_help_subcommand = true,
+    styles = console::theme::clap_styles()
+)]
 pub struct Cli {
     /// Run as if started in this directory
     #[arg(short = 'C', value_name = "PATH", global = true)]
@@ -416,7 +421,7 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     }
     if !asks_for_json(args) {
         if out.stderr_env().rich {
-            let _ = out.blocks(&[usage::block_for(error, args)]);
+            let _ = out.blocks(&[usage::block_for(error)]);
         } else {
             print_clap(error, out);
         }

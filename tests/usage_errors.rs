@@ -54,3 +54,13 @@ fn a_bare_antiq_on_a_pipe_prints_the_help_without_escape_sequences() {
     assert!(run.stderr.contains("Commands:"), "{:?}", run.stderr);
     assert!(!run.stderr.contains('\x1b'), "{:?}", run.stderr);
 }
+
+#[test]
+fn the_help_on_a_terminal_takes_its_colours_from_the_theme() {
+    let world = world();
+    let run = world.run_tty_env(&["--help"], &[("CLICOLOR_FORCE", "1")]);
+    run.expect_code(0);
+    assert!(run.stdout.contains("\x1b[1mCommands:"), "{:?}", run.stdout);
+    // clap's own style underlines its headings; the theme does not.
+    assert!(!run.stdout.contains("\x1b[4m"), "{:?}", run.stdout);
+}

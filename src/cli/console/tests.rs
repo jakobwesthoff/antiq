@@ -79,7 +79,6 @@ fn the_builder_keeps_a_backtick_in_user_data_literal() {
 
 fn push_error() -> Block {
     Block::error(rich("No push target is configured"))
-        .why(rich("antiq push mirrors the antiq collection to a target."))
         .how(rich("Add the `url`."))
         .doing("push the antiq collection")
 }
@@ -91,9 +90,6 @@ fn an_error_has_a_badge_line_a_bar_and_labelled_sections() {
         [
             " ✖ ERROR",
             "▌ No push target is configured",
-            "▌",
-            "▌ Why it happened",
-            "▌   antiq push mirrors the antiq collection to a target.",
             "▌",
             "▌ How to fix it",
             "▌   Add the url.",
@@ -310,7 +306,6 @@ fn a_stderr_pipe_gets_greppable_plain_lines() {
         push_error().render_plain(),
         [
             "error: No push target is configured",
-            "  why: antiq push mirrors the antiq collection to a target.",
             "  fix: Add the url.",
             "  while attempting to push the antiq collection",
         ]

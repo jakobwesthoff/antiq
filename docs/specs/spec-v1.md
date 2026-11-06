@@ -2092,15 +2092,16 @@ error is the chain text of the whole error, and its `fix` is the help of
 the explanation. The steps the run was in are listed innermost first under "What
 antiq was doing". A reference that matches several pieces or versions, or
 no piece, adds a table and an info after the block (see "Piece references").
-A usage error of the command line parser is a block too. An
-unknown argument, an unknown command, a missing argument and two arguments
-that exclude each other get a title of their own and the parser's usage line
-and a pointer to `--help` under "How to fix it". When the parser suggests
-a command or an option, "How to fix it" starts with "Did you mean ...?", and
-the line on passing a word that starts with a dash as a value (`-- <word>`)
-is given only where the parser gives it. Every other usage error has the
-parser's first paragraph as its title and the parser's tip and usage line
-under "How to fix it". `antiq` without any argument prints the help and
+A usage error of the command line parser is a block too. Its title is the
+parser's first line, with the first letter in upper case. "How to fix it"
+lists what the parser carries for the error, in its order: "Did you mean
+...?" for each command, option or value it suggests, then each of its tips
+as the parser words it, and then its usage line. The section is left out
+when the parser carries none of these. The tip on passing a word that
+starts with a dash as a value (`-- <word>`) shows only where the parser
+gives it. The help and the usage errors take their colours from the theme
+of the console: headings, usage line and options in bold, placeholders dim.
+`antiq` without any argument prints the help and
 exits 2. Help, version and the usage errors of a stream that is not a
 terminal are plain text, whatever `CLICOLOR_FORCE` says.
 

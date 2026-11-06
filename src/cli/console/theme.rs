@@ -18,7 +18,7 @@ pub const CYAN: Style = AnsiColor::Cyan.on_default();
 /// The part of a name a search matched.
 pub const MATCH: Style = AnsiColor::Red.on_default().bold();
 
-fn accent(kind: Kind) -> AnsiColor {
+const fn accent(kind: Kind) -> AnsiColor {
     match kind {
         Kind::Error => AnsiColor::Red,
         Kind::Warning => AnsiColor::Yellow,
@@ -34,11 +34,26 @@ pub fn badge(kind: Kind) -> Style {
 }
 
 /// The bar and the arrow of a block.
-pub fn bar(kind: Kind) -> Style {
+pub const fn bar(kind: Kind) -> Style {
     accent(kind).on_default().bold()
 }
 
 /// The headings of an error block.
-pub fn label(kind: Kind) -> Style {
+pub const fn label(kind: Kind) -> Style {
     accent(kind).on_default()
+}
+
+/// The colours of the help and the usage errors that clap prints: the
+/// headings and the usage line in bold, options and commands as the code
+/// spans of the blocks, placeholders dim, and the error, valid and invalid
+/// words in the colours of an error, an info and a warning.
+pub const fn clap_styles() -> clap::builder::Styles {
+    clap::builder::Styles::styled()
+        .header(BOLD)
+        .usage(BOLD)
+        .literal(BOLD)
+        .placeholder(DIM)
+        .error(bar(Kind::Error))
+        .valid(label(Kind::Info))
+        .invalid(label(Kind::Warning))
 }
