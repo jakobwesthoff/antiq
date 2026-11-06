@@ -458,8 +458,8 @@ Entries are written in an order the repairs rely on. A new ID's
 metadata comes before its entry. `archive` makes payload, listing,
 metadata and the entry (`pending`) durable, then sets `removing` with
 the payload, renames the folder and sets `gone`. `unearth` writes
-`unearthing`, renames, writes `live`, and only then records the
-metadata change. `fork` records the old ID's archived metadata, sets
+`unearthing`, renames, records the metadata change, and only then
+writes `live`. `fork` records the old ID's archived metadata, sets
 its entry `gone` with its local payloads, then records the new ID's
 metadata and entry.
 
@@ -1079,9 +1079,19 @@ Every state-changing run, right after taking the lock, in this order:
 - removes the temp files an interrupted atomic write left in `.antiq/`
   and below it, outside `.antiq/recovered/`: regular files named
   `.<name>.<pid>.<n>.tmp`;
-- turns an `unearthing` entry whose folder equals the listing of the
-  archive payload version the entry records into `live`, with the time
-  the entry was written (recorded in the entry) as its unearthing time.
+- turns an `unearthing` entry whose folder is in place into `live`, with
+  the time the entry was written (recorded in the entry) as its
+  unearthing time, when the object's metadata records that unearth: its
+  history holds the `unearth` entry of this machine at that time. The
+  folder may differ from the archive then, since a difference is an edit
+  of the unearthed piece. Without that record the folder has to equal
+  the listing of an archive payload of the version the entry records
+  (any such payload the entry holds, or any of the version when it holds
+  none), and the repair first records the metadata change: lifecycle
+  `live`, owner this collection, the entry's path and name, history
+  `unearth` at the entry's time. A change that cannot be written leaves
+  the entry `unearthing` for the next run, with a warning. The version
+  taken out reads `pending` once the change is recorded.
   Any other `unearthing` entry is dropped: it goes back to `gone` when it
   holds local payloads or committed versions, and is removed otherwise. A
   folder at its path that it does not recognise, or that another entry

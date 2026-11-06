@@ -464,8 +464,8 @@ fn read_file(path: &Path, id: ObjectId) -> Result<Option<TrackingEntry>, Trackin
 /// that write entries keep this one, which the start-of-run repairs rely
 /// on: a new ID's metadata before its entry; archive: payload, listing,
 /// metadata, entry `pending`, then `removing` with its payload, the
-/// rename, then `gone`; unearth: `unearthing`, the rename, `live`, and
-/// only then the metadata change; fork: the old ID's archived metadata,
+/// rename, then `gone`; unearth: `unearthing`, the rename, the metadata
+/// change, and only then `live`; fork: the old ID's archived metadata,
 /// the old entry `gone` with its local payloads, then the new ID's
 /// metadata and entry.
 ///

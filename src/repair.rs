@@ -13,7 +13,7 @@ use crate::id::ObjectId;
 use crate::listing::{self, ListingEntry, ListingType};
 use crate::lock::RunLock;
 use crate::machine::MachineError;
-use crate::meta::{Lifecycle, Payload, PayloadKind};
+use crate::meta::{HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::pack::WalkRules;
 use crate::pack::verify::{Compared, Difference, Field, compare_with_listing};
 use crate::relpath::{Name, RelPath};
@@ -87,6 +87,13 @@ pub(crate) trait Effects {
         lock: &RunLock,
         id: ObjectId,
     ) -> Result<(), TrackingError>;
+    /// Records `metadata` as the object's next version.
+    fn record_metadata(
+        &self,
+        collection: &Collection,
+        lock: &RunLock,
+        metadata: &Metadata,
+    ) -> Result<(), StoreError>;
 }
 
 /// The effects on the real file system.
@@ -140,6 +147,52 @@ impl Effects for RealEffects {
     ) -> Result<(), TrackingError> {
         tracking::remove(collection, lock, id)
     }
+
+    fn record_metadata(
+        &self,
+        collection: &Collection,
+        lock: &RunLock,
+        metadata: &Metadata,
+    ) -> Result<(), StoreError> {
+        Store::new(collection).write_pending(lock, metadata)
+    }
+}
+
+/// The metadata change of an unearth (spec "Metadata changes"): the object
+/// is live, owned by `own`, at `path`, and its history says who unearthed
+/// it and when. `unearth` and the repair of an interrupted `unearth` make
+/// the same change, so the repair can finish what `unearth` started.
+pub(crate) fn record_unearth(
+    metadata: &Metadata,
+    own: ObjectId,
+    machine: &str,
+    time: Timestamp,
+    path: &RelPath,
+) -> Metadata {
+    let mut changed = metadata.clone();
+    changed.lifecycle = Lifecycle::Live;
+    changed.collection = own;
+    changed.path = path.clone();
+    changed.name = path
+        .components()
+        .last()
+        .and_then(|name| Name::from_bytes(name.to_vec()).ok())
+        .expect("the path of a piece ends in a valid name");
+    changed
+        .history
+        .push(HistoryEntry::new(time, machine, HistoryAction::Unearth));
+    changed
+}
+
+/// Whether the history of `metadata` already holds the `unearth` entry
+/// that `machine` wrote at `time`.
+pub(crate) fn records_unearth(metadata: &Metadata, machine: &str, time: Timestamp) -> bool {
+    let time = whole_seconds(time);
+    metadata.history.iter().any(|entry| {
+        entry.action == HistoryAction::Unearth.as_str()
+            && entry.machine == machine
+            && entry.time == time
+    })
 }
 
 /// Runs the repairs in the order of spec "Operations". The lock proves
@@ -624,10 +677,16 @@ impl Repairs<'_> {
     // `unearthing` entries
     // =========================================================
 
-    /// An `unearthing` entry whose folder is the tree of the archive it
-    /// names becomes `live`, unearthed when the entry was written. Any other
-    /// goes back to what it was before the unearth, and a folder at its path
-    /// is a new piece.
+    /// An `unearthing` entry is `unearth` between the entry and its `live`
+    /// write: the folder arrives, then the metadata change is recorded.
+    ///
+    /// When the metadata already records the unearth, the folder is the
+    /// unearthed piece whatever it holds: a difference from the archive is
+    /// the user's edit, and dropping the entry would lose the payload
+    /// version that reclaiming needs. Otherwise a folder that equals the
+    /// archive it names gets the metadata change recorded first. Any
+    /// other entry goes back to what it was before the unearth, and a
+    /// folder at its path is a new piece.
     fn settle_unearthing(&mut self) -> Result<(), RepairError> {
         let unearthing: Vec<ObjectId> = self
             .entries
@@ -638,10 +697,37 @@ impl Repairs<'_> {
         for id in unearthing {
             let mut entry = self.entry(id);
             let present = self.folder_in_place(&entry);
-            if present && !self.held_by_other(&entry.path, id) && self.is_unearthed_tree(&entry) {
-                entry.state = EntryState::Live;
-                entry.unearthed = Some(entry.written);
-                self.write(entry)?;
+            let usable = present && !self.held_by_other(&entry.path, id);
+            let current = Store::new(self.collection).current(id).ok().flatten();
+            let recorded = current.as_ref().is_some_and(|current| {
+                records_unearth(&current.metadata, &self.machine, entry.written)
+            });
+
+            if usable && recorded {
+                let source = current.map_or(Source::Pending, |current| current.source);
+                self.set_unearth_live(entry, source)?;
+                continue;
+            }
+            if usable
+                && self.is_unearthed_tree(&entry)
+                && let Some(current) = &current
+            {
+                let changed = record_unearth(
+                    &current.metadata,
+                    self.collection.id(),
+                    &self.machine,
+                    entry.written,
+                    &entry.path,
+                );
+                match self
+                    .effects
+                    .record_metadata(self.collection, self.lock, &changed)
+                {
+                    Ok(()) => self.set_unearth_live(entry, Source::Pending)?,
+                    Err(error) => self.warn(format!(
+                        "cannot record the unearth of {id}: {error}; its entry stays for the next run"
+                    )),
+                }
                 continue;
             }
             // A piece that this collection owns and that is live stays at
@@ -652,9 +738,24 @@ impl Repairs<'_> {
                     entry.path
                 ));
             }
+            if let (true, Some(current)) = (recorded, &current) {
+                entry.version_taken_out = taken_out(current.source);
+            }
             self.drop_unearthing(entry)?;
         }
         Ok(())
+    }
+
+    /// The `unearthing` entry becomes `live`, unearthed when it was written.
+    fn set_unearth_live(
+        &mut self,
+        mut entry: TrackingEntry,
+        source: Source,
+    ) -> Result<(), RepairError> {
+        entry.state = EntryState::Live;
+        entry.unearthed = Some(entry.written);
+        entry.version_taken_out = taken_out(source);
+        self.write(entry)
     }
 
     /// Whether the metadata of `id` says live and owned by this collection.
@@ -676,22 +777,33 @@ impl Repairs<'_> {
         let Ok(Some(current)) = Store::new(self.collection).current(entry.id) else {
             return false;
         };
-        // Two machines can both make version N; the one this machine holds
-        // is the one it was unearthing.
-        let Some(payload) = current
+        // Two machines can both make version N. The ones this machine
+        // holds are the candidates, and the folder may be any of them;
+        // without a local one every payload of the version is.
+        let of_version: Vec<&Payload> = current
             .metadata
             .payloads
             .iter()
             .filter(|payload| payload.kind == PayloadKind::Archive && payload.version == version)
-            .max_by_key(|payload| entry.local_payloads.iter().any(|l| l.file == payload.file))
-        else {
-            return false;
-        };
+            .collect();
+        let held: Vec<&Payload> = of_version
+            .iter()
+            .copied()
+            .filter(|payload| {
+                entry
+                    .local_payloads
+                    .iter()
+                    .any(|local| local.file == payload.file)
+            })
+            .collect();
+        let candidates = if held.is_empty() { of_version } else { held };
         let Ok(tree) = self.root.sub(&entry.path) else {
             return false;
         };
-        self.compare(entry.id, payload, &tree)
-            .is_ok_and(|(_, compared)| compared.differences().is_empty())
+        candidates.into_iter().any(|payload| {
+            self.compare(entry.id, payload, &tree)
+                .is_ok_and(|(_, compared)| compared.differences().is_empty())
+        })
     }
 
     /// Takes the entry back to `gone` when it holds what an archived piece
@@ -1367,6 +1479,26 @@ mod tests {
                 });
             }
             RealEffects.remove_entry(collection, lock, id)
+        }
+
+        fn record_metadata(
+            &self,
+            collection: &Collection,
+            lock: &RunLock,
+            metadata: &Metadata,
+        ) -> Result<(), StoreError> {
+            let subject = metadata.id.to_string();
+            self.log
+                .borrow_mut()
+                .push(format!("record_metadata {subject}"));
+            if (self.fails)("record_metadata", &subject) {
+                return Err(StoreError::Io {
+                    action: "write",
+                    path: subject,
+                    source: io::Error::other("refused by the test"),
+                });
+            }
+            RealEffects.record_metadata(collection, lock, metadata)
         }
     }
 
@@ -2326,6 +2458,270 @@ mod tests {
         assert!(mentions(&warnings, "new piece"), "{warnings:?}");
     }
 
+    // ---------------------------------------------------------------------
+    // The metadata change of an interrupted unearth
+    // ---------------------------------------------------------------------
+
+    fn metadata_of(world: &World, object: &str) -> crate::store::Current {
+        Store::new(&world.collection)
+            .current(id(object))
+            .expect("the metadata reads")
+            .expect("the object has metadata")
+    }
+
+    /// The `unearth` entries of the history, as `(machine, time)`.
+    fn unearths(metadata: &Metadata) -> Vec<(String, jiff::Timestamp)> {
+        metadata
+            .history
+            .iter()
+            .filter(|entry| entry.action == "unearth")
+            .map(|entry| (entry.machine.clone(), entry.time))
+            .collect()
+    }
+
+    /// What the metadata says once the unearth of an entry written at
+    /// [`WRITTEN`] is recorded.
+    fn record_the_unearth(world: &World, object: &str) {
+        world.edit_meta(object, |document| {
+            document["lifecycle"] = serde_json::json!("live");
+            document["history"]
+                .as_array_mut()
+                .expect("a history")
+                .push(serde_json::json!({
+                    "time": WRITTEN,
+                    "machine": "imperius",
+                    "action": "unearth",
+                }));
+        });
+    }
+
+    #[test]
+    fn an_unearthing_whose_folder_matches_has_its_metadata_change_recorded() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let current = metadata_of(&world, ID);
+        assert_eq!(current.source, Source::Pending);
+        assert_eq!(current.metadata.lifecycle, Lifecycle::Live);
+        assert_eq!(current.metadata.collection, id(COLLECTION_ID));
+        assert_eq!(current.metadata.path, path("projects/a"));
+        assert_eq!(
+            unearths(&current.metadata),
+            [("imperius".to_string(), time(WRITTEN))]
+        );
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.unearthed, Some(time(WRITTEN)));
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Pending);
+    }
+
+    #[test]
+    fn the_metadata_change_takes_the_ownership_and_the_path_of_the_entry() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.edit_meta(ID, |document| {
+            document["collection"] = serde_json::json!(OTHER_ID);
+            document["path"] = serde_json::json!("elsewhere/b");
+            document["name"] = serde_json::json!("b");
+        });
+        unearthing(&world, ID, "projects/a");
+
+        world.run();
+
+        let metadata = metadata_of(&world, ID).metadata;
+        assert_eq!(metadata.collection, id(COLLECTION_ID));
+        assert_eq!(metadata.path, path("projects/a"));
+        assert_eq!(metadata.name.as_bytes(), b"a");
+    }
+
+    #[test]
+    fn a_metadata_change_that_is_recorded_already_is_not_recorded_again() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        record_the_unearth(&world, ID);
+        unearthing(&world, ID, "projects/a");
+
+        world.run();
+
+        let current = metadata_of(&world, ID);
+        assert_eq!(current.source, Source::Committed(1), "nothing was written");
+        assert_eq!(unearths(&current.metadata).len(), 1);
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+    }
+
+    #[test]
+    fn a_gone_piece_with_live_metadata_gets_its_unearth_recorded() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.edit_meta(ID, |document| {
+            document["lifecycle"] = serde_json::json!("live");
+        });
+        unearthing(&world, ID, "projects/a");
+
+        world.run();
+
+        let metadata = metadata_of(&world, ID).metadata;
+        assert_eq!(
+            unearths(&metadata),
+            [("imperius".to_string(), time(WRITTEN))]
+        );
+    }
+
+    #[test]
+    fn a_dropped_unearthing_leaves_the_metadata_and_the_version_taken_out_alone() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::write(world.at("projects/a/notes.txt"), "HELLO").expect("an edit");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.committed_versions = vec![1];
+        world.store_entry(&entry);
+
+        world.run();
+
+        let current = metadata_of(&world, ID);
+        assert_eq!(current.source, Source::Committed(1));
+        assert_eq!(current.metadata.lifecycle, Lifecycle::Archived);
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+    }
+
+    #[test]
+    fn an_edited_folder_of_a_recorded_unearth_stays_the_unearthed_piece() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        record_the_unearth(&world, ID);
+        fs::write(world.at("projects/a/notes.txt"), "HELLO").expect("an edit");
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(!mentions(&warnings, "new piece"), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.unearthed_payload_version, Some(1));
+        assert_eq!(entry.unearthed, Some(time(WRITTEN)));
+    }
+
+    #[test]
+    fn a_recorded_unearth_whose_folder_is_gone_leaves_a_pending_gone_entry() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        record_the_unearth(&world, ID);
+        let object = world.collection.object_dir(id(ID));
+        fs::rename(object.join("meta.1"), object.join("meta.pending")).expect("pending");
+        fs::remove_dir_all(world.at("projects/a")).expect("deleted after the crash");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.committed_versions = vec![1];
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Pending);
+    }
+
+    #[test]
+    fn the_folder_may_equal_any_local_payload_of_the_recorded_version() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        // A second version-1 payload from another machine, listed after
+        // the first and describing a different tree.
+        let other_listing = listing::file_name(&"11".repeat(32)).expect("a listing name");
+        let object = world.collection.object_dir(id(ID));
+        listing::write(
+            std::iter::empty(),
+            File::create(object.join(other_listing.as_str())).expect("a file"),
+        )
+        .expect("an empty listing");
+        let second = world.add_archive(ID, 1, "other", "2026-11-03T11:00:00Z");
+        world.edit_meta(ID, |document| {
+            document["payloads"][1]["listing"] = serde_json::json!(other_listing.as_str());
+        });
+        let mut entry = unearthing(&world, ID, "projects/a");
+        let first = metadata_of(&world, ID).metadata.payloads[0].file.clone();
+        entry.local_payloads = [first.as_str().to_string(), second]
+            .into_iter()
+            .map(|file| LocalPayload {
+                kind: PayloadKind::Archive,
+                version: 1,
+                file: FileName::new(file).expect("a name"),
+            })
+            .collect();
+        world.store_entry(&entry);
+
+        world.run();
+
+        assert_eq!(world.entry(ID).state, EntryState::Live);
+    }
+
+    #[test]
+    fn a_metadata_change_that_cannot_be_written_keeps_the_entry_for_the_next_run() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        let refuse = |what: &str, _: &str| what == "record_metadata";
+        let effects = Scripted::new(&refuse);
+
+        let warnings = world.run_with(&effects).expect("the run goes on");
+
+        assert!(mentions(&warnings, "unearth"), "{warnings:?}");
+        assert_eq!(world.entry(ID).state, EntryState::Unearthing);
+        assert!(world.at("projects/a/notes.txt").exists());
+
+        world.run();
+
+        assert_eq!(world.entry(ID).state, EntryState::Live);
+        assert_eq!(
+            unearths(&metadata_of(&world, ID).metadata),
+            [("imperius".to_string(), time(WRITTEN))]
+        );
+    }
+
+    #[test]
+    fn a_live_entry_that_lags_behind_an_archive_keeps_its_archived_metadata() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        lagging(&world, ID, "projects/a");
+
+        world.run();
+
+        let current = metadata_of(&world, ID);
+        assert_eq!(current.source, Source::Committed(1));
+        assert_eq!(current.metadata.lifecycle, Lifecycle::Archived);
+    }
+
+    #[test]
+    fn the_unearth_change_keeps_what_else_the_metadata_says() {
+        let metadata = {
+            let mut world = World::new();
+            world.archived(ID, "projects/a", FILES);
+            metadata_of(&world, ID).metadata
+        };
+        let target = RelPath::parse("elsewhere/b%FF").expect("a path");
+
+        let changed = record_unearth(&metadata, id(OTHER_ID), "laptop", time(WRITTEN), &target);
+
+        assert_eq!(changed.lifecycle, Lifecycle::Live);
+        assert_eq!(changed.collection, id(OTHER_ID));
+        assert_eq!(changed.path, target);
+        assert_eq!(changed.name.as_bytes(), b"b\xff");
+        assert_eq!(changed.payloads, metadata.payloads);
+        assert_eq!(changed.created, metadata.created);
+        assert_eq!(changed.history.len(), metadata.history.len() + 1);
+        assert!(records_unearth(&changed, "laptop", time(WRITTEN)));
+        assert!(!records_unearth(&changed, "imperius", time(WRITTEN)));
+        assert!(!records_unearth(&changed, "laptop", time(NOW)));
+        assert!(!records_unearth(&metadata, "laptop", time(WRITTEN)));
+    }
+
     // =====================================================================
     // Entries that lag behind the metadata
     // =====================================================================
@@ -3101,6 +3497,21 @@ mod tests {
                 world
             },
             &[],
+        );
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_settling_a_recorded_unearth_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                world.archived(ID, "projects/a", FILES);
+                record_the_unearth(&world, ID);
+                fs::write(world.at("projects/a/unsaved.txt"), UNSAVED).expect("an added file");
+                unearthing(&world, ID, "projects/a");
+                world
+            },
+            &[UNSAVED],
         );
     }
 
