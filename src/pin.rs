@@ -4,10 +4,13 @@
 
 //! Pin files.
 
+use crate::fsx::FsxError;
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
+use std::fs::File;
 use std::io;
+use std::path::Path;
 
 /// The file at the top of a piece that pins it.
 pub const PIN_FILE: &str = ".antiq-pin";
@@ -32,6 +35,12 @@ pub enum PinError {
         path: RelPath,
         #[source]
         source: io::Error,
+    },
+    #[error("cannot make the pin of {path} durable: {source}")]
+    Flush {
+        path: RelPath,
+        #[source]
+        source: FsxError,
     },
     #[error("{path} is a directory, not a pin file")]
     NotAFile { path: RelPath },
@@ -67,28 +76,56 @@ pub fn is_pinned(collection: &TreeRoot, piece: &RelPath) -> Result<bool, PinErro
     }
 }
 
+/// How the pin and its directory are made durable. A parameter so that tests
+/// can see the calls and make them fail.
+pub(crate) type Flush<'a> = &'a dyn Fn(&File, &Path) -> Result<(), FsxError>;
+
 /// Pins the piece at `piece` by creating its empty pin file. A piece that
 /// is pinned already stays so. The marker has no content, so creating it
-/// with `O_EXCL` needs no temp file and rename.
+/// with `O_EXCL` needs no temp file and rename. The pin is durable when
+/// this returns: the file and the entry in the piece's directory are
+/// flushed.
 pub fn create(collection: &TreeRoot, piece: &RelPath) -> Result<(), PinError> {
+    create_with(collection, piece, &crate::fsx::atomic::flush_file)
+}
+
+pub(crate) fn create_with(
+    collection: &TreeRoot,
+    piece: &RelPath,
+    flush: Flush<'_>,
+) -> Result<(), PinError> {
     let pin = pin_path(piece);
     match collection.create_file(&pin, 0o644) {
-        Ok(_) => Ok(()),
+        Ok(file) => {
+            flush(&file, Path::new(&pin.to_string())).map_err(|source| PinError::Flush {
+                path: pin.clone(),
+                source,
+            })?
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             match lookup(collection, &pin) {
-                Ok(Some(EntryKind::Directory)) => Err(PinError::NotAFile { path: pin }),
-                Ok(_) => Ok(()),
-                Err(source) => Err(PinError::Stat { path: pin, source }),
+                Ok(Some(EntryKind::Directory)) => return Err(PinError::NotAFile { path: pin }),
+                Ok(_) => {}
+                Err(source) => return Err(PinError::Stat { path: pin, source }),
             }
         }
-        Err(source) => Err(PinError::Create { path: pin, source }),
+        Err(source) => return Err(PinError::Create { path: pin, source }),
     }
+    flush_piece(collection, piece, flush)
 }
 
 /// Removes the pin of the piece at `piece`. A piece without a pin is
 /// left as it is. A directory of the pin's name is refused and left
-/// untouched.
+/// untouched. The removal is durable when this returns.
 pub fn remove(collection: &TreeRoot, piece: &RelPath) -> Result<(), PinError> {
+    remove_with(collection, piece, &crate::fsx::atomic::flush_file)
+}
+
+pub(crate) fn remove_with(
+    collection: &TreeRoot,
+    piece: &RelPath,
+    flush: Flush<'_>,
+) -> Result<(), PinError> {
     let pin = pin_path(piece);
     match lookup(collection, &pin) {
         Ok(None) => return Ok(()),
@@ -98,10 +135,25 @@ pub fn remove(collection: &TreeRoot, piece: &RelPath) -> Result<(), PinError> {
     }
     match collection.remove_file(&pin) {
         Err(source) if source.kind() != io::ErrorKind::NotFound => {
-            Err(PinError::Remove { path: pin, source })
+            return Err(PinError::Remove { path: pin, source });
         }
-        _ => Ok(()),
+        _ => {}
     }
+    flush_piece(collection, piece, flush)
+}
+
+/// Makes the entries of the piece's top directory durable, which is where
+/// the pin file's name lives.
+fn flush_piece(collection: &TreeRoot, piece: &RelPath, flush: Flush<'_>) -> Result<(), PinError> {
+    let shown = piece.to_string();
+    let flushed = collection
+        .open_dir_file(piece)
+        .map_err(crate::fsx::io_error("open", Path::new(&shown)))
+        .and_then(|directory| flush(&directory, Path::new(&shown)));
+    flushed.map_err(|source| PinError::Flush {
+        path: piece.clone(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -297,5 +349,140 @@ mod tests {
         let error = remove(&root, &path("a")).expect_err("the pin stays");
         assert!(matches!(error, PinError::Remove { .. }), "{error}");
         assert!(pin.exists());
+    }
+
+    // =========================================================
+    // Durability
+    // =========================================================
+
+    use std::cell::RefCell;
+
+    /// A flush that records what it was asked to make durable, and fails
+    /// for the path `fail_on`.
+    fn recording<'a>(
+        calls: &'a RefCell<Vec<String>>,
+        fail_on: Option<&'a str>,
+    ) -> impl Fn(&File, &Path) -> Result<(), FsxError> + 'a {
+        move |_file, path| {
+            let shown = path.display().to_string();
+            calls.borrow_mut().push(shown.clone());
+            if fail_on == Some(shown.as_str()) {
+                return Err(FsxError::Io {
+                    action: "flush",
+                    path: shown,
+                    source: io::Error::from_raw_os_error(5),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn creating_a_pin_flushes_the_file_and_then_the_piece_directory() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        create_with(&root, &path("a"), &recording(&calls, None)).expect("the pin is created");
+
+        assert_eq!(*calls.borrow(), ["a/.antiq-pin", "a"]);
+    }
+
+    #[test]
+    fn creating_over_an_existing_pin_flushes_the_piece_directory() {
+        let mut tree = Tree::new();
+        tree.file("a/.antiq-pin", "");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        create_with(&root, &path("a"), &recording(&calls, None)).expect("the pin stays");
+
+        assert_eq!(*calls.borrow(), ["a"]);
+    }
+
+    #[test]
+    fn removing_a_pin_flushes_the_piece_directory() {
+        let mut tree = Tree::new();
+        tree.file("a/.antiq-pin", "");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        remove_with(&root, &path("a"), &recording(&calls, None)).expect("the pin is removed");
+
+        assert_eq!(*calls.borrow(), ["a"]);
+    }
+
+    #[test]
+    fn removing_a_pin_that_is_not_there_flushes_nothing() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        remove_with(&root, &path("a"), &recording(&calls, None)).expect("nothing to remove");
+
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_directory_flushes_nothing() {
+        let mut tree = Tree::new();
+        tree.dir("a/.antiq-pin");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        create_with(&root, &path("a"), &recording(&calls, None)).expect_err("refused");
+        remove_with(&root, &path("a"), &recording(&calls, None)).expect_err("refused");
+
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_pin_file_that_cannot_be_flushed_is_reported() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        let error = create_with(&root, &path("a"), &recording(&calls, Some("a/.antiq-pin")))
+            .expect_err("the flush fails");
+
+        assert!(
+            matches!(&error, PinError::Flush { path, .. } if path.to_string() == "a/.antiq-pin"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_piece_directory_that_cannot_be_flushed_after_creating_is_reported() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        let error = create_with(&root, &path("a"), &recording(&calls, Some("a")))
+            .expect_err("the flush fails");
+
+        assert!(
+            matches!(&error, PinError::Flush { path, .. } if path.to_string() == "a"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_piece_directory_that_cannot_be_flushed_after_removing_is_reported() {
+        let mut tree = Tree::new();
+        tree.file("a/.antiq-pin", "");
+        let root = open(&tree);
+        let calls = RefCell::new(Vec::new());
+
+        let error = remove_with(&root, &path("a"), &recording(&calls, Some("a")))
+            .expect_err("the flush fails");
+
+        assert!(
+            matches!(&error, PinError::Flush { path, .. } if path.to_string() == "a"),
+            "{error}"
+        );
     }
 }

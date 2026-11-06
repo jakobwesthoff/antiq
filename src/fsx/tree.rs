@@ -209,6 +209,12 @@ impl TreeRoot {
         Ok(file)
     }
 
+    /// The directory at `path`, relative to this root, as an open file, so
+    /// that the entries it holds can be made durable.
+    pub(crate) fn open_dir_file(&self, path: &RelPath) -> io::Result<File> {
+        Ok(File::from(self.open_dir(path, SEARCH)?))
+    }
+
     /// Creates the directory `path`, relative to this root.
     pub fn create_dir(&self, path: &RelPath, mode: u32) -> io::Result<()> {
         let (dir, name) = self.split(path)?;
