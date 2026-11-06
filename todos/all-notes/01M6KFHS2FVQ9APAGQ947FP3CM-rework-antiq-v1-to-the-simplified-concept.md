@@ -1788,6 +1788,12 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   gets a sentence that on a case-folding volume a new store folder below
   an existing parent takes the parent's stored spelling (F8, which owns
   the lookup by spelling).
+- From F2's review (VR8, accepted as delivered): `VersionsError` paths
+  are relative to the root the function was given, so a staging path
+  and a store path read alike. C4 and F6 wrap these errors with the step
+  and the place ("while moving the version into the store", "while
+  putting the files back into tmp/pack/...") so the user can tell where
+  to look.
 - For F7: sidecars without their `.tar.zst` are an incomplete version
   only when `versions::store::is_being_stored` finds no staged archive
   for them in `tmp/pack/`; otherwise they are repair 1's and not
@@ -1833,8 +1839,8 @@ version: packing, reading, checking, extracting; the command stays
 short forms stay (`relpath`, `sysmem`, `id`, `cmd`); asqr's module
 names are the model. New modules follow the same rule.
 
-Item N1 does the rename as one mechanical step once F2, F4 and E0 are
-merged and before the next items start: `git mv`, every `use` line,
+Item N1 does the rename as one mechanical step once F4 and E0 are
+merged; items running then rebase onto it: `git mv`, every `use` line,
 type and doc reference, the paths in this plan todo, and no behaviour
 change; `scripts/check.sh` green.
 
