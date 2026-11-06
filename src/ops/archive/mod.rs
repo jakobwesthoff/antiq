@@ -525,6 +525,7 @@ pub(crate) fn plan_with(
     let junk = status::junk_names(&config.junk, &mut Vec::new());
     let mut plan = Plan::new();
     for candidate in candidates {
+        let junk = junk_for(collection, &candidate, &junk);
         let tree =
             walk::walk_piece_with(&root, &candidate.path, &junk, &rules, seams.walk_hooks())?;
         let size = apparent_size(&tree);
@@ -554,6 +555,16 @@ pub(crate) fn plan_with(
         needs_decision: None,
         warnings,
     })
+}
+
+/// The junk names a run uses for `candidate`: an unearthed piece has its
+/// own list (see `unearthed::junk_of_piece`), any other piece the
+/// configured one.
+fn junk_for(collection: &Collection, candidate: &Candidate, configured: &[Name]) -> Vec<Name> {
+    match (candidate.kind, candidate.id) {
+        (PieceKind::Unearthed, Some(id)) => unearthed::junk_of_piece(collection, id),
+        _ => configured.to_vec(),
+    }
 }
 
 /// What a run would do with the unearthed piece `candidate` of `size`
@@ -587,7 +598,11 @@ pub(crate) fn plan_one(
     let config = &collection.config().collection;
     let root = open_root(collection)?;
     let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
-    let junk = status::junk_names(&config.junk, &mut Vec::new());
+    let junk = junk_for(
+        collection,
+        candidate,
+        &status::junk_names(&config.junk, &mut Vec::new()),
+    );
     let tree = walk::walk_piece_with(&root, &candidate.path, &junk, &rules, seams.walk_hooks())?;
     Ok(plan_unearthed(
         collection,

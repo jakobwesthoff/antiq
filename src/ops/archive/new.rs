@@ -314,6 +314,7 @@ pub(super) fn archive_piece(
         answer: mode.answer,
         warnings: Vec::new(),
         listing_stored: false,
+        junk: cx.junk.clone(),
     };
     let outcome = match piece.run() {
         Ok(outcome) => outcome,
@@ -391,6 +392,10 @@ pub(super) struct Piece<'a, 'c> {
     pub(super) answer: Option<Answer>,
     pub(super) warnings: Vec<Warning>,
     pub(super) listing_stored: bool,
+    /// The junk names for the whole handling of this piece: the
+    /// configured list, or for an unearthed piece the one
+    /// `unearthed::junk_of_piece` gives.
+    pub(super) junk: Vec<Name>,
 }
 
 impl Piece<'_, '_> {
@@ -406,6 +411,9 @@ impl Piece<'_, '_> {
     }
 
     fn run(&mut self) -> Flow<PieceOutcome> {
+        if let Some(id) = self.known.filter(|_| self.is_unearthed) {
+            self.junk = super::unearthed::junk_of_piece(self.cx.collection, id);
+        }
         let tree = self.walk_and_judge()?;
         let size = apparent_size(&tree);
         let sub = self
@@ -429,8 +437,14 @@ impl Piece<'_, '_> {
     pub(super) fn remove_stored(&mut self, stored: Stored, size: u64) -> Flow<PieceOutcome> {
         let mut entry = self.write_entry(&stored)?;
         self.mark_removing(&mut entry, &stored.payload.file)?;
-        let durable = durable::seal(self.cx.lock, stored.matched, &stored.payload, &entry)
-            .expect("the entry was just marked removing for this payload");
+        let durable = durable::seal(
+            self.cx.lock,
+            stored.matched,
+            &stored.payload,
+            &entry,
+            &self.junk,
+        )
+        .expect("the entry was just marked removing for this payload");
         Ok(match self.remove_folder(&durable, entry)? {
             finish::Finished::Removed => PieceOutcome::Archived(Archived {
                 id: durable.id(),
@@ -455,7 +469,7 @@ impl Piece<'_, '_> {
         let tree = walk::walk_piece_with(
             &cx.root,
             self.path,
-            &cx.junk,
+            &self.junk,
             &cx.rules,
             cx.seams.walk_hooks(),
         )
@@ -571,7 +585,7 @@ impl Piece<'_, '_> {
             .ok()
             .and_then(|file| listing::read_all(file).ok())?;
         let rules = WalkRules {
-            junk: self.cx.junk.clone(),
+            junk: self.junk.clone(),
             staged: false,
         };
         let verified = self
@@ -771,7 +785,7 @@ impl Piece<'_, '_> {
         let cx = self.cx;
         self.at(Step::Verify)?;
         let rules = WalkRules {
-            junk: cx.junk.clone(),
+            junk: self.junk.clone(),
             staged: false,
         };
         let verified = cx

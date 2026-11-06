@@ -196,6 +196,29 @@ pub(crate) fn records_unearth(metadata: &Metadata, machine: &str, time: Timestam
     })
 }
 
+/// The configured junk names, less the ones that any of `listings` holds
+/// as files: a name that became junk after packing must not hide an edit
+/// of a file the archive has.
+pub(crate) fn junk_outside<'a>(
+    collection: &Collection,
+    listings: impl IntoIterator<Item = &'a [ListingEntry]>,
+) -> Vec<Name> {
+    let archived: HashSet<&[u8]> = listings
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.kind != ListingType::Dir)
+        .filter_map(|entry| entry.path.components().last())
+        .collect();
+    collection
+        .config()
+        .collection
+        .junk
+        .iter()
+        .filter(|junk| !archived.contains(junk.as_bytes()))
+        .filter_map(|junk| Name::from_bytes(junk.as_bytes().to_vec()).ok())
+        .collect()
+}
+
 /// The archive payloads an unearthed folder can have come from: those of
 /// the version the entry was unearthed from. Two machines can both make
 /// version N, so the ones this machine holds are the candidates and the
@@ -750,23 +773,8 @@ impl Repairs<'_> {
         listing::read_all(file).map_err(|error| error.to_string())
     }
 
-    /// The configured junk names, less the ones that the archive holds as
-    /// files: a name that became junk after packing must not hide an edit
-    /// of a file the archive has.
     fn junk_names(&self, listing: &[ListingEntry]) -> Vec<Name> {
-        let archived: HashSet<&[u8]> = listing
-            .iter()
-            .filter(|entry| entry.kind != ListingType::Dir)
-            .filter_map(|entry| entry.path.components().last())
-            .collect();
-        self.collection
-            .config()
-            .collection
-            .junk
-            .iter()
-            .filter(|junk| !archived.contains(junk.as_bytes()))
-            .filter_map(|junk| Name::from_bytes(junk.as_bytes().to_vec()).ok())
-            .collect()
+        junk_outside(self.collection, [listing])
     }
 
     // =========================================================

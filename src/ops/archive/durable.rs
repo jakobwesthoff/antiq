@@ -15,7 +15,7 @@ use crate::lock::RunLock;
 use crate::meta::{FileName, Payload};
 use crate::pack::verify::LstatRecord;
 use crate::pack::{Packed, Verified};
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use crate::tracking::{EntryState, TrackingEntry};
 
 /// An archive whose payload and listing are stored, whose metadata is
@@ -34,6 +34,7 @@ use crate::tracking::{EntryState, TrackingEntry};
 ///         payload_file: file,
 ///         payload_version: 1,
 ///         record: Vec::new(),
+///         junk: Vec::new(),
 ///     }
 /// }
 /// ```
@@ -44,6 +45,7 @@ pub struct DurableArchive {
     payload_file: FileName,
     payload_version: u32,
     record: Vec<LstatRecord>,
+    junk: Vec<Name>,
 }
 
 impl DurableArchive {
@@ -68,6 +70,12 @@ impl DurableArchive {
     /// it: the baseline a later walk compares with.
     pub fn record(&self) -> &[LstatRecord] {
         &self.record
+    }
+
+    /// The junk names the package was verified with, which a later walk of
+    /// the folder must use to be comparable with [`DurableArchive::record`].
+    pub fn junk(&self) -> &[Name] {
+        &self.junk
     }
 }
 
@@ -131,6 +139,7 @@ pub(super) fn seal(
     matched: Matched,
     payload: &Payload,
     entry: &TrackingEntry,
+    junk: &[Name],
 ) -> Result<DurableArchive, NotDurable> {
     if entry.state != EntryState::Removing {
         return Err(NotDurable::NotRemoving(entry.id));
@@ -144,6 +153,7 @@ pub(super) fn seal(
         payload_file: payload.file.clone(),
         payload_version: payload.version,
         record: matched.0.record().to_vec(),
+        junk: junk.to_vec(),
     })
 }
 
@@ -231,11 +241,13 @@ mod tests {
         let record = verified.record().to_vec();
         let matched = Matched::of_packing(verified, &world.packed).expect("the listings agree");
         let payload = payload();
+        let junk = Name::from_bytes(b".DS_Store".to_vec()).expect("a name");
         let token = seal(
             &world.lock,
             matched,
             &payload,
             &entry(EntryState::Removing, Some(payload.file.clone())),
+            std::slice::from_ref(&junk),
         )
         .expect("a removing entry for the payload");
         assert_eq!(token.id(), entry(EntryState::Removing, None).id);
@@ -243,6 +255,7 @@ mod tests {
         assert_eq!(token.payload_file(), &payload.file);
         assert_eq!(token.payload_version(), 3);
         assert_eq!(token.record(), record.as_slice());
+        assert_eq!(token.junk(), std::slice::from_ref(&junk));
     }
 
     #[test]
@@ -256,6 +269,7 @@ mod tests {
             matched,
             &payload,
             &entry(EntryState::Live, Some(payload.file.clone())),
+            &[],
         );
         assert!(
             matches!(result, Err(NotDurable::NotRemoving(_))),
@@ -274,6 +288,7 @@ mod tests {
             matched,
             &payload(),
             &entry(EntryState::Removing, Some(other)),
+            &[],
         );
         assert!(
             matches!(result, Err(NotDurable::OtherPayload(_))),
@@ -291,6 +306,7 @@ mod tests {
             matched,
             &payload(),
             &entry(EntryState::Removing, None),
+            &[],
         );
         assert!(
             matches!(result, Err(NotDurable::OtherPayload(_))),

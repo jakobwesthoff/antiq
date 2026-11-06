@@ -232,7 +232,7 @@ impl Piece<'_, '_> {
         let walked = walk::walk_piece_with(
             &cx.root,
             self.path,
-            &cx.junk,
+            durable.junk(),
             &cx.rules,
             cx.seams.walk_hooks(),
         )
@@ -282,13 +282,13 @@ impl Piece<'_, '_> {
         if let Err(error) = self.seam(Step::Rewalk) {
             return Some(chain(&error));
         }
-        let walked = self.walk_trashed(durable.id());
+        let walked = self.walk_trashed(durable);
         difference(durable.record(), walked)
     }
 
     /// The tree is walked as a piece of the trash directory, whose rules
     /// exclude nothing: whatever the folder holds now is compared.
-    fn walk_trashed(&self, id: ObjectId) -> Result<PieceTree, String> {
+    fn walk_trashed(&self, durable: &DurableArchive) -> Result<PieceTree, String> {
         let cx = self.cx;
         let trash = TreeRoot::open(&cx.collection.trash_dir()).map_err(|e| chain(&e))?;
         let rules = Rules::new(&[], &[])
@@ -296,8 +296,8 @@ impl Piece<'_, '_> {
             .map_err(|e| chain(&e))?;
         walk::walk_piece_with(
             &trash,
-            &trash_name(id),
-            &cx.junk,
+            &trash_name(durable.id()),
+            durable.junk(),
             &rules,
             cx.seams.walk_hooks(),
         )

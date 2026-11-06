@@ -1509,7 +1509,10 @@ superseded payload is not compared. An entry that records no version, or
 whose version has no payload left, is compared with the newest archive
 that is not superseded. A payload whose listing cannot be read is passed
 over. The comparison applies the collection's junk list to the listing and
-to the folder.
+to the folder, less the names that a payload it compares holds as files: a
+file packed under a name that became junk later still counts. The same
+list serves the packing of a replacement, its verification and the walks
+that check the folder before and after its removal.
 
 A reclaim records its metadata change first (lifecycle `archived`, live
 payload removed, a `reclaim` history entry), then sets the entry to

@@ -38,7 +38,7 @@ use crate::pack::WalkRules;
 use crate::pack::live::check_stream;
 use crate::pack::verify::{Compared, Difference, changes, compare_with_listing};
 use crate::relpath::{Name, RelPath};
-use crate::repair::unearthed_candidates;
+use crate::repair::{junk_outside, unearthed_candidates};
 use crate::report::Warning;
 use crate::store::{Source, Store};
 use crate::tracking::{self, Answer, DecisionKind, EntryState, TrackingEntry, VersionTakenOut};
@@ -149,10 +149,7 @@ pub(super) fn classify(
         return Err(Refusal::error("the object belongs to another collection"));
     }
 
-    let mut candidates = unearthed_candidates(&entry, &metadata);
-    if candidates.is_empty() {
-        candidates = newest_archive(&metadata).into_iter().collect();
-    }
+    let candidates = compared_with(&entry, &metadata);
     let rules = WalkRules {
         junk: junk.to_vec(),
         staged: false,
@@ -223,6 +220,36 @@ fn stable(differences: &[Difference]) -> Result<(), Refusal> {
         ))),
         None => Ok(()),
     }
+}
+
+/// The archives an unearthed folder is compared with.
+fn compared_with<'a>(entry: &TrackingEntry, metadata: &'a Metadata) -> Vec<&'a Payload> {
+    let candidates = unearthed_candidates(entry, metadata);
+    if candidates.is_empty() {
+        newest_archive(metadata).into_iter().collect()
+    } else {
+        candidates
+    }
+}
+
+/// The junk names for the whole handling of the unearthed piece `id`: the
+/// configured ones less the names any archive the folder is compared with
+/// holds as a file. A name that became junk after packing must not hide an
+/// edit, a deletion or the content of a file the archive has, and the
+/// comparison, the packing, the strict verify and the removal must all
+/// agree on the list. A piece whose entry, metadata or listings cannot be
+/// read gets the configured list; `classify` refuses such a piece.
+pub(super) fn junk_of_piece(collection: &Collection, id: ObjectId) -> Vec<Name> {
+    let store = Store::new(collection);
+    let listings: Vec<Vec<ListingEntry>> = match (tracking::read(collection, id), store.current(id))
+    {
+        (Ok(Some(entry)), Ok(Some(current))) => compared_with(&entry, &current.metadata)
+            .into_iter()
+            .filter_map(|payload| read_listing(&store, id, payload).ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+    junk_outside(collection, listings.iter().map(Vec::as_slice))
 }
 
 /// The newest archive that is not superseded, for an entry that records no
@@ -501,7 +528,7 @@ impl Piece<'_, '_> {
         let cx = self.cx;
         let mut outside = 0;
         loop {
-            let classified = classify(cx.collection, &cx.junk, sub, id)?;
+            let classified = classify(cx.collection, &self.junk, sub, id)?;
             let bound = match classified.verdict {
                 Verdict::Reclaim => return self.reclaim(classified, size),
                 Verdict::Replace if classified.loss.is_empty() => Bound::Nothing,
@@ -564,11 +591,7 @@ impl Piece<'_, '_> {
         let placed = self.pack_and_place(tree, sub, size)?;
         // The folder may have changed since it was compared, so what the
         // package loses is worked out from the package.
-        let found = loss_of(&changes(
-            &classified.listing,
-            placed.listing(),
-            &self.cx.junk,
-        ));
+        let found = loss_of(&changes(&classified.listing, placed.listing(), &self.junk));
         if !bound.allows(&found) {
             placed.discard();
             return Ok(Replaced::Outside);
@@ -658,7 +681,7 @@ impl Piece<'_, '_> {
             .expect("the folder was compared and equals the listing");
         let matched = Matched::of_stored(verified, &listing)
             .expect("the verified listing is the one that was compared");
-        let durable = durable::seal(cx.lock, matched, &basis, &entry)
+        let durable = durable::seal(cx.lock, matched, &basis, &entry, &self.junk)
             .expect("the entry was just marked removing for this payload");
         Ok(match self.remove_folder(&durable, entry)? {
             Finished::Removed => PieceOutcome::Reclaimed(Reclaimed {
@@ -1219,15 +1242,75 @@ pub(crate) mod tests {
     // Junk and times
     // =========================================================
 
+    /// The files of [`FILES`] and a `.DS_Store` that is junk by the
+    /// configured list but was packed as a plain file.
+    fn files_with_junk_name() -> Vec<(&'static str, &'static str)> {
+        let mut files = FILES.to_vec();
+        files.push((".DS_Store", "junk"));
+        files
+    }
+
     #[test]
-    fn a_junk_file_in_the_listing_does_not_stop_the_reclaim() {
-        let mut archived = FILES.to_vec();
-        archived.push((".DS_Store", "junk"));
-        let scene = scene_of(&archived, FILES);
+    fn an_unchanged_file_with_a_junk_name_the_archive_holds_is_reclaimed() {
+        let files = files_with_junk_name();
+        let scene = scene_of(&files, &files);
 
         let report = scene.run(&RealSeams);
 
         assert_eq!(reclaimed(&report), 1, "{report:?}");
+        assert!(!scene.folder().exists());
+    }
+
+    #[test]
+    fn an_edited_file_with_a_junk_name_the_archive_holds_is_a_loss() {
+        let files = files_with_junk_name();
+        let scene = scene_of(&files, &files);
+        scene.write_in_folder(".DS_Store", "edited");
+
+        nobody_answers(&scene, &[lost(".DS_Store", "changed")]);
+    }
+
+    #[test]
+    fn a_deleted_file_with_a_junk_name_the_archive_holds_is_a_loss() {
+        let files = files_with_junk_name();
+        let scene = scene_of(&files, &files);
+        fs::remove_file(scene.folder().join(".DS_Store")).expect("removed");
+
+        nobody_answers(&scene, &[lost(".DS_Store", "removed")]);
+    }
+
+    #[test]
+    fn a_replacement_packs_the_file_with_a_junk_name_the_archive_holds() {
+        let files = files_with_junk_name();
+        let scene = scene_of(&files, &files);
+        scene.write_in_folder("added.txt", "new");
+
+        let report = scene.run(&RealSeams);
+
+        assert_eq!(archived_rows(&report).len(), 1, "{report:?}");
+        let metadata = scene.metadata();
+        let name = metadata.payloads[1].listing.clone().expect("a listing");
+        let packed = listing::read_all(
+            fs::File::open(scene.object_file(name.as_str())).expect("the listing opens"),
+        )
+        .expect("the listing reads");
+        let paths: Vec<String> = packed.iter().map(|line| line.path.to_string()).collect();
+        assert!(
+            paths.contains(&".DS_Store".to_string()),
+            "the new package keeps the file: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_piece_without_an_entry_gets_the_configured_junk_list() {
+        let scene = scene();
+
+        let junk = junk_of_piece(&scene.collection, id("01J0000000000000000000000Z"));
+
+        assert_eq!(
+            junk,
+            status::junk_names(&scene.collection.config().collection.junk, &mut Vec::new())
+        );
     }
 
     #[test]
