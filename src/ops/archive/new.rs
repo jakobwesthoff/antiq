@@ -31,6 +31,7 @@ use super::{
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
+use crate::fsx::space::{ReserveError, SpaceLedger};
 use crate::fsx::tree::TreeRoot;
 use crate::id::{EntryTimes, IdSource, IdTime, ObjectId, id_time};
 use crate::idle::{self, IdleError, IdleVerdict};
@@ -75,6 +76,9 @@ pub(super) struct Context<'a> {
     pub idle: idle::Settings,
     pub root: TreeRoot,
     pub machine: String,
+    /// What the pieces running side by side have reserved of the free
+    /// space.
+    pub space: SpaceLedger,
     /// Objects a crashed run left behind, for new pieces to adopt.
     pub orphans: Vec<Orphan>,
 }
@@ -461,20 +465,22 @@ impl Piece<'_, '_> {
 
         let tmp_dir = cx.collection.tmp_dir();
         self.at(Step::Pack)?;
-        let free = cx
-            .seams
-            .free_space(self.path, &tmp_dir)
-            .map_err(|error| Stop::from_error(&error))?;
-        if apparent > free {
-            return Err(Stop::Skip {
-                reason: SkipReason::NoSpace,
-                message: format!(
-                    "the piece is {} and {} are free",
-                    size_text(apparent),
-                    size_text(free)
-                ),
-            });
-        }
+        // Held until the package has left `tmp/` for the store or been
+        // removed, as the free space does not show it before.
+        let _reservation = cx
+            .space
+            .try_reserve(apparent, || cx.seams.free_space(self.path, &tmp_dir))
+            .map_err(|error| match error {
+                ReserveError::Short { needed, available } => Stop::Skip {
+                    reason: SkipReason::NoSpace,
+                    message: format!(
+                        "the piece is {} and {} are free",
+                        size_text(needed),
+                        size_text(available)
+                    ),
+                },
+                ReserveError::Free(error) => Stop::from_error(&error),
+            })?;
         let tmp = tmp_dir.join(format!("{id}.tar.zst"));
         let packed = self.pack(tree, sub, apparent, &tmp)?;
 
@@ -954,6 +960,7 @@ mod tests {
     // =========================================================
 
     type Hook = Box<dyn Fn(Step, &RelPath) -> io::Result<()> + Send + Sync>;
+    type FreeHook = Box<dyn Fn(&RelPath) + Send + Sync>;
 
     /// Sees a second device at `mnt` once the first flag is set, and has no
     /// file descriptor left once the second one is.
@@ -977,6 +984,10 @@ mod tests {
     struct Scripted {
         on: Hook,
         free: Option<u64>,
+        /// Makes reading the free space fail with this OS error.
+        free_error: Option<i32>,
+        /// Called with the piece while the free space is read.
+        on_free: Option<FreeHook>,
         packager: Option<Box<dyn Packager + Sync>>,
         effects: Option<Box<dyn Effects + Sync>>,
         mount: ArmedMount,
@@ -991,6 +1002,8 @@ mod tests {
             Scripted {
                 on: Box::new(hook),
                 free: None,
+                free_error: None,
+                on_free: None,
                 packager: None,
                 effects: None,
                 mount: ArmedMount(
@@ -1059,9 +1072,19 @@ mod tests {
 
         fn free_space(
             &self,
-            _piece: &RelPath,
+            piece: &RelPath,
             dir: &std::path::Path,
         ) -> Result<u64, crate::fsx::FsxError> {
+            if let Some(on_free) = &self.on_free {
+                on_free(piece);
+            }
+            if let Some(errno) = self.free_error {
+                return Err(crate::fsx::FsxError::Io {
+                    action: "stat",
+                    path: dir.display().to_string(),
+                    source: io::Error::from_raw_os_error(errno),
+                });
+            }
             match self.free {
                 Some(free) => Ok(free),
                 None => crate::fsx::space::available_space(dir),
@@ -1153,6 +1176,7 @@ mod tests {
                 clock: &clock(),
                 ids: &ids,
                 pool: shared_pool(),
+                workers: 1,
                 dry_run: false,
             },
             seams,
@@ -1710,6 +1734,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_free_space_reading_skips_the_piece() {
+        let world = lone_piece("a");
+        let mut seams = Scripted::real();
+        seams.free_error = Some(libc::EIO);
+        let report = run(&world, &seams);
+        let [row] = skipped(&report) else {
+            panic!("one piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert!(objects(&world).is_empty());
+    }
+
+    #[test]
     fn enospc_while_packing() {
         let world = lone_piece("a");
         let seams =
@@ -2210,6 +2247,7 @@ mod tests {
             clock,
             ids,
             pool,
+            workers: 1,
             dry_run,
         }
     }
@@ -3597,5 +3635,242 @@ mod tests {
         );
         repaired(&world);
         assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    // =========================================================
+    // Pieces side by side
+    // =========================================================
+
+    /// A flag that threads wait for. The wait has a limit, so that a test
+    /// that would hang ends with an error instead.
+    #[derive(Default)]
+    struct Gate {
+        open: std::sync::Mutex<bool>,
+        changed: std::sync::Condvar,
+    }
+
+    const GATE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    impl Gate {
+        fn open(&self) {
+            *self.open.lock().expect("the gate is not poisoned") = true;
+            self.changed.notify_all();
+        }
+
+        fn wait(&self) -> io::Result<()> {
+            let open = self.open.lock().expect("the gate is not poisoned");
+            let (_open, result) = self
+                .changed
+                .wait_timeout_while(open, GATE_LIMIT, |open| !*open)
+                .expect("the gate is not poisoned");
+            if result.timed_out() {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the gate stayed shut",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Lets `count` threads wait for each other.
+    struct Meeting {
+        here: std::sync::Mutex<usize>,
+        changed: std::sync::Condvar,
+        count: usize,
+    }
+
+    impl Meeting {
+        fn of(count: usize) -> Meeting {
+            Meeting {
+                here: std::sync::Mutex::new(0),
+                changed: std::sync::Condvar::new(),
+                count,
+            }
+        }
+
+        fn meet(&self) -> io::Result<()> {
+            let mut here = self.here.lock().expect("the meeting is not poisoned");
+            *here += 1;
+            self.changed.notify_all();
+            let (_here, result) = self
+                .changed
+                .wait_timeout_while(here, GATE_LIMIT, |here| *here < self.count)
+                .expect("the meeting is not poisoned");
+            if result.timed_out() {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the others never came",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn pieces(names: &[&str]) -> World {
+        let mut world = world();
+        for name in names {
+            world.file(&format!("{name}/note.txt"), 30);
+        }
+        world
+    }
+
+    fn run_side_by_side(
+        world: &World,
+        seams: &dyn Seams,
+        pool: &Pool,
+        workers: usize,
+    ) -> ArchiveReport {
+        let (ids, now) = (SeqIds::new(1), clock());
+        archive_with(
+            &ArchiveRequest {
+                workers,
+                ..request(world, &ids, &now, pool, false)
+            },
+            seams,
+        )
+        .expect("the run finishes")
+    }
+
+    fn big_pool(cores: usize) -> Pool {
+        Pool::new(cores, 4096 * 1024 * 1024)
+    }
+
+    #[test]
+    fn two_pieces_run_at_the_same_time() {
+        let world = pieces(&["a", "b"]);
+        let meeting = Meeting::of(2);
+        let seams = Scripted::on(move |step, _| {
+            if step == Step::Pack {
+                meeting.meet()
+            } else {
+                Ok(())
+            }
+        });
+        let report = run_side_by_side(&world, &seams, &big_pool(2), 2);
+        assert_eq!(archived(&report).len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn a_pool_with_one_worker_serves_both_pieces() {
+        let world = pieces(&["a", "b"]);
+        let meeting = Meeting::of(2);
+        let seams = Scripted::on(move |step, _| {
+            if step == Step::Pack {
+                meeting.meet()
+            } else {
+                Ok(())
+            }
+        });
+        let report = run_side_by_side(&world, &seams, &big_pool(1), 2);
+        assert_eq!(archived(&report).len(), 2, "{report:?}");
+    }
+
+    // Piece b asks for room once a holds its claim, and a keeps the claim
+    // until b has asked. Each piece is one byte and the volume has one byte
+    // free.
+    #[test]
+    fn parallel_pieces_reserve_the_sum_of_their_sizes() {
+        let world = pieces(&["a", "b"]);
+        let (a_reserved, b_asked) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+        let mut seams = Scripted::on({
+            let (a_reserved, b_asked) = (Arc::clone(&a_reserved), Arc::clone(&b_asked));
+            move |step, piece| match (step, piece.to_string().as_str()) {
+                (Step::Pack, "b") => a_reserved.wait(),
+                (Step::Verify, "a") => b_asked.wait(),
+                _ => Ok(()),
+            }
+        });
+        seams.free = Some(1);
+        seams.on_free = Some(Box::new(move |piece| match piece.to_string().as_str() {
+            "a" => a_reserved.open(),
+            _ => b_asked.open(),
+        }));
+        let report = run_side_by_side(&world, &seams, &big_pool(2), 2);
+        let [done] = archived(&report) else {
+            panic!("one piece is archived: {report:?}");
+        };
+        assert_eq!(done.path.to_string(), "a");
+        let [row] = skipped(&report) else {
+            panic!("one piece is skipped: {report:?}");
+        };
+        assert_eq!(row.path.to_string(), "b");
+        assert_eq!(row.reason, SkipReason::NoSpace);
+    }
+
+    #[test]
+    fn a_reserved_size_is_given_back() {
+        let world = pieces(&["a", "b"]);
+        let mut seams = Scripted::real();
+        seams.free = Some(1);
+        let report = run_side_by_side(&world, &seams, &big_pool(1), 1);
+        assert_eq!(archived(&report).len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn a_failing_piece_does_not_stop_the_others() {
+        let world = pieces(&["a", "b", "c"]);
+        let seams = Scripted::on(|step, piece| {
+            if step == Step::Pack && piece.to_string() == "b" {
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            } else {
+                Ok(())
+            }
+        });
+        let report = run_side_by_side(&world, &seams, &big_pool(2), 2);
+        let done: Vec<String> = archived(&report)
+            .iter()
+            .map(|row| row.path.to_string())
+            .collect();
+        assert_eq!(done, ["a", "c"], "{report:?}");
+        let [row] = skipped(&report) else {
+            panic!("one piece is skipped: {report:?}");
+        };
+        assert_eq!(
+            (row.path.to_string(), row.reason),
+            ("b".to_string(), SkipReason::Error)
+        );
+    }
+
+    #[test]
+    fn running_out_of_descriptors_fails_a_parallel_run() {
+        let world = pieces(&["a", "b", "c"]);
+        let mut seams = Scripted::real();
+        let armed = Arc::clone(&seams.mount.1);
+        seams.on = Box::new(move |step, _| {
+            if step == Step::Walk {
+                armed.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let (ids, now, pool) = (SeqIds::new(1), clock(), big_pool(2));
+        let request = ArchiveRequest {
+            workers: 2,
+            ..request(&world, &ids, &now, &pool, false)
+        };
+        let error = archive_with(&request, &seams).expect_err("the run fails");
+        assert!(matches!(error, ArchiveError::Walk(_)), "{error}");
+    }
+
+    #[test]
+    fn a_run_error_starts_no_further_piece() {
+        let world = pieces(&["a", "b", "c"]);
+        let mut seams = Scripted::real();
+        let armed = Arc::clone(&seams.mount.1);
+        let walks = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&walks);
+        seams.on = Box::new(move |step, _| {
+            if step == Step::Walk {
+                counted.fetch_add(1, Ordering::SeqCst);
+                armed.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let (ids, now, pool) = (SeqIds::new(1), clock(), big_pool(1));
+        archive_with(&request(&world, &ids, &now, &pool, false), &seams)
+            .expect_err("the run fails");
+        assert_eq!(walks.load(Ordering::SeqCst), 1);
     }
 }

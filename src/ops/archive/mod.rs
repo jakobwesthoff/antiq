@@ -17,7 +17,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::device::{self, FsKind};
-use crate::fsx::space::available_space;
+use crate::fsx::space::{SpaceLedger, available_space};
 use crate::fsx::tree::TreeRoot;
 use crate::id::{IdSource, ObjectId};
 use crate::index;
@@ -40,7 +40,10 @@ use jiff::Timestamp;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io;
+use std::panic::resume_unwind;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 
 /// Errors of the `archive` command. Only what stops the whole run is an
 /// error; whatever goes wrong with one piece is a `skipped` row of the
@@ -414,6 +417,8 @@ pub struct ArchiveRequest<'a> {
     pub clock: &'a dyn Clock,
     pub ids: &'a dyn IdSource,
     pub pool: &'a Pool,
+    /// How many pieces are archived at the same time; at least one.
+    pub workers: usize,
     pub dry_run: bool,
 }
 
@@ -456,6 +461,7 @@ pub(crate) fn archive_with(
             idle: crate::idle::Settings::new(config.idle_days, &config.ignore)?,
             root,
             machine: collection.machine_name()?,
+            space: SpaceLedger::new(),
             orphans: if candidates.iter().any(|candidate| candidate.id.is_none()) {
                 new::find_orphans(collection)?
             } else {
@@ -463,8 +469,7 @@ pub(crate) fn archive_with(
             },
         };
         let mut listing_stored = false;
-        for candidate in &candidates {
-            let result = new::archive_piece(&cx, candidate)?;
+        for result in run_pieces(&cx, &candidates, request.workers)? {
             warnings.extend(result.warnings);
             listing_stored |= result.listing_stored;
             match result.outcome {
@@ -486,6 +491,47 @@ pub(crate) fn archive_with(
         kept: Some(kept),
         warnings,
     })
+}
+
+/// Archives the candidates on `workers` threads that take the next piece
+/// in path order as they become free, and returns the results in path
+/// order. When a piece fails the run, no new piece is started and the
+/// error of the first such piece in path order is returned.
+fn run_pieces(
+    cx: &new::Context<'_>,
+    candidates: &[Candidate],
+    workers: usize,
+) -> Result<Vec<new::PieceResult>, ArchiveError> {
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let mut finished: Vec<(usize, Result<new::PieceResult, ArchiveError>)> =
+        thread::scope(|scope| {
+            let threads: Vec<_> = (0..workers.clamp(1, candidates.len()))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine = Vec::new();
+                        while !failed.load(Ordering::SeqCst) {
+                            let index = next.fetch_add(1, Ordering::SeqCst);
+                            let Some(candidate) = candidates.get(index) else {
+                                break;
+                            };
+                            let result = new::archive_piece(cx, candidate);
+                            if result.is_err() {
+                                failed.store(true, Ordering::SeqCst);
+                            }
+                            mine.push((index, result));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .flat_map(|thread| thread.join().unwrap_or_else(|panic| resume_unwind(panic)))
+                .collect()
+        });
+    finished.sort_by_key(|(index, _)| *index);
+    finished.into_iter().map(|(_, result)| result).collect()
 }
 
 fn open_root(collection: &Collection) -> Result<TreeRoot, ArchiveError> {

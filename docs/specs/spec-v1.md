@@ -1200,7 +1200,8 @@ Read-only commands and `--dry-run` never touch these directories.
 
 Before packing a piece, `archive` checks free space in `.antiq/`
 against the piece's apparent size, and parallel pieces reserve their
-sum. `unearth` checks for the archive's size, when it has to be fetched,
+sum. A piece's reservation ends when its package has left `.antiq/tmp/`
+for the object store or has been removed. `unearth` checks for the archive's size, when it has to be fetched,
 plus the listing's total size. A piece without enough space is skipped,
 and `ENOSPC` during a step removes that step's temp output and skips the
 piece; the run exits 3.

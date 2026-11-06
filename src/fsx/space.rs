@@ -10,12 +10,81 @@
 
 use super::{FsxError, io_error};
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 /// The bytes an unprivileged process can still write on the filesystem
 /// holding `path`.
 pub(crate) fn available_space(path: &Path) -> Result<u64, FsxError> {
     let stat = rustix::fs::statvfs(path).map_err(|errno| io_error("stat", path)(errno.into()))?;
     Ok(bytes_available(stat.f_bavail, stat.f_frsize))
+}
+
+/// Why bytes could not be reserved.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReserveError {
+    #[error("{needed} bytes are needed and {available} are free")]
+    Short { needed: u64, available: u64 },
+    #[error(transparent)]
+    Free(#[from] FsxError),
+}
+
+/// A claim on free space that a piece holds until its output is gone.
+#[derive(Debug)]
+pub(crate) struct Reservation<'a> {
+    ledger: &'a SpaceLedger,
+    bytes: u64,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut reserved = self
+            .ledger
+            .reserved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *reserved -= self.bytes;
+    }
+}
+
+/// The space that pieces running side by side have claimed and not yet
+/// written. The free space of the volume does not show a package that is
+/// still to be written, so each piece checks against what is free minus
+/// what the others reserved.
+#[derive(Debug, Default)]
+pub(crate) struct SpaceLedger {
+    reserved: Mutex<u64>,
+}
+
+impl SpaceLedger {
+    pub(crate) fn new() -> SpaceLedger {
+        SpaceLedger::default()
+    }
+
+    /// Reserves `bytes` if `free` reports room for them on top of what is
+    /// reserved already.
+    pub(crate) fn try_reserve(
+        &self,
+        bytes: u64,
+        free: impl FnOnce() -> Result<u64, FsxError>,
+    ) -> Result<Reservation<'_>, ReserveError> {
+        // The lock is held across the reading: a piece that reads while
+        // another still holds its claim must not compare with a reading
+        // taken before the other wrote and released.
+        let mut reserved = self.reserved.lock().unwrap_or_else(PoisonError::into_inner);
+        let free = free()?;
+        let available = free.saturating_sub(*reserved);
+        if bytes > available {
+            return Err(ReserveError::Short {
+                needed: bytes,
+                available,
+            });
+        }
+        *reserved += bytes;
+        Ok(Reservation {
+            ledger: self,
+            bytes,
+        })
+    }
 }
 
 /// Free blocks an unprivileged process may use, counted in the
@@ -40,6 +109,79 @@ mod tests {
     fn free_blocks_are_counted_in_the_fundamental_block_size() {
         assert_eq!(bytes_available(10, 4096), 40_960);
         assert_eq!(bytes_available(u64::MAX, 2), u64::MAX);
+    }
+
+    #[test]
+    fn a_second_reservation_counts_the_first() {
+        let ledger = SpaceLedger::new();
+        let _first = ledger.try_reserve(60, || Ok(100)).expect("fits");
+        let error = ledger
+            .try_reserve(60, || Ok(100))
+            .expect_err("does not fit");
+        assert!(
+            matches!(
+                error,
+                ReserveError::Short {
+                    needed: 60,
+                    available: 40
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_reservation_gives_its_bytes_back() {
+        let ledger = SpaceLedger::new();
+        drop(ledger.try_reserve(60, || Ok(100)).expect("fits"));
+        ledger.try_reserve(60, || Ok(100)).expect("fits again");
+    }
+
+    // A reads the free space and waits to be overtaken. If B could reserve
+    // and hand its claim back in the meantime (its package written, the
+    // volume holding 60 bytes fewer than A's reading), A would claim on a
+    // stale reading.
+    #[test]
+    fn the_free_space_is_read_and_claimed_in_one_step() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let ledger = SpaceLedger::new();
+        let (a_reading, a_read) = mpsc::channel();
+        let (b_done, b_finished) = mpsc::channel();
+        let (first, second) = std::thread::scope(|scope| {
+            let ledger = &ledger;
+            let a = scope.spawn(move || {
+                ledger
+                    .try_reserve(60, || {
+                        a_reading.send(()).expect("the test listens");
+                        let _ = b_finished.recv_timeout(Duration::from_millis(300));
+                        Ok(100)
+                    })
+                    .map(std::mem::forget)
+                    .is_ok()
+            });
+            a_read.recv().expect("A starts reading");
+            let b = ledger.try_reserve(60, || Ok(100)).is_ok();
+            // A has stopped listening if B had to wait for A's lock.
+            let _ = b_done.send(());
+            (a.join().expect("A finishes"), b)
+        });
+        assert!(first, "A holds its claim");
+        assert!(!second, "B finds A's claim and is short");
+    }
+
+    #[test]
+    fn a_failing_reading_is_returned_and_reserves_nothing() {
+        let tree = Tree::new();
+        let ledger = SpaceLedger::new();
+        let error = ledger
+            .try_reserve(60, || available_space(&tree.path("nope")))
+            .expect_err("the reading fails");
+        assert!(matches!(error, ReserveError::Free(_)), "{error:?}");
+        ledger
+            .try_reserve(100, || Ok(100))
+            .expect("nothing is held");
     }
 
     #[test]
