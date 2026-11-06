@@ -486,6 +486,28 @@ fn exits_1_2_and_4_need_an_error() {
 }
 
 #[test]
+fn a_refused_piece_of_archive_exits_1_without_an_error() {
+    let refused = "{\"format\":1,\"command\":\"archive\",\"archived\":[],\"skipped\":[],\
+        \"refused\":[{\"piece\":\"old/pinned\",\"reasons\":[]}]}\n";
+    accepted(&["--json", "archive", "old/pinned"], refused, 1);
+}
+
+#[test]
+fn exit_1_of_archive_without_a_refused_piece_needs_an_error() {
+    let empty = "{\"format\":1,\"command\":\"archive\",\"archived\":[],\"skipped\":[],\
+        \"refused\":[]}\n";
+    rejected(&["--json", "archive", "a"], empty, 1, "error");
+    let absent = "{\"format\":1,\"command\":\"archive\"}\n";
+    rejected(&["--json", "archive", "a"], absent, 1, "error");
+}
+
+#[test]
+fn only_archive_may_exit_1_for_refused_pieces() {
+    let refused = "{\"format\":1,\"command\":\"pin\",\"refused\":[{\"piece\":\"a\"}]}\n";
+    rejected(&["--json", "pin", "a"], refused, 1, "error");
+}
+
+#[test]
 fn lock_held_carries_pid_and_started_together_or_neither() {
     let only_pid = "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"lock_held\",\"message\":\"m\",\"pid\":1}}\n";
     rejected(&["--json", "pin"], only_pid, 1, "pid and started");
@@ -1381,6 +1403,74 @@ fn tar_members_lists_the_archive_sorted() {
             "client-site/src",
             "client-site/src/main.rs"
         ]
+    );
+}
+
+use crate::support::scenario::outsider::{listing_check, tar_extract, tar_extract_with};
+
+#[test]
+fn tar_extract_unpacks_the_archive_into_the_given_directory() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let dest = scratch.path().join("unpacked");
+    tar_extract(&files.archive, &dest);
+    assert_eq!(
+        fs::read_to_string(dest.join("client-site/src/main.rs")).expect("the file is there"),
+        "fn main() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("client-site/README")).expect("the file is there"),
+        "hello\n"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot run no-such-tar")]
+fn a_missing_tar_is_named() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    tar_extract_with("no-such-tar", &files.archive, &scratch.path().join("out"));
+}
+
+#[test]
+#[should_panic(expected = "tar failed")]
+fn a_damaged_archive_fails_the_extraction() {
+    let collection = collection_with_version();
+    collection.damage_truncate_archive("old/client-site", STAMP);
+    let files = collection.version_files("old/client-site", STAMP);
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    tar_extract(&files.archive, &scratch.path().join("out"));
+}
+
+#[test]
+fn listing_check_accepts_the_unpacked_tree() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let dest = scratch.path().join("unpacked");
+    tar_extract(&files.archive, &dest);
+    listing_check(
+        &files.listing,
+        &dest.join("client-site"),
+        &scratch.path().join("listing"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "shasum -c failed")]
+fn listing_check_rejects_a_changed_file() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let dest = scratch.path().join("unpacked");
+    tar_extract(&files.archive, &dest);
+    fs::write(dest.join("client-site/README"), "changed\n").expect("the file is rewritten");
+    listing_check(
+        &files.listing,
+        &dest.join("client-site"),
+        &scratch.path().join("listing"),
     );
 }
 

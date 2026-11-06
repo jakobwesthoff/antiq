@@ -72,6 +72,53 @@ pub fn tar_members(archive: &Path) -> Vec<String> {
     members
 }
 
+/// Unpacks `archive` into the new directory `dest` with `tar --zstd -xpf`,
+/// the command the spec gives for the hand check. `-p` keeps the stored
+/// modes whatever the umask of the test run.
+pub fn tar_extract(archive: &Path, dest: &Path) {
+    tar_extract_with("tar", archive, dest);
+}
+
+/// `tar_extract` with another program, to show the message of a missing
+/// tool.
+pub fn tar_extract_with(program: &str, archive: &Path, dest: &Path) {
+    // A tool that is not installed must fail the test with its name, not
+    // pass as a check that found nothing wrong.
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("cannot run {program}, which the check needs: {error}"));
+    fs::create_dir_all(dest).expect("the destination is created");
+    let output = Command::new(program)
+        .args(["--zstd", "-xpf"])
+        .arg(archive)
+        .current_dir(dest)
+        .output()
+        .expect("the program ran a moment ago");
+    assert!(
+        output.status.success(),
+        "{program} failed on {}:\n{}{}",
+        archive.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Checks the unpacked tree `dir` against the checksum lines of a
+/// `.sha256.zst` listing with `shasum -a 256 -c`. The listing is
+/// decompressed into `scratch`, outside the tree, so the check sees no
+/// extra file.
+pub fn listing_check(listing: &Path, dir: &Path, scratch: &Path) {
+    fs::create_dir_all(scratch).expect("the scratch directory is created");
+    let decoded = scratch.join("listing.sha256");
+    let mut decoder =
+        zstd::stream::Decoder::new(fs::File::open(listing).expect("the listing opens"))
+            .expect("the listing is zstd");
+    let mut out = fs::File::create(&decoded).expect("the decoded listing is created");
+    std::io::copy(&mut decoder, &mut out).expect("the listing decodes");
+    shasum_check(dir, &decoded);
+}
+
 /// The order of versions: by time, then by counter as a number, no counter
 /// counting as 1.
 fn stamp_key(stamp: &str) -> (String, u64) {

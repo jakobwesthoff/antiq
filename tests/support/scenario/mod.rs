@@ -145,7 +145,14 @@
 //! it is not installed; `tar_members` lists an archive; `store_files`
 //! returns the files of each version found in a piece's store folder,
 //! found by suffix, and `Collection::versions` the stamps of the versions
-//! whose archive exists.
+//! whose archive exists. `tar_extract` unpacks an archive with `tar --zstd
+//! -xpf` into a new directory and `listing_check` runs `shasum -a 256 -c`
+//! on the checksum lines of a listing in an unpacked tree; both fail,
+//! naming the tool, when it is not installed.
+//!
+//! In JSON mode `world.run` accepts exit 1 without an `error` object for
+//! `archive` when its `refused` list is not empty, as the spec's report of
+//! `archive <piece>` on a refused piece.
 //!
 //! # A stand-in for the binary
 //!

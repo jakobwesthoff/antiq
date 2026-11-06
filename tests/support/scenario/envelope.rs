@@ -77,7 +77,7 @@ pub fn check(args: &[String], stdout: &str, code: i32) -> Result<(), String> {
 
     if let Some(error) = error {
         check_error(error, code)?;
-    } else if matches!(code, 1 | 2 | 4) {
+    } else if matches!(code, 1 | 2 | 4) && !refused_piece_of_archive(object, code) {
         return Err(format!("exit {code} comes without an error object"));
     }
 
@@ -92,6 +92,17 @@ pub fn check(args: &[String], stdout: &str, code: i32) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `archive <piece>` exits 1 when that piece is refused and prints its
+/// report, which lists the piece under `refused` and carries no `error`.
+fn refused_piece_of_archive(object: &serde_json::Map<String, Value>, code: i32) -> bool {
+    code == 1
+        && object["command"] == "archive"
+        && object
+            .get("refused")
+            .and_then(Value::as_array)
+            .is_some_and(|refused| !refused.is_empty())
 }
 
 fn check_error(error: &Value, code: i32) -> Result<(), String> {
