@@ -12,6 +12,7 @@ use support::cmd::{Antiq, Run, hold_lock, snapshot};
 use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection};
 use support::scenario::target::Target;
+use support::scenario::world::run_on_terminal;
 use support::ssh_shim::SshShim;
 
 fn collection() -> Collection {
@@ -2080,4 +2081,20 @@ fn an_ssh_target_that_refuses_the_connection_is_unreachable() {
     assert!(reason.contains("Connection refused"), "{reason}");
     let again = push(&collection, &["--if-reachable"]);
     assert_eq!(again.code(), 0, "{} {}", again.stdout, again.stderr);
+}
+
+#[test]
+fn a_claim_that_sends_nothing_has_the_headline_and_the_marker_sentence_but_no_table() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    let antiq = Antiq::new()
+        .env("TZ", "UTC")
+        .env("NO_COLOR", "1")
+        .arg("-C")
+        .arg(collection.root())
+        .args(["push", "--init"]);
+    let (run, stdout) = run_on_terminal(antiq);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    assert!(stdout.starts_with("✔ Claimed the push target "), "{stdout}");
+    assert!(!stdout.contains("CREATED"), "{stdout}");
 }

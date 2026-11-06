@@ -443,6 +443,70 @@ mod tests {
         assert!(usage.wrapped().downcast_ref::<Error>().is_some());
     }
 
+    /// Asserts that `Error` wraps `inner` and hands the same type back.
+    fn wraps<T>(inner: T)
+    where
+        T: std::error::Error + Send + Sync + 'static,
+        Error: From<T>,
+    {
+        let error = Error::from(inner);
+        assert!(
+            error.wrapped().downcast_ref::<T>().is_some(),
+            "{} is not handed out as {}",
+            error,
+            std::any::type_name::<T>()
+        );
+    }
+
+    #[test]
+    fn every_wrapper_hands_out_its_own_inner_error() {
+        use crate::relpath::RelPath;
+        let path = || RelPath::parse("projects/scanner").expect("a piece path");
+        let io = || std::io::Error::other("disk");
+        let invalid_stamp = || VersionsError::InvalidStamp("x".into());
+
+        wraps(ConfigError::Read {
+            path: "c".into(),
+            source: io(),
+        });
+        wraps(FilesystemError::ForeignDevice { path: "p".into() });
+        wraps(IdError::Invalid("x".into()));
+        wraps(IdleError::Problems);
+        wraps(MachineError::Unavailable { reason: "r".into() });
+        wraps(PackError::NoTopDirectory);
+        wraps(PinError::Stat {
+            path: path(),
+            source: io(),
+        });
+        wraps(RelPathError::InvalidName("x"));
+        wraps(SelectError::InvalidPattern {
+            pattern: "[".into(),
+            reason: "r".into(),
+        });
+        wraps(SysmemError::Unavailable);
+        wraps(ListError::Versions(invalid_stamp()));
+        wraps(StatusError::Survey(SurveyError::Root {
+            path: "p".into(),
+            source: io(),
+        }));
+        wraps(SurveyError::Root {
+            path: "p".into(),
+            source: io(),
+        });
+        wraps(MarkerError::Invalid {
+            path: path(),
+            reason: "r".into(),
+        });
+        wraps(RulesError::NotUtf8);
+        wraps(invalid_stamp());
+        wraps(WalkError::OutOfDescriptors {
+            piece: path(),
+            path: path(),
+            source: io(),
+        });
+        // `QueryError` has no value, so `Error::Query` cannot be built.
+    }
+
     #[test]
     fn usage_carries_its_kind() {
         assert_eq!(Error::Usage("bad".into()).kind(), ErrorKind::Usage);
