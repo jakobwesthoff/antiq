@@ -118,6 +118,8 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
     let mut container = None;
     let mut entries = Vec::new();
     let mut seen: HashMap<RelPath, EntryType> = HashMap::new();
+    // What the files read so far hold, for the hard links that name them.
+    let mut hashes: HashMap<RelPath, String> = HashMap::new();
     for member in archive.entries().map_err(damaged)? {
         let mut member = member.map_err(damaged)?;
         let path = member.path_bytes().into_owned();
@@ -163,7 +165,9 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
             EntryType::Regular => {
                 let mut reader = HashingReader::new(&mut member);
                 io::copy(&mut reader, &mut io::sink()).map_err(damaged)?;
-                (ListingType::File, None, Some(reader.sha256()))
+                let sha256 = reader.sha256();
+                hashes.insert(path.clone(), sha256.clone());
+                (ListingType::File, None, Some(sha256))
             }
             // The crate reports an empty link name as none, and macOS
             // allows a symlink with an empty target.
@@ -184,10 +188,11 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
                             shown()
                         ))
                     })?;
+                let sha256 = hashes.get(&target).cloned();
                 (
                     ListingType::Hardlink,
                     Some(LinkTarget::from_bytes(target.as_bytes().to_vec())),
-                    None,
+                    sha256,
                 )
             }
             _ => {
@@ -264,6 +269,21 @@ mod tests {
         let (_dir, path) = on_disk(&packaged.bytes);
         let listed = list(&path).expect("the package lists");
         assert_eq!(listed, packaged.packed.listing);
+    }
+
+    #[test]
+    fn a_listed_hard_link_carries_the_hash_of_the_file_it_links_to() {
+        let packaged = pack_piece(&mixed_piece(), "proj");
+        let (_dir, path) = on_disk(&packaged.bytes);
+        let listed = list(&path).expect("the package lists");
+        let hash = |name: &str| {
+            listed
+                .iter()
+                .find(|entry| entry.path.to_string() == name)
+                .and_then(|entry| entry.sha256.clone())
+        };
+        assert!(hash("notes.txt").is_some());
+        assert_eq!(hash("src/notes-copy.txt"), hash("notes.txt"));
     }
 
     fn damaged_by(bytes: &[u8]) -> String {

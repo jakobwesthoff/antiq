@@ -175,9 +175,9 @@ pub struct TarWriter<W: Write> {
     container: Name,
     listing: Vec<ListingEntry>,
     notes: Vec<PackNote>,
-    /// The first path of each file with more than one link, by device and
-    /// inode.
-    first_link: HashMap<(u64, u64), RelPath>,
+    /// The first path of each file with more than one link and the hash of
+    /// its content, by device and inode.
+    first_link: HashMap<(u64, u64), (RelPath, String)>,
 }
 
 impl<W: Write> TarWriter<W> {
@@ -226,13 +226,16 @@ impl<W: Write> TarWriter<W> {
                     .then(|| self.first_link.get(&(entry.device, entry.inode)).cloned())
                     .flatten();
                 match first {
-                    Some(first) => return self.add_hard_link(entry, &member, &first),
+                    Some((first, sha256)) => {
+                        return self.add_hard_link(entry, &member, &first, sha256);
+                    }
                     None => {
+                        let sha256 = self.add_file(entry, &member, content)?;
                         if entry.nlink > 1 {
                             self.first_link
-                                .insert((entry.device, entry.inode), entry.path.clone());
+                                .insert((entry.device, entry.inode), (entry.path.clone(), sha256));
                         }
-                        return self.add_file(entry, &member, content);
+                        return Ok(());
                     }
                 }
             }
@@ -284,7 +287,7 @@ impl<W: Write> TarWriter<W> {
         entry: &TreeEntry,
         member: &[u8],
         content: &mut ContentSource<'_>,
-    ) -> Result<(), PackError> {
+    ) -> Result<String, PackError> {
         let (mut header, clamped) = header(entry, MemberKind::File, entry.size);
         self.note_clamp(entry, clamped);
         let file = content(entry).map_err(|source| PackError::Read {
@@ -312,8 +315,14 @@ impl<W: Write> TarWriter<W> {
                 path: self.note_path(&entry.path),
             });
         }
-        self.record(entry, ListingType::File, entry.size, None, Some(sha256));
-        Ok(())
+        self.record(
+            entry,
+            ListingType::File,
+            entry.size,
+            None,
+            Some(sha256.clone()),
+        );
+        Ok(sha256)
     }
 
     fn add_hard_link(
@@ -321,6 +330,7 @@ impl<W: Write> TarWriter<W> {
         entry: &TreeEntry,
         member: &[u8],
         first: &RelPath,
+        sha256: String,
     ) -> Result<(), PackError> {
         let (mut header, clamped) = header(entry, MemberKind::Hardlink, 0);
         self.note_clamp(entry, clamped);
@@ -331,7 +341,7 @@ impl<W: Write> TarWriter<W> {
             .append_link(&mut header, member_path(member), member_path(&target))
             .map_err(PackError::Write)?;
         let link = LinkTarget::from_bytes(first.as_bytes().to_vec());
-        self.record(entry, ListingType::Hardlink, 0, Some(link), None);
+        self.record(entry, ListingType::Hardlink, 0, Some(link), Some(sha256));
         Ok(())
     }
 
@@ -810,6 +820,68 @@ mod tests {
             (0, 1_700_000_000, 0o644)
         );
         assert_eq!(line.link, Some(LinkTarget::from_bytes(b"a".to_vec())));
+    }
+
+    #[test]
+    fn a_hard_link_entry_carries_the_hash_of_the_first_path() {
+        let mut first = entry("a", EntryKind::File);
+        first.nlink = 2;
+        first.size = 3;
+        let mut second = entry("b", EntryKind::File);
+        second.nlink = 2;
+        second.size = 3;
+        let (_, listing, _) = pack(&[(first, b"abc".to_vec()), (second, b"abc".to_vec())]);
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(listing[0].sha256.as_deref(), Some(abc));
+        assert_eq!(listing[1].sha256.as_deref(), Some(abc));
+    }
+
+    /// The entries of the example in the spec's "Listing format" section.
+    fn spec_example_entries() -> Vec<(TreeEntry, Vec<u8>)> {
+        let at = |time: &str| {
+            let second: jiff::Timestamp = time.parse().expect("a UTC time");
+            i128::from(second.as_second()) * NANOS_PER_SECOND
+        };
+        let content = "x".repeat(4211);
+        let mut src = entry("src", EntryKind::Directory);
+        src.mtime_ns = at("2026-10-30T17:40:00Z");
+        let mut latest = symlink("src/latest", b"main.rs");
+        latest.mtime_ns = at("2026-10-30T17:41:00Z");
+        latest.mode = 0o120755;
+        let (mut copy, data) = file("src/main-copy.rs", content.as_bytes());
+        let (mut main, _) = file("src/main.rs", content.as_bytes());
+        for linked in [&mut copy, &mut main] {
+            linked.mtime_ns = at("2026-10-30T17:44:02Z");
+            linked.nlink = 2;
+            linked.inode = 7;
+        }
+        vec![
+            plain(src),
+            plain(latest),
+            (copy, data.clone()),
+            (main, data),
+        ]
+    }
+
+    #[test]
+    fn packing_the_tree_of_the_spec_example_gives_its_listing() {
+        use crate::listing::{Header, write};
+        let (_, listing, _) = pack(&spec_example_entries());
+        let header = Header {
+            piece: path("projects/scanner"),
+            archived: "2026-11-04T09:02:11Z".parse().expect("a time"),
+            archive: "projects-scanner--2026-11-04T090211.tar.zst".into(),
+            archive_bytes: 233,
+            imported: None,
+            rebuilt: None,
+        };
+        let mut bytes = Vec::new();
+        write(&header, &listing, &mut bytes).expect("the listing writes");
+        let decoded = ::zstd::stream::decode_all(&bytes[..]).expect("the listing decodes");
+        assert_eq!(
+            String::from_utf8(decoded).expect("UTF-8"),
+            crate::testing::package::spec_listing_example()
+        );
     }
 
     #[test]

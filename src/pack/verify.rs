@@ -411,7 +411,9 @@ fn read_folder(
     let mut lines = Vec::new();
     let mut changed = Vec::new();
     let mut record = Vec::new();
-    let mut first_link: HashMap<(u64, u64), RelPath> = HashMap::new();
+    // The first path of each file with several names, and its hash when it
+    // was read without changing.
+    let mut first_link: HashMap<(u64, u64), (RelPath, Option<String>)> = HashMap::new();
     let mut directories = DirectoryStack::new(root);
     // Directories that were granted access are described by the mode they
     // had before.
@@ -446,14 +448,29 @@ fn read_folder(
                 // with several names and links the others to it.
                 if entry.nlink > 1 {
                     let key = (entry.device, entry.inode);
-                    if let Some(first) = first_link.get(&key) {
+                    if let Some((first, sha256)) = first_link.get(&key) {
+                        // A link to a file that changed while read has no
+                        // hash to compare, so it is reported with its
+                        // first path.
+                        let Some(sha256) = sha256 else {
+                            changed.push(entry.path.clone());
+                            continue;
+                        };
                         let link = Some(LinkTarget::from_bytes(first.as_bytes().to_vec()));
-                        lines.push(listing_line(entry, ListingType::Hardlink, 0, link, None));
+                        let sha256 = Some(sha256.clone());
+                        lines.push(listing_line(entry, ListingType::Hardlink, 0, link, sha256));
                         continue;
                     }
-                    first_link.insert(key, entry.path.clone());
                 }
-                match read_file(&mut directories, entry, observe)? {
+                let read = read_file(&mut directories, entry, observe)?;
+                if entry.nlink > 1 {
+                    let hash = match &read {
+                        Read::Hashed(sha256) => Some(sha256.clone()),
+                        Read::Changed => None,
+                    };
+                    first_link.insert((entry.device, entry.inode), (entry.path.clone(), hash));
+                }
+                match read {
                     Read::Hashed(sha256) => lines.push(listing_line(
                         entry,
                         ListingType::File,
@@ -1102,6 +1119,24 @@ mod tests {
         })
         .expect("runs");
         only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn a_hard_link_whose_first_path_changed_while_read_is_reported_with_it() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/notes-copy.txt");
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "notes.txt"), |t| {
+            std::fs::write(t.path("proj/notes.txt"), "hello again").expect("written");
+        })
+        .expect("runs");
+        assert_eq!(
+            compared.differences(),
+            [
+                Difference::ChangedWhileRead(path("notes.txt")),
+                Difference::ChangedWhileRead(path("src/notes-copy.txt")),
+            ]
+        );
     }
 
     #[test]
