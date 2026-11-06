@@ -10,8 +10,10 @@
 #
 # It builds antiq in release mode, builds the world with scripts/world.sh,
 # runs the tapes of docs/pages/capture/tapes in their numbered order with vhs
-# (each one leaves the world in the state the next one expects), compresses the
-# PNGs without loss and removes the world, also when a step fails.
+# (each one leaves the world in the state the next one expects), builds a fresh
+# world for the demo video and runs its tape, cuts the GIF of the README from
+# the video, compresses the PNGs without loss and removes the world, also when
+# a step fails.
 # The world lives in a fixed folder because its path shows in the images; see
 # scripts/world.sh.
 
@@ -128,8 +130,27 @@ for image in init status keep dry-run archive-live archive-done find fork versio
         exit 1
     fi
 done
-if [ ! -s "$shots/archive-live.gif" ]; then
-    echo "render.sh: the tapes wrote no archive-live.gif" >&2
+
+# The demo video starts from a collection that does not exist yet, which the
+# numbered tapes have used up, so it gets a fresh world.
+"$here/world.sh"
+echo "rendering tapes/10-demo.tape"
+run_tape tapes/10-demo.tape
+for video in demo.webm demo.mp4; do
+    if [ ! -s "$capture/../assets/$video" ]; then
+        echo "render.sh: the demo tape wrote no $video" >&2
+        exit 1
+    fi
+done
+
+# GitHub plays no video from a repository, so the README shows a GIF of the
+# demo. The palette is built from the frames themselves; 10 frames a second
+# and 1000 pixels of width keep it small enough for a README.
+ffmpeg -v error -y -i "$capture/../assets/demo.mp4" \
+    -vf "fps=10,scale=1000:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=64[p];[b][p]paletteuse=dither=none" \
+    "$shots/demo.gif"
+if [ ! -s "$shots/demo.gif" ]; then
+    echo "render.sh: ffmpeg wrote no demo.gif" >&2
     exit 1
 fi
 
