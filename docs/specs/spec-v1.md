@@ -347,7 +347,9 @@ time before 1970 is listed as 0. The listing is the
 manifest that reclaiming compares against, for archived and imported
 pieces alike. Listings are compressed with zstd at level 3 with the
 content checksum and read with the same 128 MiB window limit as every
-other decoder.
+other decoder. The content checksum is checked when the last byte is read,
+so the entries of a listing are verified only once it has been read to its
+end. A reader refuses a listing whose first line names a higher format.
 
 An entry line is a JSON object with these keys, in this order:
 
@@ -360,6 +362,10 @@ An entry line is a JSON object with these keys, in this order:
 | `mode` | integer | permission bits |
 | `link` | string | the target in the escaped form, for a `hardlink` the path of the file it links to; for `symlink` and `hardlink` only |
 | `sha256` | string | lower-case hex; for `file` only |
+
+`link` is required for a `symlink` and a `hardlink`, and `sha256` for a
+`file`. A listing with a line that breaks these rules, or with a line for
+the top-level directory, is refused when it is read and when it is written.
 
 ### Local state
 
@@ -500,7 +506,8 @@ Payload files are never overwritten. A put onto an existing payload name
 succeeds only when the full SHA-256 matches. The name part is the
 piece's name with every byte outside `[A-Za-z0-9._-]` written as `%XX`,
 cut to 64 bytes without splitting an escape; the real name is only in
-the metadata. Upload temp names are `.<final name>.<machine part>.part`,
+the metadata. The listing of a payload is named after it: the first 16 hex
+digits of the payload's SHA-256, followed by `.listing.zst`. Upload temp names are `.<final name>.<machine part>.part`,
 where the machine part is the machine name escaped the same way and cut
 to 32 bytes; the same machine reuses the name on its next attempt. One
 writer runs per collection, and the temp name sits in the object's ULID
