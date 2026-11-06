@@ -11,7 +11,10 @@ tags: [testing]
 (`src/cli/console/live/tests.rs`) failed once in a full `just check`
 run on 2026-11-06 (unit tests of the `antiq` binary, 399 passed, 2
 failed; the other failure was a real one of the change under test) and
-passed when run alone and in the next full run. The log shows only
+passed when run alone and in the next full run. A second agent saw it fail in
+several `cargo test --bin antiq` runs, each time while another test in
+the same binary was failing, and never otherwise; that points to the
+process-wide panic hook being shared between tests. The log shows only
 `FAILED` without the panic text of the assertion. Not reproduced yet, so
 whether it is a flaky test or a race in the live console is unknown.
 
