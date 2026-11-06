@@ -10,7 +10,7 @@
 //! the plain `--itemize-changes` listing; the progress card wants the
 //! entries, the lengths and the progress totals.
 
-use super::summary::split_item;
+use super::summary::{split_item, unchanged};
 
 /// What one segment of the observed output is.
 #[derive(Debug, PartialEq, Eq)]
@@ -162,13 +162,8 @@ pub(super) fn segment(bytes: &[u8]) -> Segment {
     let mut plain = line[..line.len() - field.len()].to_vec();
     plain.extend_from_slice(rest);
     plain.extend_from_slice(newline);
-    // Plain `-i` prints an entry that did not change only when rsync makes
-    // a hard link again: the line then names the file it links to. The
-    // name of an unchanged hard link that itself contains ` => ` is taken
-    // for such a line.
-    let links_again = rest.windows(4).any(|window| window == b" => ");
     Segment::Entry(Entry {
-        unchanged: !deleting && flags[2..].iter().all(|byte| *byte == b' ') && !links_again,
+        unchanged: unchanged(flags, rest),
         deleting,
         sent_bytes: if matches!(flags[0], b'<' | b'>') && flags[1] == b'f' {
             length
@@ -536,12 +531,12 @@ mod tests {
         assert_eq!(sent, 0);
     }
 
-    fn plain_run(rsync: &Rsync, from: &Path, to: &Path) -> Vec<u8> {
+    fn plain_run(rsync: &Rsync, from: &Path, to: &Path, rsync_args: &[&str]) -> Vec<u8> {
         let url = TargetUrl::Path {
             root: to.to_path_buf(),
         };
         let outcome = rsync
-            .mirror(&plain_options(&[]), from, &url, false)
+            .mirror(&plain_options(rsync_args), from, &url, false)
             .run()
             .expect("rsync runs");
         assert_eq!(outcome.code, Some(0));
@@ -565,12 +560,12 @@ mod tests {
             .and_then(|file| file.set_modified(time))
             .expect("the copy has the time of the original");
         let (plain_to, observed_to) = (temp.path().join("plain"), temp.path().join("observed"));
-        plain_run(&rsync, &from, &plain_to);
+        plain_run(&rsync, &from, &plain_to, &[]);
         observed_run(&rsync, &from, &observed_to, &[]);
         std::fs::remove_file(from.join("b.txt")).expect("removed");
         std::fs::hard_link(from.join("a.txt"), from.join("b.txt")).expect("hard link");
 
-        let plain = plain_run(&rsync, &from, &plain_to);
+        let plain = plain_run(&rsync, &from, &plain_to, &[]);
         let (observed, _) = observed_run(&rsync, &from, &observed_to, &[]);
 
         let items = super::super::summary::parse_itemized;
@@ -580,5 +575,48 @@ mod tests {
             String::from_utf8_lossy(&plain)
         );
         assert_eq!(items(&observed), items(&plain));
+    }
+
+    /// Pushes the same changes to two targets, once with the plain mirror
+    /// and once with the observed one, both with the user's `rsync_args`,
+    /// and returns what each leaves for the report.
+    fn both_ways(rsync_args: &[&str]) -> (Vec<u8>, Vec<u8>) {
+        let rsync = real_rsync();
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let from = temp.path().join("from");
+        collection(&from);
+        std::fs::write(from.join("gone.txt"), "old").expect("file");
+        let (plain_to, observed_to) = (temp.path().join("plain"), temp.path().join("observed"));
+        plain_run(&rsync, &from, &plain_to, &[]);
+        observed_run(&rsync, &from, &observed_to, &[]);
+        std::fs::remove_file(from.join("gone.txt")).expect("removed");
+        std::fs::write(from.join("d/new.txt"), "new").expect("file");
+
+        let plain = plain_run(&rsync, &from, &plain_to, rsync_args);
+        let (observed, _) = observed_run(&rsync, &from, &observed_to, rsync_args);
+        (plain, observed)
+    }
+
+    #[test]
+    fn a_user_i_leaves_the_same_report_on_a_pipe_and_on_a_terminal() {
+        let (plain, observed) = both_ways(&["-i"]);
+
+        let items = super::super::summary::parse_itemized;
+        assert_eq!(
+            items(&plain).len(),
+            2,
+            "{}",
+            String::from_utf8_lossy(&plain)
+        );
+        assert_eq!(items(&observed), items(&plain));
+    }
+
+    #[test]
+    fn a_user_out_format_leaves_the_same_report_on_a_pipe_and_on_a_terminal() {
+        let (plain, observed) = both_ways(&["--out-format=%n"]);
+
+        let summary = super::super::summary::has_deletion;
+        assert!(summary(&plain), "{}", String::from_utf8_lossy(&plain));
+        assert!(summary(&observed));
     }
 }

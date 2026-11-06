@@ -70,6 +70,15 @@ pub(super) fn split_item(line: &[u8]) -> Option<(&[u8], &[u8])> {
     shaped.then(|| (&line[..11], &line[12..]))
 }
 
+/// Whether an itemized line is of an entry that did not change, which plain
+/// `-i` does not print and `-ii` does. A hard link that rsync makes again
+/// is not unchanged: its line names the file it links to (` => `). The
+/// name of an unchanged hard link that itself contains ` => ` is taken for
+/// such a line.
+pub(super) fn unchanged(flags: &[u8], field: &[u8]) -> bool {
+    flags[2..].iter().all(|byte| *byte == b' ') && !field.windows(4).any(|w| w == b" => ")
+}
+
 /// Without `-8`, rsync prints every byte outside ASCII as `\#ooo` in octal.
 fn unescape(field: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(field.len());
@@ -129,7 +138,7 @@ fn item_of(flags: &[u8], field: &[u8]) -> Option<Item> {
             path: path_of(field),
         });
     }
-    if flags[1] == b'd' {
+    if flags[1] == b'd' || unchanged(flags, field) {
         return None;
     }
     let created = flags[2..].iter().all(|byte| *byte == b'+');
@@ -145,9 +154,10 @@ fn item_of(flags: &[u8], field: &[u8]) -> Option<Item> {
 
 /// Whether any line of `stdout` is an itemized change, of a directory too.
 pub(super) fn has_itemized_line(stdout: &[u8]) -> bool {
-    stdout
-        .split(|byte| *byte == b'\n')
-        .any(|line| split_item(line).is_some())
+    stdout.split(|byte| *byte == b'\n').any(|line| {
+        split_item(line)
+            .is_some_and(|(flags, field)| flags == b"*deleting" || !unchanged(flags, field))
+    })
 }
 
 /// Whether `stdout` has a line that deletes something.
@@ -250,6 +260,19 @@ mod tests {
                     >f short\n\
                     sent 1 bytes  received 2 bytes\n";
         assert_eq!(items(text), []);
+    }
+
+    #[test]
+    fn entries_that_did_not_change_are_no_items_and_no_itemized_lines() {
+        let text = ".f          a/same.txt\n\
+                    hf          a/same-link\n\
+                    .L          a/same-symlink -> same.txt\n\
+                    .d          a/\n";
+        assert_eq!(items(text), []);
+        assert!(!has_itemized_line(text.as_bytes()));
+        let changed = "hf          a/again => a/first\n";
+        assert_eq!(items(changed), [(Change::Updated, "a/again".into())]);
+        assert!(has_itemized_line(changed.as_bytes()));
     }
 
     #[test]

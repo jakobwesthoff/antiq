@@ -1761,10 +1761,11 @@ target. `--init` and `--force` are each refused together with
    directory is checked to be the one that was inspected.
    `push -n` never writes it. (ADR 0031)
 6. **Mirror.** One rsync run, antiq's options first, then the options of
-   `[target] rsync_args` verbatim, then the two paths:
+   `[target] rsync_args` verbatim, then the listing options, then the two
+   paths:
 
    ```text
-   rsync -a -H -x --delete --delete-delay --itemize-changes
+   rsync -a -H -x --delete --delete-delay
          --exclude=/.antiq-target --exclude=/.antiq/tmp/
          --exclude=/.antiq/trash/ --exclude=/.antiq/doomed/
          --exclude=/.antiq/lock --exclude=/.DS_Store
@@ -1773,20 +1774,21 @@ target. `--init` and `--force` are each refused together with
          --exclude=/.Trashes/
          --timeout=300 [--fsync] [--rsync-path=<rsync_path>]
          -e "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
-         <rsync_args> <collection>/ <target>/
+         <rsync_args> --itemize-changes --out-format='%i %n%L'
+         <collection>/ <target>/
    ```
 
    `--fsync` unless `[target] fsync = false`. An option in `rsync_args`
    overrides antiq's (`--no-perms` after `-a`); an `-e` there replaces
-   antiq's ssh command, BatchMode included. The exception is the listing
-   of a push that shows progress cards (see "Progress cards"): it replaces
-   `--itemize-changes` with `-ii --info=progress2 --out-format='%i %l %n%L'`,
-   placed after `<rsync_args>` so that no option of the user's changes the
-   listing. `-ii` lists every entry rsync looks at, an unchanged one too,
-   and `%l` puts the length of the entry in front of its name. The
-   summary of step 9 is made from that listing as from the
-   `--itemize-changes` output, without the unchanged entries, the lengths
-   and the progress. The excludes are anchored at
+   antiq's ssh command, BatchMode included. The exception is the listing:
+   `--itemize-changes --out-format='%i %n%L'` come after `<rsync_args>`, so
+   that no option of the user's changes what the summary of step 9 is made
+   from. A push that shows progress cards (see "Progress cards") lists with
+   `-ii --info=progress2 --out-format='%i %l %n%L'` in their place. `-ii`
+   lists every entry rsync looks at, an unchanged one too, and `%l` puts
+   the length of the entry in front of its name. The summary is made from
+   either listing without the entries that did not change, the lengths and
+   the progress. A hard link that rsync makes again is a change. The excludes are anchored at
    the collection root, so the same names inside a live piece are still
    copied; the exclude of the marker also protects the target's marker
    from `--delete`. The macOS volume-root directories and `.DS_Store` at

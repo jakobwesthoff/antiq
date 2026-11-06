@@ -104,6 +104,10 @@ const SSH_COMMAND: &str =
 /// connection cannot hold the lock for hours.
 const TIMEOUT: &str = "--timeout=300";
 
+/// What the mirror asks for to list what it changes. They follow the
+/// options of the user, so that no option of theirs changes the listing.
+const PLAIN_OPTIONS: &[&str] = &["--itemize-changes", "--out-format=%i %n%L"];
+
 /// What the observed mirror asks for: every entry, with its length, and
 /// the progress of the whole run.
 const OBSERVED_OPTIONS: &[&str] = &["-ii", "--info=progress2", "--out-format=%i %l %n%L"];
@@ -222,11 +226,12 @@ impl Rsync {
             args.push("-n".into());
         }
         args.extend(["-a", "-H", "-x", "--delete", "--delete-delay"].map(OsString::from));
-        if itemize {
-            args.push("--itemize-changes".into());
-        }
         args.extend(MIRROR_EXCLUDES.map(|name| OsString::from(format!("--exclude={name}"))));
-        let tail: &[&str] = if itemize { &[] } else { OBSERVED_OPTIONS };
+        let tail = if itemize {
+            PLAIN_OPTIONS
+        } else {
+            OBSERVED_OPTIONS
+        };
         self.finish(
             args,
             options,
@@ -1063,7 +1068,6 @@ mod tests {
             "-x",
             "--delete",
             "--delete-delay",
-            "--itemize-changes",
             "--exclude=/.antiq-target",
             "--exclude=/.antiq/tmp/",
             "--exclude=/.antiq/trash/",
@@ -1089,10 +1093,7 @@ mod tests {
         };
         let call = rsync.mirror_observed(&options, Path::new("/Users/jakob/projects"), &nas());
 
-        let mut expected: Vec<&str> = mirror_head()
-            .into_iter()
-            .filter(|arg| *arg != "--itemize-changes")
-            .collect();
+        let mut expected = mirror_head();
         expected.extend([
             "--fsync",
             "-e",
@@ -1122,6 +1123,8 @@ mod tests {
             "--fsync",
             "-e",
             SSH,
+            "--itemize-changes",
+            "--out-format=%i %n%L",
             "/Users/jakob/projects/",
             "nas.local:/volume1/antiq/",
         ]);
@@ -1137,7 +1140,14 @@ mod tests {
         };
         let call = rsync.mirror(&options, Path::new("/c"), &nas(), false);
         let mut expected = mirror_head();
-        expected.extend(["-e", SSH, "/c/", "nas.local:/volume1/antiq/"]);
+        expected.extend([
+            "-e",
+            SSH,
+            "--itemize-changes",
+            "--out-format=%i %n%L",
+            "/c/",
+            "nas.local:/volume1/antiq/",
+        ]);
         assert_eq!(argv(&call), expected);
     }
 
@@ -1155,6 +1165,8 @@ mod tests {
             "--rsync-path=/usr/local/bin/rsync",
             "-e",
             SSH,
+            "--itemize-changes",
+            "--out-format=%i %n%L",
             "/c/",
             "nas.local:/volume1/antiq/",
         ]);
@@ -1222,6 +1234,8 @@ mod tests {
             "--no-perms",
             "-e",
             "ssh -p 2222",
+            "--itemize-changes",
+            "--out-format=%i %n%L",
             "/c/",
             "nas.local:/volume1/antiq/",
         ]);

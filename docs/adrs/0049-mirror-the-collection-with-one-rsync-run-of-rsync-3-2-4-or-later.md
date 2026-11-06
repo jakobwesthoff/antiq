@@ -15,16 +15,16 @@ a sync would delete more than 20 % of the mirror.
 ## Decision
 
 `push` runs the local rsync once against the target: `-a -H -x --delete
---delete-delay --itemize-changes`, excludes anchored at the collection
+--delete-delay`, excludes anchored at the collection
 root for the marker, `.antiq/tmp/`, `.antiq/trash/`, `.antiq/doomed/`,
 `.antiq/lock`, `.DS_Store` and the macOS volume-root directories,
 `--timeout=300`, `--fsync` unless `[target] fsync = false`, and the ssh
 options `BatchMode`, `ConnectTimeout`, `ServerAliveInterval` and
 `ServerAliveCountMax`. The options of `[target] rsync_args` follow
-verbatim. A push that shows progress cards (ADR 0064) lists with `-ii
---info=progress2 --out-format='%i %l %n%L'` in place of
-`--itemize-changes`, after the `rsync_args`, so that no option of the
-user's changes the listing. antiq requires rsync 3.2.4, the release that added `--fsync`,
+verbatim, and the listing options `--itemize-changes --out-format='%i %n%L'`
+follow them, so that no option of the user's changes the listing. A push
+that shows progress cards (ADR 0064) lists with `-ii --info=progress2
+--out-format='%i %l %n%L'` in their place. antiq requires rsync 3.2.4, the release that added `--fsync`,
 and refuses openrsync, the default `/usr/bin/rsync` on macOS, and older
 versions.
 
