@@ -851,3 +851,60 @@ fn the_version_of_an_unearth_keeps_its_place_by_cutting_the_name_and_goes_last()
     let forty = cards.finished_lines(&ready[0], 40);
     assert!(!forty[0].contains("version"));
 }
+
+#[test]
+fn a_piece_that_finishes_twice_leaves_one_line() {
+    let mut cards = cards(Kind::Archive);
+    run_piece(&mut cards, "a", 5, Outcome::Files(1), 0, 1);
+    cards.apply(finished("a", 5, Outcome::Files(2)), secs(2));
+    assert_eq!(cards.take_ready().len(), 1);
+}
+
+#[test]
+fn a_push_without_a_change_is_told_as_no_changes() {
+    let mut cards = cards(Kind::Push);
+    run_piece(
+        &mut cards,
+        "a",
+        5,
+        Outcome::Changes {
+            created: 0,
+            updated: 0,
+            deleted: 0,
+        },
+        0,
+        1,
+    );
+    assert!(lines_of(&mut cards, MOCKUP)[0].contains("no changes"));
+}
+
+#[test]
+fn a_very_narrow_terminal_has_a_bar_of_ten_cells() {
+    let mut cards = cards(Kind::Archive);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _keep) = operation("a", Operation::Packing, 1, 2);
+    cards.apply(msg, secs(0));
+    assert_eq!(
+        cards.region(secs(0), 30, 24)[1],
+        format!("    {}╸{}   50%", "━".repeat(5), "─".repeat(4))
+    );
+}
+
+#[test]
+fn a_command_in_a_reason_that_is_cut_by_wrapping_is_not_bold() {
+    let mut cards = with_style(Kind::Archive, style(true, true));
+    cards.apply(
+        finished(
+            "projects/antiq",
+            1,
+            Outcome::Refused(vec!["pinned: projects/antiq/.antiq-pin".to_string()]),
+        ),
+        secs(0),
+    );
+    let lines = lines_of(&mut cards, 40);
+    assert!(lines.len() > 2);
+    assert!(
+        lines[1..].iter().all(|line| !line.contains("\x1b[1m")),
+        "{lines:?}"
+    );
+}

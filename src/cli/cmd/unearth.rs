@@ -275,3 +275,66 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
     }
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use antiq::commands::unearth::SkippedNote;
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn report() -> UnearthReport {
+        UnearthReport {
+            unearthed: true,
+            piece: "projects/scanner".to_string(),
+            stamp: "2026-11-04T090211".to_string(),
+            version: jiff::Timestamp::UNIX_EPOCH,
+            path: "projects/scanner".to_string(),
+            bytes: 9,
+            skipped: None,
+            repairs: Vec::new(),
+            warnings: Vec::new(),
+            unfinished: false,
+            siblings: Vec::new(),
+        }
+    }
+
+    fn summary(report: &UnearthReport) -> (Tone, String) {
+        let root = Path::new("/data");
+        let summary = done_summary(report, root, root, Duration::from_secs(4));
+        (summary.tone, summary.parts[0].0.clone())
+    }
+
+    #[test]
+    fn an_unearthed_piece_is_told_by_its_destination() {
+        assert_eq!(
+            summary(&report()),
+            (Tone::Ok, "Unearthed to ./projects/scanner".to_string())
+        );
+    }
+
+    #[test]
+    fn a_folder_in_place_with_its_version_left_is_told_as_a_failure() {
+        let mut unfinished = report();
+        unfinished.unfinished = true;
+        assert_eq!(
+            summary(&unfinished),
+            (Tone::Bad, "Unearthed to ./projects/scanner".to_string())
+        );
+    }
+
+    #[test]
+    fn a_skipped_piece_is_told_as_skipped() {
+        let mut skipped = report();
+        skipped.unearthed = false;
+        skipped.skipped = Some(SkippedNote {
+            reason: "no_room",
+            needed: 9,
+            available: 3,
+        });
+        assert_eq!(
+            summary(&skipped),
+            (Tone::Warn, "Skipped projects/scanner".to_string())
+        );
+    }
+}

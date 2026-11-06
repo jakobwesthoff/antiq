@@ -413,18 +413,24 @@ impl Cards {
         }
     }
 
-    /// The paragraphs under a piece that did not finish cleanly.
-    fn reasons(&self, ready: &Ready) -> Vec<String> {
+    /// The paragraphs under a piece that did not finish cleanly, each with
+    /// the command in it that is shown in bold.
+    fn reasons(&self, ready: &Ready) -> Vec<(String, Option<String>)> {
         match &ready.outcome {
             Outcome::Refused(reasons) => reasons
                 .iter()
                 .map(|reason| self.reason_text(&ready.name, reason))
                 .collect(),
-            Outcome::Skipped(message) | Outcome::Unfinished(message) => vec![sanitize(message)],
-            Outcome::NoRoom { needed, available } => vec![format!(
-                "{} needed, {} free",
-                decimal_size(*needed),
-                decimal_size(*available)
+            Outcome::Skipped(message) | Outcome::Unfinished(message) => {
+                vec![(sanitize(message), None)]
+            }
+            Outcome::NoRoom { needed, available } => vec![(
+                format!(
+                    "{} needed, {} free",
+                    decimal_size(*needed),
+                    decimal_size(*available)
+                ),
+                None,
             )],
             Outcome::Files(_) | Outcome::Changes { .. } => Vec::new(),
         }
@@ -432,18 +438,16 @@ impl Cards {
 
     /// A named piece that carries a pin is told how to release it; every
     /// other reason is shown as the library words it.
-    fn reason_text(&self, name: &str, reason: &str) -> String {
+    fn reason_text(&self, name: &str, reason: &str) -> (String, Option<String>) {
         if reason == format!("pinned: {name}/{PIN_FILE}") {
-            let command = pasteable_line(
+            let command = sanitize(&pasteable_line(
                 self.config.directory.as_deref(),
                 &["unpin".to_string(), name.to_string()],
-            );
-            return format!(
-                "pinned, so it stays as it is. {} releases it",
-                sanitize(&command)
-            );
+            ));
+            let text = format!("pinned, so it stays as it is. {command} releases it");
+            return (text, Some(command));
         }
-        sanitize(reason)
+        (sanitize(reason), None)
     }
 
     /// The one line of a finished piece and, under it, the reasons it did
@@ -480,31 +484,18 @@ impl Cards {
         );
         let mut lines = vec![line.trim_end().to_string()];
         let room = cols.min(MAX_WIDTH).saturating_sub(4).max(10);
-        for reason in self.reasons(ready) {
+        for (reason, command) in self.reasons(ready) {
             for wrapped in wrap(&reason, room) {
-                lines.push(format!("    {}", self.bold_command(&wrapped)));
+                let shown = match &command {
+                    Some(command) if wrapped.contains(command.as_str()) => {
+                        wrapped.replacen(command, &self.paint(theme::BOLD, command), 1)
+                    }
+                    _ => wrapped,
+                };
+                lines.push(format!("    {shown}"));
             }
         }
         lines
-    }
-
-    /// Shows the `antiq ...` command of a line in bold when it is whole.
-    fn bold_command(&self, line: &str) -> String {
-        let Some(start) = line.find("antiq ") else {
-            return line.to_string();
-        };
-        let Some(end) = line.find(" releases it") else {
-            return line.to_string();
-        };
-        if end < start {
-            return line.to_string();
-        }
-        format!(
-            "{}{}{}",
-            &line[..start],
-            self.paint(theme::BOLD, &line[start..end]),
-            &line[end..]
-        )
     }
 
     // =====================================================

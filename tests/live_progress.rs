@@ -8,6 +8,7 @@
 
 mod support;
 
+use support::cmd::hold_lock;
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
 use support::scenario::world::{Mode, Setup, World};
 use support::screen::Screen;
@@ -398,4 +399,26 @@ fn a_second_push_shows_the_pieces_that_changed() {
             .expect("a last line")
             .starts_with("✔ 1 piece pushed · 1 file changed")
     );
+}
+
+// =========================================================
+// A run that cannot start
+// =========================================================
+
+#[test]
+fn a_run_that_cannot_take_the_lock_prints_no_cards_and_fails_as_before() {
+    let archive = archive_world(1);
+    let push = push_world();
+    let unearth = unearth_world();
+    for (world, args) in [
+        (&archive, vec!["archive"]),
+        (&push, vec!["push"]),
+        (&unearth, vec!["unearth", "projects/scanner"]),
+    ] {
+        let _lock = hold_lock(&world.collection().root());
+        let run = world.run_tty_sized(&args, 100, 24, &[]);
+        assert_ne!(run.code(), 0, "{args:?}");
+        assert_eq!(run.stdout, "", "{args:?}: {:?}", run.stdout);
+        assert!(run.stderr.contains("lock"), "{args:?}: {:?}", run.stderr);
+    }
 }

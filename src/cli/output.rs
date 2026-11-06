@@ -1040,12 +1040,12 @@ mod tests {
     struct DeadTerminal;
 
     impl Write for DeadTerminal {
-        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from_raw_os_error(5))
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            Ok(())
+            Err(io::Error::from_raw_os_error(5))
         }
     }
 

@@ -10,7 +10,7 @@ use crate::cli::Context;
 use crate::cli::console::cards::{Config, Kind, Ready, Summary, Tone};
 use crate::cli::console::live::{Label, Setup};
 use crate::cli::output::Output;
-use antiq::commands::archive::ArchiveReport;
+use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::push::PushReport;
 use antiq::progress::Outcome;
 use std::path::Path;
@@ -63,6 +63,14 @@ pub(super) fn exit_tone(code: u8) -> Tone {
 /// The pieces of the report in the order the pipe lists them. The ones that
 /// sent no event get their line from these.
 pub(super) fn archive_pieces(report: &ArchiveReport) -> Vec<Ready> {
+    listed_pieces(&report.archived, &report.skipped, &report.refused)
+}
+
+fn listed_pieces(
+    archived: &[ArchivedPiece],
+    skipped: &[SkippedPiece],
+    refused: &[RefusedPiece],
+) -> Vec<Ready> {
     let ready = |name: &str, outcome| Ready {
         name: name.to_string(),
         bytes: None,
@@ -71,13 +79,13 @@ pub(super) fn archive_pieces(report: &ArchiveReport) -> Vec<Ready> {
         elapsed: None,
     };
     let mut pieces = Vec::new();
-    for piece in &report.archived {
+    for piece in archived {
         pieces.push(ready(&piece.piece, Outcome::Files(piece.files)));
     }
-    for piece in &report.skipped {
+    for piece in skipped {
         pieces.push(ready(&piece.piece, Outcome::Skipped(piece.message.clone())));
     }
-    for piece in &report.refused {
+    for piece in refused {
         let reasons = piece.reasons.iter().map(|r| r.text.clone()).collect();
         pieces.push(ready(&piece.piece, Outcome::Refused(reasons)));
     }
@@ -200,6 +208,48 @@ mod tests {
         assert_eq!(
             destination(root, "projects/recipe-api", Path::new("/elsewhere")),
             "/data/collection/projects/recipe-api"
+        );
+    }
+
+    #[test]
+    fn the_pieces_of_a_report_are_listed_archived_then_skipped_then_refused() {
+        use antiq::commands::archive::{Reason, SkipReason};
+        let archived = [ArchivedPiece {
+            piece: "a".to_string(),
+            stamp: "2026-11-05T130211".to_string(),
+            version: jiff::Timestamp::UNIX_EPOCH,
+            archive_bytes: 3,
+            files: 4,
+            bytes: 9,
+        }];
+        let skipped = [SkippedPiece {
+            piece: "b".to_string(),
+            reason: SkipReason::Differs,
+            message: "it changed".to_string(),
+        }];
+        let refused = [RefusedPiece {
+            piece: "c".to_string(),
+            reasons: vec![Reason {
+                kind: "empty",
+                path: "c".to_string(),
+                text: "empty: c".to_string(),
+                line: None,
+            }],
+        }];
+        let listed: Vec<(String, Outcome)> = listed_pieces(&archived, &skipped, &refused)
+            .into_iter()
+            .map(|ready| (ready.name, ready.outcome))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a".to_string(), Outcome::Files(4)),
+                ("b".to_string(), Outcome::Skipped("it changed".to_string())),
+                (
+                    "c".to_string(),
+                    Outcome::Refused(vec!["empty: c".to_string()])
+                ),
+            ]
         );
     }
 

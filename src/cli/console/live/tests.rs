@@ -375,6 +375,7 @@ fn a_halted_driver_clears_its_region_and_prints_later_lines_plainly() {
     driver.message(started("b", 10), secs(0)).unwrap();
     driver.frame(secs(0), true).unwrap();
     driver.halt().unwrap();
+    driver.halt().unwrap();
     assert!(watcher.sync().visible().is_empty());
     driver.message(done("a", 1), secs(1)).unwrap();
     driver.frame(secs(1), true).unwrap();
@@ -437,6 +438,28 @@ fn the_loop_ends_when_every_sender_is_gone() {
 }
 
 #[test]
+fn messages_that_arrive_after_the_stop_are_still_applied() {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let driver = driver(&mut out, 100);
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Packet::Stop).unwrap();
+    sender
+        .send(Packet::Msg(started("a", 10), Duration::ZERO))
+        .unwrap();
+    sender
+        .send(Packet::Msg(done("a", 1), Duration::ZERO))
+        .unwrap();
+    thread::scope(|scope| {
+        let handle = scope.spawn(move || render(driver, receiver, Instant::now()));
+        handle.join().unwrap().unwrap();
+    });
+    let lines = watcher.sync().lines();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("  ✔ a "));
+}
+
+#[test]
 fn a_run_with_a_session_leaves_the_lines_and_hands_back_its_value_and_cards() {
     let (capture, mut out) = terminal(100, 24, true);
     let mut watcher = Watcher::new(&capture, 100, 24);
@@ -456,6 +479,14 @@ fn a_run_with_a_session_leaves_the_lines_and_hands_back_its_value_and_cards() {
                 stamp: Some("2026-11-05T13-02-11Z"),
                 siblings: &[],
             });
+            observer.event(Event::Planned {
+                items: &[Planned {
+                    name: "gone".to_string(),
+                    bytes: 1,
+                }],
+            });
+            observer.event(Event::Dropped { name: "gone" });
+            observer.event(Event::Paused { name: "a" });
             observer.event(Event::Finished {
                 name: "a",
                 bytes: 10,
