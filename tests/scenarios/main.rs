@@ -8,6 +8,7 @@
 mod support;
 
 mod find;
+mod grep;
 mod harness;
 mod init;
 mod list;
