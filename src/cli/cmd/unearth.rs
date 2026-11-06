@@ -6,7 +6,7 @@
 
 use super::progress;
 use crate::cli::console::block::Block;
-use crate::cli::console::cards::{Kind, Summary, Tone};
+use crate::cli::console::cards::{Count, Summary, Tone};
 use crate::cli::console::live::observed;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
@@ -19,11 +19,17 @@ use antiq::commands::unearth::{
     DryRunPlan, Outcome, UnearthAction, UnearthReport, UnearthRequest, unearth, unearth_observed,
 };
 use antiq::plan::Step;
+use antiq::progress::Operation;
 use antiq::report::CommandReport;
 use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
+
+/// Every count of an unearth is a count of files, which is what the cards
+/// show for an operation without an entry here. `fork` brings a version back
+/// the same way and uses the same list.
+pub(super) const COUNTS: &[(Operation, Count)] = &[];
 
 pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -43,7 +49,7 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
     let result = if progress::is_live(ctx, args.dry_run, out) {
         let label_zone = zone.clone();
         let setup = progress::setup(
-            Kind::Unearth,
+            COUNTS,
             ctx,
             out,
             None,
@@ -296,6 +302,19 @@ mod tests {
             warnings: Vec::new(),
             unfinished: false,
             siblings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_cards_of_an_unearth_count_files_in_every_operation() {
+        for (operation, word) in [
+            (Operation::Extracting, "extracting"),
+            (Operation::Verifying, "verifying"),
+            (Operation::Removing, "removing"),
+        ] {
+            let [first, second] = progress::card_of(COUNTS, operation, 1, 4);
+            assert!(first.ends_with(&format!("  {word}")), "{first:?}");
+            assert!(second.ends_with("25%  1/4 files"), "{second:?}");
         }
     }
 

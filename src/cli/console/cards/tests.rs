@@ -16,13 +16,37 @@ fn style(color: bool, utf8: bool) -> Style {
     }
 }
 
-fn cards(kind: Kind) -> Cards {
-    with_style(kind, style(false, true))
+type Counts = &'static [(Operation, Count)];
+
+const ENTRIES: Count = Count {
+    text: |done, total| items(done, total, "entries"),
+    percent: true,
+};
+const CREATED: Count = Count {
+    text: |done, total| items(done, total, "created"),
+    percent: true,
+};
+const DELETED: Count = Count {
+    text: |done, total| items(done, total, "deleted"),
+    percent: true,
+};
+
+/// Counts that read like those of the three commands, so that the layout
+/// tests run with the words the screen shows.
+const ARCHIVE: Counts = &[(Operation::Removing, ENTRIES)];
+const PUSH: Counts = &[
+    (Operation::Storing, CREATED),
+    (Operation::Removing, DELETED),
+];
+const UNEARTH: Counts = &[];
+
+fn cards(counts: Counts) -> Cards {
+    with_style(counts, style(false, true))
 }
 
-fn with_style(kind: Kind, style: Style) -> Cards {
+fn with_style(counts: Counts, style: Style) -> Cards {
     Cards::new(Config {
-        kind,
+        counts,
         style,
         directory: None,
     })
@@ -81,7 +105,7 @@ fn lines_of(cards: &mut Cards, cols: usize) -> Vec<String> {
 
 #[test]
 fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     run_piece(
         &mut cards,
         "experiments/ray-marcher",
@@ -137,7 +161,7 @@ fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
 
 #[test]
 fn a_push_run_leaves_the_lines_of_the_approved_mockup() {
-    let mut cards = cards(Kind::Push);
+    let mut cards = cards(PUSH);
     let changes = |created, updated, deleted| Outcome::Changes {
         created,
         updated,
@@ -188,7 +212,7 @@ fn a_push_run_leaves_the_lines_of_the_approved_mockup() {
 
 #[test]
 fn an_unearth_run_leaves_the_line_of_the_approved_mockup() {
-    let mut cards = cards(Kind::Unearth);
+    let mut cards = cards(UNEARTH);
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
@@ -211,7 +235,7 @@ fn an_unearth_run_leaves_the_line_of_the_approved_mockup() {
 
 #[test]
 fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
-    let mut cards = with_style(Kind::Archive, style(true, true));
+    let mut cards = with_style(ARCHIVE, style(true, true));
     run_piece(
         &mut cards,
         "tools/pdf-merge",
@@ -252,7 +276,7 @@ fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
 
 #[test]
 fn the_summary_line_follows_the_mockup() {
-    let cards = cards(Kind::Archive);
+    let cards = cards(ARCHIVE);
     let summary = Summary {
         tone: Tone::Ok,
         parts: vec![
@@ -266,7 +290,7 @@ fn the_summary_line_follows_the_mockup() {
         cards.summary_line(&summary),
         "✔ 4 archived · 0 skipped · 1 refused   took 0:19"
     );
-    let colored = with_style(Kind::Archive, style(true, true));
+    let colored = with_style(ARCHIVE, style(true, true));
     assert_eq!(
         colored.summary_line(&summary),
         "\x1b[32m✔\x1b[0m \x1b[32m4 archived\x1b[0m · 0 skipped · \x1b[1m\x1b[31m1 refused\x1b[0m   \x1b[2mtook 0:19\x1b[0m"
@@ -279,7 +303,7 @@ fn the_summary_line_follows_the_mockup() {
 
 #[test]
 fn the_region_holds_the_running_cards_and_the_waiting_line() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         Msg::Planned(vec![
             ("experiments/ray-marcher".to_string(), 222),
@@ -339,7 +363,7 @@ fn the_region_holds_the_running_cards_and_the_waiting_line() {
 
 #[test]
 fn a_finished_piece_leaves_the_region_and_waits_for_its_line_once() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     run_piece(&mut cards, "a", 5, Outcome::Files(1), 0, 1);
     assert_eq!(cards.region(secs(1), MOCKUP, 24), Vec::<String>::new());
     assert_eq!(cards.take_ready().len(), 1);
@@ -349,7 +373,7 @@ fn a_finished_piece_leaves_the_region_and_waits_for_its_line_once() {
 
 #[test]
 fn a_paused_piece_has_one_card_at_a_time_and_one_finished_line() {
-    let mut cards = cards(Kind::Push);
+    let mut cards = cards(PUSH);
     cards.apply(
         Msg::Planned(vec![("projects/site".to_string(), 12_000)]),
         secs(0),
@@ -392,7 +416,7 @@ fn a_paused_piece_has_one_card_at_a_time_and_one_finished_line() {
 
 #[test]
 fn a_dropped_piece_leaves_the_waiting_count_without_a_line() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         Msg::Planned(vec![("a".to_string(), 1), ("b".to_string(), 2)]),
         secs(0),
@@ -410,7 +434,7 @@ fn a_dropped_piece_leaves_the_waiting_count_without_a_line() {
 
 #[test]
 fn more_running_cards_than_rows_leave_a_count_in_the_waiting_line() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(Msg::Planned(vec![("late".to_string(), 1)]), secs(0));
     let mut counters = Vec::new();
     for name in ["a", "b", "c", "d", "e"] {
@@ -429,7 +453,7 @@ fn more_running_cards_than_rows_leave_a_count_in_the_waiting_line() {
 
 #[test]
 fn more_running_cards_than_rows_without_a_waiting_piece_still_name_the_rest() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     let mut counters = Vec::new();
     for name in ["a", "b", "c"] {
         cards.apply(started(name, 10), secs(0));
@@ -444,7 +468,7 @@ fn more_running_cards_than_rows_without_a_waiting_piece_still_name_the_rest() {
 
 #[test]
 fn cards_stay_in_the_order_the_pieces_started() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         Msg::Planned(vec![("a".to_string(), 1), ("b".to_string(), 1)]),
         secs(0),
@@ -461,7 +485,7 @@ fn cards_stay_in_the_order_the_pieces_started() {
 
 #[test]
 fn an_operation_without_a_total_draws_a_moving_bar_without_figures() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(started("a", 10), secs(0));
     let (storing, _k) = operation("a", Operation::Storing, 0, 0);
     cards.apply(storing, secs(0));
@@ -475,7 +499,7 @@ fn an_operation_without_a_total_draws_a_moving_bar_without_figures() {
 
 #[test]
 fn a_counter_at_or_above_its_total_shows_99_percent_until_the_card_is_replaced() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(started("a", 10), secs(0));
     let (verifying, counter) = operation("a", Operation::Verifying, 4, 4);
     cards.apply(verifying, secs(0));
@@ -488,7 +512,7 @@ fn a_counter_at_or_above_its_total_shows_99_percent_until_the_card_is_replaced()
 
 #[test]
 fn the_unit_of_a_count_follows_the_command_and_the_operation() {
-    let mut push = cards(Kind::Push);
+    let mut push = cards(PUSH);
     push.apply(started("a", 10), secs(0));
     let (storing, _a) = operation("a", Operation::Storing, 2, 3);
     push.apply(storing, secs(0));
@@ -497,17 +521,71 @@ fn the_unit_of_a_count_follows_the_command_and_the_operation() {
     push.apply(removing, secs(0));
     assert!(push.region(secs(0), MOCKUP, 24)[1].ends_with("50%  1/2 deleted"));
 
-    let mut archive = cards(Kind::Archive);
+    let mut archive = cards(ARCHIVE);
     archive.apply(started("a", 10), secs(0));
     let (removing, _c) = operation("a", Operation::Removing, 1, 4);
     archive.apply(removing, secs(0));
     assert!(archive.region(secs(0), MOCKUP, 24)[1].ends_with("25%  1/4 entries"));
 
-    let mut unearth = cards(Kind::Unearth);
+    let mut unearth = cards(UNEARTH);
     unearth.apply(started("a", 10), secs(0));
     let (extracting, _d) = operation("a", Operation::Extracting, 1, 4);
     unearth.apply(extracting, secs(0));
     assert!(unearth.region(secs(0), MOCKUP, 24)[1].ends_with("25%  1/4 files"));
+}
+
+/// A count whose text is the sizes of a byte count, and that shows no
+/// percentage.
+const SIZES: Count = Count {
+    text: |done, total| match total {
+        Some(total) => format!("{done} of {total} bytes"),
+        None => format!("{done} bytes"),
+    },
+    percent: false,
+};
+const OF: Counts = &[(Operation::Packing, SIZES)];
+
+#[test]
+fn a_count_without_percentage_draws_a_bar_and_its_own_text() {
+    let mut cards = cards(OF);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Packing, 1, 4);
+    cards.apply(msg, secs(0));
+    assert_eq!(
+        cards.region(secs(0), MOCKUP, 24)[1],
+        format!("    {}╸{}  1 of 4 bytes", "━".repeat(10), "─".repeat(29))
+    );
+}
+
+#[test]
+fn a_count_without_percentage_past_its_total_moves_and_says_the_count_alone() {
+    let mut cards = cards(OF);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Packing, 5, 4);
+    cards.apply(msg, secs(0));
+    let line = cards.region(secs(0), MOCKUP, 24)[1].clone();
+    assert!(line.ends_with("  5 bytes"), "{line:?}");
+    assert!(!line.contains('%'), "{line:?}");
+}
+
+#[test]
+fn a_count_whose_total_is_unknown_says_its_text_under_the_moving_bar() {
+    let mut cards = cards(OF);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Packing, 3, 0);
+    cards.apply(msg, secs(0));
+    let line = cards.region(secs(0), MOCKUP, 24)[1].clone();
+    assert!(line.ends_with("  3 bytes"), "{line:?}");
+    assert!(!line.contains('%'), "{line:?}");
+}
+
+#[test]
+fn the_text_of_a_count_drops_below_sixty_columns() {
+    let mut cards = cards(OF);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Packing, 1, 4);
+    cards.apply(msg, secs(0));
+    assert!(!cards.region(secs(0), 59, 24)[1].contains("bytes"));
 }
 
 // =========================================================
@@ -516,7 +594,7 @@ fn the_unit_of_a_count_follows_the_command_and_the_operation() {
 
 #[test]
 fn an_operation_for_a_piece_that_never_started_opens_a_card() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     let (packing, _k) = operation("stray", Operation::Packing, 1, 2);
     cards.apply(packing, secs(0));
     cards.apply(
@@ -538,7 +616,7 @@ fn an_operation_for_a_piece_that_never_started_opens_a_card() {
 
 #[test]
 fn a_piece_that_finishes_without_a_start_is_a_line_with_no_time() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         finished("a", 7, Outcome::Skipped("it changed".to_string())),
         secs(3),
@@ -554,7 +632,7 @@ fn a_piece_that_finishes_without_a_start_is_a_line_with_no_time() {
 #[test]
 fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
     let mut cards = Cards::new(Config {
-        kind: Kind::Archive,
+        counts: ARCHIVE,
         style: style(false, true),
         directory: Some(PathBuf::from("/data/my notes")),
     });
@@ -575,7 +653,7 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
 
 #[test]
 fn other_reasons_are_wrapped_one_block_each_and_never_cut() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         finished(
             "a",
@@ -599,7 +677,7 @@ fn other_reasons_are_wrapped_one_block_each_and_never_cut() {
 
 #[test]
 fn a_skipped_piece_shows_its_message_in_yellow_and_no_room_shows_sizes() {
-    let mut cards = with_style(Kind::Unearth, style(true, true));
+    let mut cards = with_style(UNEARTH, style(true, true));
     cards.apply(
         finished(
             "p",
@@ -619,7 +697,7 @@ fn a_skipped_piece_shows_its_message_in_yellow_and_no_room_shows_sizes() {
 
 #[test]
 fn an_unfinished_piece_is_red_and_keeps_its_message() {
-    let mut cards = cards(Kind::Unearth);
+    let mut cards = cards(UNEARTH);
     cards.apply(
         finished(
             "p",
@@ -636,7 +714,7 @@ fn an_unfinished_piece_is_red_and_keeps_its_message() {
 
 #[test]
 fn a_went_to_message_is_wrapped_at_width_sixty_not_cut() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(
         finished(
             "p",
@@ -666,7 +744,7 @@ fn a_went_to_message_is_wrapped_at_width_sixty_not_cut() {
 
 #[test]
 fn a_long_name_is_cut_in_the_middle() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     let name = "archive/2019/client-work/with-a-very-long-folder-name/acme-warehouse-dashboard-v2";
     run_piece(&mut cards, name, 5, Outcome::Files(1), 0, 1);
     let lines = lines_of(&mut cards, MOCKUP);
@@ -678,7 +756,7 @@ fn a_long_name_is_cut_in_the_middle() {
 
 #[test]
 fn a_name_with_control_characters_is_escaped() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     run_piece(&mut cards, "evil\x1b[2J\nname", 5, Outcome::Files(1), 0, 1);
     let lines = lines_of(&mut cards, MOCKUP);
     assert_eq!(lines.len(), 1);
@@ -689,7 +767,7 @@ fn a_name_with_control_characters_is_escaped() {
 #[test]
 fn no_line_of_the_region_is_wider_than_the_terminal() {
     for cols in [100, 80, 60, 40] {
-        let mut cards = cards(Kind::Archive);
+        let mut cards = cards(ARCHIVE);
         cards.apply(
             Msg::Planned(vec![("waiting/piece".to_string(), 3)]),
             secs(0),
@@ -732,9 +810,9 @@ fn a_card_with_big_counts_keeps_both_lines_within_the_terminal_by_dropping_the_d
         for cols in [70, 72, 75] {
             // The line takes 52 columns before the detail.
             for (kind, operation_kind, unit) in [
-                (Kind::Archive, Operation::Removing, "entries"),
-                (Kind::Push, Operation::Storing, "created"),
-                (Kind::Archive, Operation::Packing, "files"),
+                (ARCHIVE, Operation::Removing, "entries"),
+                (PUSH, Operation::Storing, "created"),
+                (ARCHIVE, Operation::Packing, "files"),
             ] {
                 let detail_fits = 52 + "123456/654321 ".len() + unit.len() <= cols;
                 let mut cards = with_style(kind, style(color, true));
@@ -758,7 +836,7 @@ fn a_card_with_big_counts_keeps_both_lines_within_the_terminal_by_dropping_the_d
 
 #[test]
 fn a_line_of_the_region_that_is_still_too_wide_is_cut_without_breaking_its_colour() {
-    let mut cards = with_style(Kind::Unearth, style(true, true));
+    let mut cards = with_style(UNEARTH, style(true, true));
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
@@ -776,7 +854,7 @@ fn a_line_of_the_region_that_is_still_too_wide_is_cut_without_breaking_its_colou
 
 #[test]
 fn a_narrow_terminal_drops_the_detail_then_the_size() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(started("tools/pdf-merge", 3_100_000), secs(0));
     let (msg, _k) = operation("tools/pdf-merge", Operation::Packing, 1, 4);
     cards.apply(msg, secs(0));
@@ -790,7 +868,7 @@ fn a_narrow_terminal_drops_the_detail_then_the_size() {
 
 #[test]
 fn without_utf8_the_symbols_are_ascii() {
-    let mut cards = with_style(Kind::Archive, style(false, false));
+    let mut cards = with_style(ARCHIVE, style(false, false));
     cards.apply(Msg::Planned(vec![("w".to_string(), 1)]), secs(0));
     cards.apply(started("a", 10), secs(0));
     let (msg, _k) = operation("a", Operation::Packing, 1, 4);
@@ -808,7 +886,7 @@ fn without_utf8_the_symbols_are_ascii() {
 
 #[test]
 fn without_colour_no_line_has_an_escape() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(started("a", 10), secs(0));
     let (msg, _k) = operation("a", Operation::Packing, 1, 4);
     cards.apply(msg, secs(0));
@@ -826,7 +904,7 @@ fn without_colour_no_line_has_an_escape() {
 
 #[test]
 fn a_line_without_size_and_time_keeps_its_columns() {
-    let cards = cards(Kind::Archive);
+    let cards = cards(ARCHIVE);
     let ready = Ready {
         name: "late/piece".to_string(),
         bytes: None,
@@ -846,7 +924,7 @@ fn a_line_without_size_and_time_keeps_its_columns() {
 
 #[test]
 fn the_ascii_symbol_set_reaches_every_glyph_of_a_finished_line_and_the_summary() {
-    let mut cards = with_style(Kind::Archive, style(false, false));
+    let mut cards = with_style(ARCHIVE, style(false, false));
     let name = "archive/2019/client-work/with-a-very-long-folder-name/acme-warehouse-dashboard-v2";
     run_piece(&mut cards, name, 5, Outcome::Files(1), 0, 1);
     cards.apply(
@@ -879,7 +957,7 @@ fn the_ascii_symbol_set_reaches_every_glyph_of_a_finished_line_and_the_summary()
 
 #[test]
 fn the_version_of_an_unearth_keeps_its_place_by_cutting_the_name_and_goes_last() {
-    let mut cards = cards(Kind::Unearth);
+    let mut cards = cards(UNEARTH);
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
@@ -902,7 +980,7 @@ fn the_version_of_an_unearth_keeps_its_place_by_cutting_the_name_and_goes_last()
 
 #[test]
 fn a_piece_that_finishes_twice_leaves_one_line() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     run_piece(&mut cards, "a", 5, Outcome::Files(1), 0, 1);
     cards.apply(finished("a", 5, Outcome::Files(2)), secs(2));
     assert_eq!(cards.take_ready().len(), 1);
@@ -910,7 +988,7 @@ fn a_piece_that_finishes_twice_leaves_one_line() {
 
 #[test]
 fn a_push_without_a_change_is_told_as_no_changes() {
-    let mut cards = cards(Kind::Push);
+    let mut cards = cards(PUSH);
     run_piece(
         &mut cards,
         "a",
@@ -928,7 +1006,7 @@ fn a_push_without_a_change_is_told_as_no_changes() {
 
 #[test]
 fn a_very_narrow_terminal_has_a_bar_of_ten_cells() {
-    let mut cards = cards(Kind::Archive);
+    let mut cards = cards(ARCHIVE);
     cards.apply(started("a", 10), secs(0));
     let (msg, _keep) = operation("a", Operation::Packing, 1, 2);
     cards.apply(msg, secs(0));
@@ -940,7 +1018,7 @@ fn a_very_narrow_terminal_has_a_bar_of_ten_cells() {
 
 #[test]
 fn a_command_in_a_reason_that_is_cut_by_wrapping_is_not_bold() {
-    let mut cards = with_style(Kind::Archive, style(true, true));
+    let mut cards = with_style(ARCHIVE, style(true, true));
     cards.apply(
         finished(
             "projects/antiq",

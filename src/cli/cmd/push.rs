@@ -5,7 +5,7 @@
 //! The `push` command: mirrors the collection to the target.
 
 use super::progress;
-use crate::cli::console::cards::Kind;
+use crate::cli::console::cards::{Count, items};
 use crate::cli::console::env::Env;
 use crate::cli::console::live::observed;
 use crate::cli::console::render::{available, flow, paint};
@@ -19,8 +19,27 @@ use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push, push_observed};
+use antiq::progress::Operation;
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
+
+/// A piece is sent as the files it creates and then as the files it deletes.
+pub(super) const COUNTS: &[(Operation, Count)] = &[
+    (
+        Operation::Storing,
+        Count {
+            text: |done, total| items(done, total, "created"),
+            percent: true,
+        },
+    ),
+    (
+        Operation::Removing,
+        Count {
+            text: |done, total| items(done, total, "deleted"),
+            percent: true,
+        },
+    ),
+];
 
 pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -43,7 +62,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         );
         let cursor = out.stdout_env().cursor;
         let setup = progress::setup(
-            Kind::Push,
+            COUNTS,
             ctx,
             out,
             Some(header),
@@ -225,4 +244,21 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cards_of_a_push_count_what_it_created_and_what_it_deleted() {
+        for (operation, word, count) in [
+            (Operation::Storing, "storing", "1/4 created"),
+            (Operation::Removing, "removing", "1/4 deleted"),
+        ] {
+            let [first, second] = progress::card_of(COUNTS, operation, 1, 4);
+            assert!(first.ends_with(&format!("  {word}")), "{first:?}");
+            assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
+        }
+    }
 }

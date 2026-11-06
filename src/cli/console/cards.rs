@@ -37,16 +37,33 @@ const HEAD: usize = 4;
 /// The time between two frames of the spinner and of the moving bar.
 const FRAME_MILLIS: u128 = 100;
 
-/// Which command the cards belong to. It decides the unit of a count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Archive,
-    Push,
-    Unearth,
+/// How the count of an operation reads under its bar. The formatter draws
+/// the bar and places the text; the words belong to the command.
+#[derive(Clone, Copy)]
+pub(crate) struct Count {
+    /// The text for `done` of `total`. The total is `None` while it is not
+    /// known or when `done` is past it, and the text may then be empty.
+    pub text: fn(done: u64, total: Option<u64>) -> String,
+    /// Whether the percentage shows next to the bar. A bar with a percentage
+    /// stops at the total; one without it turns into the moving bar when
+    /// `done` is past the total.
+    pub percent: bool,
 }
 
+/// `3/12 files`, and nothing while the total is not known.
+pub(crate) fn items(done: u64, total: Option<u64>, noun: &str) -> String {
+    total.map_or_else(String::new, |total| format!("{done}/{total} {noun}"))
+}
+
+/// The count of an operation that its command does not list.
+const FILES: Count = Count {
+    text: |done, total| items(done, total, "files"),
+    percent: true,
+};
+
 pub(crate) struct Config {
-    pub kind: Kind,
+    /// The count of the operations that do not read `N/M files`.
+    pub counts: &'static [(Operation, Count)],
     pub style: Style,
     /// The `-C` of the run, for the commands a card tells the reader to type.
     pub directory: Option<PathBuf>,
@@ -589,14 +606,13 @@ impl Cards {
         }
     }
 
-    /// What the count of an operation counts.
-    fn unit(&self, operation: Operation) -> &'static str {
-        match (self.config.kind, operation) {
-            (Kind::Push, Operation::Storing) => "created",
-            (Kind::Push, Operation::Removing) => "deleted",
-            (Kind::Archive, Operation::Removing) => "entries",
-            _ => "files",
-        }
+    /// How the count of an operation reads.
+    fn count(&self, operation: Operation) -> Count {
+        self.config
+            .counts
+            .iter()
+            .find(|(listed, _)| *listed == operation)
+            .map_or(FILES, |(_, count)| *count)
     }
 
     fn frame(now: Duration) -> usize {
@@ -625,37 +641,53 @@ impl Cards {
             self.paint(theme::CYAN, word)
         );
 
-        let total = current.map_or(0, |(_, counter)| counter.total());
-        let second = if total == 0 {
-            format!("    {}", self.moving_bar(now, layout.bar))
-        } else {
-            let (operation, counter) = current.expect("a total comes from a counter");
-            let done = counter.done().min(total);
+        let second = match current {
+            Some((operation, counter)) => self.count_line(operation, counter, now, layout, cols),
+            None => format!("    {}", self.moving_bar(now, layout.bar)),
+        };
+        [first.trim_end().to_string(), second]
+    }
+
+    /// The second line of a card whose operation has a counter.
+    fn count_line(
+        &self,
+        operation: Operation,
+        counter: &Counter,
+        now: Duration,
+        layout: &Layout,
+        cols: usize,
+    ) -> String {
+        let count = self.count(operation);
+        let (done, total) = (counter.done(), counter.total());
+        let proportional = total > 0 && (count.percent || done <= total);
+        let mut line;
+        let text;
+        if proportional {
+            let done = done.min(total);
             // A card whose counter is at its total is still working: the
             // operation after it, or the finished line, replaces it. So the
             // bar and the percentage stop one step short of full.
-            let percent =
-                ((u128::from(done) * 100 + u128::from(total) / 2) / u128::from(total)).min(99);
-            let mut line = format!(
-                "    {}  {}",
-                self.bar(done, total, layout.bar),
-                self.paint(theme::BOLD, &format!("{percent:>3}%"))
-            );
-            if layout.detail {
-                let detail = format!(
+            line = format!("    {}", self.bar(done, total, layout.bar));
+            if count.percent {
+                let percent =
+                    ((u128::from(done) * 100 + u128::from(total) / 2) / u128::from(total)).min(99);
+                line.push_str(&format!(
                     "  {}",
-                    self.paint(
-                        theme::DIM,
-                        &format!("{done}/{total} {}", self.unit(operation)),
-                    )
-                );
-                if visible_width(&line) + visible_width(&detail) <= cols {
-                    line.push_str(&detail);
-                }
+                    self.paint(theme::BOLD, &format!("{percent:>3}%"))
+                ));
             }
-            line
-        };
-        [first.trim_end().to_string(), second]
+            text = (count.text)(done, Some(total));
+        } else {
+            line = format!("    {}", self.moving_bar(now, layout.bar));
+            text = (count.text)(done, None);
+        }
+        if layout.detail && !text.is_empty() {
+            let detail = format!("  {}", self.paint(theme::DIM, &text));
+            if visible_width(&line) + visible_width(&detail) <= cols {
+                line.push_str(&detail);
+            }
+        }
+        line
     }
 
     /// A bar `width` cells wide that is `done` of `total` full, never

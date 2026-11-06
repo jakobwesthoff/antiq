@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
-use crate::cli::console::cards::{Kind, Summary, Tone};
+use crate::cli::console::cards::{Summary, Tone};
 use crate::cli::console::env::Env;
 use crate::cli::output::Style;
 use crate::cli::output::testing::{Capture, FailsOnFlush};
@@ -25,7 +25,7 @@ fn env(cols: usize, cursor: bool) -> Env {
 
 fn config(cols: usize) -> Config {
     Config {
-        kind: Kind::Archive,
+        counts: &[],
         style: Style::from_env(&env(cols, true)),
         directory: None,
     }

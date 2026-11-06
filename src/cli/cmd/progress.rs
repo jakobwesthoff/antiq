@@ -7,12 +7,12 @@
 //! and the pieces that never sent an event.
 
 use crate::cli::Context;
-use crate::cli::console::cards::{Config, Kind, Ready, Summary, Tone};
+use crate::cli::console::cards::{Config, Count, Ready, Summary, Tone};
 use crate::cli::console::live::{Label, Setup};
 use crate::cli::output::Output;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::push::PushReport;
-use antiq::progress::Outcome;
+use antiq::progress::{Operation, Outcome};
 use std::path::Path;
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ pub(super) fn is_live(ctx: &Context, dry_run: bool, out: &Output) -> bool {
 /// The setup of the cards of one run. `label` shows the version of an
 /// unearth.
 pub(super) fn setup(
-    kind: Kind,
+    counts: &'static [(Operation, Count)],
     ctx: &Context,
     out: &Output,
     header: Option<String>,
@@ -33,7 +33,7 @@ pub(super) fn setup(
 ) -> Setup {
     Setup {
         config: Config {
-            kind,
+            counts,
             style: out.stdout_style(),
             directory: ctx.directory.clone(),
         },
@@ -183,6 +183,53 @@ pub(super) fn destination(root: &Path, path: &str, cwd: &Path) -> String {
         Ok(rest) => format!("./{}", rest.display()),
         Err(_) => absolute.display().to_string(),
     }
+}
+
+/// The two lines of the card of a piece whose `operation` has counted
+/// `done` of `total`, on a terminal of 96 columns without colour. The
+/// tests of the commands use it to pin the words and counts their cards show.
+#[cfg(test)]
+pub(super) fn card_of(
+    counts: &'static [(Operation, Count)],
+    operation: Operation,
+    done: u64,
+    total: u64,
+) -> [String; 2] {
+    use crate::cli::console::cards::{Cards, Msg};
+    use crate::cli::output::Style;
+    use antiq::progress::Counter;
+
+    let mut cards = Cards::new(Config {
+        counts,
+        style: Style {
+            width: 96,
+            color: false,
+            terminal: true,
+            utf8: true,
+        },
+        directory: None,
+    });
+    cards.apply(
+        Msg::Started {
+            name: "projects/scanner".to_string(),
+            bytes: 10,
+            label: None,
+        },
+        Duration::ZERO,
+    );
+    let counter = Counter::new();
+    counter.set_total(total);
+    counter.add(done);
+    cards.apply(
+        Msg::Operation {
+            name: "projects/scanner".to_string(),
+            operation,
+            counter,
+        },
+        Duration::ZERO,
+    );
+    let region = cards.region(Duration::ZERO, 96, 24);
+    [region[0].clone(), region[1].clone()]
 }
 
 #[cfg(test)]

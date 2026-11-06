@@ -5,7 +5,7 @@
 //! The `archive` command: archives due pieces, or one piece now.
 
 use super::progress;
-use crate::cli::console::cards::{Cards, Kind};
+use crate::cli::console::cards::{Cards, Count, items};
 use crate::cli::console::live::observed;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
@@ -16,7 +16,18 @@ use antiq::commands::archive::{
     ArchivePlan, ArchiveReport, Outcome, Request, Target, archive, archive_observed,
 };
 use antiq::plan::{PlanAction, Step};
+use antiq::progress::Operation;
 use anyhow::Context as _;
+
+/// The removing of a piece counts the entries of its listing; every other
+/// operation counts files.
+pub(super) const COUNTS: &[(Operation, Count)] = &[(
+    Operation::Removing,
+    Count {
+        text: |done, total| items(done, total, "entries"),
+        percent: true,
+    },
+)];
 
 pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -38,7 +49,7 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
     let mut cards = None;
     let result = if progress::is_live(ctx, args.dry_run, out) {
         let setup = progress::setup(
-            Kind::Archive,
+            COUNTS,
             ctx,
             out,
             None,
@@ -177,4 +188,23 @@ fn print_pipe_lines(report: &ArchiveReport, out: &mut Output) -> anyhow::Result<
     ))
     .context("print the result")?;
     print_notices(report, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cards_of_an_archive_name_each_operation_and_what_it_counts() {
+        for (operation, word, count) in [
+            (Operation::Packing, "packing", "1/4 files"),
+            (Operation::Verifying, "verifying", "1/4 files"),
+            (Operation::Storing, "storing", "1/4 files"),
+            (Operation::Removing, "removing", "1/4 entries"),
+        ] {
+            let [first, second] = progress::card_of(COUNTS, operation, 1, 4);
+            assert!(first.ends_with(&format!("  {word}")), "{first:?}");
+            assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
+        }
+    }
 }
