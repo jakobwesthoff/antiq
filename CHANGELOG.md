@@ -42,4 +42,6 @@ target.
 - `-n` / `--dry-run` on every command that changes something
 - Archives and listings are readable without antiq: `tar.zst` files and
   checksum lists that `shasum -c` reads once `zstd` has decompressed them
+- `antiq --version` shows Archie beside the version on an interactive
+  terminal with 24-bit colour; in a pipe it prints the plain version
 - macOS and Linux
