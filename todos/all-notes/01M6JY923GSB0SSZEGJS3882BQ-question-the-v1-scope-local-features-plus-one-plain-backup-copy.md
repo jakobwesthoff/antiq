@@ -179,6 +179,21 @@ open, so the discussion survives without the conversation.
   folder, and a parameter can set it explicitly. The source folder is
   kept.
 
+## Decided in round 10 (asqr 01M6K4M2AHBZM65HTFZBA83ECB, 2026-11-04)
+
+- grep output on a terminal follows the lead's proposal:
+  - grouped by piece, with one line per in-piece path and the versions
+    that hold it ("all 3 versions" or the dates);
+  - the match highlighted, as ripgrep does;
+  - a closing hint line that says how to continue with `unearth`.
+- In a pipe, grep prints one tab-separated line per hit and version:
+  `piece  version  path`. `--json` gives everything.
+- Open (round 11, asqr 01M6K4TY1JS8DQZ1QA1NKBFJ6W): a match that lies
+  wholly in the piece path. Proposal: one row for the piece, "piece
+  name matches", with versions and the file count, and no file list.
+  The user is also asked which topics still need a round before the
+  concept.
+
 ## Presented
 
 - The grep study was presented in round 8
