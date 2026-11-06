@@ -8,15 +8,18 @@ Accepted
 
 ## Context
 
-Unearthing restores the files' modification times, so an unearthed
-piece counts as idle at once. With scheduled runs it would be archived
-again within minutes.
+Unearthing restores the files' modification times, so an unearthed piece
+counts as idle at once. With scheduled runs it would be archived again
+within minutes.
 
 ## Decision
 
-For an unearthed piece the idle clock starts at the later of its
-newest file modification time and the time it was unearthed. Other
-pieces keep the rule of ADR 0013.
+`unearth` and `fork` write `.antiq-restored` at the top of the piece
+with the time of the restore. The idle clock is the later of the newest
+file modification time and the time in that file (ADR 0013). While an
+unearth is under way the file also holds the version stamp, so the
+repairs of the next run can finish an unearth that stopped between the
+rename and the deletion of the version (ADR 0059).
 
 ## Consequences
 

@@ -69,3 +69,6 @@ its own.
 An ADR that has been pushed is not rewritten. A changed decision gets a
 new ADR (`adrs new --no-edit --supersedes <number> "<title>"`), and the
 old one only gains its status link.
+
+Until the first release, ADRs are rewritten in place instead when the
+design changes. The exception ends with the first release.

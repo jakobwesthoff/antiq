@@ -8,9 +8,9 @@ with `unpack_in` and `Archive::unpack`.
 Marks: **measured** (run), **read** (documentation, named),
 **inferred** (follows from measured facts, not run as such).
 
-Several machines share one remote (ADR 0017), so a piece archived on
-Linux can be unearthed on macOS and the reverse. Names are stored byte
-for byte (ADR 0050).
+A version can reach another machine by copying its files from the target,
+so a piece archived on Linux can be unearthed on macOS and the reverse.
+Names are stored byte for byte (ADR 0050).
 
 ## Linux archive, unearthed on macOS
 

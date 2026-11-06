@@ -14,13 +14,14 @@ and the next run could archive it over the only complete copy.
 
 ## Decision
 
-Unearthing fetches the archive into `.antiq/`, checks its checksum,
-extracts it into a staging directory inside `.antiq/`, and verifies the
-staged tree strictly against the archive (ADR 0033). Only then is the
-staged tree renamed to its place in the collection. The target is
-checked again right before the rename; a file, a symlink or a piece in
-its path makes unearthing refuse. Unearthing an ID that is already
-unearthed does nothing and says where it is.
+Unearthing extracts the version into a staging directory inside
+`.antiq/` and verifies every entry of the staged tree (ADR 0033). It
+writes `.antiq-restored`, flushes every extracted file and directory,
+and checks the destination again right before the rename; a file, a symlink
+or a piece in its path makes unearthing refuse. Only then is the staged
+tree renamed to its place in the collection. The parent is flushed, and
+the version is deleted last, so no version is deleted before the folder
+replacing it is durable.
 
 ## Consequences
 

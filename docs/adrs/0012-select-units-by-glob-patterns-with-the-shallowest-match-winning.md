@@ -21,9 +21,6 @@ ancestor is a unit. Under this rule `**/*` selects the same units as
 `*`. Deepest-wins would select every leaf directory and split a project
 into many small archives.
 
-The selection strategy is a replaceable part. A managed folder's strategy
-is chosen at `init` and cannot change in the first version.
-
 ## Consequences
 
 None further.

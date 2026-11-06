@@ -12,8 +12,11 @@ Both scripts have `--dry-run`.
 
 ## Decision
 
-Every command that changes state takes `--dry-run`, which prints what
-it would do and changes nothing. Under `--json` the plan is JSON.
+`init`, `archive`, `unearth`, `fork`, `forget`, `rebuild`, `import`,
+`pin`, `unpin` and `push` take `--dry-run`, which prints what the
+command would do and changes nothing. A dry run takes no lock. It lists
+the repairs of the start of a run first, as actions of kind `repair`.
+Under `--json` the plan is JSON.
 
 ## Consequences
 

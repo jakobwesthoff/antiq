@@ -16,7 +16,11 @@ playground have one.
 
 `antiq pin <piece>` creates the file `.antiq-pin` at the top of the
 piece, and `antiq unpin <piece>` removes it. A pinned piece is never
-archived. It is still backed up and is shown as pinned.
+archived. It is still mirrored by `push` and is shown as pinned.
+
+A regular file or a symlink of that name pins the piece. Any other entry
+of that name refuses the piece. The file is written in `.antiq/tmp/` and
+renamed into place.
 
 ## Consequences
 

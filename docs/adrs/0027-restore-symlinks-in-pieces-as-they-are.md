@@ -16,7 +16,9 @@ Real folders contain symlinks whose targets lie outside the folder; the
 
 Symlinks are archived and restored as they are, whatever their target.
 Only a member's path can escape a piece, and an archive with such a
-member is refused. Unearthing never writes through a symlink.
+member is refused. Unearthing never writes through a symlink. rsync
+copies links as links; on the target a link points to whatever its path
+names there.
 
 ## Consequences
 

@@ -1,4 +1,4 @@
-# 41. Back up nothing outside pieces in the first version
+# 41. Mirror the whole collection, content outside the pieces included
 
 Date: 2026-11-03
 
@@ -14,9 +14,9 @@ loose files included.
 
 ## Decision
 
-In the first version, content outside every piece is neither archived
-nor backed up.
+`push` mirrors the whole collection. Content outside every piece is
+copied like a live folder.
 
 ## Consequences
 
-Loose files at the top of a collection need another backup.
+None further.
