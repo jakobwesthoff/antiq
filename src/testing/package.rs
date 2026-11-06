@@ -33,7 +33,7 @@ pub fn pack_piece_without(tree: &Tree, piece: &str, junk: &[crate::relpath::Name
     let walked = walk_piece(&collection, &top, junk, &rules).expect("the walk succeeds");
     let root = collection.sub(&top).expect("the piece opens");
     let settings = PackSettings {
-        zstd: ZstdSettings::live(1),
+        zstd: ZstdSettings::fast(),
     };
     let mut bytes = Vec::new();
     let packed = TarZstd
@@ -54,7 +54,7 @@ pub fn on_disk(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
 /// `tar` compressed the way packages are, for archives a test builds by
 /// hand.
 pub fn compress(tar: &[u8]) -> Vec<u8> {
-    let mut encoder = encoder(Vec::new(), &ZstdSettings::live(1)).expect("an encoder");
+    let mut encoder = encoder(Vec::new(), &ZstdSettings::fast()).expect("an encoder");
     encoder.write_all(tar).expect("a vec accepts bytes");
     encoder.finish().expect("the stream ends")
 }

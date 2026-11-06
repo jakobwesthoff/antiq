@@ -2,12 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! zstd settings for archives and live packages, and the decoder every
-//! reader of antiq uses.
+//! zstd settings for archives and for tests, and the decoder every reader
+//! of antiq uses.
 
 use ::zstd::stream::read::Decoder;
 use ::zstd::stream::write::Encoder;
-use ::zstd::zstd_safe::CParameter;
 use std::io::{self, BufReader, Read, Write};
 
 /// Archives compress at level 19 (ADR 0051).
@@ -16,11 +15,10 @@ pub const ARCHIVE_LEVEL: i32 = 19;
 /// The window of an archive is 2^27 bytes, 128 MiB (ADR 0051).
 pub const ARCHIVE_WINDOW_LOG: u32 = 27;
 
-/// Live packages compress at level 3 in rsyncable mode (ADR 0052).
-pub const LIVE_LEVEL: i32 = 3;
-
-/// Live packages compress in jobs of 512 KiB (ADR 0052).
-pub const LIVE_JOB_SIZE: u32 = 512 * 1024;
+/// The fast preset compresses at level 1. It exists for tests and
+/// fixtures, which would otherwise start the level-19 encoder and its
+/// memory cost for every small package.
+pub const FAST_LEVEL: i32 = 1;
 
 /// The largest window any decoder of antiq accepts, 128 MiB. zstd's own
 /// default is the same value; setting it states the limit in antiq's code.
@@ -29,11 +27,11 @@ pub const DECODER_WINDOW_LOG_MAX: u32 = 27;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Preset {
     Archive,
-    Live,
+    Fast,
 }
 
-/// How a stream is compressed: the archive or the live package preset and
-/// the number of worker threads.
+/// How a stream is compressed: the preset and the number of worker
+/// threads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZstdSettings {
     preset: Preset,
@@ -50,11 +48,11 @@ impl ZstdSettings {
         }
     }
 
-    /// Level 3, rsyncable, jobs of 512 KiB, no long-distance matching.
-    pub fn live(workers: u32) -> ZstdSettings {
+    /// Level 1 with one worker and no long-distance matching.
+    pub fn fast() -> ZstdSettings {
         ZstdSettings {
-            preset: Preset::Live,
-            workers,
+            preset: Preset::Fast,
+            workers: 1,
         }
     }
 }
@@ -63,12 +61,10 @@ impl ZstdSettings {
 pub fn encoder<W: Write>(out: W, settings: &ZstdSettings) -> io::Result<Encoder<'static, W>> {
     let level = match settings.preset {
         Preset::Archive => ARCHIVE_LEVEL,
-        Preset::Live => LIVE_LEVEL,
+        Preset::Fast => FAST_LEVEL,
     };
     let mut encoder = Encoder::new(out, level)?;
     encoder.include_checksum(true)?;
-    // Rsyncable mode only takes effect with at least one worker thread, so
-    // zero workers would silently drop it.
     encoder.multithread(settings.workers.max(1))?;
     match settings.preset {
         Preset::Archive => {
@@ -77,10 +73,7 @@ pub fn encoder<W: Write>(out: W, settings: &ZstdSettings) -> io::Result<Encoder<
             // setting it states the size the archives are meant to have.
             encoder.window_log(ARCHIVE_WINDOW_LOG)?;
         }
-        Preset::Live => {
-            encoder.set_parameter(CParameter::RSyncable(true))?;
-            encoder.set_parameter(CParameter::JobSize(LIVE_JOB_SIZE))?;
-        }
+        Preset::Fast => {}
     }
     Ok(encoder)
 }
@@ -171,19 +164,25 @@ mod tests {
     }
 
     #[test]
-    fn live_frames_carry_the_checksum() {
+    fn fast_frames_carry_the_checksum_and_round_trip() {
         let input = sample(100_000);
-        let frame = compress(&ZstdSettings::live(2), &input);
+        let frame = compress(&ZstdSettings::fast(), &input);
         assert_ne!(frame[4] & CHECKSUM_FLAG, 0, "the checksum flag is set");
         assert_eq!(decompress(&frame), input);
     }
 
     #[test]
-    fn a_worker_count_of_zero_still_uses_one_worker() {
-        // Several jobs of 512 KiB, so that rsyncable mode has work to do.
-        let input = sample(2 * 1024 * 1024);
-        let none = compress(&ZstdSettings::live(0), &input);
-        let one = compress(&ZstdSettings::live(1), &input);
-        assert_eq!(none, one);
+    fn fast_is_not_the_archive_preset() {
+        let frame = compress(&ZstdSettings::fast(), &sample(3000));
+        assert_eq!(
+            frame[4] & SINGLE_SEGMENT_FLAG,
+            0,
+            "a stream of unknown size has a window descriptor"
+        );
+        let window_log = u32::from(frame[5] >> 3) + 10;
+        assert_ne!(
+            window_log, ARCHIVE_WINDOW_LOG,
+            "the fast preset has no 128 MiB window"
+        );
     }
 }

@@ -682,9 +682,9 @@ mod tests {
     // Fixtures
     // =========================================================
 
-    fn live() -> PackSettings {
+    fn fast() -> PackSettings {
         PackSettings {
-            zstd: ZstdSettings::live(1),
+            zstd: ZstdSettings::fast(),
         }
     }
 
@@ -713,7 +713,7 @@ mod tests {
         let walked = PieceTree::new(RelPath::parse(container).expect("valid"), entries, vec![]);
         let mut out = Vec::new();
         TarZstd
-            .pack(&root, &walked, &live(), &mut out)
+            .pack(&root, &walked, &fast(), &mut out)
             .expect("the piece packs");
         out
     }
@@ -870,7 +870,7 @@ mod tests {
             let mut stream = self.bytes.clone();
             stream.extend_from_slice(&[0; 1024]);
             stream.extend_from_slice(after);
-            let mut encoder = encoder(Vec::new(), &ZstdSettings::live(1)).expect("an encoder");
+            let mut encoder = encoder(Vec::new(), &ZstdSettings::fast()).expect("an encoder");
             encoder
                 .write_all(&stream)
                 .expect("a vec accepts the stream");

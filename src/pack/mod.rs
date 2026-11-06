@@ -417,9 +417,9 @@ mod pack_tests {
         PieceTree::new(RelPath::parse(top).expect("valid"), entries, vec![])
     }
 
-    fn live() -> PackSettings {
+    fn fast() -> PackSettings {
         PackSettings {
-            zstd: ZstdSettings::live(1),
+            zstd: ZstdSettings::fast(),
         }
     }
 
@@ -428,7 +428,7 @@ mod pack_tests {
         let walked = walk(&root, top);
         let mut out = Vec::new();
         let packed = TarZstd
-            .pack(&root, &walked, &live(), &mut out)
+            .pack(&root, &walked, &fast(), &mut out)
             .expect("the piece packs");
         (out, packed)
     }
@@ -539,7 +539,7 @@ mod pack_tests {
         let packed = {
             let mut buffered = BufWriter::new(&mut sink);
             TarZstd
-                .pack(&root, &walked, &live(), &mut buffered)
+                .pack(&root, &walked, &fast(), &mut buffered)
                 .expect("packs")
         };
         assert_eq!(packed.size, sink.len() as u64);
@@ -550,7 +550,7 @@ mod pack_tests {
         let mut buffered_sink = Vec::new();
         let mut buffered = BufWriter::new(&mut buffered_sink);
         let again = TarZstd
-            .pack(&root, &walked, &live(), &mut buffered)
+            .pack(&root, &walked, &fast(), &mut buffered)
             .expect("packs");
         assert_eq!(buffered.buffer().len(), 0, "nothing is left unwritten");
         drop(buffered);
@@ -605,7 +605,7 @@ mod pack_tests {
         std::fs::write(&path, "0123").expect("the file shrinks");
         let mut out = Vec::new();
         let packed = TarZstd
-            .pack(&root, &walked, &live(), &mut out)
+            .pack(&root, &walked, &fast(), &mut out)
             .expect("packs");
         let found = members(&out);
         assert_eq!(found[1].3, b"0123\0\0\0\0\0\0");
@@ -624,7 +624,7 @@ mod pack_tests {
         let walked = walk(&root, "proj");
         std::fs::remove_file(path).expect("the file is removed");
         let error = TarZstd
-            .pack(&root, &walked, &live(), &mut Vec::new())
+            .pack(&root, &walked, &fast(), &mut Vec::new())
             .expect_err("the file is gone");
         assert!(
             matches!(error, PackError::Read { ref path, .. } if path.to_string() == "dir/gone"),
@@ -641,7 +641,7 @@ mod pack_tests {
         std::fs::remove_file(path).expect("the file is removed");
         tree.fifo("swapped");
         let error = TarZstd
-            .pack(&root, &walked, &live(), &mut Vec::new())
+            .pack(&root, &walked, &fast(), &mut Vec::new())
             .expect_err("a fifo is not read");
         assert!(
             matches!(error, PackError::Read { ref path, .. } if path.to_string() == "swapped"),
@@ -671,7 +671,7 @@ mod pack_tests {
         let walked = walk(&root, "proj");
         let mut out = Vec::new();
         let packed = TarZstd
-            .pack(&root, &walked, &live(), &mut out)
+            .pack(&root, &walked, &fast(), &mut out)
             .expect("the piece packs");
         let found = members(&out);
         let last = found.last().expect("members");
@@ -706,7 +706,7 @@ mod pack_tests {
             let flawed = PieceTree::new(top.clone(), entries.clone(), vec![problem.clone()]);
             let mut out = Vec::new();
             let error = TarZstd
-                .pack(&root, &flawed, &live(), &mut out)
+                .pack(&root, &flawed, &fast(), &mut out)
                 .expect_err("a flawed walk is refused");
             assert!(matches!(&error, PackError::TreeHasProblems(p) if *p == problem));
             assert!(out.is_empty(), "nothing was written");
@@ -714,13 +714,13 @@ mod pack_tests {
 
         let headless = PieceTree::new(top, vec![], vec![]);
         let error = TarZstd
-            .pack(&root, &headless, &live(), &mut Vec::new())
+            .pack(&root, &headless, &fast(), &mut Vec::new())
             .expect_err("no top entry");
         assert!(matches!(error, PackError::NoTopDirectory));
 
         let nameless = PieceTree::new(RelPath::root(), entries, vec![]);
         let error = TarZstd
-            .pack(&root, &nameless, &live(), &mut Vec::new())
+            .pack(&root, &nameless, &fast(), &mut Vec::new())
             .expect_err("no folder name");
         assert!(matches!(error, PackError::NoContainerName));
     }
@@ -735,7 +735,7 @@ mod pack_tests {
         let root = TreeRoot::open(tree.root()).expect("opens");
         let walked = walk(&root, "proj");
         let error = TarZstd
-            .pack(&root, &walked, &live(), &mut full)
+            .pack(&root, &walked, &fast(), &mut full)
             .expect_err("nothing can be written");
         assert!(matches!(error, PackError::Write(_)), "{error:?}");
     }

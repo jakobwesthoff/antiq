@@ -19,6 +19,10 @@ use crate::sysmem::{SysmemError, physical_memory};
 
 const MIB: u64 = 1024 * 1024;
 
+/// The share of the machine's physical memory that all compressors in a
+/// run may hold together.
+pub const MEMORY_PERCENT: u8 = 25;
+
 /// What an archive encoder counts against the memory budget whatever its
 /// worker count: the round buffer zstd allocates for long-distance matching.
 pub const ARCHIVE_FIXED_BYTES: u64 = 448 * MIB;
@@ -117,14 +121,13 @@ impl Pool {
         }
     }
 
-    /// The pool of this machine: one worker per core and `memory_percent`
-    /// of the physical memory. The percentage is the validated 1 to 100
-    /// of `collection.memory_percent`.
-    pub fn for_machine(memory_percent: u8) -> Result<Pool, SysmemError> {
+    /// The pool of this machine: one worker per core and
+    /// [`MEMORY_PERCENT`] of the physical memory.
+    pub fn for_machine() -> Result<Pool, SysmemError> {
         for_machine_with(
             physical_memory(),
             cores_from(std::thread::available_parallelism()),
-            memory_percent,
+            MEMORY_PERCENT,
         )
     }
 
@@ -835,7 +838,7 @@ mod tests {
 
     #[test]
     fn the_pool_of_this_machine_has_its_cores_and_a_quarter_of_its_memory() {
-        let pool = Pool::for_machine(25).expect("the test machine reports its memory");
+        let pool = Pool::for_machine().expect("the test machine reports its memory");
         let cores = std::thread::available_parallelism()
             .expect("the test machine reports its cores")
             .get();
