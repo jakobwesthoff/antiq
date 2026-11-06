@@ -1298,6 +1298,21 @@ refuses and lists them with their IDs; one that matches none is an
 error. Both exit 1. JSON output always carries full ULIDs; scripts use
 them.
 
+A reference is read as a path first: a path at which an object is
+recorded, by its metadata or by its tracking entry, names that object,
+also when the text could be a ULID prefix. At a path, the object whose
+tracking entry says its folder is there, arriving or leaving names the
+piece; the objects archived there as well, such as the old ID after a
+`fork`, count only when no object holds the folder, and several of them
+make the reference ambiguous. Only a text of 6 to 26 characters from the
+ULID alphabet, in either case, that no object is recorded at as a path,
+is a ULID prefix; a shorter text is an unknown reference. A folder that
+no object is recorded at is an unknown reference. The objects this
+machine knows for the prefix are those with metadata, those with an
+object directory whose metadata cannot be read, and those with a
+tracking entry or a damaged tracking file. A candidate's `path` is the
+one in its metadata, else the one in its tracking entry, else empty.
+
 antiq writes console output; the picker of `find` is its only
 full-screen part. (ADR 0056) The output adapts to the terminal's width:
 on a wide terminal tables and progress rows use their wide layout, with
@@ -1425,7 +1440,9 @@ of the conditions `status` shows, such as `pinned`, `stale_backup`,
 `remote_only_in_days` where it applies.
 
 `find` adds `query` and `matches`, a list of objects with `id`, `path`,
-`abs_path`, `name`, `state`, `created` and `size`.
+`abs_path`, `name`, `state`, `created` and `size`. `size` is the size in
+bytes of the object's current payload: its newest archive that is not
+superseded, else its newest live package.
 
 `init` adds `created`, `id` (only when created), `path` (the
 collection's root), `machine`, `patterns`, `exclude` (what `--yes` writes:
