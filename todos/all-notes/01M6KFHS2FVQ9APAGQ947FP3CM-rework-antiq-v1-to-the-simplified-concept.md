@@ -1780,7 +1780,7 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   when it is missing, never skip: rsync 3.2.4 or later (P1's real-rsync
   tests) and GNU `sha256sum` (F3's listing tests; uutils and Apple's
   `sha256sum` are refused, PO10). Z documents these developer
-  requirements in the repository (README section for contributors),
+  requirements in a "Development" section of the README,
   together with how to run `scripts/check.sh` and the coverage step.
 - From F2: C4 keeps the staging tree when a move into the store ends in
   `PartlyMoved` or `StoredNotDurable`; the spec's "Spelling" section
