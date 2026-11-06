@@ -253,3 +253,15 @@ fn colour_marks_the_matches_and_dims_the_rest() {
          \x1b[1m\x1b[31m▸\x1b[0m projects/scanner   \x1b[1m\x1b[31m2025-06\x1b[0m-01 22:30:00   NNN B       1"
     );
 }
+
+#[test]
+fn a_version_that_does_not_exist_is_an_error_without_a_table_or_an_info() {
+    let world = world(stored_pieces);
+    let text = plain(
+        &world,
+        &["unearth", "projects/scanner", "--version", "1999"],
+    );
+    assert!(text.starts_with("\x20✖ ERROR\n"), "{text}");
+    assert!(!text.contains("Nothing was"), "{text}");
+    assert!(!text.contains("VERSION  "), "{text}");
+}

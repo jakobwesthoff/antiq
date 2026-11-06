@@ -1227,7 +1227,10 @@ for each version `Would delete version <time> of <piece>: <file>, ...`,
 naming the files in the order they are deleted. On a terminal each version
 is an action line `would delete version <time> of <piece>, <n> files:`
 followed by one line for each file, indented by two columns, with its part
-(`archive`, `listing` or `checksum`) in front of its name. With `--all-versions` the
+(`archive`, `listing` or `checksum`) in front of its name. When the plan
+deletes a version, an info says that `forget` deletes a version for good
+and that `unearth` and `fork` cannot bring it back, between the rows and
+the footer. With `--all-versions` the
 versions are deleted oldest first, incomplete ones among them. The
 `Deleted` and the `Would delete` lines, and `forgotten` and `actions` in
 JSON, list them newest first.

@@ -48,7 +48,7 @@ here the folders two levels down:
 $ cd ~/playground
 $ antiq init --pattern '*/*'
 Created the collection at /home/me/playground
-  id: 01M6MC8YED87SF9J43N47W07JE
+  id: 01M6P3PAQ5PQDFEXENXAQMET70
   patterns: */*
 The next archive would archive 2 folders.
 ```
@@ -63,6 +63,8 @@ $ antiq status
 STATE    PIECE             IDLE  WHAT
 due      projects/scanner  430d  archives next run
 due      tools/scan-old    430d  archives next run
+
+ → HINT  Run antiq archive -n to see what the next run would archive.
 $ antiq archive
 archived projects/scanner
 archived tools/scan-old
@@ -74,8 +76,8 @@ Find a version by piece name or by the files it holds, and bring it back:
 ```console
 $ antiq list scan
 PIECE              VERSION               SIZE    FILES
-projects/scanner   2026-11-05 01:09:48   120 B       1
-tools/scan-old     2026-11-05 01:09:48   124 B       1
+projects/scanner   2026-11-05 16:02:01   129 B       1
+tools/scan-old     2026-11-05 16:02:01   124 B       1
 $ antiq grep 'main\.rs'
 projects/scanner   1 version, 2026-11-05
   src/main.rs      2026-11-05
@@ -84,7 +86,7 @@ tools/scan-old     1 version, 2026-11-05
 
 2 files in 2 pieces · antiq unearth <piece> [--version <version>]
 $ antiq unearth scan-old
-Unearthed tools/scan-old (version 2026-11-05 01:09:48)
+Unearthed tools/scan-old (version 2026-11-05 16:02:01)
 ```
 
 To mirror the collection, add a `[target]` block to
@@ -98,12 +100,15 @@ url = "/Volumes/nas/antiq/playground"
 
 ```console
 $ antiq push --init
-Claimed the push target /Volumes/nas/antiq/playground for this antiq collection.
-Changed on /Volumes/nas/antiq/playground:
-  projects/antiq: 1 created, 0 updated, 0 deleted
-  projects/scanner: 3 created, 0 updated, 0 deleted
-  tools/scan-old: 2 created, 0 updated, 0 deleted
-  other files: 2 created, 0 updated, 0 deleted
+✔ Claimed the push target /Volumes/nas/antiq/playground: 7 created, 0 updated, 0 deleted
+The marker file .antiq-target on the target now records this antiq collection and host, so another
+antiq collection cannot push there by mistake.
+
+PIECE              CREATED   UPDATED   DELETED
+projects/antiq           1         0         0
+projects/scanner         3         0         0
+tools/scan-old           2         0         0
+other files              1         0         0
 ```
 
 <!-- docs:start -->
@@ -126,6 +131,8 @@ Changed on /Volumes/nas/antiq/playground:
 
 ```text
 $ antiq --help
+Archive what you no longer touch, find it when you need it
+
 Usage: antiq [OPTIONS] <COMMAND>
 
 Commands:
@@ -246,14 +253,23 @@ the command:
 
 ```console
 $ antiq push
-error: Push refused: the store holds versions that are damaged or incomplete
-  why: push copies the store as it is, so it only runs on a store without damage.
-  fix: Repair or remove these versions first:
-         projects/scanner 2026-11-05T000948: the listing is missing. Run `antiq rebuild projects/scanner 2026-11-05T000948`.
-  while attempting to push the antiq collection
+ ✖ ERROR
+▌ Push refused: the store holds versions that are damaged or incomplete
+▌
+▌ Why it happened
+▌   push copies the store as it is, so it only runs on a store without damage.
+▌
+▌ How to fix it
+▌   Repair or remove these versions first:
+▌
+▌     projects/scanner 2026-11-05T150201: the listing is missing. Run `antiq rebuild projects/scanner 2026-11-05T150201`.
+▌
+▌ What antiq was doing
+▌   Attempting to push the antiq collection.
 $ antiq rebuild projects/scanner 2026-11-05
-Rebuilt version 2026-11-05 01:09:48 of projects/scanner: wrote projects-scanner--2026-11-05T000948.sha256.zst
-note: the archive is the one checksummed when it was stored
+Rebuilt version 2026-11-05 16:02:01 of projects/scanner: wrote projects-scanner--2026-11-05T150201.sha256.zst
+
+ ℹ INFO  the archive is the one checksummed when it was stored
 ```
 
 ### Setting up a target
@@ -322,9 +338,9 @@ go into the unpacked folder and check it against the listing:
 ```console
 $ store=~/playground/.antiq/pieces/projects/scanner
 $ mkdir /tmp/check && cd /tmp/check
-$ zstd -dc $store/projects-scanner--2026-11-05T000948.tar.zst | tar -x
+$ zstd -dc $store/projects-scanner--2026-11-05T150201.tar.zst | tar -x
 $ cd scanner
-$ zstd -dc $store/projects-scanner--2026-11-05T000948.sha256.zst | shasum -a 256 -c -
+$ zstd -dc $store/projects-scanner--2026-11-05T150201.sha256.zst | shasum -a 256 -c -
 src/main.rs: OK
 ```
 

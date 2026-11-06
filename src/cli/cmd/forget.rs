@@ -4,6 +4,8 @@
 
 //! The `forget` command: deletes a version, or all versions of a piece.
 
+use crate::cli::console::block::Block;
+use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
@@ -44,8 +46,13 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
             out.json(Some("forget"), &plan).context("print the plan")?;
         } else {
             let lines = render_plan(&plan, out.stdout_style().terminal, &zone);
-            out.dry_plan(&lines.stdout, "deleted", &rerun_text(&plan))
-                .context("print the plan")?;
+            out.dry_plan_explained(
+                &lines.stdout,
+                deletes_a_version(&plan).then(explanation).as_ref(),
+                "deleted",
+                &rerun_text(&plan),
+            )
+            .context("print the plan")?;
             out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
@@ -68,15 +75,41 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
     Ok(if report.partial() { PARTIAL } else { 0 })
 }
 
-/// What running the plan again without `-n` would do, for the footer.
-fn rerun_text(plan: &ForgetPlan) -> String {
-    let versions = match plan {
+/// How many versions the plan deletes. Repairs are not counted.
+fn versions_deleted(plan: &ForgetPlan) -> usize {
+    match plan {
         ForgetPlan::Held { .. } => 0,
         ForgetPlan::Listed { actions, .. } => actions
             .iter()
             .filter(|action| matches!(action, Action::ForgetVersion(_)))
             .count(),
-    };
+    }
+}
+
+fn deletes_a_version(plan: &ForgetPlan) -> bool {
+    versions_deleted(plan) > 0
+}
+
+/// Tells a terminal that the deletion cannot be undone. A plan of repairs
+/// only deletes nothing and gets no such explanation.
+fn explanation() -> Block {
+    Block::info(
+        Rich::new()
+            .cmd("forget")
+            .text(" deletes a version for good."),
+    )
+    .text(
+        Rich::new()
+            .cmd("unearth")
+            .text(" and ")
+            .cmd("fork")
+            .text(" cannot bring it back afterwards."),
+    )
+}
+
+/// What running the plan again without `-n` would do, for the footer.
+fn rerun_text(plan: &ForgetPlan) -> String {
+    let versions = versions_deleted(plan);
     match versions {
         0 => "make these repairs".to_string(),
         1 => "delete the version".to_string(),
@@ -456,5 +489,31 @@ mod tests {
             ["The lock is held by pid 4711, started 2026-11-04T09:02:11Z. No repairs are listed."]
         );
         assert!(lines.stderr.is_empty());
+    }
+
+    #[test]
+    fn the_files_of_a_version_are_counted_and_named_by_their_part() {
+        let mut version = entry("projects/scanner", "2026-11-04T090211", false);
+        version.files = vec![
+            "a--2026-11-04T090211.tar.zst".to_string(),
+            "a--2026-11-04T090211.sha256.zst".to_string(),
+        ];
+        let lines = files_under_action("version 2026-11-04", "projects/scanner", &version);
+        assert_eq!(
+            lines,
+            [
+                "Would delete version 2026-11-04 of projects/scanner, two files:",
+                "  archive    a--2026-11-04T090211.tar.zst",
+                "  listing    a--2026-11-04T090211.sha256.zst",
+            ]
+        );
+
+        version.files = (1..=4).map(|n| format!("stray-{n}")).collect();
+        let lines = files_under_action("version 2026-11-04", "projects/scanner", &version);
+        assert_eq!(
+            lines[0],
+            "Would delete version 2026-11-04 of projects/scanner, 4 files:"
+        );
+        assert_eq!(lines[1], "  file       stray-1");
     }
 }

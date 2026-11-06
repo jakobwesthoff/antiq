@@ -704,6 +704,79 @@ mod tests {
     }
 
     #[test]
+    fn the_command_to_copy_covers_the_commands_on_live_pieces_and_fork() {
+        let swap = |args: &[&str], piece: Option<&str>, version: Option<&str>| {
+            command_line(&cli(args), piece, version)
+        };
+        assert_eq!(
+            swap(&["archive", "scnaer", "-n"], Some("projects/scanner"), None),
+            "antiq archive projects/scanner -n"
+        );
+        assert_eq!(
+            swap(&["pin", "scnaer"], Some("projects/scanner"), None),
+            "antiq pin projects/scanner"
+        );
+        assert_eq!(
+            swap(&["unpin", "scnaer", "-n"], Some("projects/scanner"), None),
+            "antiq unpin projects/scanner -n"
+        );
+        assert_eq!(
+            swap(
+                &[
+                    "fork",
+                    "scan",
+                    "--version",
+                    "2025",
+                    "--name",
+                    "my copy",
+                    "-n"
+                ],
+                Some("projects/scanner"),
+                Some("2025-06-18T154509")
+            ),
+            "antiq fork projects/scanner --version 2025-06-18T154509 --name 'my copy' -n"
+        );
+        assert_eq!(
+            swap(&["rebuild", "scan", "2025", "-n"], None, None),
+            "antiq rebuild scan 2025 -n"
+        );
+    }
+
+    #[test]
+    fn without_a_listing_the_stamps_of_an_ambiguous_version_stand_in_the_error() {
+        let stamps: Vec<String> = (10..21)
+            .map(|day| format!("2025-06-{day}T101500"))
+            .collect();
+        let failure = Failure::Version {
+            piece: "projects/scanner",
+            input: "2025-06",
+            stamps: &stamps,
+        };
+        let action = action(&cli(&["fork", "scanner"]).command).expect("fork is an action");
+        let parts = build(
+            &failure,
+            action,
+            None,
+            &no_command,
+            &plain_env(),
+            &TimeZone::UTC,
+        );
+        let lines = render_parts(&parts, &plain_env());
+        assert_eq!(
+            lines[..5],
+            [
+                " ✖ ERROR",
+                "▌ `2025-06` matches 11 versions of projects/scanner",
+                "▌",
+                "▌ Why it happened",
+                "▌   11 versions start with `2025-06`:",
+            ]
+        );
+        assert_eq!(lines[5], "▌     2025-06-10T101500");
+        assert_eq!(lines[lines.len() - 1], " ℹ INFO  Nothing was forked.");
+    }
+
+    #[test]
     fn a_word_a_shell_would_split_is_quoted() {
         assert_eq!(shell_word("projects/scanner"), "projects/scanner");
         assert_eq!(shell_word("my docs"), "'my docs'");
@@ -782,5 +855,66 @@ mod tests {
                 "projects/scanner          1",
             ]
         );
+    }
+
+    #[test]
+    fn every_command_that_takes_a_piece_names_its_verb_and_where_it_looks() {
+        let words = |args: &[&str]| {
+            let action = action(&cli(args).command).expect("an action");
+            (action.verb, action.done, action.source)
+        };
+        assert_eq!(
+            words(&["archive", "p"]),
+            ("archive", "archived", Source::Live)
+        );
+        assert_eq!(words(&["unpin", "p"]), ("unpin", "unpinned", Source::Live));
+        assert_eq!(
+            words(&["rebuild", "p", "v"]),
+            ("rebuild", "rebuilt", Source::Store)
+        );
+        assert!(action(&cli(&["list"]).command).is_none());
+    }
+
+    #[test]
+    fn the_command_to_copy_keeps_the_dry_run_of_forget_and_stays_bare_elsewhere() {
+        assert_eq!(
+            command_line(&cli(&["forget", "scan", "2025", "-n"]), Some("a"), None),
+            "antiq forget a 2025 -n"
+        );
+        assert_eq!(command_line(&cli(&["list"]), None, None), "antiq");
+    }
+
+    #[test]
+    fn the_count_table_keeps_a_long_name_whole_on_a_wide_terminal() {
+        let long = format!("projects/{}", "x".repeat(60));
+        let wide = Style {
+            width: WIDE_FROM,
+            color: false,
+            terminal: true,
+        };
+        let lines = count_table(&[(long.clone(), 3, Vec::new())], wide);
+        assert!(lines[1].starts_with(&long), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn a_version_spelled_with_a_t_is_marked_but_not_highlighted() {
+        let versions = [row("projects/scanner", "2026-11-04T090211")];
+        let style = Style {
+            width: 100,
+            color: true,
+            terminal: true,
+        };
+        let env = Env::new(true, true, true, 100);
+        let lines = version_table(
+            &versions,
+            "2026-11-04T09",
+            &["2026-11-04T090211".to_string()],
+            style,
+            &TimeZone::UTC,
+            &env,
+        );
+        // The only red is the marker.
+        assert!(lines[1].contains('▸'), "{lines:?}");
+        assert_eq!(lines[1].matches("\x1b[31m").count(), 1, "{lines:?}");
     }
 }

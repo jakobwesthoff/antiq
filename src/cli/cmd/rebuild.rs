@@ -195,3 +195,51 @@ fn render_plan(plan: &RebuildPlan, terminal: bool, zone: &TimeZone) -> Lines {
     let stderr = notice::warnings(warnings);
     Lines { stdout, stderr }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use antiq::relpath::RelPath;
+    use antiq::versions::stamp::Stamp;
+
+    fn entry(basis: Basis, against: Option<&str>, write: &[&str]) -> RebuildEntry {
+        let stamp = Stamp::parse("2026-11-04T090211").expect("a stamp");
+        RebuildEntry {
+            piece: RelPath::parse("projects/scanner").expect("a piece"),
+            stamp,
+            version: stamp.time(),
+            basis,
+            archive: "a.tar.zst".to_string(),
+            against: against.map(str::to_string),
+            write: write.iter().map(|file| file.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_missing_checksum_file_is_checked_against_the_listing_member_by_member() {
+        let rows = rows(&entry(
+            Basis::Listing,
+            Some("a.sha256.zst"),
+            &["a.tar.zst.sha256"],
+        ));
+        assert_eq!(
+            rows,
+            [
+                "  check    every member of a.tar.zst",
+                "  against  a.sha256.zst",
+                "  write    a.tar.zst.sha256",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_archive_without_sidecars_is_only_read() {
+        let rows = rows(&entry(
+            Basis::ReadableOnly,
+            None,
+            &["a.sha256.zst", "a.tar.zst.sha256"],
+        ));
+        assert_eq!(rows[0], "  read     a.tar.zst to its end");
+        assert_eq!(rows.len(), 3);
+    }
+}

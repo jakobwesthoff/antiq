@@ -179,6 +179,11 @@ fn a_title_only_info_is_one_line() {
 }
 
 #[test]
+fn a_block_with_an_empty_title_is_its_badge_alone() {
+    assert_eq!(Block::info(Rich::new()).render(&bare(80)), [" ℹ INFO"]);
+}
+
+#[test]
 fn a_hint_is_inline_and_wrapped_text_hangs_under_the_text() {
     let block = Block::hint(rich("one two three four five six"));
     assert_eq!(

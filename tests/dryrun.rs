@@ -85,7 +85,7 @@ fn a_dry_run_with_nothing_to_do_has_no_footer() {
 }
 
 #[test]
-fn a_forget_dry_run_lists_the_files_of_the_version_under_its_action() {
+fn a_forget_dry_run_lists_the_files_of_the_version_and_says_the_deletion_is_final() {
     let world = world(|builder| {
         builder.version("projects/scanner", NEW, &[("main.rs", "fn main() {}\n")]);
     });
@@ -97,6 +97,9 @@ fn a_forget_dry_run_lists_the_files_of_the_version_under_its_action() {
          \x20 archive    projects-scanner--2026-11-04T090211.tar.zst\n\
          \x20 listing    projects-scanner--2026-11-04T090211.sha256.zst\n\
          \x20 checksum   projects-scanner--2026-11-04T090211.tar.zst.sha256\n\
+         \n\
+         \x20ℹ INFO  forget deletes a version for good.\n\
+         ▌   unearth and fork cannot bring it back afterwards.\n\
          \n\
          Dry run: nothing was deleted. Run again without -n to delete the version.\n"
     );

@@ -112,7 +112,7 @@ fn fallback(rendered: &str) -> Block {
 mod tests {
     use super::super::console::env::Env;
     use super::super::{Cli, os_args};
-    use super::block_for;
+    use super::{ContextKind, ContextValue, ErrorKind, block_for, context_text, fallback};
     use clap::Parser;
 
     /// The rich lines for the command line `args` on a terminal 100
@@ -216,5 +216,85 @@ mod tests {
             lines[1].starts_with("▌ a value is required for '--time <TIME>'"),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn several_missing_arguments_are_named_in_the_plural() {
+        let lines = rich(&["antiq", "rebuild"]);
+        assert_eq!(lines[1], "▌ Missing arguments <PIECE>, <VERSION>");
+    }
+
+    /// The error clap would raise for `kind`, built from the context values
+    /// given, so a test can reach combinations that no command line of
+    /// antiq produces.
+    fn raw(kind: ErrorKind, message: &str, context: &[(ContextKind, ContextValue)]) -> clap::Error {
+        let mut error = clap::Error::raw(kind, message);
+        for (key, value) in context {
+            error.insert(*key, value.clone());
+        }
+        error
+    }
+
+    #[test]
+    fn a_conflict_without_the_other_argument_keeps_clap_s_first_paragraph() {
+        let error = raw(
+            ErrorKind::ArgumentConflict,
+            "the argument '--init' cannot be used with another",
+            &[(
+                ContextKind::InvalidArg,
+                ContextValue::String("--init".into()),
+            )],
+        );
+        let lines = block_for(&error, &[]).render(&Env::new(true, false, true, 100));
+        assert_eq!(
+            lines[1],
+            "▌ the argument '--init' cannot be used with another"
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_usage_paragraph_gets_only_the_help_pointer() {
+        let error = raw(
+            ErrorKind::InvalidSubcommand,
+            "unrecognized subcommand 'x'",
+            &[(
+                ContextKind::InvalidSubcommand,
+                ContextValue::String("x".into()),
+            )],
+        );
+        let lines = block_for(&error, &[]).render(&Env::new(true, false, true, 100));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("▌   Run antiq --help for the list of commands.")
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("Usage:")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_paragraphs_of_a_fallback_keep_the_tip_and_the_usage_on_one_line_each() {
+        let rendered = "error: bad value\n\n  tip: try\n  this\n\nUsage: antiq\n  list\n\nFor more information, try '--help'.";
+        assert_eq!(
+            fallback(rendered).render(&Env::new(true, false, true, 100)),
+            [
+                " ✖ ERROR",
+                "▌ bad value",
+                "▌",
+                "▌ How to fix it",
+                "▌   tip: try this",
+                "▌   Usage: antiq list",
+            ]
+        );
+    }
+
+    #[test]
+    fn context_values_without_text_are_ignored() {
+        assert_eq!(
+            context_text(&ContextValue::StyledStr("styled".to_string().into())),
+            Some("styled".to_string())
+        );
+        assert_eq!(context_text(&ContextValue::Number(3)), None);
     }
 }
