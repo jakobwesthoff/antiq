@@ -89,7 +89,7 @@
 //! name of another machine. `remove` deletes the directory. `copy_back`
 //! runs `rsync -aH` into a new directory and returns it as a collection,
 //! for scenarios that restore from the target. `real_rsync` finds an rsync
-//! of 3.2.4 or later and `Collection::use_real_rsync` writes it as
+//! of 3.2.4 or later and `Setup::with_real_rsync` writes it as
 //! `[target] rsync`, so a push does not depend on the machine's `PATH`
 //! order (macOS ships openrsync as `/usr/bin/rsync`).
 //!

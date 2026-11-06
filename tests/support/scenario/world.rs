@@ -58,6 +58,13 @@ impl Setup {
         self
     }
 
+    /// Names the located rsync as `[target] rsync`. Needs `with_target`
+    /// first.
+    pub fn with_real_rsync(self) -> Setup {
+        self.collection.use_real_rsync();
+        self
+    }
+
     /// Runs `program` instead of the antiq binary, started the same way.
     pub fn with_program(mut self, program: impl Into<PathBuf>) -> Setup {
         self.program = Some(program.into());

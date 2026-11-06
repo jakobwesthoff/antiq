@@ -15,6 +15,7 @@ mod harness;
 mod init;
 mod list;
 mod pin;
+mod push;
 mod status;
 mod unearth;
 mod verify;
