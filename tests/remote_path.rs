@@ -406,3 +406,254 @@ fn a_dry_run_in_json_says_so_before_the_actions() {
     assert_eq!(json["actions"][1]["objects"], 2);
     assert!(json.get("pulled").is_none());
 }
+
+// =========================================================
+// remote show
+// =========================================================
+
+/// Attaches the remote at `root` to `collection`.
+fn attach(collection: &TempCollection, root: &Path) {
+    let run = remote_in(collection, &["add", path_text(root)]);
+    assert_eq!(
+        run.code(),
+        0,
+        "stdout: {} stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn without_a_remote_show_says_so_and_exits_0() {
+    let collection = TempCollection::minimal();
+    let run = remote_in(&collection, &["show"]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "No remote is attached.\n");
+    let json = remote_in(&collection, &["show", "--json"]).json();
+    assert_eq!(json["command"], "remote show");
+    assert_eq!(json["attached"], false);
+    assert!(json.get("state").is_none());
+}
+
+#[test]
+fn a_reachable_remote_is_shown_with_its_kind_url_id_and_state() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    let run = remote_in(&collection, &["show"]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let shown = run.stdout.replace(path_text(&root), "<remote>");
+    insta::assert_snapshot!(shown, @r"
+    remote: path <remote>
+      id: 01BX5ZZKBKACTAV9WEVGEMMVRY
+      state: reachable
+    ");
+    assert!(
+        run.stderr.contains("is not a mount point"),
+        "{}",
+        run.stderr
+    );
+
+    let json = remote_in(&collection, &["show", "--json"]).json();
+    assert_eq!(json["attached"], true);
+    assert_eq!(json["kind"], "path");
+    assert_eq!(json["url"], path_text(&root));
+    assert_eq!(json["id"], REMOTE_ID);
+    assert_eq!(json["state"], "reachable");
+    assert_eq!(json["probed"], serde_json::json!({}));
+    assert!(json.get("reason").is_none());
+}
+
+#[test]
+fn a_remote_whose_root_is_gone_is_shown_as_away() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    fs::remove_dir_all(&root).expect("the share goes");
+    let run = remote_in(&collection, &["show", "--json"]);
+    assert_eq!(run.code(), 0);
+    let json = run.json();
+    assert_eq!(json["state"], "away");
+    assert!(
+        json["reason"]
+            .as_str()
+            .expect("a reason")
+            .contains("does not exist")
+    );
+}
+
+#[test]
+fn a_remote_with_another_marker_is_shown_as_broken() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    fs::write(
+        root.join("antiq-remote.json"),
+        "{\"format\":1,\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"layout\":1}\n",
+    )
+    .expect("write");
+    let run = remote_in(&collection, &["show"]);
+    assert_eq!(run.code(), 0);
+    assert!(run.stdout.contains("state: broken ("), "{}", run.stdout);
+}
+
+#[test]
+fn showing_takes_no_lock_and_writes_nothing() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    let before = (names(&root), config_of(&collection));
+    let lock = collection.root().join(".antiq/lock");
+    fs::remove_file(&lock).expect("the lock file `add` made is removed");
+    remote_in(&collection, &["show"]);
+    assert_eq!((names(&root), config_of(&collection)), before);
+    assert!(!lock.exists());
+}
+
+// =========================================================
+// remote remove
+// =========================================================
+
+/// Valid metadata for an archive that only the remote holds.
+fn remote_only_metadata(at: &str) -> Vec<u8> {
+    use antiq::meta::{
+        Checksum, CreatedSource, FileName, Lifecycle, Metadata, Payload, PayloadKind,
+    };
+    use antiq::relpath::{Name, RelPath};
+    let path = RelPath::parse(at).expect("a valid path");
+    let name =
+        Name::from_bytes(path.components().last().expect("a name").to_vec()).expect("a name");
+    let known = Metadata {
+        format: 1,
+        id: OTHER_OBJECT.parse().expect("an ID"),
+        collection: support::tree::COLLECTION_ID.parse().expect("an ID"),
+        path,
+        name,
+        created: "2026-01-01T00:00:00Z".parse().expect("a time"),
+        created_source: CreatedSource::Birth,
+        lifecycle: Lifecycle::Archived,
+        payloads: vec![Payload {
+            kind: PayloadKind::Archive,
+            version: 1,
+            file: FileName::new("0123456789abcdef-old.tar.zst").expect("a name"),
+            package_format: "tar+zstd/1".into(),
+            size: 1,
+            checksum: Checksum::sha256("00"),
+            listing: None,
+            machine: "laptop".into(),
+            created: "2026-01-01T00:00:00Z".parse().expect("a time"),
+            verified: None,
+            superseded: false,
+            encoder: None,
+            extra: serde_json::Map::new(),
+        }],
+        history: Vec::new(),
+        extra: serde_json::Map::new(),
+    };
+    antiq::meta::to_bytes(&known).expect("metadata serialises")
+}
+
+#[test]
+fn without_a_remote_removing_fails_with_no_remote() {
+    let collection = TempCollection::minimal();
+    let run = remote_in(&collection, &["remove", "--json"]);
+    assert_eq!(run.code(), 1);
+    assert_eq!(run.error_kind(), "no_remote");
+}
+
+#[test]
+fn removing_detaches_the_remote_and_keeps_the_local_metadata() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    let run = remote_in(&collection, &["remove"]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let shown = run.stdout.replace(path_text(&root), "<remote>");
+    insta::assert_snapshot!(shown, @"Detached the remote at <remote>
+    ");
+    assert!(!config_of(&collection).contains("[[remote]]"));
+    let kept = collection
+        .root()
+        .join(".antiq/objects")
+        .join(REMOTE_ID)
+        .join("meta.2");
+    assert_eq!(fs::read(kept).expect("kept"), b"two");
+    assert!(
+        root.join("antiq-remote.json").is_file(),
+        "the remote is left alone"
+    );
+    let show = remote_in(&collection, &["show"]);
+    assert_eq!(show.stdout, "No remote is attached.\n");
+}
+
+#[test]
+fn removing_lists_the_pieces_that_only_the_remote_holds() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    fs::write(
+        root.join("objects").join(OTHER_OBJECT).join("meta.1"),
+        remote_only_metadata("projects/old"),
+    )
+    .expect("write");
+    attach(&collection, &root);
+    let run = remote_in(&collection, &["remove", "--force"]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let shown = run.stdout.replace(path_text(&root), "<remote>");
+    insta::assert_snapshot!(shown, @r"
+    Detached the remote at <remote>
+    These remote-only pieces can no longer be reached:
+      projects/old (01D39ZY06FGSCTVN4T2V9PKHFZ)
+    ");
+}
+
+#[test]
+fn a_dry_run_of_removing_prints_the_plan_and_changes_nothing() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    fs::write(
+        root.join("objects").join(OTHER_OBJECT).join("meta.1"),
+        remote_only_metadata("projects/old"),
+    )
+    .expect("write");
+    attach(&collection, &root);
+    let before = config_of(&collection);
+    let run = remote_in(&collection, &["remove", "--dry-run"]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let shown = run.stdout.replace(path_text(&root), "<remote>");
+    insta::assert_snapshot!(shown, @r"
+    Would detach the remote at <remote>
+    These remote-only pieces would no longer be reachable:
+      projects/old (01D39ZY06FGSCTVN4T2V9PKHFZ)
+    ");
+    assert_eq!(config_of(&collection), before);
+
+    let json = remote_in(&collection, &["remove", "--dry-run", "--json"]);
+    let dry = json
+        .stdout
+        .find("\"dry_run\":true")
+        .expect("the key is there");
+    let actions = json.stdout.find("\"actions\"").expect("the key is there");
+    assert!(dry < actions, "{}", json.stdout);
+    assert_eq!(json.json()["remote_only"][0]["path"], "projects/old");
+    assert_eq!(json.json()["detached"], false);
+}
+
+#[test]
+fn a_remote_that_is_gone_can_still_be_removed() {
+    let collection = TempCollection::minimal();
+    let mut tree = remotes();
+    let root = existing_remote(&mut tree);
+    attach(&collection, &root);
+    fs::remove_dir_all(&root).expect("the share goes");
+    let run = remote_in(&collection, &["remove", "--json"]);
+    assert_eq!(run.code(), 0, "stdout: {}", run.stdout);
+    assert_eq!(run.json()["detached"], true);
+    assert!(!config_of(&collection).contains("[[remote]]"));
+}

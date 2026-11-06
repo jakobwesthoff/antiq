@@ -723,10 +723,12 @@ written after `--init` leaves the marker, and `remote add <url>` without
 `--init` attaches it.
 
 `remote show` prints kind, URL, remote ULID, reachability and the probed
-versions. `remote remove` only detaches: it deletes nothing on the
-remote and keeps the local metadata, lists the remote-only pieces that
-become unreachable, and goes through the brake. A path remote whose root
-is not a mount point gets a warning at `remote add` and at `remote show`.
+versions; it reads only, takes no lock, and reports a remote that is away
+or broken with exit 0. `remote remove` only detaches: it deletes nothing
+on the remote and keeps the local metadata, lists the remote-only pieces
+that become unreachable, and goes through the brake. A path remote whose
+root is not a mount point gets a warning at `remote add` and at
+`remote show`.
 
 Without a remote, `sync` fails with exit 1 and the error kind
 `no_remote`, `remote show` reports that none is attached and exits 0,
@@ -1751,7 +1753,17 @@ marker that is no mount point, `remote_broken` for the other roots that
 cannot be used, `unsupported` for an ssh URL, `usage` for an invalid URL
 or for `--host-key-alias` with a path URL, and `other` for the rest.
 
-`remote show` and `remote remove` have no payload defined yet.
+`remote show` adds `attached`. With a remote attached it also adds
+`kind`, `url`, `id`, `state` (`reachable`, `away` or `broken`), `reason`
+(for a remote that is away or broken; it names the place), `probed` (an
+object of what was probed on the remote, empty for a path remote) and
+`warnings`. Without a remote it reports `"attached": false` and exits 0.
+
+`remote remove` adds `detached`, `url`, `remote_only` (a list of `{id,
+path}` of the pieces whose archive only the remote holds, which cannot be
+reached any more), `dry_run` (present, and true, under `--dry-run`),
+`actions` (one `detach_remote` with the `url`) and `warnings`. Without a
+remote it fails with the error kind `no_remote`.
 
 `reconcile` adds `index` (`written` and `removed`, the numbers of files
 written to and removed from the index, and `skipped`, a list of `{id,

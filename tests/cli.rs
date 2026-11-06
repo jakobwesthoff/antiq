@@ -264,8 +264,8 @@ fn remote_add_takes_its_options() {
     assert_eq!(run.error_kind(), "not_a_collection");
     assert_eq!(run.json()["command"], "remote add");
 }
-accepts!(remote_show_takes_nothing, "remote show", ["remote", "show"]);
-accepts!(
+accepts_and_needs_a_collection!(remote_show_takes_nothing, "remote show", ["remote", "show"]);
+accepts_and_needs_a_collection!(
     remote_remove_takes_force_and_dry_run,
     "remote remove",
     ["remote", "remove", "--force", "--dry-run"]

@@ -5,11 +5,14 @@
 //! The `remote add`, `remote show` and `remote remove` commands.
 
 use crate::cli::output::Output;
-use crate::cli::{Context, RemoteAddArgs, RemoteCommand};
+use crate::cli::{Context, RemoteAddArgs, RemoteCommand, RemoteRemoveArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::id::RandomIds;
-use antiq::ops::remote::{AddReport, AddRequest, RemoteOpError, add};
+use antiq::ops::remote::{
+    AddReport, AddRequest, RemoteOpError, RemoveReport, ShowReport, add, remove, show,
+};
+use antiq::remote::RemoteState;
 use antiq::run::{self, Started};
 use anyhow::Context as _;
 use std::path::PathBuf;
@@ -17,15 +20,80 @@ use std::path::PathBuf;
 pub fn run(ctx: &Context, args: &RemoteCommand, out: &mut Output) -> anyhow::Result<u8> {
     match args {
         RemoteCommand::Add(add_args) => add_command(ctx, add_args, out),
-        other => super::not_implemented(other.name()),
+        RemoteCommand::Show => show_command(ctx, out),
+        RemoteCommand::Remove(remove_args) => remove_command(ctx, remove_args, out),
     }
 }
 
-fn add_command(ctx: &Context, args: &RemoteAddArgs, out: &mut Output) -> anyhow::Result<u8> {
+fn find_collection(ctx: &Context) -> anyhow::Result<Collection> {
     let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    Collection::find(&start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the collection")
+}
+
+fn print(out: &mut Output, lines: &Lines) -> anyhow::Result<()> {
+    for line in &lines.stdout {
+        out.line(line).context("print the result")?;
+    }
+    for line in &lines.stderr {
+        out.note(line).context("print the notes")?;
+    }
+    Ok(())
+}
+
+/// The note a dry run prints when another run holds the lock: a dry run
+/// takes none itself.
+fn lock_note(started: &Started) -> Option<String> {
+    match started {
+        Started::DryRun {
+            holder: Some(holder),
+        } => Some(format!(
+            "note: another run holds the lock (pid {}, machine {}, started {})",
+            holder.pid, holder.machine, holder.started
+        )),
+        _ => None,
+    }
+}
+
+fn show_command(ctx: &Context, out: &mut Output) -> anyhow::Result<u8> {
+    let collection = find_collection(ctx)?;
+    let report = show(&collection)
+        .map_err(antiq::Error::from)
+        .context("look at the remote")?;
+    if ctx.json {
+        out.json(Some("remote show"), &report)
+            .context("print the result")?;
+        return Ok(0);
+    }
+    print(out, &render_show(&report))?;
+    Ok(0)
+}
+
+fn remove_command(ctx: &Context, args: &RemoteRemoveArgs, out: &mut Output) -> anyhow::Result<u8> {
+    let collection = find_collection(ctx)?;
+    let clock = SystemClock;
+    let started = run::start(&collection, &clock, args.dry_run)
+        .map_err(antiq::Error::from)
+        .context("start the run")?;
+    // The brake follows with the item that implements it: until then
+    // `--force` has nothing to hold.
+    let report = remove(&collection, &started)
+        .map_err(antiq::Error::from)
+        .context("detach the remote")?;
+    if ctx.json {
+        out.json(Some("remote remove"), &report)
+            .context("print the result")?;
+        return Ok(0);
+    }
+    let mut lines = render_remove(&report);
+    lines.stderr.extend(lock_note(&started));
+    print(out, &lines)?;
+    Ok(0)
+}
+
+fn add_command(ctx: &Context, args: &RemoteAddArgs, out: &mut Output) -> anyhow::Result<u8> {
+    let collection = find_collection(ctx)?;
     let clock = SystemClock;
     let started = run::start(&collection, &clock, args.dry_run)
         .map_err(antiq::Error::from)
@@ -52,22 +120,8 @@ fn add_command(ctx: &Context, args: &RemoteAddArgs, out: &mut Output) -> anyhow:
         return Ok(0);
     }
     let mut lines = render(&report);
-    // A dry run takes no lock, so it says when another run holds it.
-    if let Started::DryRun {
-        holder: Some(holder),
-    } = &started
-    {
-        lines.stderr.push(format!(
-            "note: another run holds the lock (pid {}, machine {}, started {})",
-            holder.pid, holder.machine, holder.started
-        ));
-    }
-    for line in &lines.stdout {
-        out.line(line).context("print the result")?;
-    }
-    for line in &lines.stderr {
-        out.note(line).context("print the notes")?;
-    }
+    lines.stderr.extend(lock_note(&started));
+    print(out, &lines)?;
     Ok(0)
 }
 
@@ -103,12 +157,74 @@ fn render(report: &AddReport) -> Lines {
             _ => {}
         }
     }
-    let stderr = report
-        .warnings
+    Lines {
+        stdout,
+        stderr: notes(&report.warnings),
+    }
+}
+
+fn notes(warnings: &[antiq::report::Warning]) -> Vec<String> {
+    warnings
         .iter()
         .map(|warning| format!("note: {}", warning.message))
-        .collect();
-    Lines { stdout, stderr }
+        .collect()
+}
+
+fn render_show(report: &ShowReport) -> Lines {
+    let (Some(kind), Some(url), Some(id), Some(state)) =
+        (report.kind, &report.url, report.id, report.state)
+    else {
+        return Lines {
+            stdout: vec!["No remote is attached.".to_string()],
+            stderr: notes(&report.warnings),
+        };
+    };
+    let word = match state {
+        RemoteState::Reachable => "reachable",
+        RemoteState::Away => "away",
+        RemoteState::Broken => "broken",
+        RemoteState::None => "none",
+    };
+    let state = match &report.reason {
+        Some(reason) => format!("{word} ({reason})"),
+        None => word.to_string(),
+    };
+    Lines {
+        stdout: vec![
+            format!("remote: {kind} {url}"),
+            format!("  id: {id}"),
+            format!("  state: {state}"),
+        ],
+        stderr: notes(&report.warnings),
+    }
+}
+
+fn render_remove(report: &RemoveReport) -> Lines {
+    let mut stdout = if report.dry_run {
+        report.plan_lines()
+    } else {
+        vec![format!("Detached the remote at {}", report.url)]
+    };
+    if !report.remote_only.is_empty() {
+        stdout.push(
+            if report.dry_run {
+                "These remote-only pieces would no longer be reachable:"
+            } else {
+                "These remote-only pieces can no longer be reached:"
+            }
+            .to_string(),
+        );
+        stdout.extend(
+            report
+                .remote_only
+                .iter()
+                .map(|piece| format!("  {} ({})", piece.path, piece.id)),
+        );
+    }
+    Lines {
+        stdout,
+        stderr: notes(&report.warnings),
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +288,47 @@ mod tests {
                 "  id: 01BX5ZZKBKACTAV9WEVGEMMVRY",
             ]
         );
+    }
+
+    fn shown(state: RemoteState, reason: Option<&str>) -> ShowReport {
+        ShowReport {
+            attached: true,
+            kind: Some("path"),
+            url: Some("/Volumes/nas/antiq".into()),
+            id: Some("01BX5ZZKBKACTAV9WEVGEMMVRY".parse().expect("a ULID")),
+            state: Some(state),
+            reason: reason.map(String::from),
+            probed: Some(serde_json::Map::new()),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_state_of_a_remote_that_is_away_comes_with_its_reason() {
+        let lines = render_show(&shown(
+            RemoteState::Away,
+            Some("/Volumes/nas does not exist"),
+        ));
+        assert_eq!(
+            texts(&lines.stdout),
+            [
+                "remote: path /Volumes/nas/antiq",
+                "  id: 01BX5ZZKBKACTAV9WEVGEMMVRY",
+                "  state: away (/Volumes/nas does not exist)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_broken_remote_is_called_broken() {
+        let lines = render_show(&shown(RemoteState::Broken, Some("wrong marker")));
+        assert_eq!(lines.stdout[2], "  state: broken (wrong marker)");
+    }
+
+    #[test]
+    fn a_state_of_none_is_called_none() {
+        let lines = render_show(&shown(RemoteState::None, None));
+        assert_eq!(lines.stdout[2], "  state: none");
     }
 
     #[test]

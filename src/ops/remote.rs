@@ -10,18 +10,21 @@ use crate::config::{ConfigDoc, ConfigError, RemoteConfig};
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, write_atomic};
+use crate::fsx::tree::TreeRoot;
 use crate::id::{IdSource, ObjectId};
 use crate::lock::RunLock;
 use crate::machine::MachineError;
 use crate::plan::{Plan, PlanAction};
+use crate::reference::Candidate;
 use crate::relpath::machine_part;
 use crate::remote::marker::{self, MarkerError, write_marker};
 use crate::remote::path::{PathRemote, RootState, Seams, assess, inspect, probe_exclusive};
 use crate::remote::url::{RemoteUrl, UrlError};
-use crate::remote::{KnownVersions, Remote, RemoteError};
+use crate::remote::{KnownVersions, Remote, RemoteError, RemoteState};
 use crate::report::{CommandReport, Warning};
 use crate::run::Started;
 use crate::store::{Store, StoreError};
+use crate::tracking::{self, PieceState, TrackingError};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -85,6 +88,8 @@ pub enum RemoteOpError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Machine(#[from] MachineError),
+    #[error(transparent)]
+    Tracking(#[from] TrackingError),
 }
 
 impl HasKind for RemoteOpError {
@@ -104,6 +109,7 @@ pub enum RemoteAction {
     CreateRemote { url: String },
     AttachRemote { url: String },
     CopyMetadata { objects: usize },
+    DetachRemote { url: String },
 }
 
 impl PlanAction for RemoteAction {
@@ -115,6 +121,7 @@ impl PlanAction for RemoteAction {
             RemoteAction::CopyMetadata { objects } => {
                 format!("copy the metadata of {objects} objects")
             }
+            RemoteAction::DetachRemote { url } => format!("detach the remote at {url}"),
         }
     }
 }
@@ -150,11 +157,7 @@ pub struct AddReport {
 impl AddReport {
     /// The lines of a console for a dry run.
     pub fn plan_lines(&self) -> Vec<String> {
-        let mut plan = Plan::new();
-        for action in &self.actions {
-            plan.push(action.clone());
-        }
-        plan.lines()
+        plan_lines(&self.actions)
     }
 }
 
@@ -166,6 +169,193 @@ impl CommandReport for AddReport {
     fn warnings(&self) -> &[Warning] {
         &self.warnings
     }
+}
+
+/// What `remote show` found.
+#[derive(Debug, Serialize)]
+pub struct ShowReport {
+    pub attached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<RemoteState>,
+    /// What is wrong, for a remote that is away or broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// What was probed on the remote, by name. A path remote has nothing
+    /// to probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probed: Option<serde_json::Map<String, serde_json::Value>>,
+    pub warnings: Vec<Warning>,
+}
+
+impl CommandReport for ShowReport {
+    fn partial(&self) -> bool {
+        false
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+}
+
+/// Looks at the attached remote and changes nothing, locally or on the
+/// remote.
+pub fn show(collection: &Collection) -> Result<ShowReport, RemoteOpError> {
+    show_with(collection, &Seams::default())
+}
+
+pub(crate) fn show_with(
+    collection: &Collection,
+    seams: &Seams,
+) -> Result<ShowReport, RemoteOpError> {
+    let Some(config) = collection.config().remotes.first() else {
+        return Ok(ShowReport {
+            attached: false,
+            kind: None,
+            url: None,
+            id: None,
+            state: None,
+            reason: None,
+            probed: None,
+            warnings: Vec::new(),
+        });
+    };
+    let root = match RemoteUrl::parse(&config.url)? {
+        RemoteUrl::Path { root } => root,
+        RemoteUrl::Ssh { .. } => {
+            return Err(RemoteError::Unsupported("an ssh remote".into()).into());
+        }
+    };
+    let state = inspect(&root, seams);
+    let assessment = assess(&root, &state, config.id);
+    // The mount test only means something for a root that is there.
+    let mut warnings = Vec::new();
+    if matches!(state, RootState::Marker(_) | RootState::NoMarker { .. }) {
+        warnings.extend(mount_warning(&root, seams));
+    }
+    Ok(ShowReport {
+        attached: true,
+        kind: Some("path"),
+        url: Some(config.url.clone()),
+        id: Some(config.id),
+        state: Some(assessment.reachability.into()),
+        reason: Some(assessment.reason).filter(|reason| !reason.is_empty()),
+        probed: Some(serde_json::Map::new()),
+        warnings,
+    })
+}
+
+/// What `remote remove` did or would do.
+#[derive(Debug, Serialize)]
+pub struct RemoveReport {
+    pub detached: bool,
+    pub url: String,
+    /// The pieces whose archive only the remote holds, which cannot be
+    /// reached without it.
+    pub remote_only: Vec<Candidate>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub actions: Vec<RemoteAction>,
+    pub warnings: Vec<Warning>,
+}
+
+impl RemoveReport {
+    /// The lines of a console for a dry run.
+    pub fn plan_lines(&self) -> Vec<String> {
+        plan_lines(&self.actions)
+    }
+}
+
+fn plan_lines(actions: &[RemoteAction]) -> Vec<String> {
+    let mut plan = Plan::new();
+    for action in actions {
+        plan.push(action.clone());
+    }
+    plan.lines()
+}
+
+impl CommandReport for RemoveReport {
+    fn partial(&self) -> bool {
+        false
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+}
+
+/// Detaches the remote: the `[[remote]]` entry goes, nothing on the remote
+/// is touched and the local metadata stays.
+pub fn remove(collection: &Collection, started: &Started) -> Result<RemoveReport, RemoteOpError> {
+    let config = collection
+        .config()
+        .remotes
+        .first()
+        .ok_or(RemoteError::NoRemote)?;
+    let url = config.url.clone();
+    let remote_only = remote_only_pieces(collection)?;
+    let actions = vec![RemoteAction::DetachRemote { url: url.clone() }];
+
+    let Started::Guarded(guard) = started else {
+        return Ok(RemoveReport {
+            detached: false,
+            url,
+            remote_only,
+            dry_run: true,
+            actions,
+            warnings: Vec::new(),
+        });
+    };
+    let mut doc = ConfigDoc::read(&collection.config_path())?;
+    doc.remove_remote();
+    write_atomic(&collection.config_path(), doc.render()?.as_bytes())?;
+    Ok(RemoveReport {
+        detached: true,
+        url,
+        remote_only,
+        dry_run: false,
+        actions,
+        warnings: guard.warnings().to_vec(),
+    })
+}
+
+/// The pieces this machine has no archive of, which only the remote holds.
+/// An object whose metadata cannot be read is left out: `status` lists it
+/// as damaged.
+fn remote_only_pieces(collection: &Collection) -> Result<Vec<Candidate>, RemoteOpError> {
+    let store = Store::new(collection);
+    let tracked = tracking::read_all(collection)?;
+    let root = TreeRoot::open(collection.root()).map_err(|source| RemoteOpError::Io {
+        action: "open",
+        path: collection.root().display().to_string(),
+        source,
+    })?;
+    let mut pieces = Vec::new();
+    for object in store.objects()? {
+        let Ok(Some(current)) = store.current(object) else {
+            continue;
+        };
+        let entry = tracked.entries.iter().find(|entry| entry.id == object);
+        let folder_present = entry.is_some_and(|entry| root.lstat(&entry.path).is_ok());
+        let state = tracking::derive_state(
+            entry,
+            Some(&current.metadata),
+            folder_present,
+            collection.id(),
+        );
+        if matches!(state, Ok(PieceState::RemoteOnly)) {
+            pieces.push(Candidate {
+                id: object.to_string(),
+                path: current.metadata.path.to_string(),
+            });
+        }
+    }
+    Ok(pieces)
 }
 
 /// Attaches the remote at `request.url`, or creates it with `--init`.
@@ -1142,6 +1332,376 @@ mod tests {
             ..no_mount_point()
         };
         world.run(&root, false, true, &seams).expect("planned");
+    }
+
+    // =====================================================
+    // show
+    // =====================================================
+
+    impl World {
+        fn show(&self, seams: &Seams) -> Result<ShowReport, RemoteOpError> {
+            show_with(&self.collection(), seams)
+        }
+
+        fn append_to_config(&self, text: &str) {
+            let config = self.collection().config_path();
+            let mut found = fs::read_to_string(&config).expect("config");
+            found.push_str(text);
+            fs::write(&config, found).expect("write");
+        }
+    }
+
+    #[test]
+    fn without_a_remote_show_says_so() {
+        let world = world();
+        let report = world.show(&no_mount_point()).expect("shown");
+        assert!(!report.attached);
+        assert_eq!(report.kind, None);
+        assert_eq!(report.state, None);
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_reachable_remote_is_shown_with_kind_url_id_and_state() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let report = world.show(&no_mount_point()).expect("shown");
+        assert!(report.attached);
+        assert_eq!(report.kind, Some("path"));
+        assert_eq!(report.url.as_deref(), root.to_str());
+        assert_eq!(report.id, Some(id(REMOTE_ID)));
+        assert_eq!(report.state, Some(RemoteState::Reachable));
+        assert_eq!(report.reason, None);
+        assert_eq!(report.probed, Some(serde_json::Map::new()));
+    }
+
+    #[test]
+    fn a_remote_whose_root_is_gone_is_shown_as_away_with_the_reason() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        fs::remove_dir_all(&root).expect("the share goes");
+        let report = world.show(&no_mount_point()).expect("shown");
+        assert_eq!(report.state, Some(RemoteState::Away));
+        assert!(
+            report
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("does not exist")),
+            "{:?}",
+            report.reason
+        );
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_remote_with_another_marker_is_shown_as_broken() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        fs::write(
+            root.join(marker::FILE_NAME),
+            Marker::new(id(OTHER_ID)).to_bytes(),
+        )
+        .expect("write");
+        let report = world.show(&no_mount_point()).expect("shown");
+        assert_eq!(report.state, Some(RemoteState::Broken));
+        assert!(report.reason.is_some());
+    }
+
+    #[test]
+    fn showing_a_root_that_is_no_mount_point_warns_and_a_mount_point_does_not() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let warned = world.show(&no_mount_point()).expect("shown");
+        assert!(
+            warned.warnings[0].message.contains("not a mount point"),
+            "{:?}",
+            warned.warnings
+        );
+        let mounted = Seams {
+            mount: Arc::new(|_| Ok(true)),
+            ..Seams::default()
+        };
+        assert!(world.show(&mounted).expect("shown").warnings.is_empty());
+    }
+
+    #[test]
+    fn showing_changes_nothing() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let before = (names(&root), world.config_text());
+        world.show(&no_mount_point()).expect("shown");
+        assert_eq!(names(&root), before.0);
+        assert_eq!(world.config_text(), before.1);
+    }
+
+    #[test]
+    fn an_ssh_remote_in_the_config_cannot_be_shown_yet() {
+        let world = world();
+        world.append_to_config(&format!(
+            "\n[[remote]]\nurl = \"ssh://nas/srv/antiq\"\nid = \"{REMOTE_ID}\"\n"
+        ));
+        let error = world.show(&no_mount_point()).expect_err("not supported");
+        assert!(
+            matches!(error, RemoteOpError::Remote(RemoteError::Unsupported(_))),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_url_in_the_config_that_does_not_fit_cannot_be_shown() {
+        let world = world();
+        world.append_to_config(&format!(
+            "\n[[remote]]\nurl = \"relative\"\nid = \"{REMOTE_ID}\"\n"
+        ));
+        let error = world.show(&no_mount_point()).expect_err("no URL");
+        assert!(matches!(error, RemoteOpError::Url(_)), "{error}");
+    }
+
+    // =====================================================
+    // remove
+    // =====================================================
+
+    impl World {
+        fn remove(&self, dry_run: bool) -> Result<RemoveReport, RemoteOpError> {
+            let collection = self.collection();
+            let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+            let started = run::start(&collection, &clock, dry_run).expect("the run starts");
+            remove(&collection, &started)
+        }
+
+        /// Archived metadata for object `number` at `path`, with no entry
+        /// of this machine: an archive only the remote holds.
+        fn remote_only(&self, number: u8, path: &str) -> ObjectId {
+            let object = ObjectId::from_ulid(ulid::Ulid::from_parts(
+                1_600_000_000_000 + u64::from(number),
+                u128::from(number),
+            ));
+            let known = archived_metadata(object, path);
+            let dir = self.collection().object_dir(object);
+            fs::create_dir_all(&dir).expect("dirs");
+            fs::write(
+                dir.join("meta.1"),
+                crate::meta::to_bytes(&known).expect("serialises"),
+            )
+            .expect("write");
+            object
+        }
+    }
+
+    fn archived_metadata(object: ObjectId, at: &str) -> crate::meta::Metadata {
+        use crate::meta::PayloadKind;
+        use crate::meta::{Checksum, CreatedSource, FileName, Lifecycle, Metadata, Payload};
+        use crate::relpath::{Name, RelPath};
+        let path = RelPath::parse(at).expect("a valid path");
+        let name =
+            Name::from_bytes(path.components().last().expect("a name").to_vec()).expect("a name");
+        Metadata {
+            format: 1,
+            id: object,
+            collection: COLLECTION_ID.parse().expect("an ID"),
+            path,
+            name,
+            created: "2026-01-01T00:00:00Z".parse().expect("a time"),
+            created_source: CreatedSource::Birth,
+            lifecycle: Lifecycle::Archived,
+            payloads: vec![Payload {
+                kind: PayloadKind::Archive,
+                version: 1,
+                file: FileName::new("0123456789abcdef-x.tar.zst").expect("a name"),
+                package_format: "tar+zstd/1".into(),
+                size: 1,
+                checksum: Checksum::sha256("00"),
+                listing: None,
+                machine: "laptop".into(),
+                created: "2026-01-01T00:00:00Z".parse().expect("a time"),
+                verified: None,
+                superseded: false,
+                encoder: None,
+                extra: serde_json::Map::new(),
+            }],
+            history: Vec::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn removing_without_a_remote_says_so() {
+        let world = world();
+        let error = world.remove(false).expect_err("no remote");
+        assert!(
+            matches!(error, RemoteOpError::Remote(RemoteError::NoRemote)),
+            "{error}"
+        );
+        assert_eq!(error.kind(), ErrorKind::NoRemote);
+    }
+
+    #[test]
+    fn removing_detaches_and_keeps_everything_else() {
+        let world = world();
+        let root = world.remote("antiq");
+        put_version(&root, REMOTE_ID, 1, b"first");
+        world.add(&root).expect("attached");
+        let collection = world.collection();
+        let local = Store::new(&collection).meta_path(id(REMOTE_ID), 1);
+        let before_remote = names(&root);
+        let report = world.remove(false).expect("detached");
+        assert!(report.detached);
+        assert_eq!(report.url, root.to_str().expect("UTF-8"));
+        assert!(world.collection().config().remotes.is_empty());
+        assert!(!world.config_text().contains("[[remote]]"));
+        assert!(world.config_text().contains("name = \"laptop\""));
+        assert_eq!(fs::read(local).expect("kept"), b"first");
+        assert_eq!(names(&root), before_remote);
+        assert_eq!(
+            report.actions,
+            [RemoteAction::DetachRemote {
+                url: root.to_str().expect("UTF-8").into()
+            }]
+        );
+    }
+
+    #[test]
+    fn removing_lists_the_pieces_only_the_remote_holds() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let remote_only = world.remote_only(1, "projects/old");
+        // An archived piece whose archive this machine holds is not listed.
+        let kept = world.remote_only(2, "projects/kept");
+        let entry = crate::tracking::TrackingEntry {
+            local_payloads: vec![crate::tracking::LocalPayload {
+                kind: crate::meta::PayloadKind::Archive,
+                version: 1,
+                file: crate::meta::FileName::new("0123456789abcdef-x.tar.zst").expect("a name"),
+            }],
+            ..crate::tracking::TrackingEntry::new(
+                kept,
+                crate::relpath::RelPath::parse("projects/kept").expect("a path"),
+                crate::tracking::EntryState::Gone,
+                crate::tracking::VersionTakenOut::Committed(1),
+                "2026-01-01T00:00:00Z".parse().expect("a time"),
+            )
+        };
+        let tracking = world.collection().tracking_path(kept);
+        fs::write(tracking, serde_json::to_vec(&entry).expect("serialises")).expect("write");
+        let report = world.remove(false).expect("detached");
+        assert_eq!(
+            report.remote_only,
+            [Candidate {
+                id: remote_only.to_string(),
+                path: "projects/old".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_folder_at_the_path_of_a_remote_only_piece_makes_it_unearthed_and_not_listed() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let object = world.remote_only(1, "projects/old");
+        let entry = crate::tracking::TrackingEntry::new(
+            object,
+            crate::relpath::RelPath::parse("projects/old").expect("a path"),
+            crate::tracking::EntryState::Live,
+            crate::tracking::VersionTakenOut::Committed(1),
+            "2026-01-01T00:00:00Z".parse().expect("a time"),
+        );
+        fs::write(
+            world.collection().tracking_path(object),
+            serde_json::to_vec(&entry).expect("serialises"),
+        )
+        .expect("write");
+        fs::create_dir_all(world.collection_dir.root().join("projects/old")).expect("dirs");
+        let report = world.remove(false).expect("detached");
+        assert!(report.remote_only.is_empty(), "{:?}", report.remote_only);
+    }
+
+    #[test]
+    fn a_dry_run_of_removing_plans_the_detach_and_changes_nothing() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        world.remote_only(1, "projects/old");
+        let before = world.config_text();
+        let report = world.remove(true).expect("planned");
+        assert!(report.dry_run && !report.detached);
+        assert_eq!(
+            report.plan_lines(),
+            [format!("Would detach the remote at {}", root.display())]
+        );
+        assert_eq!(report.remote_only.len(), 1);
+        assert_eq!(world.config_text(), before);
+    }
+
+    #[test]
+    fn a_remote_that_is_gone_can_still_be_removed() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        fs::remove_dir_all(&root).expect("the share goes");
+        world.remove(false).expect("detached");
+        assert!(world.collection().config().remotes.is_empty());
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_written_keeps_the_remote_attached() {
+        let world = world();
+        let root = world.remote("antiq");
+        world.add(&root).expect("attached");
+        let antiq = world.collection().antiq_dir();
+        let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+        drop(run::start(&world.collection(), &clock, false).expect("the run starts"));
+        fs::set_permissions(&antiq, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let denied = fs::write(antiq.join("probe"), "").is_err();
+        let error = world.remove(false).expect_err("no config write");
+        fs::set_permissions(&antiq, fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(
+            denied,
+            "the test needs a user for whom mode 555 denies writing; run it as a non-root user"
+        );
+        assert!(matches!(error, RemoteOpError::Fsx(_)), "{error}");
+        assert_eq!(world.collection().config().remotes.len(), 1);
+    }
+
+    #[test]
+    fn a_collection_root_that_cannot_be_opened_stops_the_listing_of_remote_only_pieces() {
+        let error = remote_only_pieces(&Collection::for_tests()).expect_err("no root");
+        assert!(
+            matches!(error, RemoteOpError::Io { action: "open", .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_other_reports_are_never_partial_and_list_their_warnings() {
+        let shown = ShowReport {
+            attached: false,
+            kind: None,
+            url: None,
+            id: None,
+            state: None,
+            reason: None,
+            probed: None,
+            warnings: vec![Warning::new("one")],
+        };
+        assert!(!shown.partial());
+        assert_eq!(shown.warnings(), [Warning::new("one")]);
+        let removed = RemoveReport {
+            detached: true,
+            url: "/x".into(),
+            remote_only: Vec::new(),
+            dry_run: false,
+            actions: Vec::new(),
+            warnings: vec![Warning::new("two")],
+        };
+        assert!(!removed.partial());
+        assert_eq!(removed.warnings(), [Warning::new("two")]);
     }
 
     #[test]
