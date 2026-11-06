@@ -1580,6 +1580,10 @@ mod tests {
     fn the_top_directory_mode_is_compared_on_a_users_folder() {
         use std::os::unix::fs::PermissionsExt;
         let tree = mixed();
+        // The folder is packed with a mode other than the one it is changed
+        // to, whatever mask the process has.
+        std::fs::set_permissions(tree.path("proj"), std::fs::Permissions::from_mode(0o755))
+            .expect("the mode is set");
         let packaged = pack_piece(&tree, "proj");
         std::fs::set_permissions(tree.path("proj"), std::fs::Permissions::from_mode(0o700))
             .expect("the mode is set");
@@ -1596,6 +1600,8 @@ mod tests {
     fn a_staged_top_directory_with_another_mode_verifies() {
         use std::os::unix::fs::PermissionsExt;
         let tree = mixed();
+        std::fs::set_permissions(tree.path("proj"), std::fs::Permissions::from_mode(0o755))
+            .expect("the mode is set");
         let packaged = pack_piece(&tree, "proj");
         std::fs::set_permissions(tree.path("proj"), std::fs::Permissions::from_mode(0o700))
             .expect("the mode is set");

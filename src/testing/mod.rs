@@ -166,6 +166,9 @@ mod snapshot_tests {
         tree.dir("d");
         tree.symlink("link", "one");
         tree.file("d/f", "x");
+        // The directory starts with the mode the test changes and restores,
+        // whatever mask the process has.
+        fs::set_permissions(tree.path("d"), fs::Permissions::from_mode(0o755)).expect("chmod");
         let before = snapshot(tree.root());
 
         fs::set_permissions(tree.path("d"), fs::Permissions::from_mode(0o700)).expect("chmod");

@@ -997,10 +997,13 @@ mod tests {
         assert_eq!(raw_error(&refused), Some(Errno::NAMETOOLONG.raw_os_error()));
 
         let file = deep.join(&name("note"));
-        root.create_file(&file, 0o640)
-            .expect("the file is created")
-            .write_all(b"hello")
-            .expect("the file is written");
+        let mut created = root.create_file(&file, 0o640).expect("the file is created");
+        created.write_all(b"hello").expect("the file is written");
+        // The mask of the process takes bits from the mode a file is
+        // created with, so the mode the stat has to report is set here.
+        created
+            .set_permissions(Permissions::from_mode(0o640))
+            .expect("the mode is set");
 
         let entry = root.lstat(&file).expect("the file is stat'd");
         assert_eq!(entry.kind, EntryKind::File);
