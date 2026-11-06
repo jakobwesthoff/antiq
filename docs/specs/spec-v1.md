@@ -1930,7 +1930,8 @@ the current archive file is not in the object's directory on the remote or
 the remote does not list the object. The mark clears once the file is
 back. A remote that cannot be listed ends the remote part with its error
 and leaves the marks as they are. The upload temp files of this machine
-for pieces that are pending upload are kept. A dry run reads the remote
+for pieces that are pending upload, and those of every object with a
+recorded change, are kept. A dry run reads the remote
 without pulling, lists the marks and the removals, and writes nothing; a
 removal that depends on the age of a file is listed as such.
 

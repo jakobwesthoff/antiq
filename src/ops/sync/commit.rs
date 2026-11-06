@@ -75,7 +75,7 @@ pub(super) fn pending_objects(collection: &Collection) -> Result<Vec<ObjectId>, 
 /// has a recorded change keeps the temp files of its files, whatever the
 /// run did with it, since a later run continues them. An object whose
 /// metadata cannot be read keeps nothing.
-pub(super) fn pending_temp_names(
+pub(crate) fn pending_temp_names(
     collection: &Collection,
     machine: &str,
 ) -> Result<BTreeSet<(ObjectId, String)>, SyncError> {

@@ -1138,3 +1138,41 @@ fn if_reachable_with_a_fresh_away_remote_keeps_the_exit_code_of_a_partial_index(
         run.stderr
     );
 }
+
+// ---------------------------------------------------------
+// The upload of a live package that waits
+// ---------------------------------------------------------
+
+#[test]
+fn the_temp_file_of_a_live_package_that_waits_for_its_upload_is_kept() {
+    let world = world();
+    put_meta(
+        world.root(),
+        &metadata(1, "alpha", Lifecycle::Live, COLLECTION_ID, Vec::new()),
+    );
+    put_entry(world.root(), &entry(1, "alpha", EntryState::Live));
+    fs::create_dir_all(world.root().join("alpha")).expect("the folder");
+    fs::write(world.root().join("alpha/a.txt"), b"x").expect("a file");
+    let there = world.remote_dir(1);
+    fs::create_dir_all(&there).expect("the object directory");
+    fs::copy(world.local_dir(1).join("meta.1"), there.join("meta.1")).expect("the version");
+    let live = support::objects::payload(PayloadKind::Live, 2, 10);
+    let name = live.file.as_str().to_string();
+    let waiting = metadata(1, "alpha", Lifecycle::Live, COLLECTION_ID, vec![live]);
+    fs::write(
+        world.local_dir(1).join("meta.pending"),
+        antiq::meta::to_bytes(&waiting).expect("bytes"),
+    )
+    .expect("the recorded change");
+    fs::write(world.local_dir(1).join(&name), b"live package").expect("the package");
+    let temp = format!(".{name}.laptop.part");
+    world.old_leftover(1, &temp);
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert!(
+        world.remote_dir(1).join(&temp).exists(),
+        "the temp file of a waiting live-package upload was removed"
+    );
+}

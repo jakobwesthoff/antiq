@@ -132,8 +132,10 @@ fn reach(
     let tracked = tracking::read_all(collection)?;
     let listed: BTreeSet<ObjectId> = remote.list_objects()?.into_iter().collect();
     let mut changes = Vec::new();
-    let mut keep = BTreeSet::new();
     let machine = collection.machine_name().map_err(RemoteError::from)?;
+    // Every object with a recorded change keeps the temp files of its
+    // uploads, as `sync` does.
+    let mut keep = crate::ops::sync::commit::pending_temp_names(collection, &machine)?;
     for entry in &tracked.entries {
         let current = match store.current(entry.id) {
             Ok(Some(current)) => current,
