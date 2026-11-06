@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub mod cmd;
+pub mod scenario;
 pub mod sshd;
 pub mod tree;
 pub mod versions;
