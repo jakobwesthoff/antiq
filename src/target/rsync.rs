@@ -536,6 +536,10 @@ mod tests {
     fn probe_refuses_a_pre_release_of_3_2_4() {
         let refused = refusal(&line("3.2.4pre1"));
         assert!(matches!(refused, Refusal::TooOld(found) if found.pre_release));
+        assert_eq!(
+            refused.to_string(),
+            "version 3.2.4 (pre-release) is older than 3.2.4"
+        );
     }
 
     #[test]
