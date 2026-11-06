@@ -20,9 +20,11 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, flush_file};
+use path::PathRemote;
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
+use url::{RemoteUrl, UrlError};
 
 /// How the path remote makes what it wrote durable. The real one flushes
 /// with `sync_all` and falls back to plain `fsync` where a filesystem
@@ -174,9 +176,79 @@ impl From<Reachability> for RemoteState {
     }
 }
 
-/// Looks at the remote of a collection without changing anything.
-pub fn probe_state(_collection: &Collection) -> RemoteState {
-    RemoteState::None
+/// The answer to "can the remote be used right now", with the reason when
+/// it cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assessment {
+    pub reachability: Reachability,
+    /// Says what is wrong, naming the place; empty while the remote is
+    /// reachable.
+    pub reason: String,
+}
+
+impl Assessment {
+    pub fn new(reachability: Reachability, reason: impl Into<String>) -> Assessment {
+        Assessment {
+            reachability,
+            reason: reason.into(),
+        }
+    }
+
+    /// Ok while the remote is reachable, else the error that says why not.
+    pub fn into_result(self) -> Result<(), RemoteError> {
+        match self.reachability {
+            Reachability::Reachable => Ok(()),
+            Reachability::Away => Err(RemoteError::Away {
+                message: self.reason,
+                overdue: false,
+            }),
+            Reachability::Broken => Err(RemoteError::Broken(self.reason)),
+        }
+    }
+}
+
+/// Everything a remote does. Each implementation provides every operation
+/// (ADR 0015), and each one checks that the remote is the one the config
+/// names before it reads or writes (ADR 0031).
+pub trait Remote: Send + Sync {
+    /// Whether the remote can be used now. It looks and changes nothing.
+    fn reachability(&self) -> Result<Assessment, RemoteError>;
+
+    /// Called at the start of each remote phase of a run.
+    fn begin_phase(&self) -> Result<(), RemoteError>;
+
+    /// Called once when the run is done with the remote.
+    fn finish(&self);
+}
+
+/// Opens the remote the config of `collection` names.
+pub fn open(collection: &Collection) -> Result<Box<dyn Remote>, RemoteError> {
+    let config = collection
+        .config()
+        .remotes
+        .first()
+        .ok_or(RemoteError::NoRemote)?;
+    match RemoteUrl::parse(&config.url)? {
+        RemoteUrl::Path { root } => Ok(Box::new(PathRemote::new(root, config.id))),
+        RemoteUrl::Ssh { .. } => Err(RemoteError::Unsupported("an ssh remote".into())),
+    }
+}
+
+/// Looks at the remote of a collection without changing anything. A remote
+/// that cannot be opened, such as an ssh remote before this version can
+/// open it, cannot be used and is reported as broken.
+pub fn probe_state(collection: &Collection) -> RemoteState {
+    let Some(config) = collection.config().remotes.first() else {
+        return RemoteState::None;
+    };
+    match RemoteUrl::parse(&config.url) {
+        Ok(RemoteUrl::Path { root }) => {
+            path::assess_root(&root, config.id, &path::Seams::default())
+                .reachability
+                .into()
+        }
+        Ok(RemoteUrl::Ssh { .. }) | Err(_) => RemoteState::Broken,
+    }
 }
 
 #[cfg(test)]
@@ -212,9 +284,140 @@ mod tests {
         }
     }
 
+    // =====================================================
+    // Opening and probing the configured remote
+    // =====================================================
+
+    const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
+
+    fn collection_with(url: &str, machine: Option<&str>) -> Collection {
+        let mut config = crate::config::Config::new(
+            crate::testing::tree::COLLECTION_ID
+                .parse()
+                .expect("the fixture ID is a ULID"),
+        );
+        config.machine.name = machine.map(String::from);
+        config.remotes.push(crate::config::RemoteConfig {
+            url: url.into(),
+            id: REMOTE_ID.parse().expect("a ULID"),
+            host_key_alias: None,
+        });
+        Collection::new(std::path::PathBuf::from("/collection-for-tests"), config)
+    }
+
+    fn remote_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("temp dir");
+        let marker = marker::Marker::new(REMOTE_ID.parse().expect("a ULID"));
+        std::fs::write(root.path().join(marker::FILE_NAME), marker.to_bytes())
+            .expect("the marker is written");
+        root
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .expect("the directory is listed")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
+            .collect();
+        found.sort();
+        found
+    }
+
     #[test]
-    fn no_remote_is_probed_yet() {
+    fn without_a_remote_the_state_is_none() {
         assert_eq!(probe_state(&Collection::for_tests()), RemoteState::None);
+    }
+
+    #[test]
+    fn a_path_remote_with_its_marker_is_reachable() {
+        let root = remote_root();
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some("laptop"));
+        assert_eq!(probe_state(&collection), RemoteState::Reachable);
+    }
+
+    #[test]
+    fn a_missing_root_is_away() {
+        let parent = tempfile::tempdir().expect("temp dir");
+        let url = parent.path().join("absent");
+        let collection = collection_with(url.to_str().expect("UTF-8"), Some("laptop"));
+        assert_eq!(probe_state(&collection), RemoteState::Away);
+    }
+
+    #[test]
+    fn an_ssh_remote_cannot_be_used_yet_and_is_broken() {
+        let collection = collection_with("ssh://nas/srv/antiq", Some("laptop"));
+        assert_eq!(probe_state(&collection), RemoteState::Broken);
+    }
+
+    #[test]
+    fn a_url_that_does_not_parse_is_broken() {
+        let collection = collection_with("relative/path", Some("laptop"));
+        assert_eq!(probe_state(&collection), RemoteState::Broken);
+    }
+
+    #[test]
+    fn probing_leaves_the_remote_as_it_was() {
+        let root = remote_root();
+        let before = names(root.path());
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some("laptop"));
+        probe_state(&collection);
+        assert_eq!(names(root.path()), before);
+    }
+
+    #[test]
+    fn a_machine_name_that_cannot_be_resolved_does_not_make_the_remote_broken() {
+        let root = remote_root();
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some(""));
+        assert!(collection.machine_name().is_err());
+        assert_eq!(probe_state(&collection), RemoteState::Reachable);
+    }
+
+    #[test]
+    fn opening_without_a_remote_says_so() {
+        let error = open(&Collection::for_tests()).err().expect("no remote");
+        assert!(matches!(error, RemoteError::NoRemote), "{error}");
+    }
+
+    #[test]
+    fn opening_an_ssh_url_is_unsupported() {
+        let collection = collection_with("ssh://nas/srv/antiq", Some("laptop"));
+        let error = open(&collection).err().expect("not supported yet");
+        assert!(matches!(error, RemoteError::Unsupported(_)), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn opening_a_url_that_does_not_parse_is_an_error() {
+        let collection = collection_with("relative/path", Some("laptop"));
+        let error = open(&collection).err().expect("no URL");
+        assert!(matches!(error, RemoteError::Url(_)), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn an_opened_path_remote_answers_for_its_root() {
+        let root = remote_root();
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some("laptop"));
+        let remote = open(&collection).expect("a path remote opens");
+        let found = remote.reachability().expect("an answer");
+        assert_eq!(found.reachability, Reachability::Reachable);
+    }
+
+    #[test]
+    fn an_assessment_becomes_the_error_that_says_why() {
+        assert!(
+            Assessment::new(Reachability::Reachable, "")
+                .into_result()
+                .is_ok()
+        );
+        let away = Assessment::new(Reachability::Away, "no root").into_result();
+        assert!(matches!(
+            away,
+            Err(RemoteError::Away { ref message, overdue: false }) if message == "no root"
+        ));
+        let broken = Assessment::new(Reachability::Broken, "wrong marker").into_result();
+        assert!(
+            matches!(broken, Err(RemoteError::Broken(ref message)) if message == "wrong marker")
+        );
     }
 }
 
@@ -231,11 +434,14 @@ pub enum RemoteError {
     Broken(String),
     #[error("{0} is not supported yet")]
     Unsupported(String),
+    #[error(transparent)]
+    Url(#[from] UrlError),
 }
 
 impl HasKind for RemoteError {
     fn kind(&self) -> ErrorKind {
         match self {
+            RemoteError::Url(_) => ErrorKind::Other,
             RemoteError::NoRemote => ErrorKind::NoRemote,
             RemoteError::Away { .. } => ErrorKind::RemoteAway,
             RemoteError::Broken(_) => ErrorKind::RemoteBroken,

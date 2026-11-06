@@ -733,9 +733,17 @@ rename. Live packages on a path remote are uploaded in full on every
 change. (ADR 0047)
 
 Reachability: a missing root, or a root that is not a mount point and
-has no marker, is away. A marker with another ULID, a mount point
-without a marker, or an I/O error on the marker is broken. A matching
-marker is reachable.
+has no marker, is away. So is a root that cannot be looked at because
+the server behind a network mount is gone: the errors `ENOTCONN`,
+`EHOSTDOWN`, `EHOSTUNREACH`, `ENETUNREACH` and `ETIMEDOUT`. A marker
+with another ULID, a mount point without a marker, or an I/O error on
+the marker is broken. So are a marker that cannot be parsed or has a
+higher `format` or `layout`, a root that is not a directory, an error
+while testing for a mount point, and any other error on the root, a
+stale handle (`ESTALE`) included. A root that is a symlink to a
+directory counts as that directory. A matching marker is reachable. The
+marker is checked before every operation, and an operation on a root
+that is not reachable fails without reading or writing.
 
 ### SSH remote
 
