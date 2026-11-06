@@ -2595,4 +2595,40 @@ mod tests {
             ]
         );
     }
+
+    // ---- crash points ----
+
+    #[test]
+    fn every_crash_point_is_repaired_as_listed_and_the_next_run_finds_nothing() {
+        let mut temp = TempCollection::minimal();
+        // Archive died between steps 4 and 5: sidecars stored, archive staged.
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &SIDECARS);
+        stage(&mut temp, "a/b", S);
+        // Died between steps 5 and 6: the tree is in trash/, the version stored.
+        let later = "2026-11-04T090212";
+        lay(&mut temp, ".antiq/pieces", "c", later, &WHOLE);
+        trash_tree(&mut temp, later, "c");
+        // Died during step 7: the tree is in doomed/.
+        temp.tree().file(&format!(".antiq/doomed/{later}/d/f"), "x");
+        // Unearth died: the marker names a stored version.
+        lay(&mut temp, ".antiq/pieces", "q", S, &WHOLE);
+        marker(&mut temp, "q", &marked(S));
+        // Forget died: the store folder is empty.
+        temp.tree().dir(".antiq/pieces/gone");
+        temp.tree().file(".antiq/tmp/upload.part", "x");
+        let collection = collection(&temp);
+        let planned = plan(&collection);
+
+        let first = repaired(&temp);
+
+        assert_eq!(
+            first.done, planned.repairs,
+            "the run does what the dry run listed"
+        );
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+        assert!(exists(&temp, "c/f"), "the trashed tree is live again");
+        let second = repaired(&temp);
+        assert!(second.done.is_empty(), "{:?}", second.done);
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+    }
 }

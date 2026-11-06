@@ -644,8 +644,12 @@ It computes the repairs read-only and lists them first, as actions of
 kind `repair` (each naming the version or tree it would delete, rename
 back or move to `recovered/`); its other actions assume the repairs were
 done. A dry run that finds the lock held says so, names the holder and
-lists no repairs, since the running command owns those directories. It
-exits 0, and under `--json` the plan carries `pid` and `started`. Each
+lists no repairs, since the running command owns those directories; it
+reads nothing else. A holder that has not yet written its pid does not
+count as a holder here, so the repairs are listed. It exits 0, and under
+`--json` the plan is `{"dry_run": true, "lock_held": {"pid": ...,
+"started": ...}, "actions": []}`; on the console it is the line `The
+lock is held by pid <pid>, started <time>. No repairs are listed.` Each
 command's section says what else its dry run prints. On the console a
 plan is one `Would ...` line per action, or `Nothing to do.` when there
 is none. Under `--json` the plan is JSON (see "JSON output"). (ADR 0046)
@@ -1602,6 +1606,27 @@ console shows. Some kinds add keys to the error object. A `--dry-run` plan
 carries `"dry_run": true` and an `actions` list, in that order; repairs
 come first in it, as actions of kind `repair`. Paths are in the escaped
 form.
+
+A repair action is `{"kind": "repair", "repair": "<name>", ...}` and the
+fields depend on `<name>`. `piece` of `delete_sidecars` and `folder` of
+`remove_empty_folder` are relative to `pieces/`, `piece` of
+`delete_restored_version` to the collection root, and `entry` is a name in
+`tmp/`. `tree` and `path` are relative to the stamp folder
+`<area>/<stamp>/`, or to the area itself where `stamp` is absent. `stamp`
+is a version stamp or the name of a stamp folder.
+
+| `repair` | Repair | Fields |
+|----------|--------|--------|
+| `delete_sidecars` | 1 | `piece` (store folder), `version` (stamp) |
+| `delete_temporary` | 2 | `entry` (name in `tmp/`) |
+| `delete_doomed` | 3 | `stamp` (absent for an entry directly in `doomed/`), `tree` |
+| `give_back` | 4 | `stamp` (absent for an entry directly in `trash/`), `tree`, `destination` (`live` or `recovered`) |
+| `delete_restored_version` | 5 | `piece` (live path), `version` (stamp), `delete` (false when the stamp names no version and is only dropped from the marker) |
+| `remove_empty_folder` | 6 | `folder` (below `pieces/`) |
+| `remove_empty_chain` | 3, 4 | `area` (`trash` or `doomed`), `stamp`, `path` (below the stamp folder; empty for the stamp folder itself) |
+
+In a dry run `destination` is a prediction: whether the live path is free
+and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|

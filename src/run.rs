@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::lock::{self, Holder, LockError, RunLock};
 use crate::machine::{self, MachineError};
-use crate::repair;
+use crate::repair::{self, Repair};
 use crate::report::Warning;
 
 /// Errors of the run guard.
@@ -40,6 +40,7 @@ impl HasKind for RunError {
 #[must_use = "the lock is released when this is dropped"]
 pub struct RunGuard {
     lock: RunLock,
+    repaired: Vec<Repair>,
     warnings: Vec<Warning>,
 }
 
@@ -60,6 +61,7 @@ impl RunGuard {
         let outcome = repair::run(collection, &lock);
         Ok(RunGuard {
             lock,
+            repaired: outcome.done,
             warnings: outcome.warnings,
         })
     }
@@ -70,7 +72,13 @@ impl RunGuard {
         &self.lock
     }
 
-    /// What the repairs at the start of the run have to report.
+    /// The repairs at the start of the run that were done, as they were done.
+    pub fn repaired(&self) -> &[Repair] {
+        &self.repaired
+    }
+
+    /// The repairs at the start of the run that failed, and what could not
+    /// be read to repair.
     pub fn warnings(&self) -> &[Warning] {
         &self.warnings
     }
@@ -84,6 +92,11 @@ pub enum Started {
     /// run that holds the lock now, if there is one.
     DryRun {
         holder: Option<Holder>,
+        /// The repairs a real run would start with, in order. Empty while
+        /// another run holds the lock.
+        repairs: Vec<Repair>,
+        /// What could not be read to find them.
+        warnings: Vec<Warning>,
     },
 }
 
@@ -98,7 +111,21 @@ pub fn start(
     if dry_run {
         // Reading the lock file takes no lock and creates nothing.
         let holder = lock::holder(&collection.lock_path())?;
-        return Ok(Started::DryRun { holder });
+        // The run that holds the lock is doing the repairs, and what it is
+        // moving would be read half way.
+        if holder.is_some() {
+            return Ok(Started::DryRun {
+                holder,
+                repairs: Vec::new(),
+                warnings: Vec::new(),
+            });
+        }
+        let planned = repair::plan(collection);
+        return Ok(Started::DryRun {
+            holder,
+            repairs: planned.repairs,
+            warnings: planned.warnings,
+        });
     }
     Ok(Started::Guarded(RunGuard::begin(collection, clock)?))
 }
@@ -109,7 +136,7 @@ mod tests {
     use crate::clock::FixedClock;
     use crate::config::Config;
     use crate::error::Error;
-    use crate::testing::tree::{COLLECTION_ID, TempCollection};
+    use crate::testing::tree::{COLLECTION_ID, TempCollection, snapshot};
     use std::fs;
 
     fn clock() -> FixedClock {
@@ -175,7 +202,7 @@ mod tests {
         assert!(
             matches!(
                 &started,
-                Started::DryRun { holder: Some(holder) } if holder.pid == std::process::id()
+                Started::DryRun { holder: Some(holder), .. } if holder.pid == std::process::id()
             ),
             "{started:?}"
         );
@@ -187,7 +214,7 @@ mod tests {
         let collection = collection(&temp);
         let started = start(&collection, &clock(), true).expect("starts");
         assert!(
-            matches!(started, Started::DryRun { holder: None }),
+            matches!(started, Started::DryRun { holder: None, .. }),
             "{started:?}"
         );
     }
@@ -220,33 +247,6 @@ mod tests {
         );
     }
 
-    /// Every path below `dir` with its content, directories as `None`.
-    fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
-        fn walk(
-            base: &std::path::Path,
-            dir: &std::path::Path,
-            seen: &mut std::collections::BTreeMap<String, Option<Vec<u8>>>,
-        ) {
-            for item in fs::read_dir(dir).expect("lists") {
-                let path = item.expect("an item").path();
-                let name = path
-                    .strip_prefix(base)
-                    .expect("below")
-                    .display()
-                    .to_string();
-                if path.is_dir() {
-                    seen.insert(name, None);
-                    walk(base, &path, seen);
-                } else {
-                    seen.insert(name, Some(fs::read(&path).expect("reads")));
-                }
-            }
-        }
-        let mut seen = std::collections::BTreeMap::new();
-        walk(dir, dir, &mut seen);
-        seen
-    }
-
     #[test]
     fn a_dry_run_leaves_the_run_directories_and_everything_else_alone() {
         let mut temp = TempCollection::minimal();
@@ -262,7 +262,7 @@ mod tests {
         let started = start(&collection, &clock(), true).expect("starts");
 
         assert_eq!(snapshot(temp.root()), before);
-        assert!(matches!(started, Started::DryRun { holder: None }));
+        assert!(matches!(started, Started::DryRun { holder: None, .. }));
     }
 
     #[test]
@@ -280,5 +280,187 @@ mod tests {
         );
         let error = begin(&collection).expect_err("the guard holds the lock");
         assert_eq!(error.kind(), ErrorKind::LockHeld);
+    }
+
+    // ---- repairs at the start ----
+
+    use crate::relpath::{Name, RelPath};
+    use crate::repair::Repair;
+    use crate::versions::names::{VersionFile, file_name};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn delete_temporary(name: &str) -> Repair {
+        Repair::DeleteTemporary {
+            entry: Name::from_bytes(name.as_bytes().to_vec()).expect("a name"),
+        }
+    }
+
+    #[test]
+    fn a_real_start_repairs_and_reports_what_it_did() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().file(".antiq/tmp/upload.part", "x");
+        let collection = collection(&temp);
+
+        let guard = begin(&collection).expect("starts");
+
+        assert_eq!(guard.repaired(), [delete_temporary("upload.part")]);
+        assert!(guard.warnings().is_empty());
+        assert!(!temp.root().join(".antiq/tmp/upload.part").exists());
+        drop(guard);
+        let again = begin(&collection).expect("starts again");
+        assert!(again.repaired().is_empty(), "the second run finds it done");
+    }
+
+    #[test]
+    fn a_failing_repair_reaches_the_caller_as_a_warning() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().file(".antiq/tmp/x", "x");
+        let tmp = temp.root().join(".antiq/tmp");
+        let _restore = crate::filesystem::RestoreModes(vec![tmp.clone()]);
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let probe = std::fs::File::create(tmp.join("probe"));
+        assert!(
+            probe.is_err(),
+            "the test needs a user that mode 0555 locks out"
+        );
+        let collection = collection(&temp);
+
+        let guard = begin(&collection).expect("a failing repair never fails the run");
+
+        assert!(guard.repaired().is_empty());
+        assert!(
+            guard.warnings()[0]
+                .message
+                .starts_with("cannot delete a temporary file .antiq/tmp/x: "),
+            "{:?}",
+            guard.warnings()
+        );
+    }
+
+    fn crashed(temp: &mut TempCollection) {
+        temp.tree().file(".antiq/tmp/upload.part", "x");
+        temp.tree()
+            .file(".antiq/doomed/2026-11-04T090211/gone/f", "x");
+        temp.tree()
+            .file(".antiq/trash/2026-11-04T090212/back/f", "x");
+        temp.tree().dir(".antiq/pieces/empty");
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_repairs_a_real_run_then_does_and_changes_nothing() {
+        let mut temp = TempCollection::minimal();
+        crashed(&mut temp);
+        let collection = collection(&temp);
+        let before = snapshot(temp.root());
+
+        let started = start(&collection, &clock(), true).expect("starts");
+
+        let Started::DryRun {
+            holder,
+            repairs,
+            warnings,
+        } = started
+        else {
+            panic!("a dry run");
+        };
+        assert!(holder.is_none() && warnings.is_empty(), "{warnings:?}");
+        assert_eq!(snapshot(temp.root()), before, "nothing was changed");
+        let lines: Vec<String> = repairs.iter().map(Repair::describe).collect();
+        assert_eq!(
+            lines,
+            [
+                "delete .antiq/tmp/upload.part",
+                "delete .antiq/doomed/2026-11-04T090211/gone",
+                "remove the empty folder .antiq/doomed/2026-11-04T090211",
+                "move .antiq/trash/2026-11-04T090212/back back to back",
+                "remove the empty folder .antiq/trash/2026-11-04T090212",
+                "remove the empty folder .antiq/pieces/empty",
+            ]
+        );
+        let guard = begin(&collection).expect("starts");
+        assert_eq!(
+            guard.repaired(),
+            repairs,
+            "the run does what the dry run listed"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_whose_live_move_cannot_work_lists_live_and_the_run_reports_recovered() {
+        let mut temp = TempCollection::minimal();
+        temp.tree()
+            .file(".antiq/trash/2026-11-04T090212/up/down/f", "x");
+        let piece = RelPath::parse("up/down").expect("a path");
+        let stamp = "2026-11-04T090212".parse().expect("a stamp");
+        for kind in VersionFile::ALL {
+            let name = file_name(&piece, &stamp, kind);
+            temp.tree()
+                .file(&format!(".antiq/pieces/up/down/{name}"), "x");
+        }
+        temp.tree().dir("up");
+        let up = temp.root().join("up");
+        let _restore = crate::filesystem::RestoreModes(vec![up.clone()]);
+        std::fs::set_permissions(&up, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        assert!(
+            std::fs::File::create(up.join("probe")).is_err(),
+            "the test needs a user that mode 0555 locks out"
+        );
+        let collection = collection(&temp);
+
+        let Started::DryRun { repairs, .. } = start(&collection, &clock(), true).expect("starts")
+        else {
+            panic!("a dry run");
+        };
+        let guard = begin(&collection).expect("starts");
+
+        let destination = |repairs: &[Repair]| {
+            repairs
+                .iter()
+                .find_map(|repair| match repair {
+                    Repair::GiveBack { destination, .. } => Some(*destination),
+                    _ => None,
+                })
+                .expect("a give back")
+        };
+        assert_eq!(destination(&repairs), crate::repair::Destination::Live);
+        assert_eq!(
+            destination(guard.repaired()),
+            crate::repair::Destination::Recovered
+        );
+    }
+
+    #[test]
+    fn a_dry_run_while_another_run_holds_the_lock_names_it_and_reads_nothing() {
+        let mut temp = TempCollection::minimal();
+        crashed(&mut temp);
+        let collection = collection(&temp);
+        let _holder = crate::testing::hold_lock(temp.root());
+        // Planning would warn about these, so a read shows as a warning.
+        let blocked = [
+            temp.root().join(".antiq/trash"),
+            temp.root().join(".antiq/tmp"),
+        ];
+        let _restore = crate::filesystem::RestoreModes(blocked.to_vec());
+        for dir in &blocked {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        }
+        assert!(
+            std::fs::read_dir(&blocked[0]).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let started = start(&collection, &clock(), true).expect("starts");
+
+        let Started::DryRun {
+            holder,
+            repairs,
+            warnings,
+        } = started
+        else {
+            panic!("a dry run");
+        };
+        assert_eq!(holder.expect("the holder is named").pid, std::process::id());
+        assert!(repairs.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

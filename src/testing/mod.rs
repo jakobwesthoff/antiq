@@ -20,6 +20,13 @@ pub use pool::shared_pool;
 
 use crate::relpath::RelPath;
 
+/// Holds the run lock of the collection at `root` in this process, so a
+/// dry run in the same process finds it held and names the holder.
+pub fn hold_lock(root: &std::path::Path) -> crate::lock::RunLock {
+    let clock = crate::clock::FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+    crate::lock::acquire(&root.join(".antiq/lock"), "imperius", &clock).expect("the lock is free")
+}
+
 /// A path of `levels` nested names of 200 bytes each. Past five levels it
 /// is longer than the 1,024 bytes macOS accepts in a path, and past 20
 /// longer than the 4,096 bytes of Linux.
