@@ -18,6 +18,11 @@ released, so the two show the same image.
 GitHub has no API for the social preview. Upload `docs/pages/assets/og.png`
 by hand under the repository's Settings, General, Social preview.
 
+The section only shows once the repository is public: GitHub accepts an
+upload to a public repository, or to a private one that had an image
+before (checked 2026-11-05, while `jakobwesthoff/antiq` was private and
+the section was missing).
+
 ## Relations
 
 - Blocked by: the first release of antiq
