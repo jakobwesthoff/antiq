@@ -471,42 +471,49 @@ pub fn layout<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container: &Name
 /// Turns the bytes of the tar stream that the compressor has consumed into
 /// the content bytes of the files among them. Headers and padding count for
 /// nothing, so the total is the size of the piece's files.
+///
+/// The consumed bytes only grow, so the clock keeps a cursor over the spans
+/// instead of searching them.
 #[derive(Debug, Clone)]
 pub struct ContentClock {
     spans: Vec<Span>,
-    /// The content bytes of the spans before each one, and in all at the
-    /// end.
-    before: Vec<u64>,
+    total: u64,
+    /// The spans before this one are done whole.
+    finished: usize,
+    /// The content bytes of the finished spans.
+    finished_bytes: u64,
 }
 
 impl ContentClock {
     pub fn new(spans: Vec<Span>) -> ContentClock {
-        let mut before = Vec::with_capacity(spans.len() + 1);
-        let mut sum = 0;
-        before.push(sum);
-        for span in &spans {
-            sum += span.len;
-            before.push(sum);
+        let total = spans.iter().map(|span| span.len).sum();
+        ContentClock {
+            spans,
+            total,
+            finished: 0,
+            finished_bytes: 0,
         }
-        ContentClock { spans, before }
     }
 
     /// The content bytes of all files.
     pub fn total(&self) -> u64 {
-        self.before.last().copied().unwrap_or(0)
+        self.total
     }
 
     /// The content bytes among the first `consumed` bytes of the stream.
-    pub fn content_done(&self, consumed: u64) -> u64 {
-        // The spans that end at or before `consumed` are done whole.
-        let finished = self
-            .spans
-            .partition_point(|span| span.start + span.len <= consumed);
+    /// `consumed` must not be less than in an earlier call.
+    pub fn content_done(&mut self, consumed: u64) -> u64 {
+        while let Some(span) = self.spans.get(self.finished)
+            && span.start + span.len <= consumed
+        {
+            self.finished_bytes += span.len;
+            self.finished += 1;
+        }
         let current = self
             .spans
-            .get(finished)
+            .get(self.finished)
             .map_or(0, |span| consumed.saturating_sub(span.start));
-        self.before[finished] + current
+        self.finished_bytes + current
     }
 }
 
@@ -867,7 +874,7 @@ mod tests {
         // Headers of 512 bytes, files of 100 and 600 bytes padded to whole
         // blocks: the first file's content lies in 512..612, the second's
         // in 1536..2136.
-        let clock = ContentClock::new(vec![
+        let mut clock = ContentClock::new(vec![
             Span {
                 start: 512,
                 len: 100,

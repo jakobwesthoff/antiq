@@ -205,7 +205,7 @@ impl Counting {
             self.reads += 1;
         }
         let consumed = self.context.get_frame_progression().consumed;
-        counter.raise_to(match &self.clock {
+        counter.raise_to(match &mut self.clock {
             Some(clock) => clock.content_done(consumed),
             None => consumed,
         });
