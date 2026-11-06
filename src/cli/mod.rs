@@ -241,7 +241,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
     match &cli.command {
         Command::Init(args) => cmd::init::run(&ctx, args, out),
         Command::Status => cmd::status::run(&ctx, out),
-        Command::Archive(args) => cmd::archive::run(&ctx, args),
+        Command::Archive(args) => cmd::archive::run(&ctx, args, out),
         Command::Unearth(args) => cmd::unearth::run(&ctx, args, out),
         Command::Fork(args) => cmd::fork::run(&ctx, args),
         Command::Forget(args) => cmd::forget::run(&ctx, args, out),

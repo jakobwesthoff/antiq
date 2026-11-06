@@ -148,12 +148,30 @@ mod status {
     }
 }
 
-command_line!(archive_everything, "archive", ["archive", "-n"]);
-command_line!(
-    archive_one_piece,
-    "archive",
-    ["archive", "piece", "--dry-run"]
-);
+/// `archive` is built: outside a collection it fails with `not_a_collection`.
+mod archive {
+    use super::*;
+
+    #[test]
+    fn needs_a_collection() {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args(["archive", "piece", "-n"])
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection");
+        assert_eq!(run.json()["command"], "archive");
+    }
+}
+
 command_line!(
     fork,
     "fork",

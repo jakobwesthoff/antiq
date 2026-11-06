@@ -699,7 +699,8 @@ after.
 | 4 | target unreachable (only `push`, and 0 instead under `--if-reachable`) |
 
 Pieces the walk refuses do not change the exit code; `status` and the
-command's output name them.
+command's output name them. The exception is `archive <piece>`, which exits
+1 when the piece it names is pinned, empty or refused.
 
 **Naming a version.** `unearth` and `fork` take the version as the flag
 `--version <version>`; without it they take the newest version. `forget`
@@ -875,10 +876,17 @@ the collection stays, no count is printed and a warning says why.
 is due. With a piece, archives that one now, however recently it changed.
 `<piece>` is a live piece's path as the patterns select it, or a search
 word that matches exactly one live piece (see "Piece references");
-anything else is refused. Only the idle check is skipped: a pinned piece
-is refused until it is unpinned, and the walk refusals and the empty rule
-still apply. `-n` lists the pieces it would archive and the ones it
-refuses, with the reason.
+anything else is refused. An empty `<piece>` is a usage error. Only the
+idle check is skipped: a pinned piece is refused (reason `pinned`, at its
+`.antiq-pin`) until it is unpinned, a piece without a file that counts is
+refused (reason `empty`, at the piece), and the walk refusals still apply.
+`archive <piece>` exits 1 when that piece is refused. Without an argument,
+refused pieces never change the exit code, and only the pieces the walk
+refuses are listed, due or not: a pinned piece and a piece without a file
+that counts are not. `-n` lists the pieces it would archive and the ones it
+refuses, with the reason. It judges the folders as they lie in the
+collection now, so a tree that repair 4 would give back to its live path is
+not judged.
 
 1. Find the pieces and judge each with the rules of "Selection", "Walks",
    "Ignore and timeless rules" and "Idle".
@@ -899,7 +907,8 @@ refuses, with the reason.
    `.tar.zst`, then the checksum file, then the listing go back to the
    staging, flushed as in step 4 (repair 1 finishes this after a crash);
    the folder stays, the piece is reported with the error, and the run
-   exits 3.
+   exits 3. The staging folder, empty after step 4, stays until the
+   rename succeeded and is removed then.
 6. Walk the trashed tree again and compare it with the record of the
    verify: per entry type, size, modification time, inode and change time,
    directories included; the top only by type, inode and modification
@@ -921,7 +930,17 @@ refuses, with the reason.
    the run that failed and in the warning of each later run's repair 3.
    Whenever a tree leaves `trash/` or `doomed/`, the parents that became
    empty are removed, up to and including `<stamp>/`.
-8. One output line per folder, a summary at the end.
+8. One output line per folder on stdout, `archived <piece>`, `skipped
+   <piece>: <message>` or `refused <piece>: <reasons>`, then the summary
+   `Archived N, skipped N, refused N.` The repairs of the start of the run
+   and the warnings go to stderr as `note:` lines. A dry run prints the
+   repair lines and `Would archive <piece>` lines, then `Refused <piece>:
+   <reasons>` for each refused piece, and `Nothing to do.` when it prints
+   none. A skipped piece has the reason `differs` (the folder changed while
+   it was packed, and stayed where it is, or after the verify, and the
+   message says whether it went back to its path or into `recovered/`),
+   `no_room` or `error` (any other failure; the message names the step and
+   the place, and where the folder went when a step moved it).
 
 Running out of file descriptors in the walk of a piece ends the run:
 pieces already running finish, the piece and every piece not yet started
@@ -1720,7 +1739,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
@@ -1733,6 +1752,20 @@ and its parent is a directory when the plan is made. The run decides.
 | `other` | 1 | any other failure | |
 
 `--help` and the top-level `--version` print text and exit 0, also under `--json`.
+
+`archive` adds `archived`, `skipped`, `refused`, `repairs` and `warnings`.
+An element of `archived` has `piece`, `stamp` (the version stamp), `version`
+(its time in UTC, RFC 3339), `archive_bytes`, `files` and `bytes`. An
+element of `skipped` has `piece`, `reason` (`differs`, `no_room` or `error`)
+and `message`. An element of `refused` has `piece` and `reasons`, each with
+`kind`, `path`, `text` and, for a rule file at fault, `line`. The kinds are
+`mount_point`, `nested_collection`, `unreadable_entry`, `exclude_entry`,
+`locked`, `rule_file`, `not_a_file`, `unreadable_marker`, `pinned` and
+`empty`. `repairs` lists the repairs of the start of the run, each as
+`{"kind": "repair", "repair": "<name>", ...}`, and `warnings` is a list of
+`{message}` objects. A dry run adds `refused` and `warnings` after
+`actions`, which hold the repairs, each as in `repairs`, and, per piece,
+`{"kind": "archive", "piece": ...}`.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
 collection, as `{message}` objects) and, while a run holds the lock, `note`

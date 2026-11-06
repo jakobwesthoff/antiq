@@ -4,8 +4,115 @@
 
 //! The `archive` command: archives due pieces, or one piece now.
 
+use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
+use antiq::clock::SystemClock;
+use antiq::collection::Collection;
+use antiq::commands::archive::{ArchiveReport, Outcome, Request, Target, archive};
+use antiq::plan::PlanAction;
+use antiq::report::Warning;
+use anyhow::Context as _;
+use std::path::PathBuf;
 
-pub fn run(ctx: &Context, _args: &ArchiveArgs) -> anyhow::Result<u8> {
-    super::not_implemented(ctx, "archive")
+pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
+    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
+    let collection = Collection::find(&start)
+        .map_err(antiq::Error::from)
+        .context("find the collection")?;
+    let target = match &args.piece {
+        None => Target::Due,
+        Some(reference) => {
+            // A relative path starts where `Collection::find` started.
+            let cwd = std::fs::canonicalize(&start).context("find the directory to start from")?;
+            Target::Piece {
+                reference: reference.clone(),
+                cwd,
+            }
+        }
+    };
+    let request = Request {
+        target,
+        dry_run: args.dry_run,
+    };
+    let outcome = archive(&collection, &SystemClock, &request)
+        .map_err(antiq::Error::from)
+        .context(if args.dry_run {
+            "plan the archive"
+        } else {
+            "archive the pieces"
+        })?;
+
+    match outcome {
+        Outcome::Archived(report) => {
+            print_report(ctx, &report, out)?;
+            Ok(report.exit_code())
+        }
+        Outcome::Planned(plan) => {
+            if ctx.json {
+                out.json(Some("archive"), &plan)
+                    .context("print the result")?;
+            } else {
+                for line in plan.lines() {
+                    out.line(&line).context("print the result")?;
+                }
+                notes(&plan.warnings, out)?;
+            }
+            Ok(plan.exit_code())
+        }
+        Outcome::Held(held) => {
+            if ctx.json {
+                out.json(Some("archive"), &held)
+                    .context("print the result")?;
+            } else {
+                for line in held.lines() {
+                    out.line(&line).context("print the result")?;
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn print_report(ctx: &Context, report: &ArchiveReport, out: &mut Output) -> anyhow::Result<()> {
+    if ctx.json {
+        return out
+            .json(Some("archive"), report)
+            .context("print the result");
+    }
+    for piece in &report.archived {
+        out.line(&format!("archived {}", piece.piece))
+            .context("print the result")?;
+    }
+    for piece in &report.skipped {
+        out.line(&format!("skipped {}: {}", piece.piece, piece.message))
+            .context("print the result")?;
+    }
+    for piece in &report.refused {
+        out.line(&format!(
+            "refused {}: {}",
+            piece.piece,
+            piece.reasons_text()
+        ))
+        .context("print the result")?;
+    }
+    out.line(&format!(
+        "Archived {}, skipped {}, refused {}.",
+        report.archived.len(),
+        report.skipped.len(),
+        report.refused.len()
+    ))
+    .context("print the result")?;
+    for repair in &report.repairs {
+        out.note(&format!("note: repaired: {}", repair.describe()))
+            .context("print the notes")?;
+    }
+    notes(&report.warnings, out)
+}
+
+fn notes(warnings: &[Warning], out: &mut Output) -> anyhow::Result<()> {
+    for warning in warnings {
+        out.note(&format!("note: {}", warning.message))
+            .context("print the notes")?;
+    }
+    Ok(())
 }
