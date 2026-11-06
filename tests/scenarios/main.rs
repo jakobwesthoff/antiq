@@ -10,3 +10,4 @@ mod support;
 mod find;
 mod harness;
 mod init;
+mod list;
