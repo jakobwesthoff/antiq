@@ -7,7 +7,6 @@
 use crate::config::{Config, ConfigError};
 use crate::error::{ErrorKind, HasKind};
 use crate::id::ObjectId;
-use crate::machine::{self, MachineError};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -69,12 +68,6 @@ impl Collection {
 
     pub fn id(&self) -> ObjectId {
         self.config.collection.id
-    }
-
-    /// The name this machine goes by in this collection: the configured one,
-    /// else the detected one.
-    pub fn machine_name(&self) -> Result<String, MachineError> {
-        machine::resolve(self.config.machine.name.as_deref())
     }
 
     pub fn antiq_dir(&self) -> PathBuf {
@@ -309,27 +302,6 @@ mod tests {
         );
         let collection = Collection::find(temp.root()).expect("a collection");
         assert_eq!(collection.config().collection.idle_days, 99);
-    }
-
-    #[test]
-    fn the_machine_name_prefers_the_config() {
-        let mut temp = TempCollection::minimal();
-        temp.tree().file(
-            ".antiq/config.toml",
-            format!("[collection]\nid = \"{COLLECTION_ID}\"\n[machine]\nname = \"laptop\"\n"),
-        );
-        let collection = Collection::find(temp.root()).expect("a collection");
-        assert_eq!(collection.machine_name().expect("a name"), "laptop");
-    }
-
-    #[test]
-    fn the_machine_name_is_detected_without_a_configured_one() {
-        let temp = TempCollection::minimal();
-        let collection = Collection::find(temp.root()).expect("a collection");
-        assert_eq!(
-            collection.machine_name().expect("a name"),
-            machine::detect().expect("a name")
-        );
     }
 
     #[test]

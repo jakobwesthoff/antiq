@@ -12,7 +12,7 @@ use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::lock::{self, Holder, LockError, RunLock};
-use crate::machine::MachineError;
+use crate::machine::{self, MachineError};
 use crate::repair::{self, RepairError};
 use crate::report::Warning;
 
@@ -49,8 +49,17 @@ pub struct RunGuard {
 impl RunGuard {
     /// Takes the lock and repairs what an earlier run left behind.
     pub(crate) fn begin(collection: &Collection, clock: &dyn Clock) -> Result<RunGuard, RunError> {
-        let machine = collection.machine_name()?;
-        let lock = lock::acquire(&collection.lock_path(), &machine, clock)?;
+        RunGuard::begin_as(collection, clock, machine::detect())
+    }
+
+    /// [`RunGuard::begin`] with the outcome of the machine detection given,
+    /// so that a test can make it fail.
+    fn begin_as(
+        collection: &Collection,
+        clock: &dyn Clock,
+        machine: Result<String, MachineError>,
+    ) -> Result<RunGuard, RunError> {
+        let lock = lock::acquire(&collection.lock_path(), &machine?, clock)?;
         let warnings = repair::run(collection, &lock, clock)?;
         Ok(RunGuard { lock, warnings })
     }
@@ -107,15 +116,9 @@ mod tests {
         FixedClock::new("2026-11-03T10:00:00Z".parse().expect("a timestamp"))
     }
 
-    fn named(name: &str) -> Config {
-        let mut config = Config::new(COLLECTION_ID.parse().expect("an ID"));
-        config.machine.name = Some(name.to_string());
-        config
-    }
-
-    /// The collection of `temp`, run by a machine called `imperius`.
     fn collection(temp: &TempCollection) -> Collection {
-        Collection::new(temp.root().to_path_buf(), named("imperius"))
+        let config = Config::new(COLLECTION_ID.parse().expect("an ID"));
+        Collection::new(temp.root().to_path_buf(), config)
     }
 
     fn begin(collection: &Collection) -> Result<RunGuard, RunError> {
@@ -144,7 +147,7 @@ mod tests {
             .expect("reads")
             .expect("a holder");
         assert_eq!(holder.pid, std::process::id());
-        assert_eq!(holder.machine, "imperius");
+        assert_eq!(holder.machine, machine::detect().expect("a name"));
         drop(guard);
         assert_eq!(fs::read(collection.lock_path()).expect("exists"), b"");
     }
@@ -152,8 +155,12 @@ mod tests {
     #[test]
     fn a_machine_without_a_name_cannot_run() {
         let temp = TempCollection::minimal();
-        let collection = Collection::new(temp.root().to_path_buf(), named(""));
-        let error = begin(&collection).expect_err("no machine name");
+        let collection = collection(&temp);
+        let unavailable = MachineError::Unavailable {
+            reason: "refused by the test".to_string(),
+        };
+        let error = RunGuard::begin_as(&collection, &clock(), Err(unavailable))
+            .expect_err("no machine name");
         assert!(matches!(error, RunError::Machine(_)), "{error}");
         assert_eq!(error.kind(), ErrorKind::Other);
         assert!(!collection.lock_path().exists(), "no lock was taken");

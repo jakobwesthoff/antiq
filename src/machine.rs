@@ -24,17 +24,6 @@ pub fn detect() -> Result<String, MachineError> {
     )
 }
 
-/// The name to use: the configured `machine.name`, else the detected one.
-pub fn resolve(configured: Option<&str>) -> Result<String, MachineError> {
-    match configured {
-        Some("") => Err(MachineError::Unavailable {
-            reason: "machine.name is empty".to_string(),
-        }),
-        Some(name) => Ok(name.to_string()),
-        None => detect(),
-    }
-}
-
 /// Picks between the results of asking the system. `device` is `None` where
 /// the system has no separate device name to ask for.
 fn choose(
@@ -107,22 +96,6 @@ mod tests {
     fn an_empty_hostname_is_unavailable() {
         let reason = unavailable(choose(None, Ok(String::new())));
         assert_eq!(reason, "the hostname is empty");
-    }
-
-    #[test]
-    fn a_configured_name_wins_over_detection() {
-        assert_eq!(resolve(Some("laptop")).expect("a name"), "laptop");
-    }
-
-    #[test]
-    fn an_empty_configured_name_is_refused() {
-        let reason = unavailable(resolve(Some("")));
-        assert_eq!(reason, "machine.name is empty");
-    }
-
-    #[test]
-    fn without_a_configured_name_the_system_is_asked() {
-        assert_eq!(resolve(None).expect("a name"), detect().expect("a name"));
     }
 
     #[test]
