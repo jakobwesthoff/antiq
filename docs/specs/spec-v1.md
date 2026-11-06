@@ -1560,7 +1560,9 @@ target. `--init` and `--force` are each refused together with
    is the user's statement that this empty target is the right one;
    `--force` that this copy may overwrite the target once, after the user
    made sure the target holds nothing newer. A forced push leaves the
-   marker as it was, so the machine it names pushes on as before.
+   marker as it was, so the machine it names pushes on as before. It adds
+   a note that names the host and path of the marker: an entry of `notes`
+   in `--json`, a `note:` line on stderr in text.
    `--init` is refused where a marker exists, whoever's it is. The
    marker is sent by its own rsync run, as a temp directory in
    `.antiq/tmp/` holding only `.antiq-target`, sent to `<target>/` with
@@ -1613,8 +1615,8 @@ target. `--init` and `--force` are each refused together with
    the runs, and the first failure's text is the one printed; the
    summary adds up the changes of both mirror runs.
 8. **Result.** rsync exit 0 is success; 24 (files vanished during the run)
-   is success with a note naming the paths of the `file has vanished`
-   lines. Everything else, including any failure after the pre-check, is
+   is success with a note on stderr naming the paths of the `file has
+   vanished` lines. Everything else, including any failure after the pre-check, is
    exit 1 with rsync's message (rsync ended by a signal included), also
    under `--if-reachable`. With exit 23
    and the line `IO error encountered -- skipping file deletion`, push

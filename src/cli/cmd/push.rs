@@ -55,6 +55,9 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     out.note(&format!("note: {}", warning.message))
                         .context("print the result")?;
                 }
+                for note in report.note_lines() {
+                    out.note(&note).context("print the result")?;
+                }
                 for line in report.lines() {
                     out.line(&line).context("print the result")?;
                 }

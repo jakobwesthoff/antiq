@@ -165,12 +165,20 @@ impl PushReport {
                 lines.push(format!("  other files: {}", counts(&self.changes.other)));
             }
         }
-        for note in &self.notes {
-            lines.push(format!("Note: {note}"));
-        }
+        lines
+    }
+
+    /// The messages to the user the console prints to stderr: how the push
+    /// was cleared, and the files that vanished while rsync ran.
+    pub fn note_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .notes
+            .iter()
+            .map(|note| format!("note: {note}"))
+            .collect();
         if !self.vanished.is_empty() {
             lines.push(format!(
-                "Note: {} files vanished while rsync ran: {}",
+                "note: {} files vanished while rsync ran: {}",
                 self.vanished.len(),
                 self.vanished.join(", ")
             ));
@@ -300,14 +308,21 @@ mod tests {
     }
 
     #[test]
-    fn the_console_lists_the_changes_per_piece_and_the_notes() {
+    fn the_console_lists_the_changes_per_piece() {
         let lines = report().lines();
         assert_eq!(lines[0], "Wrote the marker .antiq-target.");
         assert_eq!(lines[1], "Changed on backup@nas:/srv:");
         assert_eq!(lines[2], "  work: 2 created, 1 updated, 0 deleted");
         assert_eq!(lines[3], "  other files: 0 created, 0 updated, 3 deleted");
-        assert_eq!(lines[4], "Note: be careful");
-        assert!(lines[5].contains("1 files vanished") && lines[5].contains("/c/x"));
+        assert_eq!(lines.len(), 4, "{lines:?}");
+    }
+
+    #[test]
+    fn the_notes_and_the_vanished_files_are_stderr_notes() {
+        let notes = report().note_lines();
+        assert_eq!(notes[0], "note: be careful");
+        assert!(notes[1].starts_with("note: 1 files vanished") && notes[1].contains("/c/x"));
+        assert_eq!(notes.len(), 2);
     }
 
     #[test]

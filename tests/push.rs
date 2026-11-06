@@ -1589,7 +1589,13 @@ fn files_that_vanished_are_a_success_with_a_note() {
 
     let text = push_text(&collection, &[]);
     assert_eq!(text.code(), 0, "{}", text.stderr);
-    assert!(text.stdout.contains("vanished"), "{}", text.stdout);
+    assert!(!text.stdout.contains("vanished"), "{}", text.stdout);
+    assert!(
+        text.stderr
+            .contains("note: 1 files vanished while rsync ran"),
+        "{}",
+        text.stderr
+    );
 }
 
 #[test]
