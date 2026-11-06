@@ -42,6 +42,15 @@ pub fn pack_piece_without(tree: &Tree, piece: &str, junk: &[crate::relpath::Name
     Packaged { bytes, packed }
 }
 
+/// Writes `bytes` to a file in a fresh temp directory, which lives as long
+/// as the returned guard.
+pub fn on_disk(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("package.tar.zst");
+    std::fs::write(&path, bytes).expect("the package is written");
+    (dir, path)
+}
+
 /// `tar` compressed the way packages are, for archives a test builds by
 /// hand.
 pub fn compress(tar: &[u8]) -> Vec<u8> {

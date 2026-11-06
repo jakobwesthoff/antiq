@@ -852,13 +852,40 @@ and unearthing never writes through a symlink. (ADR 0027)
 
 ### Verifying
 
-A strict verify gates archiving and unearthing. It checks the stream's
-integrity, then compares every member with the tree on disk (type,
-size, content hash, modification time in whole seconds with the same
-clamp, mode, link target) and requires equal path sets under the same
-walk rules. Junk files are left out. While it reads, it records each
-entry's lstat (size, modification time in nanoseconds, ctime, inode).
-(ADR 0033)
+A strict verify gates archiving and unearthing. It reads the stream to
+its end and checks its integrity. A cut or corrupt stream, data after
+the end of the archive, a member outside the top-level directory, a path
+that occurs twice, a hard link that does not name a file listed before
+it and a member that is neither file, directory, symlink nor hard link
+make the package damaged.
+
+Then it compares every member with the tree on disk (type, size,
+content hash, modification time in whole seconds with the same clamp,
+mode, link target) and requires equal path sets under the same walk
+rules. The walk is the one packing uses, so a tree with an unreadable
+entry or a mount point is refused. A file with several names must be
+stored as packing stores it: the first path in byte order is the file
+and the others link to it. Junk files are left out on both sides.
+Special files are not archived and are not compared. Symlink modes are
+not compared, since Linux cannot set them.
+
+On a user's folder, directory modification times are not compared, the
+top-level directory's included, because creating a junk file such as
+`.DS_Store` changes its directory's time without changing what is
+archived. The top-level directory's mode is compared with the mode of
+the first member. On antiq's staging, directory modification times are
+compared, since the final pass of the extraction sets them from the
+package, and the top-level directory's modification time is compared but
+not its mode: the staging root keeps the mode its maker gave it until the
+piece is moved into place. A staging directory whose mode keeps its
+owner out gets owner access for the read, and its mode is put back
+afterwards. A user's folder is never changed.
+
+While it reads, the verify records each entry's lstat (kind, size,
+modification time in nanoseconds, ctime, inode), special files and the
+top-level directory included, and the members of the package in archive
+order. A file that is replaced, resized or touched while it is read is
+reported as changed while read. (ADR 0033)
 
 Reclaiming compares the folder with the archive's listing: path, type,
 size, modification time, mode, link target and content hash. Directory

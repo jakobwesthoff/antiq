@@ -2682,6 +2682,32 @@ the same commit; the lead checks that at acceptance.
   blocked waiters, both wake-up paths, the want-0 clamp and the
   machine's figures.
 
+### I12
+
+Notes for the items that call the strict verify and the listing comparison
+(`src/pack/verify.rs`):
+
+- `verify_strict` returns `Verified` or `PackError::Differs(Vec<Difference>)`;
+  a damaged package is `PackError::Damaged`, a walk with a problem
+  `PackError::TreeHasProblems`, an unreadable file `PackError::Read`.
+  `compare_with_listing` returns `Compared { differences, record }`, and
+  `Compared::into_verified()` gives `Verified` only when `differences` is
+  empty. Reclaim (I26) takes its loss list from `differences` and its record
+  for the deletion steps from the same call.
+- `WalkRules { junk, staged }`: I19 and I26 pass `staged: false` on the
+  user's folder; I20 passes `staged: true` on the staging tree. A user's
+  folder is never changed; directory times are compared only when staged.
+- `Verified::record()` holds the lstat of every walked entry, special files
+  and the top included. The top entry's ctime changes when antiq moves the
+  piece (spec "Operations": owner write added and the mode restored), so
+  archive step 4 compares the top's kind, inode and modification time, not
+  its ctime.
+- `Verified::listing()` is the package's own member list, read from the
+  stream. I19 stores it as the listing, or refuses when it differs from the
+  `Packed.listing` of the pack.
+- The verify walk applies no exclude entries (they are spelled relative to
+  the collection); I19 walks with the bound rules before it packs.
+
 ## Relations
 
 - Relates to: [Define the v1 scope and architecture of antiq](01M6E17PET32XD9PC04AJ2PBZY-define-the-v1-scope-and-architecture-of-antiq.md)

@@ -25,10 +25,6 @@ pub(super) struct Container {
 /// What reading a package to its end found.
 #[derive(Debug)]
 pub(super) struct Package {
-    #[expect(
-        dead_code,
-        reason = "the strict verify compares it with the top directory"
-    )]
     pub container: Container,
     /// One entry per member below the top-level directory, in archive
     /// order, with the SHA-256 of every file computed from the stream.
@@ -191,16 +187,8 @@ fn finish_stream(mut rest: impl io::Read) -> Result<(), PackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::package::{RawMember, compress, pack_piece, raw_tar};
+    use crate::testing::package::{RawMember, compress, on_disk, pack_piece, raw_tar};
     use crate::testing::tree::Tree;
-
-    /// Writes `bytes` to a file in a fresh temp directory.
-    fn on_disk(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let path = dir.path().join("package.tar.zst");
-        std::fs::write(&path, bytes).expect("the package is written");
-        (dir, path)
-    }
 
     /// A piece with every kind of member and a 1969 file.
     fn mixed_piece() -> Tree {

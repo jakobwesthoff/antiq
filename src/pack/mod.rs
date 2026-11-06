@@ -111,6 +111,11 @@ pub struct WalkRules {
     /// Files with these names are left out on both sides, as the walk
     /// leaves them out when packing.
     pub junk: Vec<Name>,
+    /// The tree is antiq's own staging, where the extraction's final pass
+    /// may have left a directory whose mode keeps its owner out. Only then
+    /// does the strict verify give such a directory owner access for the
+    /// read and put its mode back, and only then do directory times count.
+    pub staged: bool,
 }
 
 /// Rules for the target of an extraction. Filled in by the extraction.
@@ -279,6 +284,8 @@ pub enum PackError {
     OpenPackage(#[source] std::io::Error),
     #[error("the package is damaged: {0}")]
     Damaged(String),
+    #[error("the folder differs from the package: {}", verify::describe(.0))]
+    Differs(Vec<verify::Difference>),
 }
 
 impl crate::error::HasKind for PackError {}
@@ -303,23 +310,11 @@ mod tests {
     #[test]
     fn the_unfinished_operations_answer_not_implemented() {
         let (dir, root) = empty_root();
-        let errors = [
-            TarZstd
-                .verify_strict(dir.path(), &root, &WalkRules::default())
-                .expect_err("not implemented")
-                .to_string(),
-            TarZstd
-                .unpack(dir.path(), &root, &TargetRules)
-                .expect_err("not implemented")
-                .to_string(),
-        ];
-        assert_eq!(
-            errors,
-            [
-                "the strict verify is not implemented",
-                "unpacking a package is not implemented",
-            ]
-        );
+        let errors = [TarZstd
+            .unpack(dir.path(), &root, &TargetRules)
+            .expect_err("not implemented")
+            .to_string()];
+        assert_eq!(errors, ["unpacking a package is not implemented"]);
     }
 
     #[test]
