@@ -20,6 +20,7 @@ use std::fs::{File, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 use tar::{Archive, Entry, PaxExtensions};
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
@@ -317,6 +318,7 @@ struct DirectoryRecord {
 
 struct Extraction<'a> {
     staging: &'a TreeRoot,
+    flush: &'a dyn ExtractionFlush,
     container: Option<Vec<u8>>,
     /// Mode and time the archive stores for the container.
     top: Option<(u32, u64)>,
@@ -381,9 +383,10 @@ fn nanoseconds(seconds: u64) -> i128 {
 }
 
 impl<'a> Extraction<'a> {
-    fn new(staging: &'a TreeRoot) -> Extraction<'a> {
+    fn new(staging: &'a TreeRoot, flush: &'a dyn ExtractionFlush) -> Extraction<'a> {
         Extraction {
             staging,
+            flush,
             container: None,
             top: None,
             directories: Vec::new(),
@@ -438,8 +441,12 @@ impl<'a> Extraction<'a> {
                 }
                 file.set_permissions(Permissions::from_mode(mode))
                     .map_err(at)?;
+                // The time is set through the handle: setting it by name
+                // after the flush would leave the inode dirty again.
+                file.set_modified(UNIX_EPOCH + Duration::from_secs(mtime))
+                    .map_err(at)?;
+                self.flush.file(&file, &path).map_err(at)?;
                 drop(file);
-                parent.set_times(&leaf, nanoseconds(mtime)).map_err(at)?;
             }
             Kind::Symlink(target) => {
                 parent.create_symlink(&leaf, &target).map_err(at)?;
@@ -462,17 +469,25 @@ impl<'a> Extraction<'a> {
         self.directories.sort_by(|a, b| b.path.cmp(&a.path));
         for record in &self.directories {
             let at = failed_at(&record.path);
+            // The handle is opened while the owner still has access: a
+            // final mode that takes it away would refuse the open later,
+            // and the flush must come after that mode is set.
+            let handle = self.staging.open_dir_file(&record.path).map_err(at)?;
             self.staging
                 .set_times(&record.path, nanoseconds(record.mtime))
                 .map_err(at)?;
             self.staging
                 .set_mode(&record.path, record.mode)
                 .map_err(at)?;
+            self.flush.directory(&handle, &record.path).map_err(at)?;
         }
         let root = RelPath::root();
+        let at = failed_at(&root);
+        let handle = self.staging.open_dir_file(&root).map_err(at)?;
         self.staging
             .set_times(&root, nanoseconds(top_mtime))
-            .map_err(failed_at(&root))?;
+            .map_err(at)?;
+        self.flush.directory(&handle, &root).map_err(at)?;
         Ok(Unpacked {
             top_mode,
             top_mtime,
@@ -500,6 +515,40 @@ impl Write for ZerosOnly {
     }
 }
 
+/// What an extraction makes durable while it runs.
+///
+/// The extraction calls `file` for every regular file once its content, mode
+/// and time are final, before the file is closed, and `directory` for every
+/// directory once its stored mode and time are set, through a handle opened
+/// before the mode could keep the owner out.
+pub trait ExtractionFlush {
+    fn file(&self, file: &File, path: &RelPath) -> io::Result<()>;
+    fn directory(&self, directory: &File, path: &RelPath) -> io::Result<()>;
+}
+
+/// [`unpack`] that hands every extracted file and directory to `flush`.
+pub fn unpack_flushed(
+    package: &Path,
+    staging: &TreeRoot,
+    rules: &TargetRules,
+    flush: &dyn ExtractionFlush,
+) -> Result<Unpacked, PackError> {
+    unpack_with(package, staging, rules, flush)
+}
+
+/// The flush of an extraction that makes nothing durable.
+struct NoFlush;
+
+impl ExtractionFlush for NoFlush {
+    fn file(&self, _file: &File, _path: &RelPath) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn directory(&self, _directory: &File, _path: &RelPath) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Unpacks `package` below `staging`.
 ///
 /// What was written stays in staging when a member is refused or a
@@ -508,6 +557,15 @@ pub fn unpack(
     package: &Path,
     staging: &TreeRoot,
     rules: &TargetRules,
+) -> Result<Unpacked, PackError> {
+    unpack_with(package, staging, rules, &NoFlush)
+}
+
+fn unpack_with(
+    package: &Path,
+    staging: &TreeRoot,
+    rules: &TargetRules,
+    flush: &dyn ExtractionFlush,
 ) -> Result<Unpacked, PackError> {
     // Two passes write nothing, so a package that is refused for what its
     // headers say, or for names the volume cannot hold, leaves staging as
@@ -520,7 +578,7 @@ pub fn unpack(
     }
 
     let mut archive = open(open_file(package)?)?;
-    let mut extraction = Extraction::new(staging);
+    let mut extraction = Extraction::new(staging, flush);
     for entry in archive.entries().map_err(PackError::Archive)? {
         let mut entry = entry.map_err(PackError::Archive)?;
         let member = classify(&entry, &mut extraction.container)?;
@@ -1044,6 +1102,243 @@ mod tests {
         assert_eq!(seconds_of(&staged, &rel("outer/inner")), 1_300_000_000);
         assert_eq!(seconds_of(&staged, &rel("outer/inner/file")), 1_400_000_000);
         assert_eq!(seconds_of(&staged, &rel("outer/sibling")), 1_500_000_000);
+    }
+
+    // =========================================================
+    // Flushing while extracting
+    // =========================================================
+
+    /// What a flusher saw of one entry at the moment it was asked to flush.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Flushed {
+        File {
+            path: String,
+            size: u64,
+            mode: u32,
+            seconds: i64,
+        },
+        Directory {
+            path: String,
+            mode: u32,
+            seconds: i64,
+        },
+    }
+
+    /// Records the state of every handle it is given, and fails on the
+    /// path it was told to fail on.
+    #[derive(Default)]
+    struct Recorder {
+        seen: std::sync::Mutex<Vec<Flushed>>,
+        fail_on: Option<&'static str>,
+    }
+
+    impl Recorder {
+        fn failing_on(path: &'static str) -> Recorder {
+            Recorder {
+                seen: Default::default(),
+                fail_on: Some(path),
+            }
+        }
+
+        fn seen(&self) -> Vec<Flushed> {
+            self.seen
+                .lock()
+                .expect("the recorder is not poisoned")
+                .clone()
+        }
+
+        fn refuse_if_told(&self, path: &RelPath) -> io::Result<()> {
+            if self.fail_on == Some(path.to_string().as_str()) {
+                return Err(io::Error::other("the flusher was told to fail here"));
+            }
+            Ok(())
+        }
+    }
+
+    impl ExtractionFlush for Recorder {
+        fn file(&self, file: &File, path: &RelPath) -> io::Result<()> {
+            use std::os::unix::fs::MetadataExt;
+            let meta = file.metadata()?;
+            self.seen
+                .lock()
+                .expect("the recorder is not poisoned")
+                .push(Flushed::File {
+                    path: path.to_string(),
+                    size: meta.len(),
+                    mode: meta.mode() & 0o7777,
+                    seconds: meta.mtime(),
+                });
+            self.refuse_if_told(path)
+        }
+
+        fn directory(&self, directory: &File, path: &RelPath) -> io::Result<()> {
+            use std::os::unix::fs::MetadataExt;
+            let meta = directory.metadata()?;
+            self.seen
+                .lock()
+                .expect("the recorder is not poisoned")
+                .push(Flushed::Directory {
+                    path: path.to_string(),
+                    mode: meta.mode() & 0o7777,
+                    seconds: meta.mtime(),
+                });
+            self.refuse_if_told(path)
+        }
+    }
+
+    fn unpack_flushing(
+        bytes: &[u8],
+        staging: &TreeRoot,
+        flush: &dyn ExtractionFlush,
+    ) -> Result<Unpacked, PackError> {
+        let package = package_file(bytes);
+        unpack_flushed(&package.path, staging, &TargetRules::linux(), flush)
+    }
+
+    #[test]
+    fn a_file_is_flushed_once_its_content_mode_and_time_are_final() {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_100_000_000).file(
+            "proj/note",
+            0o640,
+            1_400_000_000,
+            b"hello",
+        );
+        let (_dir, staged) = staging();
+        let recorder = Recorder::default();
+        unpack_flushing(&archive.finish(), &staged, &recorder).expect("the package unpacks");
+        let files: Vec<Flushed> = recorder
+            .seen()
+            .into_iter()
+            .filter(|seen| matches!(seen, Flushed::File { .. }))
+            .collect();
+        assert_eq!(
+            files,
+            [Flushed::File {
+                path: "note".into(),
+                size: 5,
+                mode: 0o640,
+                seconds: 1_400_000_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_directory_is_flushed_with_its_stored_mode_and_time_deepest_first() {
+        let mut archive = RawArchive::new();
+        archive
+            .dir("proj/", 0o755, 1_100_000_000)
+            .dir("proj/outer/", 0o750, 1_200_000_000)
+            .dir("proj/outer/inner/", 0o700, 1_300_000_000)
+            .file("proj/outer/inner/file", 0o644, 1_400_000_000, b"x");
+        let (_dir, staged) = staging();
+        let recorder = Recorder::default();
+        unpack_flushing(&archive.finish(), &staged, &recorder).expect("the package unpacks");
+        let directories: Vec<Flushed> = recorder
+            .seen()
+            .into_iter()
+            .filter(|seen| matches!(seen, Flushed::Directory { .. }))
+            .collect();
+        let directory = |path: &str, mode, seconds| Flushed::Directory {
+            path: path.into(),
+            mode,
+            seconds,
+        };
+        assert_eq!(directories.len(), 3, "{directories:?}");
+        assert_eq!(
+            directories[0],
+            directory("outer/inner", 0o700, 1_300_000_000)
+        );
+        assert_eq!(directories[1], directory("outer", 0o750, 1_200_000_000));
+        // The staging root keeps the mode its maker gave it; its time is the
+        // archived one.
+        assert!(
+            matches!(&directories[2], Flushed::Directory { path, seconds, .. }
+                if path.is_empty() && *seconds == 1_100_000_000),
+            "{directories:?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_whose_stored_mode_keeps_its_owner_out_is_still_flushed() {
+        assert_ne!(
+            rustix::process::geteuid().as_raw(),
+            0,
+            "root opens a directory of any mode, so the test would prove nothing"
+        );
+        let mut archive = RawArchive::new();
+        archive
+            .dir("proj/", 0o755, 1_100_000_000)
+            .dir("proj/locked/", 0o000, 1_200_000_000)
+            .file("proj/locked/child", 0o644, 1_300_000_000, b"l")
+            .dir("proj/readonly/", 0o500, 1_250_000_000);
+        let (dir, staged) = staging();
+        let _restore = RestoreModes(vec![dir.path().join("locked"), dir.path().join("readonly")]);
+        let recorder = Recorder::default();
+        unpack_flushing(&archive.finish(), &staged, &recorder).expect("the package unpacks");
+        let seen = recorder.seen();
+        assert!(
+            seen.contains(&Flushed::Directory {
+                path: "locked".into(),
+                mode: 0o000,
+                seconds: 1_200_000_000,
+            }),
+            "{seen:?}"
+        );
+        assert!(
+            seen.contains(&Flushed::Directory {
+                path: "readonly".into(),
+                mode: 0o500,
+                seconds: 1_250_000_000,
+            }),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_flush_that_fails_on_a_file_fails_the_extraction_naming_it() {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_100_000_000).file(
+            "proj/note",
+            0o644,
+            1_400_000_000,
+            b"hello",
+        );
+        let (_dir, staged) = staging();
+        let recorder = Recorder::failing_on("note");
+        let error =
+            unpack_flushing(&archive.finish(), &staged, &recorder).expect_err("the flush fails");
+        assert!(
+            matches!(&error, PackError::Extract { path, .. } if path.to_string() == "note"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_flush_that_fails_on_a_directory_fails_the_extraction_naming_it() {
+        let mut archive = RawArchive::new();
+        archive
+            .dir("proj/", 0o755, 1_100_000_000)
+            .dir("proj/sub/", 0o755, 1_200_000_000);
+        let (_dir, staged) = staging();
+        let recorder = Recorder::failing_on("sub");
+        let error =
+            unpack_flushing(&archive.finish(), &staged, &recorder).expect_err("the flush fails");
+        assert!(
+            matches!(&error, PackError::Extract { path, .. } if path.to_string() == "sub"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_flush_that_fails_on_the_staging_root_fails_the_extraction() {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_100_000_000);
+        let (_dir, staged) = staging();
+        let recorder = Recorder::failing_on("");
+        let error =
+            unpack_flushing(&archive.finish(), &staged, &recorder).expect_err("the flush fails");
+        assert!(matches!(error, PackError::Extract { .. }), "{error:?}");
     }
 
     #[test]
