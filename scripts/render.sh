@@ -7,7 +7,7 @@
 # docs/pages/assets/shots/ from real runs of antiq in the demo world.
 #
 # Usage: scripts/render.sh          (or: just shots)
-#        scripts/render.sh --demo   (or: just demo) renders only the demo video
+#        scripts/render.sh --demo   (or: just demo-video) renders only the demo video
 #                                   and the GIF of the README
 #
 # It builds antiq in release mode, builds the world with scripts/world.sh,
@@ -43,7 +43,7 @@ expected_columns=105
 # =========================================================
 
 missing=""
-for tool in vhs ttyd ffmpeg oxipng openssl cargo fc-list; do
+for tool in vhs ttyd ffmpeg oxipng openssl cargo; do
     command -v "$tool" > /dev/null || missing="$missing $tool"
 done
 if [ -n "$missing" ]; then
@@ -147,12 +147,6 @@ fi
 # numbered tapes have used up, so after them it gets a fresh world.
 if [ "$mode" = all ]; then
     "$here/world.sh"
-fi
-# vhs draws with the fonts installed on the machine, and the sextants of the
-# version screen come out as boxes in any font that lacks them.
-if ! fc-list : family | grep 'Cascadia Mono' > /dev/null; then
-    echo "render.sh: the font Cascadia Mono is not installed; install $capture/fonts/CascadiaMono.ttf" >&2
-    exit 1
 fi
 echo "rendering tapes/10-demo.tape"
 run_tape tapes/10-demo.tape
