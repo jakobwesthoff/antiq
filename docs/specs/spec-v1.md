@@ -1934,6 +1934,22 @@ for pieces that are pending upload are kept. A dry run reads the remote
 without pulling, lists the marks and the removals, and writes nothing; a
 removal that depends on the age of a file is listed as such.
 
+`reconcile --prune` drops a piece from this machine when its entry is
+`gone`, or is `remote_only` and marked while the remote answers. The
+piece must also hold no archive here (neither in the entry nor as a file
+named by an archive payload of any committed version in its object
+directory), have no recorded change that is not committed, no open
+decision and no folder in place. It is checked once for the plan and
+again when the piece is dropped. Without a remote, or with one that is
+away or broken, only gone pieces are dropped, never an entry that an
+earlier run marked. The drop goes through the brake ("Safety"): the
+planned drops against every entry this machine tracks and every object in
+its store. A drop removes the entry, the live manifest, the object's
+directory and its index rows, and records the object and its highest
+committed version in `.antiq/pruned.json` first. Pull, `status` and the
+index skip a recorded object until a committed version above the recorded
+one is stored; the remote is never touched.
+
 `reconcile` names each piece whose highest committed version is above the
 version this machine took out and above every version it lists as
 committed, with the machine that wrote it, until `sync` or `resolve`
@@ -2462,10 +2478,10 @@ out without a remote or when the remote part stopped: `pulled`, the
 metadata versions stored, `removed` and `skipped`, the leftovers removed
 and the ones the second look did not confirm, and `left_alone`, a list of
 `{id, reason}`), `marked` and `unmarked` (lists of `{id, path}`),
-`changed_elsewhere` (`{id, path, version, machine}`), `unreadable_versions`
+`pruned` (`{id, path}`), `changed_elsewhere` (`{id, path, version, machine}`), `unreadable_versions`
 (`{id, version, reason}`) and `warnings`. Its dry-run actions are
 `rebuild_index` with `member_lists`, the number of listings stored on this
-machine, `mark_missing` and `clear_missing` with `id` and `path`, and
+machine, `mark_missing`, `clear_missing` and `drop` with `id` and `path`, and
 `remove` and `age_unknown` with `id`, `name` and `what`.
 
 `import` adds `imported`, the files that became objects, as `{id, file,

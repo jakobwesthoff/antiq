@@ -38,6 +38,8 @@ pub(super) struct Part {
     pub warnings: Vec<Warning>,
     /// What a dry run lists instead of doing.
     pub actions: Vec<ReconcileAction>,
+    /// The remote answered and the marks are as the remote says.
+    pub reached: bool,
     /// Why the part stopped. The local part stands.
     pub stop: Option<Error>,
 }
@@ -207,6 +209,7 @@ fn reach(
                 tracking::write(collection, lock, clock, &mut entry)?;
             }
             remote.flush()?;
+            part.reached = true;
             part.remote = Some(RemoteReport {
                 pulled,
                 removed: applied.removed,
@@ -215,6 +218,7 @@ fn reach(
             });
         }
         _ => {
+            part.reached = true;
             part.actions
                 .extend(part.marked.iter().cloned().map(ReconcileAction::from_mark));
             part.actions.extend(
@@ -294,13 +298,12 @@ fn changed_elsewhere(
         // version is read on its own.
         _ => {
             let path = store.meta_path(entry.id, newest);
-            let Ok(bytes) = std::fs::read(&path) else {
-                return Ok(());
-            };
-            let Ok(metadata) = meta::parse(&bytes) else {
-                return Ok(());
-            };
-            metadata
+            let bytes = std::fs::read(&path).map_err(|source| crate::fsx::FsxError::Io {
+                action: "read",
+                path: path.display().to_string(),
+                source,
+            })?;
+            meta::parse(&bytes)?
         }
     };
     let machine = metadata
@@ -384,10 +387,15 @@ mod tests {
     }
 
     fn reconcile_with(world: &World, opener: Opener) -> Result<Reconciled, Error> {
+        let mut interaction = crate::interact::NonInteractive;
         reconcile(
             &world.collection,
             &world.clock,
             opener,
+            crate::brake::BrakeInput {
+                force: false,
+                interaction: &mut interaction,
+            },
             ReconcileRequest::default(),
         )
     }
@@ -469,5 +477,76 @@ mod tests {
         assert!(report.stop.is_none());
         assert_eq!(report.marked.len(), 1);
         let _ = &world.temp;
+    }
+
+    fn remote_failing(world: &World, op: Op, fault: Fault) -> Error {
+        let root = world.remote.path().to_path_buf();
+        let opener = move |_: &Collection| -> Result<Box<dyn Remote>, RemoteError> {
+            let remote = FaultRemote::new(path_remote(&root, "laptop"));
+            remote.fail(op, 1, fault);
+            Ok(Box::new(remote))
+        };
+        stop_of(reconcile_with(world, &opener).expect("the local part runs"))
+    }
+
+    #[test]
+    fn a_remote_that_answers_away_ends_the_part_with_the_away_kind() {
+        let world = world();
+        let stop = remote_failing(&world, Op::Reachability, Fault::Away);
+        assert_eq!(stop.kind(), crate::error::ErrorKind::RemoteAway);
+    }
+
+    #[test]
+    fn a_remote_that_answers_broken_ends_the_part_with_the_broken_kind() {
+        let world = world();
+        let stop = remote_failing(&world, Op::Reachability, Fault::Broken);
+        assert_eq!(stop.kind(), crate::error::ErrorKind::RemoteBroken);
+    }
+
+    #[test]
+    fn an_entry_without_metadata_is_left_alone() {
+        let world = world();
+        fs::remove_dir_all(world.collection.object_dir(object(1))).expect("removed");
+        fs::remove_dir_all(
+            world
+                .remote
+                .path()
+                .join("objects")
+                .join(object(1).to_string()),
+        )
+        .expect("removed there as well");
+        let root = world.remote.path().to_path_buf();
+        let opener = move |_: &Collection| -> Result<Box<dyn Remote>, RemoteError> {
+            Ok(Box::new(path_remote(&root, "laptop")))
+        };
+
+        let Reconciled::Done(report) = reconcile_with(&world, &opener).expect("runs") else {
+            panic!("a real run was asked for");
+        };
+
+        assert!(report.marked.is_empty(), "{:?}", report.marked);
+    }
+
+    #[test]
+    fn a_recorded_change_that_cannot_be_read_is_a_warning_and_the_run_goes_on() {
+        let world = world();
+        fs::write(world.collection.meta_pending_path(object(1)), b"{ not json").expect("written");
+        let root = world.remote.path().to_path_buf();
+        let opener = move |_: &Collection| -> Result<Box<dyn Remote>, RemoteError> {
+            Ok(Box::new(path_remote(&root, "laptop")))
+        };
+
+        let Reconciled::Done(report) = reconcile_with(&world, &opener).expect("runs") else {
+            panic!("a real run was asked for");
+        };
+
+        assert!(report.stop.is_none());
+        assert!(
+            report.warnings.iter().any(|warning| warning
+                .message
+                .starts_with(&format!("the metadata of {} cannot be read", object(1)))),
+            "{:?}",
+            report.warnings
+        );
     }
 }

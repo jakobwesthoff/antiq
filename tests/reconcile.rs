@@ -257,18 +257,8 @@ fn a_dry_run_names_the_run_that_holds_the_lock() {
 }
 
 // =========================================================
-// What a prune will do
+// Flags without a remote
 // =========================================================
-
-#[test]
-fn pruning_is_not_implemented_yet() {
-    let temp = world();
-    let run = antiq_in(&temp, &["--json", "reconcile", "--prune"]);
-    assert_eq!(run.code(), 1, "{}", run.stdout);
-    assert_eq!(run.error_kind(), "not_implemented");
-    assert_eq!(run.json()["command"], "reconcile");
-    assert!(!cache_file(&temp, 1).exists(), "nothing was done");
-}
 
 #[test]
 fn force_and_if_reachable_change_nothing_without_a_remote() {

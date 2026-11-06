@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use support::cmd::{Antiq, Run};
 use support::objects::{archive_with_members, entry, id, metadata, put_entry, put_meta, snapshot};
+use support::pty::{Options, Pty};
 use support::tree::{COLLECTION_ID, TempCollection};
 
 /// The archive file the helpers of `support::objects` name for version 1.
@@ -181,6 +182,14 @@ impl World {
             .set_modified(old)
             .expect("sets the time");
     }
+}
+
+/// A snapshot without the clock file a real run touches on the remote.
+fn without_clock(
+    mut snapshot: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+    snapshot.remove(".antiq-clock.laptop");
+    snapshot
 }
 
 fn succeeded(run: &Run) {
@@ -672,4 +681,404 @@ fn an_object_with_nothing_readable_is_listed_and_the_run_goes_on() {
     let listed = run.json()["unreadable_versions"].clone();
     assert_eq!(listed[0]["id"], id(1).to_string());
     assert_eq!(listed[0]["version"], 1);
+}
+
+// =========================================================
+// Pruning
+// =========================================================
+
+impl World {
+    /// A live piece that is gone from its place: no folder, no archive.
+    fn gone(&self, number: u8, at: &str) {
+        let known = metadata(number, at, Lifecycle::Live, COLLECTION_ID, Vec::new());
+        put_meta(self.root(), &known);
+        put_entry(self.root(), &entry(number, at, EntryState::Gone));
+    }
+
+    /// `pads` archived pieces that the remote holds, from number 1 on, so
+    /// that the pieces a test drops are a known share of the set.
+    fn padded(pads: u8) -> World {
+        let world = world();
+        for number in 1..=pads {
+            world.archived(number, &format!("pad{number}"), Archive::Remote);
+        }
+        world
+    }
+
+    fn tombstones(&self) -> Value {
+        match fs::read(self.root().join(".antiq/pruned.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).expect("json"),
+            Err(_) => json!({"format": 1, "pruned": []}),
+        }
+    }
+
+    fn tracked(&self, number: u8) -> bool {
+        self.root()
+            .join(".antiq/tracking")
+            .join(format!("{}.json", id(number)))
+            .exists()
+    }
+
+    /// Replaces the entry of `number` by one that `change` altered.
+    fn alter_entry(
+        &self,
+        number: u8,
+        at: &str,
+        change: impl FnOnce(&mut antiq::tracking::TrackingEntry),
+    ) {
+        let mut tracked = entry(number, at, EntryState::Gone);
+        change(&mut tracked);
+        put_entry(self.root(), &tracked);
+    }
+}
+
+#[test]
+fn a_piece_whose_archive_is_gone_from_the_remote_is_dropped() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    fs::write(
+        world
+            .root()
+            .join(".antiq/tracking")
+            .join(format!("{}.manifest.json", id(10))),
+        "{}",
+    )
+    .expect("a manifest");
+    let remote_before = without_clock(snapshot(&world.remote_root()));
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    succeeded(&run);
+    assert_eq!(
+        run.json()["pruned"],
+        json!([{"id": id(10).to_string(), "path": "alpha"}])
+    );
+    assert!(!world.tracked(10));
+    assert!(!world.local_dir(10).exists());
+    assert!(
+        !world
+            .root()
+            .join(".antiq/tracking")
+            .join(format!("{}.manifest.json", id(10)))
+            .exists()
+    );
+    assert!(
+        !world
+            .root()
+            .join(".antiq/index")
+            .join(format!("{}.json", id(10)))
+            .exists()
+    );
+    assert_eq!(
+        world.tombstones()["pruned"],
+        json!([{"id": id(10).to_string(), "version": 1}])
+    );
+    assert_eq!(without_clock(snapshot(&world.remote_root())), remote_before);
+}
+
+#[test]
+fn the_console_names_a_dropped_piece() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+
+    let run = world.reconcile(&["--prune"]);
+
+    succeeded(&run);
+    assert!(run.stdout.contains("Dropped: alpha\n"), "{}", run.stdout);
+}
+
+#[test]
+fn a_gone_piece_is_dropped_without_a_remote() {
+    let temp = TempCollection::minimal();
+    let world = World {
+        temp,
+        remotes: tempfile::tempdir().expect("a directory"),
+    };
+    for number in 1..=9 {
+        world.gone(number + 1, &format!("pad{number}"));
+        fs::write(world.local_dir(number + 1).join("meta.pending"), "{}").expect("pending");
+    }
+    world.gone(1, "alpha");
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    succeeded(&run);
+    assert_eq!(
+        run.json()["pruned"],
+        json!([{"id": id(1).to_string(), "path": "alpha"}])
+    );
+}
+
+#[test]
+fn an_away_remote_drops_gone_pieces_only() {
+    let world = World::padded(8);
+    world.archived(9, "marked", Archive::Nowhere);
+    succeeded(&world.reconcile(&[]));
+    assert!(world.missing(9));
+    world.gone(10, "alpha");
+    world.take_remote_away();
+
+    let run = world.reconcile(&["--prune"]);
+
+    assert_eq!(run.code(), 4, "{}{}", run.stdout, run.stderr);
+    assert!(!world.tracked(10));
+    assert!(world.tracked(9));
+}
+
+#[test]
+fn a_piece_that_waits_for_its_upload_survives() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Here);
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+#[test]
+fn a_recorded_change_survives() {
+    let world = World::padded(9);
+    world.gone(10, "alpha");
+    fs::copy(
+        world.local_dir(10).join("meta.1"),
+        world.local_dir(10).join("meta.pending"),
+    )
+    .expect("a recorded change");
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+#[test]
+fn a_piece_with_a_pending_decision_survives() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    world.alter_entry(10, "alpha", |tracked| {
+        tracked.decide(antiq::tracking::DecisionKind::ReplacingWithLoss);
+    });
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+#[test]
+fn an_archive_file_in_the_object_directory_keeps_the_piece() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    fs::write(world.local_dir(10).join(ARCHIVE), b"archive").expect("an older archive");
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+#[test]
+fn an_unearthed_piece_with_its_folder_survives() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    world.alter_entry(10, "alpha", |tracked| {
+        tracked.state = EntryState::Live;
+    });
+    fs::create_dir(world.root().join("alpha")).expect("the folder");
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+#[test]
+fn a_gone_piece_with_a_local_archive_survives() {
+    let world = World::padded(9);
+    world.gone(10, "alpha");
+    world.alter_entry(10, "alpha", |tracked| {
+        tracked.local_payloads = vec![LocalPayload {
+            kind: PayloadKind::Archive,
+            version: 1,
+            file: antiq::meta::FileName::new(ARCHIVE).expect("a name"),
+        }];
+    });
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(world.tracked(10));
+}
+
+// ---------------------------------------------------------
+// The brake
+// ---------------------------------------------------------
+
+fn three_of_ten() -> World {
+    let world = World::padded(7);
+    for number in 8..=10 {
+        world.archived(number, &format!("gone{number}"), Archive::Nowhere);
+    }
+    world
+}
+
+#[test]
+fn three_of_ten_are_refused_without_a_terminal_and_nothing_is_dropped() {
+    let world = three_of_ten();
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    assert_eq!(run.code(), 1, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.error_kind(), "brake");
+    assert_eq!(run.json()["error"]["planned"], 3);
+    assert_eq!(run.json()["error"]["set_size"], 10);
+    assert!(world.tracked(8) && world.tracked(9) && world.tracked(10));
+    assert_eq!(world.tombstones()["pruned"], json!([]));
+}
+
+#[test]
+fn force_goes_past_the_brake() {
+    let world = three_of_ten();
+
+    succeeded(&world.reconcile(&["--prune", "--force"]));
+
+    assert!(!world.tracked(8) && !world.tracked(9) && !world.tracked(10));
+}
+
+#[test]
+fn a_dry_run_says_where_the_brake_would_hold_and_drops_nothing() {
+    let world = three_of_ten();
+
+    let run = world.reconcile_json(&["--prune", "--dry-run"]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["brake"]["planned"], 3);
+    assert_eq!(run.json()["brake"]["set_size"], 10);
+    let actions = run.json()["actions"].to_string();
+    assert!(actions.contains("\"action\":\"drop\""), "{actions}");
+    assert!(world.tracked(8));
+    assert_eq!(world.tombstones()["pruned"], json!([]));
+}
+
+#[test]
+fn a_dry_run_lists_a_drop_on_the_console() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+
+    let run = world.reconcile(&["--prune", "--dry-run"]);
+
+    succeeded(&run);
+    assert!(run.stdout.contains("drop alpha\n"), "{}", run.stdout);
+    assert!(world.tracked(10));
+}
+
+fn ask(world: &World) -> Pty {
+    let mut pty = Pty::start(world.root(), &["reconcile", "--prune"], Options::piped());
+    pty.wait_for("the question", |screen| screen.contains("Choose [1-2"));
+    pty
+}
+
+#[test]
+fn a_person_at_a_terminal_can_go_on() {
+    let world = three_of_ten();
+    let mut pty = ask(&world);
+    assert!(
+        pty.screen()
+            .contains("Drop 3 of 10 pieces from this machine?"),
+        "{}",
+        pty.screen().text()
+    );
+    pty.send(b"2\r");
+    let finished = pty.finish();
+    assert_eq!(finished.code(), 0, "stderr: {}", finished.stderr);
+    assert!(!world.tracked(8));
+}
+
+#[test]
+fn a_person_at_a_terminal_can_stop() {
+    let world = three_of_ten();
+    let mut pty = ask(&world);
+    pty.send(b"1\r");
+    let finished = pty.finish();
+    assert_eq!(finished.code(), 1, "stderr: {}", finished.stderr);
+    assert!(world.tracked(8));
+}
+
+// ---------------------------------------------------------
+// The record of pruned objects
+// ---------------------------------------------------------
+
+#[test]
+fn a_pruned_piece_does_not_come_back_with_the_next_pull() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    succeeded(&world.reconcile(&["--prune"]));
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["remote"]["pulled"], 0);
+    assert!(!world.local_dir(10).exists());
+}
+
+#[test]
+fn a_newer_version_on_the_remote_brings_a_pruned_piece_back() {
+    let world = World::padded(9);
+    world.archived(10, "alpha", Archive::Nowhere);
+    succeeded(&world.reconcile(&["--prune"]));
+    fs::copy(
+        world.remote_dir(10).join("meta.1"),
+        world.remote_dir(10).join("meta.2"),
+    )
+    .expect("a newer version");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["remote"]["pulled"], 1);
+    assert!(world.local_dir(10).join("meta.2").exists());
+}
+
+#[test]
+fn a_gone_piece_is_not_marked() {
+    let world = World::padded(2);
+    world.gone(3, "alpha");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["marked"], json!([]));
+}
+
+#[test]
+fn a_recorded_change_does_not_hide_a_version_another_machine_wrote() {
+    let world = world();
+    world.archived(1, "alpha", Archive::Remote);
+    version_by(&world, 1, "studio");
+    fs::copy(
+        world.local_dir(1).join("meta.1"),
+        world.local_dir(1).join("meta.pending"),
+    )
+    .expect("a recorded change");
+    let mut tracked = entry(1, "alpha", EntryState::Gone);
+    tracked.version_taken_out = antiq::tracking::VersionTakenOut::Pending;
+    put_entry(world.root(), &tracked);
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["changed_elsewhere"][0]["version"], 2);
+    assert_eq!(run.json()["changed_elsewhere"][0]["machine"], "studio");
+}
+
+#[test]
+fn only_a_recorded_change_names_no_version_elsewhere() {
+    let world = world();
+    world.gone(1, "alpha");
+    fs::copy(
+        world.local_dir(1).join("meta.1"),
+        world.local_dir(1).join("meta.pending"),
+    )
+    .expect("a recorded change");
+    fs::remove_file(world.local_dir(1).join("meta.1")).expect("removed");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["changed_elsewhere"], json!([]));
 }

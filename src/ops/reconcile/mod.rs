@@ -5,6 +5,7 @@
 //! The `reconcile` command, as far as it needs no remote: it rebuilds the
 //! index, and a real run starts with the repairs of every run.
 
+use crate::brake::{self, BrakeInput};
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::Error;
@@ -19,6 +20,7 @@ use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, Started};
 use serde::Serialize;
 
+mod prune;
 mod remote_part;
 
 /// Errors of the `reconcile` command.
@@ -40,6 +42,8 @@ pub enum ReconcileAction {
     MarkMissing { id: ObjectId, path: String },
     /// Clear that note, as the archive is back.
     ClearMissing { id: ObjectId, path: String },
+    /// Drop a piece from this machine.
+    Drop { id: ObjectId, path: String },
     /// Remove a leftover from the remote.
     Remove {
         id: ObjectId,
@@ -84,6 +88,7 @@ impl PlanAction for ReconcileAction {
             ReconcileAction::MarkMissing { path, .. } => {
                 format!("mark {path} as missing on the remote")
             }
+            ReconcileAction::Drop { path, .. } => format!("drop {path}"),
             ReconcileAction::ClearMissing { path, .. } => {
                 format!("clear the missing mark of {path}")
             }
@@ -167,6 +172,7 @@ pub struct ReconcileReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteReport>,
     pub marked: Vec<PieceRef>,
+    pub pruned: Vec<PieceRef>,
     pub unmarked: Vec<PieceRef>,
     pub changed_elsewhere: Vec<ChangedElsewhere>,
     pub unreadable_versions: Vec<UnreadableVersion>,
@@ -229,14 +235,11 @@ pub fn reconcile(
     collection: &Collection,
     clock: &dyn Clock,
     opener: Opener,
+    brake: BrakeInput<'_>,
     request: ReconcileRequest,
 ) -> Result<Reconciled, Error> {
     let ReconcileRequest { prune, dry_run, .. } = request;
-    if prune {
-        return Err(Error::NotImplemented {
-            command: "reconcile --prune".to_string(),
-        });
-    }
+    let percent = collection.config().collection.brake_percent;
     match run::start(collection, clock, dry_run)? {
         Started::DryRun { holder } => {
             let index = Index::compute(collection)?;
@@ -249,8 +252,19 @@ pub fn reconcile(
             let mut plan = Plan::new();
             plan.push(ReconcileAction::RebuildIndex { member_lists });
             let part = remote_part::run(collection, clock, opener, None);
-            for action in part.actions {
-                plan.push(action);
+            for action in &part.actions {
+                plan.push(action.clone());
+            }
+            if prune {
+                let dropping = prune::plan(collection, &part)?;
+                let hold = brake::evaluate(percent, dropping.candidates(), dropping.set_size);
+                plan.brake = hold.filter(|_| !brake.force);
+                for piece in dropping.pieces {
+                    plan.push(ReconcileAction::Drop {
+                        id: piece.id,
+                        path: piece.path,
+                    });
+                }
             }
             let mut notes = collection_notes(collection);
             notes.extend(part.warnings);
@@ -264,6 +278,23 @@ pub fn reconcile(
         Started::Guarded(guard) => {
             let rebuilt = index::rebuild(collection, guard.lock())?;
             let part = remote_part::run(collection, clock, opener, Some(guard.lock()));
+            let mut pruned = Vec::new();
+            if prune {
+                let dropping = prune::plan(collection, &part)?;
+                let hold = brake::evaluate(percent, dropping.candidates(), dropping.set_size);
+                brake::gate(
+                    hold,
+                    brake.force,
+                    &|hold| {
+                        format!(
+                            "Drop {} of {} pieces from this machine?",
+                            hold.planned, hold.set_size
+                        )
+                    },
+                    brake.interaction,
+                )?;
+                pruned = prune::execute(collection, guard.lock(), &part, &dropping.pieces)?;
+            }
             let mut warnings = collection_notes(collection);
             warnings.extend_from_slice(guard.warnings());
             warnings.extend(part.warnings);
@@ -279,6 +310,7 @@ pub fn reconcile(
                 },
                 remote: part.remote,
                 marked: part.marked,
+                pruned,
                 unmarked: part.unmarked,
                 changed_elsewhere: part.changed_elsewhere,
                 unreadable_versions: part.unreadable_versions,
@@ -302,6 +334,7 @@ mod tests {
             },
             remote: None,
             marked: Vec::new(),
+            pruned: Vec::new(),
             unmarked: Vec::new(),
             changed_elsewhere: Vec::new(),
             unreadable_versions: Vec::new(),

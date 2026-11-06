@@ -7,6 +7,7 @@
 use crate::cli::cmd::status::sanitize;
 use crate::cli::output::Output;
 use crate::cli::{Context, ReconcileArgs};
+use antiq::brake::BrakeInput;
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::ops::reconcile::{ReconcileReport, ReconcileRequest, Reconciled, reconcile};
@@ -24,8 +25,19 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
         force: args.force,
         dry_run: args.dry_run,
     };
-    let reconciled = reconcile(&collection, &SystemClock, &antiq::remote::open, request)
-        .context("reconcile the index")?;
+    let mut interaction = ctx.interaction();
+    let brake = BrakeInput {
+        force: args.force,
+        interaction: interaction.as_mut(),
+    };
+    let reconciled = reconcile(
+        &collection,
+        &SystemClock,
+        &antiq::remote::open,
+        brake,
+        request,
+    )
+    .context("reconcile the index")?;
 
     match reconciled {
         Reconciled::Done(mut report) => {
@@ -90,6 +102,10 @@ fn print_report(report: &ReconcileReport, out: &mut Output) -> anyhow::Result<()
             sanitize(&piece.path)
         ))
         .context("print the result")?;
+    }
+    for piece in &report.pruned {
+        out.line(&format!("Dropped: {}", sanitize(&piece.path)))
+            .context("print the result")?;
     }
     for piece in &report.unmarked {
         out.line(&format!(
