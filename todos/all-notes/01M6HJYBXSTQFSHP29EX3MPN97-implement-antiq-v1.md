@@ -2403,8 +2403,8 @@ the same commit; the lead checks that at acceptance.
   `f_mntonname` of the directory against its parent's), so the delete
   helper refuses a same-filesystem bind mount and the walk and selection
   report it as a mount point. This replaces the I05 statement that bind
-  mounts are not seen; the bind-mount todo closes with the fix batch,
-  which lands before I19. On macOS a firmlink at the top of the system
+  mounts are not seen; the bind-mount todo closed with the fix batch
+  (I03F, merged before I19). On macOS a firmlink at the top of the system
   volume compares as a mount root (safe direction, stated in the spec).
   `remove_tree` works iteratively and stops at the walk's 512 levels
   with its own error, and extraction refuses members deeper than that
@@ -2418,6 +2418,15 @@ the same commit; the lead checks that at acceptance.
   and the removal refused. The nested-collection problem is
   `Problem::NestedCollection { root }`, naming the directory that holds
   the marker. Selection is unchanged.
+- 2026-11-04 (I03F merged): a piece below a directory that is a mount
+  root (between the collection root and its top) counts as containing a
+  mount point at its own path, and `remove_tree` refuses such a path, so
+  a same-device bind mount above a piece is never emptied (review O1).
+  New `TreeEntry` literals need `mount_root`; `FsxError::TooDeep` is
+  new; `Problem::NestedCollection { root }` names the directory holding
+  the `.antiq`. Bind-mount tests run as root only with
+  `ANTIQ_PRIVILEGED_TESTS=1` (Linux gate scripts in the logbook's
+  `plans/linux/`; I39 uses them).
 
 ### I04
 
@@ -2617,6 +2626,16 @@ the same commit; the lead checks that at acceptance.
   wins over a ULID prefix; a folder without an object is an unknown
   reference; I15 exposes `resolve_path` for `pin` on new pieces (I18).
 
+- 2026-11-04 (I15 plan review, 11 agreed): the member cache lives as
+  long as its local listing; `at_path` gives the claimant of a path
+  (entry `unearthing`, `live` or `removing`), so after a fork a path
+  resolves to the new ID; a new folder sharing the path of an archived
+  object resolves to the archived one (I18 tells them apart with
+  `at_path` and the folder's presence); a path above the filesystem root
+  is `outside_collection`; search scores the piece path and members as
+  `<piece path>/<member>`; I20 and I21 refuse the collection root and
+  `.antiq/...` themselves.
+
 ### I16
 
 - 2026-11-04: the time of the last sync in `status`'s header comes from
@@ -2626,6 +2645,17 @@ the same commit; the lead checks that at acceptance.
   on the console; the JSON keeps `pending_upload`. Console labels are
   I16's proposal, kept in one place; the user sees the rendered output
   before the merge.
+- 2026-11-04 (I16): `remote::probe_state`, called by `status`, writes
+  nothing locally; `.antiq/remote-state.json` is written only by runs
+  that hold the lock (I23, I29, I30). `status` reads only the optional
+  `last_sync` (RFC 3339, whole seconds) and ignores other keys. For
+  I33: `status` defines `archive_commit_time(&Metadata)`
+  (pub(crate), `src/ops/status.rs`): the current archive is the
+  highest-version archive payload that is not superseded, its commit
+  time the earliest history entry at or after the payload's `created`
+  with action `archive`, `import`, `resolve` or `fork`; reuse or move it.
+  `derive_state` gives a `gone` entry its folder back only for live
+  metadata of this collection (I16 fixes I09's code).
 
 ### I12
 
