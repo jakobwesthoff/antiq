@@ -412,3 +412,58 @@ fn a_text_run_that_does_not_fit_says_so_on_stderr() {
         run.stderr
     );
 }
+
+fn after_a_died_unearth(builder: &mut CollectionBuilder) {
+    scanner(builder);
+    builder
+        .piece("projects/died", |piece| {
+            piece.file("a.txt", "a").restored(3, Some(NEW));
+        })
+        .version("projects/died", NEW, &[("a.txt", "a")]);
+}
+
+#[test]
+fn the_repairs_of_the_start_are_told_before_and_after_the_run() {
+    let world = world(Mode::Text, after_a_died_unearth);
+    let dry = world.run(&["unearth", "tools/scan-old", "-n"]);
+    dry.expect_code(0);
+    let lines: Vec<&str> = dry.stdout.lines().collect();
+    assert!(
+        lines[0].starts_with("Would delete version "),
+        "{:?}",
+        dry.stdout
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Would unearth tools/scan-old")),
+        "{:?}",
+        dry.stdout
+    );
+
+    let run = world.run(&["unearth", "tools/scan-old"]);
+    run.expect_code(0);
+    assert!(
+        run.stderr.starts_with("note: repaired: delete version "),
+        "{:?}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.starts_with("Unearthed tools/scan-old"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_refusal_a_repair_may_lift_is_a_note_of_the_dry_run() {
+    let world = world(Mode::Text, after_a_died_unearth);
+    let dry = world.run(&["unearth", "projects/died", "-n"]);
+    dry.expect_code(0);
+    assert!(
+        dry.stderr
+            .contains("note: cannot be judged before the repairs run"),
+        "{:?}",
+        dry.stderr
+    );
+}
