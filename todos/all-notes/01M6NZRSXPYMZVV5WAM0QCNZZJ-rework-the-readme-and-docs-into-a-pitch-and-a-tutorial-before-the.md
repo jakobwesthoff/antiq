@@ -47,5 +47,10 @@ content stays; no information is lost. The order and the voice change.
 - Which captures, and in which form (images or text transcripts).
 - The exact wording of the pitch and the use cases.
 
+Once the README names the AI context-directory use case and the
+supported platforms, revisit the GitHub topics: on 2026-11-05 `ai-agents`
+and `macos`/`linux` were left out because the README did not state them
+yet, and the repository already has the maximum of 20 topics.
+
 Do this after the console overhaul and the live progress rows land, so
 the captures show the final output.
