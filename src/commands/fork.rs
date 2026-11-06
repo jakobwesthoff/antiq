@@ -14,6 +14,7 @@ use crate::commands::unearth::{complete_stamps, concerns, gives_back_to};
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
+use crate::progress::Tracker;
 use crate::reference::{self, ReferenceError};
 use crate::relpath::RelPath;
 use crate::repair::Repair;
@@ -421,6 +422,7 @@ impl Run<'_> {
             &Placement {
                 destination: &destination,
                 marker_version: None,
+                tracker: Tracker::silent(),
             },
             clock.now(),
             hooks,

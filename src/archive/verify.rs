@@ -403,6 +403,28 @@ enum Stage {
     AfterRead,
 }
 
+/// [`compare_with_listing`], counting the files it reads into `counter`.
+/// The counter gets its total at once: the regular files the listing holds
+/// under their own name, as a hard link is not read again.
+pub(crate) fn compare_with_listing_counted(
+    listing: &[ListingEntry],
+    root: &TreeRoot,
+    rules: &WalkRules,
+    counter: &Counter,
+) -> Result<Compared, PackError> {
+    let files = listing
+        .iter()
+        .filter(|entry| entry.kind == ListingType::File)
+        .count();
+    counter.set_total(files as u64);
+    let mut counted = |stage: Stage, _: &RelPath| {
+        if stage == Stage::AfterRead {
+            counter.add(1);
+        }
+    };
+    compare_with_listing_observed(listing, root, rules, &mut counted)
+}
+
 fn compare_with_listing_observed(
     listing: &[ListingEntry],
     root: &TreeRoot,
@@ -1009,6 +1031,23 @@ mod tests {
                 changed("src/copy.txt", &[Field::Type])
             ]
         );
+    }
+
+    #[test]
+    fn the_counted_comparison_reads_a_hard_linked_file_once_and_ends_at_its_total() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
+        let listing = packed(&tree);
+        let counter = Counter::new();
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+
+        let compared =
+            compare_with_listing_counted(&listing, &root, &WalkRules::default(), &counter)
+                .expect("the comparison runs");
+
+        assert!(compared.differences().is_empty());
+        // main.rs and notes.txt; copy.txt is a link member of notes.txt.
+        assert_eq!((counter.done(), counter.total()), (2, 2));
     }
 
     #[test]

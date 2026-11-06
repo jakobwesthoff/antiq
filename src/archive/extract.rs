@@ -12,6 +12,7 @@
 use super::names::{MemberKind, MemberName, check_members};
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::filesystem::tree::TreeRoot;
+use crate::progress::Counter;
 use crate::relpath::{RelPath, escape};
 use crate::walk::MAX_DEPTH;
 use std::collections::HashMap;
@@ -321,6 +322,7 @@ struct DirectoryRecord {
 struct Extraction<'a> {
     staging: &'a TreeRoot,
     flush: &'a dyn ExtractionFlush,
+    counter: Option<&'a Counter>,
     container: Option<Vec<u8>>,
     /// Mode and time the archive stores for the container.
     top: Option<(u32, u64)>,
@@ -385,10 +387,15 @@ fn nanoseconds(seconds: u64) -> i128 {
 }
 
 impl<'a> Extraction<'a> {
-    fn new(staging: &'a TreeRoot, flush: &'a dyn ExtractionFlush) -> Extraction<'a> {
+    fn new(
+        staging: &'a TreeRoot,
+        flush: &'a dyn ExtractionFlush,
+        counter: Option<&'a Counter>,
+    ) -> Extraction<'a> {
         Extraction {
             staging,
             flush,
+            counter,
             container: None,
             top: None,
             directories: Vec::new(),
@@ -418,6 +425,7 @@ impl<'a> Extraction<'a> {
             self.top = Some((mode, mtime));
             return Ok(());
         }
+        let counted = !matches!(kind, Kind::Directory);
         let at = failed_at(&path);
         let (parent_path, leaf) = split(&path);
         let parent = parent_of(self.staging, &mut self.parent, &parent_path).map_err(at)?;
@@ -460,6 +468,11 @@ impl<'a> Extraction<'a> {
             }
         }
         self.members += 1;
+        if let Some(counter) = self.counter
+            && counted
+        {
+            counter.add(1);
+        }
         Ok(())
     }
 
@@ -535,7 +548,19 @@ pub fn unpack_flushed(
     rules: &TargetRules,
     flush: &dyn ExtractionFlush,
 ) -> Result<Unpacked, PackError> {
-    unpack_with(package, staging, rules, flush)
+    unpack_with(package, staging, rules, flush, None)
+}
+
+/// [`unpack_flushed`], adding one to `counter` for every member that is not
+/// a directory once it is extracted.
+pub fn unpack_counted(
+    package: &Path,
+    staging: &TreeRoot,
+    rules: &TargetRules,
+    flush: &dyn ExtractionFlush,
+    counter: &Counter,
+) -> Result<Unpacked, PackError> {
+    unpack_with(package, staging, rules, flush, Some(counter))
 }
 
 /// The flush of an extraction that makes nothing durable.
@@ -560,7 +585,7 @@ pub fn unpack(
     staging: &TreeRoot,
     rules: &TargetRules,
 ) -> Result<Unpacked, PackError> {
-    unpack_with(package, staging, rules, &NoFlush)
+    unpack_with(package, staging, rules, &NoFlush, None)
 }
 
 fn unpack_with(
@@ -568,6 +593,7 @@ fn unpack_with(
     staging: &TreeRoot,
     rules: &TargetRules,
     flush: &dyn ExtractionFlush,
+    counter: Option<&Counter>,
 ) -> Result<Unpacked, PackError> {
     // Two passes write nothing, so a package that is refused for what its
     // headers say, or for names the volume cannot hold, leaves staging as
@@ -580,7 +606,7 @@ fn unpack_with(
     }
 
     let mut archive = open(open_file(package)?)?;
-    let mut extraction = Extraction::new(staging, flush);
+    let mut extraction = Extraction::new(staging, flush, counter);
     for entry in archive.entries().map_err(PackError::Archive)? {
         let mut entry = entry.map_err(PackError::Archive)?;
         let member = classify(&entry, &mut extraction.container)?;

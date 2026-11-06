@@ -84,6 +84,9 @@ pub enum Outcome {
     Refused(Vec<String>),
     /// The item was not processed; the text says why.
     Skipped(String),
+    /// The item was not processed for lack of room: it needs `needed` bytes
+    /// and `available` are free.
+    NoRoom { needed: u64, available: u64 },
     /// The item is partly done and the repairs of the next run finish it.
     Unfinished(String),
 }

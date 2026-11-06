@@ -6,9 +6,9 @@
 
 use crate::archive::TargetRules;
 use crate::archive::extract::ExtractionFlush;
-use crate::archive::extract::unpack_flushed;
+use crate::archive::extract::unpack_counted;
 use crate::archive::names::{MemberName, check_members};
-use crate::archive::verify::compare_with_listing;
+use crate::archive::verify::compare_with_listing_counted;
 use crate::archive::{PackError, WalkRules};
 use crate::code_span::CodeSpan;
 use crate::collection::Collection;
@@ -24,6 +24,7 @@ use crate::listing::{self, Listing, ListingEntry, ListingError, ListingType};
 use crate::markers::{self, Restored};
 use crate::markers::{MarkerError, RESTORED_FILE, RealSite, Site};
 use crate::pin::PIN_FILE;
+use crate::progress::{Operation, Tracker};
 use crate::reference::{self, ReferenceError};
 use crate::relpath::{Name, RelPath};
 use crate::select::Rules;
@@ -1029,10 +1030,13 @@ pub(crate) struct Placement<'a> {
     pub destination: &'a RelPath,
     /// The stamp of the version, for an unearth; none for a fork.
     pub marker_version: Option<Stamp>,
+    /// Reports the extraction and the comparison with the listing.
+    pub tracker: Tracker<'a>,
 }
 
 /// Brings the chosen version back as a folder at the piece's own path;
 /// see [`bring_back_to`].
+#[cfg(test)]
 pub(crate) fn bring_back(
     collection: &Collection,
     places: &Places,
@@ -1050,6 +1054,7 @@ pub(crate) fn bring_back(
         &Placement {
             destination: &chosen.piece,
             marker_version,
+            tracker: Tracker::silent(),
         },
         now,
         hooks,
@@ -1204,19 +1209,30 @@ fn place(
         .join(archive_name);
     let flush = TreeFlush::begin_with(&collection.tmp_dir().join("extract"), hooks.platform())
         .map_err(io_at("start the flush in", &extract))?;
-    let unpacked = unpack_flushed(&archive, &staging, &volume, &flush)?;
+    let extracting = placement.tracker.operation(Operation::Extracting);
+    if let Some(listing) = source.listing {
+        let items = listing
+            .entries
+            .iter()
+            .filter(|entry| entry.kind != ListingType::Dir)
+            .count();
+        extracting.set_total(items as u64);
+    }
+    let unpacked = unpack_counted(&archive, &staging, &volume, &flush, &extracting)?;
     hooks.reached(Step::Extracted)?;
 
     if let Some(listing) = source.listing
         && source.compare
     {
-        let compared = compare_with_listing(
+        let verifying = placement.tracker.operation(Operation::Verifying);
+        let compared = compare_with_listing_counted(
             &listing.entries,
             &staging,
             &WalkRules {
                 staged: true,
                 ..WalkRules::default()
             },
+            &verifying,
         )?;
         if !compared.differences().is_empty() {
             return Err(RestoreError::Differs {
@@ -3431,6 +3447,7 @@ mod bring_tests {
                 &Placement {
                     destination: &destination,
                     marker_version: None,
+                    tracker: Tracker::silent(),
                 },
                 self.now,
                 hooks,

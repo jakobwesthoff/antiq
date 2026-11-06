@@ -7,13 +7,14 @@
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::commands::restore::{
-    Brought, Hooks, RealHooks, RestoreError, Skipped, Step, TargetProblem, bring_back,
-    check_destination, check_same_volume, choose_version, measured_tmp,
+    Brought, Hooks, Placement, RealHooks, RestoreError, Skipped, Source, Step, TargetProblem,
+    bring_back_to, check_destination, check_same_volume, choose_version, measured_tmp,
 };
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::markers::{self, RESTORED_FILE, Restored};
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
+use crate::progress::{Observer, Operation, Outcome as Progress, Silent, Tracker};
 use crate::relpath::RelPath;
 use crate::repair::{Destination, Repair};
 use crate::report::{CommandReport, Warning, setting_notes};
@@ -194,12 +195,35 @@ pub fn unearth(
     unearth_with(collection, request, clock, zone, &RealHooks)
 }
 
+/// [`unearth`], telling `observer` what a real run does. A dry run has
+/// nothing to tell.
+pub fn unearth_observed(
+    collection: &Collection,
+    request: &UnearthRequest,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+    observer: &dyn Observer,
+) -> Result<Outcome, UnearthError> {
+    unearth_watched(collection, request, clock, zone, &RealHooks, Some(observer))
+}
+
 pub(crate) fn unearth_with(
     collection: &Collection,
     request: &UnearthRequest,
     clock: &dyn Clock,
     zone: &TimeZone,
     hooks: &dyn Hooks,
+) -> Result<Outcome, UnearthError> {
+    unearth_watched(collection, request, clock, zone, hooks, None)
+}
+
+fn unearth_watched(
+    collection: &Collection,
+    request: &UnearthRequest,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+    hooks: &dyn Hooks,
+    observer: Option<&dyn Observer>,
 ) -> Result<Outcome, UnearthError> {
     let started = run::start(collection, clock, request.dry_run)?;
     if let Started::DryRun {
@@ -229,6 +253,7 @@ pub(crate) fn unearth_with(
         places: &places,
         rules: &rules,
         root: &root,
+        observer,
     };
     match started {
         Started::DryRun {
@@ -245,6 +270,7 @@ struct Run<'a> {
     places: &'a Places<'a>,
     rules: &'a Rules,
     root: &'a TreeRoot,
+    observer: Option<&'a dyn Observer>,
 }
 
 /// Whether a repair of the start of a run concerns the piece the person
@@ -386,12 +412,20 @@ impl Run<'_> {
         warnings.extend(guard.warnings().iter().cloned());
 
         let chosen = self.choose()?;
-        let brought = bring_back(
+        let name = chosen.piece.to_string();
+        let tracker = Tracker::new(self.observer.unwrap_or(&Silent), &name);
+        let bytes = chosen.listing.bytes;
+        tracker.started(bytes, Some(&chosen.stamp.to_string()));
+        let brought = bring_back_to(
             self.collection,
             self.places,
             self.rules,
-            &chosen,
-            Some(chosen.stamp),
+            &Source::sound(&chosen),
+            &Placement {
+                destination: &chosen.piece,
+                marker_version: Some(chosen.stamp),
+                tracker,
+            },
             clock.now(),
             hooks,
         )?;
@@ -419,6 +453,13 @@ impl Run<'_> {
                     available,
                 });
                 warnings.extend(more.into_iter().map(Warning::new));
+                tracker.finished(
+                    bytes,
+                    &Progress::NoRoom {
+                        needed: needed.expect("a sound version has a listing"),
+                        available,
+                    },
+                );
             }
             Brought::Done {
                 time,
@@ -435,8 +476,13 @@ impl Run<'_> {
                         &chosen.piece,
                         format!("it could not be made durable: {error}"),
                     )),
-                    None => self.finish(&chosen, time, hooks)?,
+                    None => self.finish(&chosen, time, hooks, tracker)?,
                 };
+                let outcome = match &unfinished {
+                    Some(warning) => Progress::Unfinished(warning.message.clone()),
+                    None => Progress::Files(chosen.listing.files),
+                };
+                tracker.finished(bytes, &outcome);
                 if let Some(warning) = unfinished {
                     report.unfinished = true;
                     warnings.push(warning);
@@ -455,8 +501,10 @@ impl Run<'_> {
         chosen: &crate::commands::restore::Chosen,
         time: Timestamp,
         hooks: &dyn Hooks,
+        tracker: Tracker<'_>,
     ) -> Result<Option<Warning>, UnearthError> {
         let piece = &chosen.piece;
+        tracker.operation(Operation::Removing);
         if let Err(error) = self.delete_version(chosen) {
             return Ok(Some(in_place(
                 piece,
@@ -726,6 +774,18 @@ mod tests {
 
         fn run(&self, hooks: &dyn Hooks) -> Result<Outcome, UnearthError> {
             self.run_with(&self.request(false), hooks)
+        }
+
+        fn run_observed(&self, hooks: &dyn Hooks, observer: &dyn Observer) -> Outcome {
+            unearth_watched(
+                &self.collection(),
+                &self.request(false),
+                &*self.clock,
+                &TimeZone::UTC,
+                hooks,
+                Some(observer),
+            )
+            .expect("the run ends")
         }
 
         fn store_files(&self, folder: &str) -> Vec<String> {
@@ -1432,5 +1492,90 @@ mod tests {
         let world = World::new(&[NEW]);
         let report = report(world.run(&Probe::default()));
         assert!(CommandReport::warnings(&report).is_empty());
+    }
+
+    // =========================================================
+    // Progress events
+    // =========================================================
+
+    use crate::testing::recording::Recorder;
+
+    #[test]
+    fn an_unearth_reports_its_operations_with_counters_that_reach_their_totals() {
+        let world = World::new(&[OLD]);
+        let recorder = Recorder::new();
+
+        world.run_observed(&Probe::default(), &recorder);
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 25 2026-11-03T081500",
+                "projects/scanner Extracting 2/2",
+                "projects/scanner Verifying 2/2",
+                "projects/scanner Removing 0/0",
+                "finished projects/scanner 25 Files(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unearth_without_room_ends_as_skipped_after_it_started() {
+        let world = World::new(&[OLD]);
+        let probe = Probe::default();
+        probe.space.set(Some(3));
+        let recorder = Recorder::new();
+
+        world.run_observed(&probe, &recorder);
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 25 2026-11-03T081500",
+                "finished projects/scanner 25 NoRoom { needed: 25, available: 3 }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_in_place_whose_marker_cannot_be_rewritten_ends_as_unfinished() {
+        let world = World::new(&[NEW]);
+        let probe = Probe::default();
+        probe.fail_marker_from.set(Some(1));
+        let recorder = Recorder::new();
+
+        world.run_observed(&probe, &recorder);
+
+        let lines = recorder.lines();
+        let last = lines.last().expect("events came");
+        assert!(
+            last.starts_with("finished projects/scanner 25 Unfinished(")
+                && last.contains("is in place"),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn an_unearth_that_fails_before_the_rename_ends_without_a_finish() {
+        let world = World::new(&[OLD]);
+        let probe = Probe::default();
+        probe.stop_at(Step::Extracted);
+        let recorder = Recorder::new();
+
+        let result = unearth_watched(
+            &world.collection(),
+            &world.request(false),
+            &*world.clock,
+            &TimeZone::UTC,
+            &probe,
+            Some(&recorder),
+        );
+
+        assert!(result.is_err());
+        let lines = recorder.lines();
+        assert!(
+            lines.iter().all(|line| !line.starts_with("finished")),
+            "{lines:?}"
+        );
     }
 }
