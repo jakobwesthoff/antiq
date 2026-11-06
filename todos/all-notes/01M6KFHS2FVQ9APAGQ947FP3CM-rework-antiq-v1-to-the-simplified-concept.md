@@ -1744,6 +1744,16 @@ During the review (ledger `plans/rework-plan-review-ledger.md`):
 - PF4: Linux uses `syncfs` without a measurement; M1 runs on macOS only.
 - PO20: the lead files the new plan todo on main before R1, M1 and D0.
 
+### 8.6 M1's result and the lead's decision (2026-11-04)
+
+M1 (`docs/research/extract-flush.md`, main 60d3387) measured on the
+internal APFS SSD: T1 control 2.45 s, A 225.4 s, B 3.14 s. By the rule of
+5.1, A fails both thresholds (91.9 times, 223 s above), so **C6 uses B on
+macOS**: plain `fsync` per file and directory, then one `F_FULLFSYNC`
+before the rename; **C on Linux** (one `syncfs` on an fd opened before
+extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
+`syncfs` is refused. C6 states the method in the spec section "unearth".
+
 ### 8.5 User decisions after the plan review (2026-11-04)
 
 - `--take-over` goes. `push --force` pushes despite a host or path
