@@ -1075,6 +1075,27 @@ pub(in crate::ops::unearth) mod tests {
     }
 
     #[test]
+    fn an_unearthing_entry_that_cannot_be_written_leaves_the_store_as_it_was() {
+        let scenario = Scenario::new(false);
+        let entry_file = scenario.fx.collection.tracking_path(id(ID));
+        // The probe runs after the checks and before anything is stored, so
+        // the entry file is made unwritable at the last moment.
+        let probe = |staged: &TreeRoot| {
+            fs::remove_file(&entry_file).expect("the entry file");
+            fs::create_dir(&entry_file).expect("a directory in its place");
+            TargetRules::probe(staged)
+        };
+        let env = Scenario::environment(&available_space, &crate::fsx::moves::move_dir, &probe);
+
+        let error = scenario
+            .unearth_through(&scenario.remote, &env)
+            .expect_err("fails");
+
+        assert!(matches!(error, UnearthError::Tracking(_)), "{error}");
+        assert!(scenario.nothing_is_left());
+    }
+
+    #[test]
     fn a_volume_with_room_for_archive_and_extraction_unearths_a_held_listing_piece() {
         let scenario = Scenario::new(true);
         let plan = scenario.fx.planned(&scenario.fx.request(ID));

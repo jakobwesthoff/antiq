@@ -331,7 +331,12 @@ fn place(
     let machine = collection.machine_name()?;
     let stored = arrived.store(collection, lock, plan)?;
     let mut entry = unearthing_entry(plan, subject, clock);
-    tracking::write(collection, lock, clock, &mut entry)?;
+    // Nothing tracks the files this run stored yet, so without the entry
+    // they would stay in the store untracked.
+    if let Err(error) = tracking::write(collection, lock, clock, &mut entry) {
+        stored.undo(collection, plan);
+        return Err(error.into());
+    }
 
     let placed = move_into_place(&root, &rules, env, staging_root, staged_name, target);
     match placed {
