@@ -51,7 +51,10 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
                 print_report(&report, out)?;
             }
             if let Some(stop) = stop {
-                return Err(anyhow::Error::new(stop).context(RemoteStop { partial }));
+                return Err(anyhow::Error::new(stop).context(RemoteStop {
+                    partial,
+                    pruned: report.pruned.clone(),
+                }));
             }
             Ok(if partial { 3 } else { 0 })
         }
@@ -75,7 +78,10 @@ pub fn run(ctx: &Context, args: &ReconcileArgs, out: &mut Output) -> anyhow::Res
                 }
             }
             if let Some(stop) = stop {
-                return Err(anyhow::Error::new(stop).context(RemoteStop { partial: false }));
+                return Err(anyhow::Error::new(stop).context(RemoteStop {
+                    partial: false,
+                    pruned: Vec::new(),
+                }));
             }
             Ok(0)
         }

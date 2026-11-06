@@ -415,6 +415,17 @@ fn finish(
         ),
         None => (ErrorKind::Other, Map::new(), Outcome::Fail),
     };
+    // The envelope is all that `--json` prints of a run that stopped at its
+    // remote, so the drops of its local part ride along.
+    let mut details = details;
+    if let Some(stop) = error.downcast_ref::<RemoteStop>()
+        && !stop.pruned.is_empty()
+    {
+        details.insert(
+            "pruned".into(),
+            serde_json::to_value(&stop.pruned).expect("pieces are plain strings and serialise"),
+        );
+    }
     // When the output itself fails there is nowhere left to report that.
     let _ = if cli.json {
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
@@ -437,10 +448,11 @@ fn finish(
 
 /// The context of an error that stopped a run at its remote part, after
 /// its local part was done. `partial` is whether that local part left
-/// something out.
+/// something out, `pruned` the pieces it dropped.
 #[derive(Debug)]
 pub struct RemoteStop {
     pub partial: bool,
+    pub pruned: Vec<antiq::ops::reconcile::PieceRef>,
 }
 
 impl std::fmt::Display for RemoteStop {

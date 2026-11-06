@@ -1294,3 +1294,52 @@ fn a_recorded_change_that_cannot_be_read_is_a_warning_for_an_object_without_an_e
         "{warnings}"
     );
 }
+
+// ---------------------------------------------------------
+// Drops reported with the error of a remote that cannot be used
+// ---------------------------------------------------------
+
+#[test]
+fn under_json_the_error_of_an_away_remote_names_the_pieces_that_were_dropped() {
+    let world = World::padded(8);
+    world.gone(10, "alpha");
+    world.take_remote_away();
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    assert_eq!(run.code(), 4, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.error_kind(), "remote_away");
+    assert_eq!(
+        run.json()["error"]["pruned"],
+        json!([{"id": id(10).to_string(), "path": "alpha"}]),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn under_json_the_error_of_a_broken_remote_names_the_pieces_that_were_dropped() {
+    let world = World::padded(8);
+    world.gone(10, "alpha");
+    world.break_remote();
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    assert_eq!(run.error_kind(), "remote_broken", "{}", run.stdout);
+    assert_eq!(run.json()["error"]["pruned"][0]["path"], "alpha");
+}
+
+#[test]
+fn under_json_the_error_of_an_away_remote_has_no_pruned_key_without_a_drop() {
+    let world = World::padded(8);
+    world.take_remote_away();
+
+    let run = world.reconcile_json(&["--prune"]);
+
+    assert_eq!(run.error_kind(), "remote_away", "{}", run.stdout);
+    assert!(
+        run.json()["error"].get("pruned").is_none(),
+        "{}",
+        run.stdout
+    );
+}

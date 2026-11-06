@@ -1920,7 +1920,8 @@ run with exit code 4 and one that is broken with the error kind
 the exit code of an away remote as under "Remotes". An open error counts
 as broken. On the console the report of the local part
 comes first and then the error; under `--json` only the error envelope is
-printed. A reachable remote is recorded as such, an away remote as away.
+printed, and its error object carries `pruned`, the pieces the local
+part dropped as `{id, path}`, unless there were none. A reachable remote is recorded as such, an away remote as away.
 
 With a reachable remote, a real run pulls the metadata versions this
 machine lacks, removes leftovers with the cleanup of the commit protocol
@@ -2269,8 +2270,8 @@ brake would hold.
 | `brake` | 1 | the brake holds and there is no terminal to ask | `planned`, `set_size`, `items`: up to ten `{id, path}` |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
 | `no_remote` | 1 | a command needs a remote and none is attached | |
-| `remote_away` | 4 | the remote cannot be reached | |
-| `remote_broken` | 1 | the remote is broken, as "Remotes" defines | |
+| `remote_away` | 4 | the remote cannot be reached | `pruned` of `reconcile --prune`, see "reconcile" |
+| `remote_broken` | 1 | the remote is broken, as "Remotes" defines | `pruned` of `reconcile --prune`, see "reconcile" |
 | `unsupported` | 1 | a command needs something this version does not have yet | |
 | `format_too_new` | 1 | a write meets metadata of a higher `format` | |
 | `other` | 1 | any other failure | |
