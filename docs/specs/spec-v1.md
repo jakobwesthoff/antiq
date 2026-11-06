@@ -1059,9 +1059,10 @@ later. (ADR 0049)
 rsync runs with `LC_ALL=C`, every `RSYNC_*` variable and `CVSIGNORE`
 removed from its environment, `--stats`, `--no-human-readable`,
 `--no-whole-file`, `--ignore-times` and `--timeout`, never with
-`--inplace` or `--append`. `--ignore-times` makes rsync compare the
-bytes of a destination that has the size and modification time of the
-source, which a temp name seeded from the current package has. A new live package is seeded on the NAS as a hard link to
+`--inplace` or `--append`. `--ignore-times` turns off rsync's skip of a
+destination whose size and modification time equal the source's, so a
+temp name seeded from the current package goes through the delta
+comparison even when both happen to match. A new live package is seeded on the NAS as a hard link to
 the current one and transferred onto it; the link is made only when the
 current package is a regular file and no symlink and the temp name is
 free, and a seed that does not link costs the transfer of the whole

@@ -20,7 +20,10 @@ On the SSH remote, antiq moves live packages and archives with rsync
 macOS, whose stats output, flags and timeout behaviour differ, and the
 rsync binary is configurable. It runs rsync with `LC_ALL=C`, `--stats`,
 `--no-human-readable`, `--no-whole-file`, `--ignore-times` and
-`--timeout`, and never with `--inplace` or `--append`. A new live package is seeded on the NAS
+`--timeout`, and never with `--inplace` or `--append`. `--ignore-times` turns off
+rsync's skip of a destination whose size and modification time equal
+the source's, so a temp name seeded from the current package goes
+through the delta comparison even when both happen to match. A new live package is seeded on the NAS
 as a hard link to the current one and transferred onto it. An archive
 upload keeps its partial file, so the next attempt resumes. Any
 non-zero exit fails the transfer.
