@@ -42,7 +42,7 @@ use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::SelectError;
 use crate::select::{Rules, select};
 use crate::sysmem::SysmemError;
-use crate::tree::PieceTree;
+use crate::tree::{EntryKind, PieceTree, TreeEntry};
 use crate::versions::VersionsError;
 use crate::versions::stamp::Stamp;
 use crate::walk::walk_piece_with;
@@ -50,6 +50,7 @@ use crate::walk::{Hooks, RealFs, WalkError};
 use jiff::Timestamp;
 use remove::{Outcome as Removed, RemoveContext, RemoveRequest, remove_folder};
 use seams::{RealSeams, Seams};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -170,7 +171,7 @@ pub(crate) fn execute(
         ledger: SpaceLedger::new(),
         run_dirs: Mutex::new(()),
     };
-    let done = run_pieces(&shared);
+    let (done, looked_out) = run_pieces(&shared);
 
     let mut report = ArchiveReport {
         archived: Vec::new(),
@@ -182,7 +183,7 @@ pub(crate) fn execute(
     };
     report.warnings.extend(setup.unreadable_notes());
     report.warnings.extend(guard.warnings().iter().cloned());
-    let mut exhausted = None;
+    let mut exhausted = looked_out;
     for item in done {
         report.warnings.extend(item.warnings);
         match item.finished {
@@ -362,44 +363,198 @@ impl Done {
 }
 
 /// Runs the pieces on as many threads as `env.parallel` allows. A walk that
-/// runs out of file descriptors stops the pieces not yet started.
-fn run_pieces(shared: &Shared<'_>) -> Vec<Done> {
+/// runs out of file descriptors stops the pieces not yet started. The cause
+/// comes back when that happens before any piece has started, in the look for
+/// shared files.
+///
+/// Pieces that hold names of one hard-linked file run one after the other, in
+/// path order, on one thread. Deleting the first changes the link count and so
+/// the change time of the file, which the second would take for a change by
+/// someone else between its verify and its re-walk. Run after the first has
+/// ended, the second records the file as the deletion left it.
+fn run_pieces(shared: &Shared<'_>) -> (Vec<Done>, Option<String>) {
     let pieces = &shared.setup.pieces;
+    let links = match hard_links(shared) {
+        Ok(links) => links,
+        Err(cause) => {
+            let done = pieces.iter().map(not_started).collect();
+            return (done, Some(cause));
+        }
+    };
+    let groups = share_groups(&links);
     let next = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
     let slots: Vec<Mutex<Option<Done>>> = pieces.iter().map(|_| Mutex::new(None)).collect();
-    let threads = shared.env.parallel.clamp(1, pieces.len().max(1));
+    let threads = shared.env.parallel.clamp(1, groups.len().max(1));
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
-                while !stopped.load(Ordering::SeqCst) {
-                    let index = next.fetch_add(1, Ordering::SeqCst);
-                    let Some(piece) = pieces.get(index) else {
-                        break;
-                    };
-                    let done = process(shared, piece);
-                    if done.exhausted.is_some() {
-                        stopped.store(true, Ordering::SeqCst);
+                while let Some(group) = groups.get(next.fetch_add(1, Ordering::SeqCst)) {
+                    for &index in group {
+                        if stopped.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let done = process(shared, &pieces[index]);
+                        if done.exhausted.is_some() {
+                            stopped.store(true, Ordering::SeqCst);
+                        }
+                        *slots[index].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
                     }
-                    *slots[index].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
                 }
             });
         }
     });
-    slots
+    let done = slots
         .into_iter()
         .zip(pieces)
         .map(|(slot, piece)| {
             let done = slot.into_inner().unwrap_or_else(PoisonError::into_inner);
-            done.unwrap_or_else(|| {
-                skipped(
-                    piece,
-                    SkipReason::Error,
-                    "not started: the run ran out of file descriptors".to_string(),
-                )
-            })
+            done.unwrap_or_else(|| not_started(piece))
         })
-        .collect()
+        .collect();
+    (done, None)
+}
+
+fn not_started(piece: &RelPath) -> Done {
+    skipped(
+        piece,
+        SkipReason::Error,
+        "not started: the run ran out of file descriptors".to_string(),
+    )
+}
+
+/// What identifies a file on disk: its device and inode.
+type FileId = (u64, u64);
+
+/// The files of one piece that have more than one name.
+#[derive(Debug, Default)]
+struct PieceLinks {
+    /// Files with a name that goes into the archive.
+    packed: HashSet<FileId>,
+    /// Files all of whose names in the piece are ignored.
+    ignored: HashSet<FileId>,
+}
+
+/// The linked files of each piece, or the cause when a walk ran out of file
+/// descriptors, which ends the run like the walk of a piece does.
+///
+/// No walk before this one reaches into the pieces, and the walk of a piece
+/// belongs to the moment it starts, so this one only keeps the identities
+/// and drops the tree. It is skipped for fewer than two pieces, which cannot
+/// share a file. Running out of descriptors is the only way such a walk
+/// fails.
+fn hard_links(shared: &Shared<'_>) -> Result<Vec<PieceLinks>, String> {
+    let pieces = &shared.setup.pieces;
+    if pieces.len() < 2 {
+        return Ok(pieces.iter().map(|_| PieceLinks::default()).collect());
+    }
+    let next = AtomicUsize::new(0);
+    let failed: Mutex<Option<String>> = Mutex::new(None);
+    let slots: Vec<Mutex<PieceLinks>> = pieces
+        .iter()
+        .map(|_| Mutex::new(PieceLinks::default()))
+        .collect();
+    std::thread::scope(|scope| {
+        for _ in 0..shared.env.parallel.clamp(1, pieces.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(piece) = pieces.get(index) else {
+                        break;
+                    };
+                    match shared.setup.walk(piece, shared.env.seams.link_hooks()) {
+                        Ok(tree) => {
+                            *slots[index].lock().unwrap_or_else(PoisonError::into_inner) =
+                                piece_links(&tree);
+                        }
+                        Err(error) => {
+                            failed
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .get_or_insert_with(|| chain_text(&error));
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if let Some(cause) = failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        return Err(cause);
+    }
+    Ok(slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner))
+        .collect())
+}
+
+/// The files of `tree` that have more than one name. A directory has several
+/// links without sharing anything.
+fn piece_links(tree: &PieceTree) -> PieceLinks {
+    let linked = |entry: &&TreeEntry| entry.nlink > 1 && entry.kind != EntryKind::Directory;
+    let id = |entry: &TreeEntry| (entry.device, entry.inode);
+    let packed: HashSet<FileId> = tree.packed_entries().filter(linked).map(id).collect();
+    let ignored = tree
+        .entries()
+        .iter()
+        .filter(linked)
+        .map(id)
+        .filter(|file| !packed.contains(file))
+        .collect();
+    PieceLinks { packed, ignored }
+}
+
+/// The pieces, by index, grouped so that pieces which one deletion can make
+/// differ from their verify are in one group. A file joins its holders when
+/// at least one of them packs it: the step 6 comparison skips ignored
+/// entries, so a file that every holder ignores can change without any piece
+/// noticing, while the deletion of an ignored name still changes a file that
+/// another piece packs.
+///
+/// A group lists its pieces in ascending order, and the groups are ordered by
+/// their first piece, so a run without shared files keeps the order of the
+/// paths.
+fn share_groups(links: &[PieceLinks]) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..links.len()).collect();
+    fn root(parent: &mut [usize], mut at: usize) -> usize {
+        while parent[at] != at {
+            parent[at] = parent[parent[at]];
+            at = parent[at];
+        }
+        at
+    }
+    // Per file: the first piece that holds it, and whether any holder packs it.
+    let mut holders: HashMap<FileId, (usize, bool)> = HashMap::new();
+    for (index, piece) in links.iter().enumerate() {
+        for (file, packs) in piece
+            .packed
+            .iter()
+            .map(|file| (file, true))
+            .chain(piece.ignored.iter().map(|file| (file, false)))
+        {
+            let entry = holders.entry(*file).or_insert((index, false));
+            entry.1 |= packs;
+        }
+    }
+    for (index, piece) in links.iter().enumerate() {
+        for file in piece.packed.iter().chain(&piece.ignored) {
+            let (first, packed_somewhere) = holders[file];
+            if packed_somewhere {
+                let (a, b) = (root(&mut parent, first), root(&mut parent, index));
+                // The lower index stays the root, so a group is found by its
+                // first piece.
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for index in 0..links.len() {
+        groups
+            .entry(root(&mut parent, index))
+            .or_default()
+            .push(index);
+    }
+    groups.into_values().collect()
 }
 
 fn skipped(piece: &RelPath, reason: SkipReason, message: String) -> Done {
@@ -1883,5 +2038,285 @@ mod tests {
         assert!(report.warnings[0].message.contains("mystery"));
         assert_eq!(CommandReport::warnings(&plan), plan.warnings.as_slice());
         assert_eq!(CommandReport::warnings(&report), report.warnings.as_slice());
+    }
+
+    // =========================================================
+    // Pieces that share a hard-linked file
+    // =========================================================
+
+    /// Holds `remover` after its rename into `trash/` until `waiter` has
+    /// reached the same point, and `waiter` there until `remover` is deleted.
+    /// Run side by side, the verify of `waiter` then falls before the
+    /// deletion of `remover`, and its re-walk after it, whatever the timing.
+    /// Run one after the other, which is what the fix does, `remover` waits
+    /// for a `waiter` that cannot start before it ends, so every passing run
+    /// takes the whole timeout. The wait is what makes the failing run fail
+    /// every time, so the cost stays.
+    struct Linked {
+        waiter: &'static str,
+        remover: &'static str,
+        state: Mutex<(bool, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl Linked {
+        fn new(waiter: &'static str, remover: &'static str) -> Linked {
+            Linked {
+                waiter,
+                remover,
+                state: Mutex::new((false, false)),
+                changed: std::sync::Condvar::new(),
+            }
+        }
+
+        /// Waits until `done` holds of (waiter arrived, remover deleted). The
+        /// timeout is long, since a short one lets the failing run pass under
+        /// load; it only ends a wait that cannot succeed.
+        fn wait_for(&self, done: impl Fn(&(bool, bool)) -> bool) {
+            let state = self.state.lock().expect("the gate is not poisoned");
+            let _ = self
+                .changed
+                .wait_timeout_while(state, std::time::Duration::from_secs(3), |state| {
+                    !done(state)
+                })
+                .expect("the gate is not poisoned");
+        }
+
+        fn update(&self, change: impl FnOnce(&mut (bool, bool))) {
+            change(&mut self.state.lock().expect("the gate is not poisoned"));
+            self.changed.notify_all();
+        }
+    }
+
+    impl Seams for Linked {
+        fn after_trash_rename(&self, tree: &Path) {
+            if tree.ends_with(self.waiter) {
+                self.update(|state| state.0 = true);
+                self.wait_for(|state| state.1);
+            } else if tree.ends_with(self.remover) {
+                self.wait_for(|state| state.0);
+            }
+        }
+
+        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
+            RealSeams.remove(root, path)?;
+            if Path::new(&path.to_string()).ends_with(self.remover) {
+                self.update(|state| state.1 = true);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pieces_that_share_a_hard_link_are_both_archived_whatever_the_timing() {
+        let mut world = world("");
+        add(&mut world, "a", 40);
+        add(&mut world, "b", 40);
+        let linked = world.tree().path("b/a.txt");
+        fs::remove_file(&linked).expect("the copy goes");
+        world.tree().hard_link("a/a.txt", "b/a.txt");
+        let seams = Linked::new("b", "a");
+
+        let report = execute_with(&world, &Target::Due, &seams, 2).expect("the run ends");
+
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(pieces_of(&report), ["a", "b"]);
+        assert_no_leftovers(&world);
+    }
+
+    fn files(ids: &[u64]) -> PieceLinks {
+        PieceLinks {
+            packed: ids.iter().map(|inode| (1, *inode)).collect(),
+            ignored: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn pieces_without_a_shared_file_are_groups_of_one_in_path_order() {
+        let keys = [files(&[]), files(&[1]), files(&[2])];
+
+        assert_eq!(share_groups(&keys), [[0], [1], [2]]);
+    }
+
+    #[test]
+    fn pieces_with_a_file_in_common_form_one_group_ordered_by_its_first_piece() {
+        let keys = [
+            files(&[1]),
+            files(&[]),
+            files(&[1]),
+            files(&[2]),
+            files(&[3]),
+        ];
+
+        assert_eq!(share_groups(&keys), [vec![0, 2], vec![1], vec![3], vec![4]]);
+    }
+
+    #[test]
+    fn sharing_is_transitive_and_a_device_tells_inodes_apart() {
+        let keys = [
+            files(&[1]),
+            files(&[2]),
+            files(&[1, 2]),
+            PieceLinks {
+                packed: HashSet::from([(2, 1)]),
+                ignored: HashSet::new(),
+            },
+        ];
+
+        assert_eq!(share_groups(&keys), [vec![0, 1, 2], vec![3]]);
+    }
+
+    #[test]
+    fn a_file_that_every_holder_ignores_joins_no_pieces_but_one_that_a_holder_packs_does() {
+        let ignoring = |inode: u64| PieceLinks {
+            packed: HashSet::new(),
+            ignored: HashSet::from([(1, inode)]),
+        };
+
+        assert_eq!(share_groups(&[ignoring(1), ignoring(1)]), [[0], [1]]);
+        assert_eq!(
+            share_groups(&[ignoring(1), ignoring(2), files(&[1])]),
+            [vec![0, 2], vec![1]]
+        );
+    }
+
+    #[test]
+    fn the_linked_files_of_a_walk_are_the_files_with_more_than_one_name() {
+        let mut world = world("ignore = [\"node_modules/\"]");
+        add(&mut world, "a", 40);
+        add(&mut world, "b", 40);
+        world.tree().hard_link("a/a.txt", "b/shared");
+        world.tree().hard_link("a/sub/b.txt", "a/twin.txt");
+        world
+            .tree()
+            .file_with("a/node_modules/x.js", "ignored", 0o644, 0);
+        world.tree().hard_link("a/node_modules/x.js", "b/dep.js");
+        let collection = collection(&world);
+        let setup = Setup::new(&collection, &Target::Due).expect("the setup");
+        let id_of = |relative: &str| {
+            let meta = fs::metadata(world.root().join(relative)).expect("the file is there");
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+
+        let a = piece_links(&setup.walk(&path("a"), &RealFs).expect("walks"));
+        let b = piece_links(&setup.walk(&path("b"), &RealFs).expect("walks"));
+
+        assert_eq!(
+            a.packed,
+            HashSet::from([id_of("a/a.txt"), id_of("a/sub/b.txt")])
+        );
+        assert_eq!(a.ignored, HashSet::from([id_of("a/node_modules/x.js")]));
+        assert_eq!(
+            b.packed,
+            HashSet::from([id_of("a/a.txt"), id_of("a/node_modules/x.js")])
+        );
+        assert!(b.ignored.is_empty());
+        let directory = id_of("a/sub");
+        assert!(!a.packed.contains(&directory) && !a.ignored.contains(&directory));
+    }
+
+    #[test]
+    fn linked_pieces_run_in_path_order_on_one_thread() {
+        let mut world = world("");
+        for piece in ["a", "b", "c"] {
+            add(&mut world, piece, 40);
+        }
+        fs::remove_file(world.root().join("c/a.txt")).expect("the copy goes");
+        world.tree().hard_link("a/a.txt", "c/a.txt");
+        let order = Order::default();
+
+        let report = execute_with(&world, &Target::Due, &order, 3).expect("the run ends");
+
+        assert_eq!(pieces_of(&report), ["a", "b", "c"]);
+        let seen = order.seen.lock().expect("not poisoned").clone();
+        let at = |piece: &str| {
+            seen.iter()
+                .position(|(name, _)| name == piece)
+                .expect("seen")
+        };
+        assert!(at("a") < at("c"), "{seen:?}");
+        assert_eq!(seen[at("a")].1, seen[at("c")].1, "one thread: {seen:?}");
+    }
+
+    /// Records which thread deleted which piece, in order.
+    #[derive(Default)]
+    struct Order {
+        seen: Mutex<Vec<(String, std::thread::ThreadId)>>,
+    }
+
+    impl Seams for Order {
+        fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
+            RealSeams.remove(root, path)?;
+            let piece = path
+                .to_string()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            self.seen
+                .lock()
+                .expect("not poisoned")
+                .push((piece, std::thread::current().id()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn running_out_of_descriptors_in_the_look_for_shared_files_ends_the_run_before_any_piece_starts()
+     {
+        struct Blind;
+        impl Hooks for Blind {
+            fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+                (call == Call::Stat && path.is_root())
+                    .then(|| io::Error::from_raw_os_error(libc::EMFILE))
+            }
+        }
+        impl Seams for Blind {
+            fn link_hooks(&self) -> &dyn Hooks {
+                self
+            }
+        }
+        let mut world = world("");
+        add(&mut world, "a", 40);
+        add(&mut world, "b", 40);
+
+        let report = execute_with(&world, &Target::Due, &Blind, 2).expect("the run ends");
+
+        assert!(report.archived.is_empty(), "{report:?}");
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
+        for skipped in &report.skipped {
+            assert_eq!(skipped.reason, SkipReason::Error);
+            assert!(skipped.message.starts_with("not started"), "{skipped:?}");
+        }
+        let notes: Vec<&str> = report.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("ran out of file descriptors"),
+            "{notes:?}"
+        );
+        assert_eq!(report.exit_code(), 3);
+        assert!(world.root().join("a/a.txt").exists() && world.root().join("b/a.txt").exists());
+    }
+
+    #[test]
+    fn running_out_of_descriptors_in_a_group_leaves_its_later_pieces_not_started() {
+        let mut world = world("");
+        add(&mut world, "a", 40);
+        add(&mut world, "b", 40);
+        fs::remove_file(world.root().join("b/a.txt")).expect("the copy goes");
+        world.tree().hard_link("a/a.txt", "b/a.txt");
+        let seams = Probe {
+            exhausts_first_walk: true,
+            ..Probe::default()
+        };
+
+        let report = execute_with(&world, &Target::Due, &seams, 2).expect("the run ends");
+
+        assert!(report.archived.is_empty(), "{report:?}");
+        let messages: Vec<&str> = report.skipped.iter().map(|s| s.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[1].starts_with("not started"), "{messages:?}");
+        assert!(world.root().join("b/a.txt").exists());
     }
 }

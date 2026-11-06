@@ -50,6 +50,13 @@ pub(crate) trait Seams: Send + Sync {
         &RealFs
     }
 
+    /// What the walk that looks for files shared between pieces asks about
+    /// the disk. It is apart from `walk_hooks` so that a fault meant for the
+    /// walks of the steps is not spent on it.
+    fn link_hooks(&self) -> &dyn Hooks {
+        &RealFs
+    }
+
     /// Moves the folder `from` of `from_root` to `to` in `to_root`.
     fn move_dir(
         &self,

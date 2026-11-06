@@ -106,6 +106,52 @@ fn archives_the_due_piece_and_prints_json() {
     assert_no_leftovers(&collection);
 }
 
+/// Pieces that hold names of one file, as after `cp -al`, are all archived:
+/// the run keeps them on one worker, so the removal of one does not make
+/// another differ. The timing that goes wrong without it is forced by a unit
+/// test; here the pieces only have to come out right.
+#[test]
+fn pieces_that_share_a_hard_linked_file_are_all_archived() {
+    let names = ["old/a", "old/b", "old/c", "old/d", "old/e", "old/f"];
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["*/*"]).idle_days(30);
+    for name in names {
+        builder.piece(name, |piece| {
+            piece
+                .age_days(40)
+                .file("own.txt", name)
+                .file("shared.txt", "one inode");
+        });
+    }
+    let collection = builder.finish();
+    for name in &names[1..] {
+        let shared = collection.path(&format!("{name}/shared.txt"));
+        fs::remove_file(&shared).expect("the copy goes");
+        fs::hard_link(collection.path("old/a/shared.txt"), &shared).expect("the link is made");
+    }
+
+    let run = archive(&collection, &["--json"], &[]);
+
+    assert_eq!(
+        run.code(),
+        0,
+        "stdout: {}, stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    let json = run.json();
+    assert_eq!(
+        json["archived"].as_array().expect("a list").len(),
+        names.len()
+    );
+    assert_eq!(json["skipped"], serde_json::json!([]));
+    for name in names {
+        assert!(!collection.path(name).exists(), "{name}");
+    }
+    assert_no_leftovers(&collection);
+}
+
 #[test]
 fn prints_a_line_per_folder_and_a_summary() {
     let collection = world();

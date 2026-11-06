@@ -997,10 +997,19 @@ each directory before it deletes the entries. A file created after the
 deletion listed its directory survives; the deletion then fails and the
 next run finds it.
 
-Pieces that share hard-linked files change each other's change times when
-one of them is removed. When such pieces are archived in the same run, the
-outcome of each depends on timing: it can be given back instead of
-removed, or skipped with reason `differs`.
+Removing a piece changes the link count, and so the change time, of every
+file it shares with another piece by hard link. Before the pieces start,
+when the run has more than one, `archive` walks each of them once more and
+records the files that have more than one name. Pieces that have such a
+file in common run one after the other, in path order, on one thread, so
+the removal of one is over before the next is walked. A file joins pieces
+only when at least one of them packs it, since step 6 does not compare
+ignored entries. Running out of file descriptors in this walk ends the run
+as it does in the walk of a piece, with every piece skipped as not started.
+A hard link to a file outside the run is no change as long as no name of it
+is added or removed between the verify and step 6; one that is, whether
+made after this walk or by someone else, gives the folder back or skips it
+with reason `differs` like any other change.
 
 A crash between steps 4 and 5 leaves the live folder next to a complete
 version of it; the next run may archive the unchanged folder again, which
