@@ -21,7 +21,9 @@
 #                in front
 #   fault        optional: "<name> [start|command|all]"; the call prints
 #                ssh-texts/<name>.txt next to this script and exits 255
-#                (see the cases below for the names that do something else)
+#                (see the cases below for the names that do something else;
+#                `status-<n>` exits with status n without running the
+#                command)
 #
 # The master is a perl process that listens on the control socket, so
 # -O check can connect to it the way ssh does. ControlPersist expiry is
@@ -245,6 +247,12 @@ if fault_applies command; then
         exit 255
         ;;
     no-master) ;;
+    status-*)
+        # A far shell that cannot run the script: nologin, a forced
+        # command, no /bin/sh. ssh passes the remote status on.
+        echo "shim: the remote shell ended with status ${fault_name#status-}" >&2
+        exit "${fault_name#status-}"
+        ;;
     die)
         # ssh killed by a signal has no exit status.
         kill -KILL $$

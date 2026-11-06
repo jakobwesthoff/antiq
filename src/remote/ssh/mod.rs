@@ -987,6 +987,20 @@ impl Probe {
 }
 
 /// The output of a script that failed, as a sentence.
+/// Whether a script ended with a status none of its own steps uses, as a
+/// shell that cannot run it does.
+fn script_status_is_unexpected(status: i32) -> bool {
+    !matches!(
+        status,
+        0 | ROOT_MISSING
+            | MARKER_MISSING
+            | ROOT_UNUSABLE
+            | MARKER_UNREADABLE
+            | NO_HASH_TOOL
+            | NO_STAT
+    )
+}
+
 fn failure_reason(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
@@ -1016,10 +1030,7 @@ impl SshRemote {
 
     /// Looks at the root and the tools in one read-only script.
     pub(crate) fn probe(&self) -> Result<Probe, RemoteError> {
-        let script = Script::new(&format!("{PRELUDE}\n{PROBE}"))
-            .arg(&self.root)
-            .arg(self.remote_rsync_command());
-        let output = self.exec(&script)?;
+        let output = self.probe_output()?;
         if output.status != 0 {
             return Err(RemoteError::Io {
                 action: "probe",
@@ -1028,6 +1039,13 @@ impl SshRemote {
             });
         }
         Probe::parse(&output.stdout)
+    }
+
+    fn probe_output(&self) -> Result<Output, RemoteError> {
+        let script = Script::new(&format!("{PRELUDE}\n{PROBE}"))
+            .arg(&self.root)
+            .arg(self.remote_rsync_command());
+        self.exec(&script)
     }
 
     /// The marker of a root that has one. `Ok(None)` is a directory
@@ -1100,7 +1118,14 @@ impl SshRemote {
     ) -> Result<(Assessment, serde_json::Map<String, serde_json::Value>), RemoteError> {
         use serde_json::Value;
         let mut probed = serde_json::Map::new();
-        let probe = match self.probe() {
+        let probe = match self.probe_output().and_then(|output| {
+            // A NAS that answers but cannot run the script is not a remote
+            // antiq can use, whatever the reason.
+            if output.status != 0 {
+                return Err(RemoteError::Broken(failure_reason(&output)));
+            }
+            Probe::parse(&output.stdout)
+        }) {
             Ok(probe) => probe,
             Err(RemoteError::Away { message, .. }) => {
                 return Ok((Assessment::new(Reachability::Away, message), probed));
@@ -1343,7 +1368,15 @@ fn classify_rsync_failure(error: RsyncError, master_log: &str) -> RemoteError {
 
 impl Remote for SshRemote {
     fn reachability(&self) -> Result<Assessment, RemoteError> {
-        match self.check_root("", "check") {
+        let checked = self.exec(&self.script("")).and_then(|output| {
+            // A NAS that answers but cannot run the script is not a remote
+            // antiq can use, whatever the reason.
+            if script_status_is_unexpected(output.status) {
+                return Err(RemoteError::Broken(failure_reason(&output)));
+            }
+            self.answer(output, false, "check")
+        });
+        match checked.map(|_| ()) {
             Ok(()) => Ok(Assessment::new(Reachability::Reachable, "")),
             Err(RemoteError::Away { message, .. }) => {
                 Ok(Assessment::new(Reachability::Away, message))
@@ -4213,10 +4246,56 @@ exec /usr/bin/stat "$@""#,
     #[test]
     fn show_passes_on_an_error_that_is_neither_away_nor_broken() {
         let far = Far::new();
-        let error = far
-            .remote_of(killing_machine(), SshSeams::default())
-            .show()
-            .expect_err("the script died");
+        let mut settings = SessionSettings::new(Target::new("nas"));
+        settings.program = far.state.path().join("no-such-ssh");
+        settings.control_dir = far.control.path().to_path_buf();
+        let remote = SshRemote::with_session(
+            Session::new(settings).expect("session"),
+            far.root().to_str().expect("UTF-8").to_string(),
+            id(),
+            MachineConfig::default(),
+            "nas".into(),
+        );
+        let error = remote.show().expect_err("ssh does not start");
+        assert!(matches!(error, RemoteError::Session(_)), "{error}");
+    }
+
+    #[test]
+    fn a_far_shell_that_cannot_run_the_script_makes_the_remote_broken_for_the_check() {
+        for status in [1, 127] {
+            let far = Far::new();
+            far.fault(&format!("status-{status} command"));
+            let assessment = far.remote().reachability().expect("an assessment");
+            assert_eq!(assessment.reachability, Reachability::Broken, "{status}");
+            assert!(
+                assessment.reason.contains(&format!("status {status}")),
+                "{}",
+                assessment.reason
+            );
+        }
+    }
+
+    #[test]
+    fn a_far_shell_that_cannot_run_the_script_makes_the_remote_broken_for_show() {
+        for status in [1, 127] {
+            let far = Far::new();
+            far.fault(&format!("status-{status} command"));
+            let (assessment, probed) = far.remote().show().expect("an assessment");
+            assert_eq!(assessment.reachability, Reachability::Broken, "{status}");
+            assert!(
+                assessment.reason.contains(&format!("status {status}")),
+                "{}",
+                assessment.reason
+            );
+            assert!(probed.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_far_shell_that_cannot_run_the_script_is_an_io_error_for_an_operation() {
+        let far = Far::new();
+        far.fault("status-1 command");
+        let error = far.remote().flush().expect_err("no shell");
         assert!(matches!(error, RemoteError::Io { .. }), "{error}");
     }
 

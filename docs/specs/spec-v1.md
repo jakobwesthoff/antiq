@@ -1002,7 +1002,12 @@ searched is away. A root that is not a directory, a directory above the
 root that cannot be searched, a marker that is missing, cannot be read,
 cannot be parsed or has a higher `format` or `layout`, and the marker of
 another remote are broken. A host that does not answer is away or broken
-as described above. Every script starts by checking the root and the
+as described above. A host that
+answers but cannot run the script (a login that ends with a status
+the script does not use, as `nologin`, a forced command or a missing
+`/bin/sh` do) is broken, with the error text as the reason, for the
+reachability check and for `remote show`; any other operation reports it
+as an I/O error. Every script starts by checking the root and the
 marker, the marker comes back to antiq as the first block of the
 answer, and `begin_phase` does the same check over the new master. The
 clock is `date +%s` on the NAS, printed first by a script that begins
