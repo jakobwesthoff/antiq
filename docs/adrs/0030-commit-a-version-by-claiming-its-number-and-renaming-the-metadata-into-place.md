@@ -23,10 +23,12 @@ carries the machine, and then renamed to its final name.
 Only then does the writer claim metadata version N+1, one above the
 highest committed version, by creating an empty `meta.<N+1>.claim`
 exclusively. It writes the metadata under a temporary name and checks
-that its claim still exists, that no version above the highest one it saw
-has been committed, and that the files the metadata names are present
+that its claim still exists, that no claim above its own exists, that no
+version above the highest one it saw has been committed, and that the files the metadata names are present
 with their sizes. Then it renames the metadata to `meta.<N+1>` and looks
-at the directory once more. A version is committed once `meta.<N+1>`
+at the directory once more; a claim above its own at that point leaves
+the version committed but contested until the claim is released or becomes
+a higher version. A version is committed once `meta.<N+1>`
 exists, and the highest committed version is current. Readers read only
 `meta.<N>` files.
 

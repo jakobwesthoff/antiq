@@ -308,6 +308,12 @@ impl Config {
                 Some(100),
             ),
             (
+                "collection.grace_hours",
+                collection.grace_hours.into(),
+                1,
+                None,
+            ),
+            (
                 "collection.remote_jobs",
                 collection.remote_jobs.into(),
                 1,
@@ -722,6 +728,12 @@ host_key_alias = "nas"
     fn brake_percent_101_fails_naming_the_key() {
         let text = range_error("collection", "brake_percent", "101");
         assert!(text.contains("collection.brake_percent"), "{text}");
+    }
+
+    #[test]
+    fn grace_hours_0_fails_naming_the_key() {
+        let text = range_error("collection", "grace_hours", "0");
+        assert!(text.contains("collection.grace_hours"), "{text}");
     }
 
     #[test]

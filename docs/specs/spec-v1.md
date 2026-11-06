@@ -602,7 +602,7 @@ remotes; version 1 accepts exactly one.
 | `collection.live_exclude` | `[]` | paths relative to the collection root, in the escaped form of the metadata, left out of live packages only; an empty entry is an error |
 | `collection.replace_without_asking` | `false` | ADR 0036 |
 | `collection.brake_percent` | 20 | ADR 0045, 0 to 100 |
-| `collection.grace_hours` | 24 | commit protocol |
+| `collection.grace_hours` | 24 | commit protocol, at least 1 |
 | `collection.away_warn_days` | 7 | see `--if-reachable` |
 | `collection.memory_percent` | 25 | compression memory limit, 1 to 100 |
 | `collection.remote_jobs` | 4 | remote operations at a time, at least 1 |
@@ -644,17 +644,21 @@ each one is reported in a warning.
    interrupted attempt of this machine. Version numbers stop at
    4294967295: when the number to claim would pass it, the commit stops.
 3. It writes the metadata under a temp name, flushes, lists the
-   directory, and checks that its claim still exists, that no `meta.<M>`
+   directory, and checks that its claim still exists, that no
+   `meta.<M>.claim` above its own exists, that no `meta.<M>`
    above the highest committed version it saw in step 2 exists, and that
    every file the metadata names is present, a payload with its recorded
    size. A named file that is missing and that this commit uploaded is
    put again once; any other missing file ends the commit. It flushes
-   again if it put anything, and renames the metadata to `meta.<N+1>`.
+   again if it put anything, checks once more that no `meta.<M>` above
+   the highest committed version it saw exists, and renames the metadata to `meta.<N+1>`.
    On the SSH remote this rename refuses an existing target (`ln` to the
    final name, then remove the temp name).
 4. It flushes, lists the directory again, and checks the named files once
    more, putting a missing one again. A higher committed version is a
-   conflict.
+   conflict. So is a claim above its own, which no committed version has
+   yet: the version stays committed and the writer looks again at its next
+   sync.
 
 A version is committed once `meta.<N+1>` exists; readers read only
 `meta.<N>` files. (ADR 0030)
@@ -669,8 +673,8 @@ this commit got past the rename. The commit then writes nothing and
 returns that version, which is how a commit that failed after its rename
 is retried.
 
-A commit that ends before the rename because a named file is missing or a
-higher version appeared deletes its temp name, flushes, and then deletes
+A commit that ends before the rename because a named file is missing, a
+higher version appeared or a claim above its own appeared deletes its temp name, flushes, and then deletes
 its claim, unless the version of its number exists. A commit that ends
 for any other reason leaves its claim and temp name. The temp name goes
 first so that a stop between the two leaves a claim without a temp name,
@@ -683,14 +687,21 @@ the claim and writing the temp name leaves a claim that is not recognised
 and blocks the object for one grace period. A collection copied to
 another machine with the same name, or two collections of one machine on
 one remote, can have a live claim of the other writer skipped; that
-writer then finds a higher committed version at step 3 or step 4 and has a
-conflict, not a silent loss.
+writer then finds a higher committed version or a higher claim at step 3
+or step 4 and has a conflict, not a silent loss.
 
 When step 4 finds a higher version, the writer's own version stays on the
 remote as committed but not current. The writer treats this as a conflict
 and does not delete its local archive because of that version. Cleanup
 removes it once it is older than the grace period, and its payloads one
 run later.
+
+When step 4 finds a claim above the writer's own version and no higher
+committed version, the writer's version is committed and stays current if
+the claim is released. The claim's writer either skipped this writer's
+claim as abandoned, so that its version will not build on this one, or is
+building on this version. The writer does not delete its local archive
+because of the version and reads the remote again at its next sync.
 
 Cleanup:
 

@@ -66,6 +66,14 @@ pub enum Outcome {
     /// removes it once it is older than the grace period, and its payloads
     /// one run later.
     Overtaken { number: NonZeroU32, higher: u32 },
+    /// `meta.<number>` exists, and another writer holds the claim `claim`
+    /// above it, which no committed version has yet. The claim's writer
+    /// either skipped this commit's claim as abandoned or is building on
+    /// this version, and the commit cannot tell which. The version stays
+    /// current if the claim is released, and a higher version that does
+    /// not build on it replaces it. The caller keeps its local archive,
+    /// as for `Overtaken`, and looks at the remote again at its next sync.
+    Contested { number: NonZeroU32, claim: u32 },
     /// Nothing of this commit is committed.
     Refused(Refusal),
 }
@@ -84,8 +92,8 @@ pub enum Refusal {
     /// The remote has less than `based_on`.
     MissingBase { based_on: u32, highest: u32 },
     /// Another writer holds a claim above the highest version that is not
-    /// abandoned yet. The first claimer goes on; this commit is retried at
-    /// the next sync.
+    /// abandoned yet, or above the claim of this commit. The first claimer
+    /// goes on; this commit is retried at the next sync.
     ClaimOpen { number: u32 },
     /// Another writer created the claim first.
     ClaimTaken { number: u32 },
@@ -108,7 +116,21 @@ pub enum Refusal {
 ///
 /// Remote failures (away, broken, I/O, a payload name taken by other
 /// bytes) are `Err`; every outcome of the protocol itself is an
-/// [`Outcome`]. A commit that fails after the rename leaves the version
+/// [`Outcome`]. The caller acts on it as follows:
+///
+/// - `Committed`: the version is current. The caller may drop what the
+///   commit made redundant locally.
+/// - `Overtaken`: the version is committed, and a higher committed version
+///   exists. The caller handles a conflict (ADR 0017) and keeps its local
+///   archive.
+/// - `Contested`: the version is committed, and a claim above it is open.
+///   The caller keeps its local archive, treats the version as not settled
+///   and reads the remote again at the next sync: the claim becomes a
+///   higher version (a conflict, or a change built on this version) or
+///   goes away (this version is current).
+/// - `Refused`: nothing of this commit is committed.
+///
+/// A commit that fails after the rename leaves the version
 /// committed, and calling again with the same request finds it and returns
 /// the outcome without writing.
 ///
@@ -136,8 +158,8 @@ pub enum Refusal {
 ///   this collection on this machine is not running. A collection copied
 ///   to another machine with the same name, or two collections of one
 ///   machine on one remote, can have a live claim of the other writer
-///   skipped. That writer then gets `NewerCommitted` or `Overtaken`, not a
-///   silent loss.
+///   skipped. That writer then gets `NewerCommitted`, `ClaimOpen`,
+///   `Overtaken` or `Contested`, not a silent loss.
 pub fn commit(
     remote: &dyn Remote,
     settings: &Settings,
@@ -377,7 +399,21 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
     if listed.file(&claim_name(number)).is_none() {
         return Err(Refusal::ClaimLost { number }.into());
     }
+    // A writer whose number is above ours skipped our claim as abandoned.
+    // Its version would not build on ours, so ours must not be committed.
+    if let Some(&(claim, _)) = listed.claims_above(number).first() {
+        release(remote, request.id, number, &temp, &listed)?;
+        return Err(Refusal::ClaimOpen { number: claim }.into());
+    }
     let restored = restore_missing(remote, request, &named, listed)?;
+    // The puts of a repair take time, in which a version can be committed.
+    if restored.directory.highest() > found.highest {
+        let refusal = Refusal::NewerCommitted {
+            highest: restored.directory.highest(),
+        };
+        release(remote, request.id, number, &temp, &restored.directory)?;
+        return Err(refusal.into());
+    }
     if let Some(name) = restored.missing {
         release(remote, request.id, number, &temp, &restored.directory)?;
         return Err(Refusal::PayloadMissing { name }.into());
@@ -545,7 +581,8 @@ fn restore_missing(
 }
 
 /// Looks at the directory once the version is committed: the files it
-/// names are checked once more, and a higher version makes it overtaken.
+/// names are checked once more, a higher version makes it overtaken and a
+/// claim above it makes it contested.
 fn confirm(
     remote: &dyn Remote,
     request: &Request,
@@ -568,6 +605,8 @@ fn confirm(
             number,
             higher: highest,
         }
+    } else if let Some(&(claim, _)) = restored.directory.claims_above(number.get()).first() {
+        Outcome::Contested { number, claim }
     } else {
         Outcome::Committed { number }
     })
@@ -1218,6 +1257,79 @@ mod tests {
             }
         );
         assert_eq!(world.read("meta.1"), bytes, "our version stays");
+    }
+
+    #[test]
+    fn a_claim_above_ours_after_the_rename_contests() {
+        let world = World::new();
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            inner
+                .create_exclusive(id(), "meta.2.claim")
+                .expect("the other machine claims");
+        });
+        let bytes = metadata("a", true);
+        let outcome = world.committed(0, &bytes);
+        assert_eq!(
+            outcome,
+            Outcome::Contested {
+                number: number(1),
+                claim: 2
+            }
+        );
+        assert_eq!(world.read("meta.1"), bytes, "our version stays");
+    }
+
+    #[test]
+    fn a_higher_version_beside_a_higher_claim_overtakes() {
+        let world = World::new();
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            inner
+                .create_exclusive(id(), "meta.3.claim")
+                .expect("the other machine claims");
+            commit_as_studio(inner, 2, &metadata("b", false));
+        });
+        let outcome = world.committed(0, &metadata("a", true));
+        assert_eq!(
+            outcome,
+            Outcome::Overtaken {
+                number: number(1),
+                higher: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_claim_above_ours_before_the_rename_is_refused_and_released() {
+        let world = World::new();
+        world.remote.after(Op::WriteTemp, 1, |inner| {
+            inner
+                .create_exclusive(id(), "meta.2.claim")
+                .expect("the other machine claims");
+        });
+        let outcome = world.committed(0, &metadata("a", true));
+        assert_eq!(outcome, refused(Refusal::ClaimOpen { number: 2 }));
+        assert_eq!(world.remote.count(Op::RenameIntoPlace), 0);
+        let names = world.names();
+        assert!(!names.contains(&CLAIM.to_string()), "{names:?}");
+        assert!(!names.contains(&OWN_TEMP.to_string()), "{names:?}");
+        assert!(names.contains(&"meta.2.claim".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn a_version_that_appears_while_a_payload_is_put_again_is_a_conflict() {
+        let world = World::new();
+        world.remote.before(Op::ListDir, 3, |inner| {
+            inner.delete(id(), PAYLOAD).expect("deleted")
+        });
+        world.remote.after(Op::PutPayload, 3, |inner| {
+            commit_as_studio(inner, 2, &metadata("b", false));
+        });
+        let outcome = world.committed(0, &metadata("a", true));
+        assert_eq!(outcome, refused(Refusal::NewerCommitted { highest: 2 }));
+        assert_eq!(world.remote.count(Op::RenameIntoPlace), 0);
+        let names = world.names();
+        assert!(!names.contains(&CLAIM.to_string()), "{names:?}");
+        assert!(!names.contains(&OWN_TEMP.to_string()), "{names:?}");
     }
 
     // =====================================================
