@@ -1539,9 +1539,10 @@ recorded as committed as the highest number in `committed_versions` above
 the highest version the change builds on and below the newest, and the
 recorded change is removed. When no such number is listed, it is a
 conflict that names the newest version as the one holding the change. A
-change that does not build on the newest version, and a change with an open
-`version_conflict` decision, is a conflict: nothing of it is uploaded or
-committed, the piece is skipped and the run exits 3. Any other change is
+change that does not build on the newest version, except a change that
+touches only metadata, which is rebased as "Several machines" says, and
+a change with an open `version_conflict` decision, is a conflict:
+nothing of it is uploaded or committed, the piece is skipped and the run exits 3. Any other change is
 committed: the payloads and listings it names that the previous version
 did not are uploaded, at most `remote_jobs` objects at a time, the remote
 is flushed once after all uploads, and each object's metadata is then
