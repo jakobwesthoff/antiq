@@ -262,7 +262,8 @@ impl Error {
                 );
             }
             Error::Brake(BrakeError::Held(hold)) => insert_brake_hold(&mut details, hold),
-            Error::Lock(LockError::Held { pid, started }) => {
+            Error::Lock(LockError::Held { pid, started })
+            | Error::Run(RunError::Lock(LockError::Held { pid, started })) => {
                 details.insert("pid".into(), Value::from(*pid));
                 details.insert(
                     "started".into(),
