@@ -76,7 +76,7 @@ fn notes(report: &FindReport) -> Vec<String> {
 const PIECE_MIN: usize = 20;
 
 /// The words of the STATE column: the names of spec "States".
-fn state_word(state: FoundState) -> &'static str {
+pub(crate) fn state_word(state: FoundState) -> &'static str {
     match state {
         FoundState::Piece(state) => match state {
             antiq::tracking::PieceState::New => "new",
@@ -93,7 +93,7 @@ fn state_word(state: FoundState) -> &'static str {
 
 /// A size in bytes for people: `512 B`, `1.5 KiB`, `12 MiB`. A figure
 /// below 10 keeps one decimal.
-fn human_size(bytes: Option<u64>) -> String {
+pub(crate) fn human_size(bytes: Option<u64>) -> String {
     let Some(bytes) = bytes else {
         return "-".to_string();
     };

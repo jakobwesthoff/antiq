@@ -9,6 +9,12 @@ use antiq::interact::{Choice, Interaction, Question};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 
+/// The controlling terminal, opened for reading and writing. Fails where
+/// there is none (cron, a detached session).
+pub fn open() -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).open("/dev/tty")
+}
+
 /// Asks questions by writing to `output` and reading lines from `input`.
 /// On the real terminal both are `/dev/tty`.
 pub struct TtyInteraction<R, W> {
@@ -25,7 +31,7 @@ impl<R, W> TtyInteraction<R, W> {
 impl TtyInteraction<BufReader<File>, File> {
     /// Opens the controlling terminal. Fails when there is none.
     pub fn open() -> io::Result<Self> {
-        let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+        let tty = open()?;
         Ok(TtyInteraction::new(BufReader::new(tty.try_clone()?), tty))
     }
 }

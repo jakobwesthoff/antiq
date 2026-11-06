@@ -1,0 +1,982 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! The interactive fuzzy picker of `find` (ADR 0021, ADR 0057).
+//!
+//! antiq renders its own picker over the `nucleo` matcher and `crossterm`
+//! rather than a picker library, so the selection bar adapts to any terminal
+//! theme (it uses reverse video instead of a hardcoded background) and the
+//! whole UI stays under our control. It draws on the controlling terminal,
+//! keeping stdout free for piped data. The public surface is the
+//! single generic [`pick`] function; everything else is private, so swapping
+//! the engine never touches call sites.
+//!
+//! All interaction logic lives in [`state::PickerState`] and is unit tested
+//! without a TTY. This module is the thin glue that maps `crossterm`
+//! key events onto that state and draws it. Each frame is buffered and reaches
+//! the terminal as a single write bracketed by a synchronized update (DEC
+//! mode 2026), erases per line rather than clearing the screen, and keeps the
+//! cursor hidden until it is parked at the prompt, so redraws neither flicker
+//! nor leave cursor trails.
+
+mod layout;
+mod state;
+
+use std::io::{self, Write};
+
+use anyhow::{Context, Result};
+use crossterm::style::Attribute;
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute, queue, style, terminal,
+};
+
+use unicode_width::UnicodeWidthStr;
+
+pub use layout::align_pieces;
+use state::{Page, PickerState, VisibleRow};
+
+/// One picker row split by role: searched, displayed, and display-only.
+///
+/// Fuzzy scoring runs over `search` (the full content, which may extend past
+/// what the width-sized columns can show); match-highlighting runs over
+/// `display`; `detail` is never matched and appears only in the stats line
+/// while its row is selected, so a long identifier stays reachable without
+/// taking room on every row or polluting the query or the highlight.
+pub struct Row {
+    /// The displayed, highlightable text.
+    pub display: String,
+    /// Display-only text about the row, e.g. a piece's ID, shown in the stats
+    /// line while the row is selected.
+    pub detail: String,
+    /// The full content scored against the query, untruncated and unpadded.
+    /// It must not depend on the row width: the picker scores it once and
+    /// keeps that ranking when the terminal width changes.
+    pub search: String,
+}
+
+/// A key that ends the picker with the selected item like Enter does, but
+/// tells the caller to act on it differently, e.g. Ctrl-K in `find` pins
+/// the piece instead of unearthing it. The stats line lists each key with
+/// its `hint`.
+pub struct AcceptKey<A> {
+    /// The letter pressed together with Ctrl.
+    pub ctrl: char,
+    /// A word or two for the stats line, e.g. `path`.
+    pub hint: &'static str,
+    /// What the caller receives when the key ends the picker.
+    pub action: A,
+}
+
+/// The Ctrl keys the picker itself handles. An [`AcceptKey`] on one of them
+/// is ignored, so a caller cannot take away aborting or moving the selection.
+const BUILT_IN_CTRL_KEYS: [char; 6] = ['c', 'd', 'n', 'p', 'u', 'w'];
+
+/// The action of the accept key a key press matches, if any.
+fn accept_key<A: Copy>(keys: &[AcceptKey<A>], code: KeyCode, modifiers: KeyModifiers) -> Option<A> {
+    let KeyCode::Char(c) = code else {
+        return None;
+    };
+    if !modifiers.contains(KeyModifiers::CONTROL) || BUILT_IN_CTRL_KEYS.contains(&c) {
+        return None;
+    }
+    keys.iter().find(|k| k.ctrl == c).map(|k| k.action)
+}
+
+/// The stats line's hint for the accept keys, e.g. `^Y path`, or empty when
+/// there are none.
+fn key_hints<A>(keys: &[AcceptKey<A>]) -> String {
+    keys.iter()
+        .map(|k| format!("^{} {}", k.ctrl.to_ascii_uppercase(), k.hint))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Present `items` in the interactive picker and return the chosen one.
+///
+/// `render_all` turns the whole item set into its [`Row`]s in one pass for a
+/// given row width in display columns, which lets the renderer align columns
+/// across every candidate and size them to the terminal (see [`layout`]). It
+/// runs at startup and again whenever the terminal width changes.
+/// Returns `Ok(None)` when there are no items or the user aborts (Esc / Ctrl-C)
+/// without selecting.
+pub fn pick<T>(items: Vec<T>, render_all: impl Fn(&[T], usize) -> Vec<Row>) -> Result<Option<T>> {
+    let keys: [AcceptKey<()>; 0] = [];
+    Ok(pick_with_keys(items, render_all, &keys)?.map(|(item, _)| item))
+}
+
+/// [`pick`] with extra [`AcceptKey`]s besides Enter.
+///
+/// Returns the chosen item together with the action of the accept key that
+/// chose it, or `None` for the action when Enter did.
+pub fn pick_with_keys<T, A: Copy>(
+    items: Vec<T>,
+    render_all: impl Fn(&[T], usize) -> Vec<Row>,
+    keys: &[AcceptKey<A>],
+) -> Result<Option<(T, Option<A>)>> {
+    // Nothing to pick: never touch the terminal so non-interactive callers and
+    // empty result sets stay side-effect free.
+    if items.is_empty() {
+        return Ok(None);
+    }
+
+    // The picker draws on the controlling terminal, never on stdout, so stdout
+    // stays a pure data channel: `find --print | pbcopy` shows the picker and
+    // pipes only the selected path.
+    let mut tty =
+        crate::cli::tty::open().context("while opening the controlling terminal for the picker")?;
+    let mut teardown_tty = tty
+        .try_clone()
+        .context("while cloning the terminal handle")?;
+    terminal::enable_raw_mode().context("while enabling raw mode")?;
+    // Arm raw-mode teardown the instant raw mode is on, before any further
+    // fallible setup. If entering the alternate screen below fails, this guard
+    // still restores the terminal, so the user's shell never stays in raw mode.
+    let _raw_guard = TerminalGuard::new(|| {
+        let _ = terminal::disable_raw_mode();
+    });
+    execute!(tty, terminal::EnterAlternateScreen).context("while entering the alternate screen")?;
+    // Armed only after the alternate screen is actually entered, so it leaves
+    // exactly what was entered. It drops before the raw guard (reverse arming
+    // order), leaving the alternate screen before raw mode is disabled.
+    // Ending a synchronized update that was never begun is a no-op, so the
+    // guard can always close one; without this, an error between the frame's
+    // begin/end markers would leave the terminal waiting out its sync timeout.
+    let _alt_guard = TerminalGuard::new(move || {
+        let _ = execute!(
+            teardown_tty,
+            terminal::EndSynchronizedUpdate,
+            terminal::LeaveAlternateScreen,
+            cursor::Show
+        );
+    });
+
+    // The tty file is unbuffered, so without this every `queue!` would be its
+    // own syscall — hundreds per frame — and the terminal would render the
+    // partially painted states in between, cursor hops included. Buffering
+    // delivers each frame as one write; `draw` flushes once per frame.
+    let mut frame = io::BufWriter::with_capacity(FRAME_BUFFER_BYTES, tty);
+
+    run_loop(&mut frame, items, render_all, keys)
+}
+
+/// The frame buffer size: comfortably a full redraw of a large terminal, so a
+/// frame never flushes partially.
+const FRAME_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Restores one piece of terminal state when dropped, on every exit path
+/// (`?`, normal return, panic). One guard is armed per setup step so a failure
+/// between steps still tears down everything already set up.
+///
+/// The teardown action is injected rather than hardcoded so the arming-order
+/// guarantee is unit-testable without a real terminal.
+struct TerminalGuard<F: FnMut()> {
+    teardown: F,
+}
+
+impl<F: FnMut()> TerminalGuard<F> {
+    fn new(teardown: F) -> Self {
+        Self { teardown }
+    }
+}
+
+impl<F: FnMut()> Drop for TerminalGuard<F> {
+    fn drop(&mut self) {
+        (self.teardown)();
+    }
+}
+
+/// The read-draw-react loop. Returns the selection with the accept key that
+/// chose it (`None` for Enter), or `None` on abort.
+fn run_loop<T, A: Copy>(
+    tty: &mut impl Write,
+    items: Vec<T>,
+    render_all: impl Fn(&[T], usize) -> Vec<Row>,
+    keys: &[AcceptKey<A>],
+) -> Result<Option<(T, Option<A>)>> {
+    let (mut cols, rows) = terminal::size().context("while querying the terminal size")?;
+    let mut built_row_width = row_width(cols);
+    let picker_rows = render_all(&items, built_row_width);
+    let mut state = PickerState::new(items, picker_rows, list_height(rows));
+    let hints = key_hints(keys);
+
+    // The first frame paints a fresh alternate screen and every later frame
+    // erases per line, so a full clear is only needed again after a resize.
+    let mut clear_all = true;
+    loop {
+        draw(tty, &state, cols, clear_all, &hints).context("while drawing the picker")?;
+        clear_all = false;
+
+        match event::read().context("while reading a key event")? {
+            Event::Key(key) => match handle_key(&mut state, keys, key) {
+                Flow::Continue => {}
+                // With nothing matching there is nothing to return, so the
+                // picker ends without a selection, as on abort.
+                Flow::Accept(action) => {
+                    return Ok(state.into_selected().map(|item| (item, action)));
+                }
+                Flow::Abort => return Ok(None),
+            },
+            Event::Resize(new_cols, new_rows) => {
+                // The column layout depends only on the width, so a height-only
+                // resize skips the rebuild. On Unix, crossterm reports at most
+                // one resize per read however many arrived in between, so a
+                // window drag rebuilds once per frame at most.
+                if needs_rebuild(built_row_width, new_cols) {
+                    built_row_width = row_width(new_cols);
+                    let picker_rows = render_all(state.items(), built_row_width);
+                    state.set_rows(picker_rows);
+                }
+                cols = new_cols;
+                state.set_height(list_height(new_rows));
+                clear_all = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a key press means for the picker's loop.
+#[derive(Debug, PartialEq, Eq)]
+enum Flow<A> {
+    /// Keep reading keys; the state may have changed.
+    Continue,
+    /// End with the selected item, chosen by Enter (`None`) or by the accept
+    /// key with this action.
+    Accept(Option<A>),
+    /// End without a selection.
+    Abort,
+}
+
+/// Apply one key event to the picker state and say whether the picker goes on.
+///
+/// Only presses count. Where crossterm also reports repeats and releases
+/// (Windows, or Unix with keyboard enhancement enabled), acting on them would
+/// apply one key press more than once.
+fn handle_key<T, A: Copy>(
+    state: &mut PickerState<T>,
+    keys: &[AcceptKey<A>],
+    key: KeyEvent,
+) -> Flow<A> {
+    if key.kind != KeyEventKind::Press {
+        return Flow::Continue;
+    }
+    // An accept key ends the picker exactly as Enter does.
+    if let Some(action) = accept_key(keys, key.code, key.modifiers) {
+        return Flow::Accept(Some(action));
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter => return Flow::Accept(None),
+        KeyCode::Esc => return Flow::Abort,
+        KeyCode::Char('c') if ctrl => return Flow::Abort,
+        // The list is bottom-anchored with the best match at the bottom, so Up
+        // moves toward worse matches (up the screen) and Down toward the best
+        // (down toward the prompt). The page keys follow the same directions,
+        // Ctrl-U and Ctrl-D as in vim.
+        KeyCode::Up => state.select_worse(),
+        KeyCode::Down => state.select_better(),
+        KeyCode::Char('p') if ctrl => state.select_worse(),
+        KeyCode::Char('n') if ctrl => state.select_better(),
+        KeyCode::Char('u') if ctrl => state.page_worse(Page::Half),
+        KeyCode::Char('d') if ctrl => state.page_better(Page::Half),
+        KeyCode::PageUp => state.page_worse(Page::Full),
+        KeyCode::PageDown => state.page_better(Page::Full),
+        KeyCode::Char('w') if ctrl => state.delete_word(),
+        KeyCode::Backspace => state.backspace(),
+        // Plain typing (no Ctrl/Alt) edits the query. TODO: no intra-query
+        // cursor movement (Left/Right) in v1.
+        KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+            state.push_char(c)
+        }
+        _ => {}
+    }
+    Flow::Continue
+}
+
+/// The color of the divider lines that frame the prompt.
+const DIVIDER_COLOR: style::Color = style::Color::Blue;
+
+/// The prompt prefix; its width is also the indent the query text and the stats
+/// line share, so the stats sit directly under the query.
+const PROMPT_PREFIX: &str = "❯ ";
+
+/// The selected-row marker. A left bar reads as a selection gutter and stays
+/// distinct from the prompt's `❯`. Two columns wide, like the unselected `  `.
+const SELECTION_POINTER: &str = "▌ ";
+
+/// The display columns a row's content gets on a terminal `cols` wide: what is
+/// left after the selection pointer (or the matching two-space gutter).
+fn row_width(cols: u16) -> usize {
+    (cols as usize).saturating_sub(SELECTION_POINTER.width())
+}
+
+/// Whether a terminal now `new_cols` wide needs its rows laid out again, given
+/// the row width they were built for.
+fn needs_rebuild(built_row_width: usize, new_cols: u16) -> bool {
+    row_width(new_cols) != built_row_width
+}
+
+/// The number of list rows that fit above the divider/prompt/divider/stats chrome.
+fn list_height(terminal_rows: u16) -> usize {
+    (terminal_rows as usize).saturating_sub(4).max(1)
+}
+
+/// Draw the whole picker, bottom-anchored: the list region (best match at the
+/// bottom), a divider, the prompt, a second divider, then the dimmed `m/n` stats
+/// with the accept-key `hints` at their right.
+///
+/// `clear_all` wipes the screen before painting; it is needed after a resize,
+/// where rows the frame does not touch may hold reflowed leftovers.
+fn draw<T>(
+    tty: &mut impl Write,
+    state: &PickerState<T>,
+    cols: u16,
+    clear_all: bool,
+    hints: &str,
+) -> Result<()> {
+    // The frame is bracketed by a synchronized update (DEC mode 2026): a
+    // supporting terminal applies everything in between as one atomic screen
+    // swap, so a display refresh can never catch the frame half painted.
+    // Others ignore the markers. The cursor is hidden while the frame paints
+    // and shown again only once it is parked at the prompt, so the terminal
+    // never sees it anywhere else — cursor-trail animations (kitty, ghostty)
+    // would otherwise chase every intermediate `MoveTo`.
+    queue!(tty, terminal::BeginSynchronizedUpdate, cursor::Hide)?;
+    if clear_all {
+        queue!(
+            tty,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(terminal::ClearType::All),
+        )?;
+    }
+
+    // The list region is exactly `height` lines; blanks (`None`) at the top
+    // keep the rows hugging the divider and prompt below them. Every row is
+    // erased only from the end of its new content, never blanked up front: a
+    // full-screen clear followed by a repaint flickers on terminals without
+    // synchronized updates when a refresh lands between the two.
+    let lines = state.list_lines();
+    let list_rows = lines.len() as u16;
+    for (i, line) in lines.iter().enumerate() {
+        queue!(tty, cursor::MoveTo(0, i as u16))?;
+        if let Some(row) = line {
+            draw_row(tty, row, cols)?;
+        }
+        queue!(tty, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+    }
+
+    // Divider directly above the prompt (full width, nothing left to erase).
+    queue!(tty, cursor::MoveTo(0, list_rows))?;
+    draw_divider(tty, cols)?;
+
+    // Prompt, framed by a second divider below it. The clear erases what a
+    // longer previous query left behind.
+    let prompt_row = list_rows + 1;
+    let (prompt, prompt_col) = prompt_line(state.query(), cols);
+    queue!(
+        tty,
+        cursor::MoveTo(0, prompt_row),
+        style::Print(prompt),
+        terminal::Clear(terminal::ClearType::UntilNewLine),
+        cursor::MoveTo(0, prompt_row + 1),
+    )?;
+    draw_divider(tty, cols)?;
+
+    // Dimmed stats under the second divider, aligned under the query text.
+    let (matching, total) = state.counter();
+    let rank = state.selected_rank();
+    queue!(
+        tty,
+        cursor::MoveTo(0, prompt_row + 2),
+        style::SetAttribute(Attribute::Dim),
+        style::Print(stats_line(
+            cols as usize,
+            rank,
+            matching,
+            total,
+            state.selected_detail(),
+            hints,
+        )),
+        style::SetAttribute(Attribute::Reset),
+        terminal::Clear(terminal::ClearType::UntilNewLine),
+    )?;
+
+    // Park the cursor at the end of the query so typing reads naturally, and
+    // only now make it visible again.
+    queue!(
+        tty,
+        cursor::MoveTo(prompt_col, prompt_row),
+        cursor::Show,
+        terminal::EndSynchronizedUpdate,
+    )?;
+
+    tty.flush().context("while flushing the picker frame")?;
+    Ok(())
+}
+
+/// The prompt line for a terminal `cols` wide, and the column the cursor parks
+/// at after the query.
+///
+/// A query too wide for the terminal shows its end, where typing happens, as
+/// shells do. One column stays free after the visible query so the cursor sits
+/// behind its last character, inside the terminal. The line never exceeds
+/// `cols`, so it cannot wrap onto the divider below and break the frame.
+fn prompt_line(query: &str, cols: u16) -> (String, u16) {
+    let cols = cols as usize;
+    let prefix = PROMPT_PREFIX.width();
+    let shown = layout::fit_suffix(query, cols.saturating_sub(prefix + 1));
+    // On a terminal narrower than the prefix even the prefix is cut.
+    let line = layout::fit_prefix(&format!("{PROMPT_PREFIX}{shown}"), cols).to_string();
+    let cursor = (prefix + shown.width()).min(cols.saturating_sub(1));
+    (line, cursor as u16)
+}
+
+/// Draw a full-width colored divider line.
+fn draw_divider(tty: &mut impl Write, cols: u16) -> Result<()> {
+    queue!(
+        tty,
+        style::SetForegroundColor(DIVIDER_COLOR),
+        style::Print(divider_line(cols as usize, '─')),
+        style::ResetColor,
+    )?;
+    Ok(())
+}
+
+/// A run of `fill` exactly `width` columns wide.
+fn divider_line(width: usize, fill: char) -> String {
+    std::iter::repeat_n(fill, width).collect()
+}
+
+/// The smallest gap between the stats and the right-aligned key hints.
+const HINTS_GAP: usize = 2;
+
+/// The dimmed stats string, indented to sit directly under the query text (past
+/// the prompt prefix). Shows the cursor's rank within the matches plus the total
+/// candidate count, or an empty-state hint, followed by the selected row's
+/// detail (the piece's ID) when it has one. `rank` is the 1-based position of
+/// the selection among the matches, or `None` when nothing matches.
+///
+/// The accept-key `hints` sit right-aligned at the end of the line. They are
+/// the first thing to go when the line is too narrow: they show only with at
+/// least [`HINTS_GAP`] columns between them and the stats, and the stats are
+/// clipped to `width` (cutting the detail first) only once the hints are gone.
+fn stats_line(
+    width: usize,
+    rank: Option<usize>,
+    matching: usize,
+    total: usize,
+    detail: Option<&str>,
+    hints: &str,
+) -> String {
+    let body = match rank {
+        None => format!("no matches · {total} total"),
+        Some(rank) => format!("{rank}/{matching} · {total} total"),
+    };
+    let mut line = " ".repeat(PROMPT_PREFIX.width());
+    line.push_str(&body);
+    if let Some(detail) = detail.filter(|d| !d.is_empty()) {
+        line.push_str(" · ");
+        line.push_str(detail);
+    }
+
+    let used = line.width() + hints.width();
+    if !hints.is_empty() && used + HINTS_GAP <= width {
+        line.push_str(&" ".repeat(width - used));
+        line.push_str(hints);
+        return line;
+    }
+    if line.chars().count() > width {
+        return line.chars().take(width).collect();
+    }
+    line
+}
+
+/// Draw a single list row. The selected row is drawn in cyan with a `▌ ` bar;
+/// matched characters are yellow on either row. All colors are the terminal's
+/// own ANSI palette, so the picker adapts to its theme.
+fn draw_row(tty: &mut impl Write, row: &VisibleRow<'_>, cols: u16) -> Result<()> {
+    let width = cols as usize;
+    let selected = row.selected;
+    let pointer = if selected { SELECTION_POINTER } else { "  " };
+
+    // The selected row's body is cyan; the pointer shares that accent.
+    if selected {
+        queue!(tty, style::SetForegroundColor(style::Color::Cyan))?;
+    }
+    queue!(tty, style::Print(pointer))?;
+
+    // Clip to the terminal width (in display columns) so a long row never wraps
+    // and breaks the layout. The `▌ ` bar is two display columns; a wide
+    // character is dropped whole rather than allowed to straddle the right
+    // edge. The clip measures like the layout's padding does (see
+    // `layout::fit_prefix`), so a row laid out to fit is drawn whole. The
+    // visible part is a character prefix, so the highlight indices still
+    // address its characters.
+    let shown = layout::fit_prefix(row.display, width.saturating_sub(pointer.width()));
+    let highlights = row.highlights;
+    for (i, c) in shown.chars().enumerate() {
+        let matched = highlights.binary_search(&(i as u32)).is_ok();
+        if matched {
+            queue!(tty, style::SetForegroundColor(style::Color::Yellow))?;
+        }
+        queue!(tty, style::Print(c))?;
+        if matched {
+            // Restore the row's base color after a highlighted character.
+            if selected {
+                queue!(tty, style::SetForegroundColor(style::Color::Cyan))?;
+            } else {
+                queue!(tty, style::ResetColor)?;
+            }
+        }
+    }
+
+    // Reset styling so it never bleeds into the next line or a blank area.
+    queue!(
+        tty,
+        style::SetAttribute(Attribute::Reset),
+        style::ResetColor
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn guards_tear_down_in_reverse_arming_order() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let raw_log = Rc::clone(&log);
+            let _raw = TerminalGuard::new(move || raw_log.borrow_mut().push("raw"));
+            let alt_log = Rc::clone(&log);
+            let _alt = TerminalGuard::new(move || alt_log.borrow_mut().push("alt"));
+        }
+        // The alternate screen is left before raw mode is disabled.
+        assert_eq!(*log.borrow(), vec!["alt", "raw"]);
+    }
+
+    #[test]
+    fn raw_guard_restores_when_the_alt_screen_step_is_skipped() {
+        // Models `EnterAlternateScreen` failing: the alt guard is never armed,
+        // yet raw mode must still be restored.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        {
+            let raw_log = Rc::clone(&log);
+            let _raw = TerminalGuard::new(move || raw_log.borrow_mut().push("raw"));
+        }
+        assert_eq!(*log.borrow(), vec!["raw"]);
+    }
+
+    #[test]
+    fn divider_fills_the_full_width_with_the_glyph() {
+        let line = divider_line(30, '─');
+        assert_eq!(line.chars().count(), 30);
+        assert!(line.chars().all(|c| c == '─'));
+    }
+
+    #[test]
+    fn divider_of_zero_width_is_empty() {
+        assert_eq!(divider_line(0, '─'), "");
+    }
+
+    #[test]
+    fn stats_align_under_the_query_text() {
+        let line = stats_line(40, Some(3), 12, 40, None, "");
+        // Indented past the prompt prefix so it sits under the query text.
+        assert_eq!(line, "  3/12 · 40 total");
+        assert_eq!(line.trim_start(), "3/12 · 40 total");
+    }
+
+    #[test]
+    fn stats_show_an_empty_state_when_nothing_matches() {
+        assert_eq!(
+            stats_line(40, None, 0, 40, None, ""),
+            "  no matches · 40 total"
+        );
+    }
+
+    #[test]
+    fn stats_end_with_the_selected_rows_detail() {
+        assert_eq!(
+            stats_line(80, Some(3), 12, 40, Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"), ""),
+            "  3/12 · 40 total · 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
+    }
+
+    #[test]
+    fn an_empty_detail_adds_no_separator() {
+        assert_eq!(
+            stats_line(80, Some(1), 1, 1, Some(""), ""),
+            "  1/1 · 1 total"
+        );
+    }
+
+    /// The counts and ULID part used by the key-hint tests: 46 columns.
+    const LEFT: &str = "  3/12 · 40 total · 01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    fn stats_with_hint(width: usize) -> String {
+        stats_line(
+            width,
+            Some(3),
+            12,
+            40,
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "^Y path",
+        )
+    }
+
+    #[test]
+    fn key_hints_are_right_aligned() {
+        let line = stats_with_hint(60);
+        assert!(line.starts_with(LEFT));
+        assert!(line.ends_with("^Y path"));
+        assert_eq!(line.width(), 60);
+    }
+
+    #[test]
+    fn key_hints_keep_a_two_column_gap_or_go() {
+        // 46 + 2 + 7 = 55.
+        assert!(stats_with_hint(55).ends_with(&format!("{LEFT}  ^Y path")));
+        assert_eq!(stats_with_hint(54), LEFT);
+    }
+
+    #[test]
+    fn key_hints_go_before_the_ulid_is_cut() {
+        assert_eq!(LEFT.width(), 46);
+        assert_eq!(stats_with_hint(46), LEFT);
+    }
+
+    #[test]
+    fn a_narrow_terminal_cuts_the_detail_first() {
+        let line = stats_line(
+            20,
+            Some(3),
+            12,
+            40,
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "^Y path",
+        );
+        assert_eq!(line, "  3/12 · 40 total · ");
+    }
+
+    // -------------------------------------------------------------------------
+    // Accept keys
+    // -------------------------------------------------------------------------
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Action {
+        First,
+        Second,
+    }
+
+    const KEYS: [AcceptKey<Action>; 2] = [
+        AcceptKey {
+            ctrl: 'y',
+            hint: "path",
+            action: Action::First,
+        },
+        AcceptKey {
+            ctrl: 'o',
+            hint: "other",
+            action: Action::Second,
+        },
+    ];
+
+    #[test]
+    fn a_configured_ctrl_key_yields_its_action() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(
+            accept_key(&KEYS, KeyCode::Char('y'), ctrl),
+            Some(Action::First)
+        );
+        assert_eq!(
+            accept_key(&KEYS, KeyCode::Char('o'), ctrl),
+            Some(Action::Second)
+        );
+    }
+
+    #[test]
+    fn the_letter_without_ctrl_is_no_accept_key() {
+        let none = KeyModifiers::NONE;
+        assert_eq!(accept_key(&KEYS, KeyCode::Char('y'), none), None);
+    }
+
+    #[test]
+    fn an_unconfigured_ctrl_key_is_no_accept_key() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(accept_key(&KEYS, KeyCode::Char('z'), ctrl), None);
+        assert_eq!(accept_key::<Action>(&[], KeyCode::Char('y'), ctrl), None);
+    }
+
+    #[test]
+    fn an_accept_key_cannot_shadow_a_built_in_key() {
+        let shadowing = [AcceptKey {
+            ctrl: 'c',
+            hint: "nope",
+            action: Action::First,
+        }];
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(accept_key(&shadowing, KeyCode::Char('c'), ctrl), None);
+    }
+
+    #[test]
+    fn an_accept_key_cannot_shadow_ctrl_d() {
+        let shadowing = [AcceptKey {
+            ctrl: 'd',
+            hint: "nope",
+            action: Action::First,
+        }];
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(accept_key(&shadowing, KeyCode::Char('d'), ctrl), None);
+    }
+
+    #[test]
+    fn key_hints_name_each_key_and_its_purpose() {
+        assert_eq!(key_hints(&KEYS), "^Y path  ^O other");
+        assert_eq!(key_hints::<Action>(&[]), "");
+    }
+
+    #[test]
+    fn row_width_leaves_room_for_the_selection_pointer() {
+        assert_eq!(row_width(80), 80 - SELECTION_POINTER.width());
+    }
+
+    #[test]
+    fn row_width_saturates_on_a_terminal_narrower_than_the_pointer() {
+        assert_eq!(row_width(0), 0);
+        assert_eq!(row_width(1), 0);
+        assert_eq!(row_width(2), 0);
+    }
+
+    #[test]
+    fn rows_are_rebuilt_only_when_the_row_width_changes() {
+        assert!(!needs_rebuild(row_width(80), 80));
+        assert!(needs_rebuild(row_width(80), 81));
+        assert!(needs_rebuild(row_width(80), 79));
+    }
+
+    #[test]
+    fn terminals_too_narrow_for_any_row_share_one_layout() {
+        // Every width up to the pointer leaves a zero-width row.
+        assert!(!needs_rebuild(row_width(0), 2));
+    }
+
+    // -------------------------------------------------------------------------
+    // Prompt line
+    // -------------------------------------------------------------------------
+
+    const LONG_QUERY: &str = "abcdefghijklmnopqrstuvwxyz0123";
+
+    #[test]
+    fn a_long_query_shows_its_end() {
+        let (line, _) = prompt_line(LONG_QUERY, 20);
+        assert!(line.width() <= 20, "{line:?} is {} columns", line.width());
+        assert!(line.ends_with(&LONG_QUERY[13..]), "{line:?}");
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_terminal() {
+        let (_, cursor) = prompt_line(LONG_QUERY, 20);
+        assert_eq!(cursor, 19);
+    }
+
+    #[test]
+    fn a_wide_character_is_not_split_at_the_cut() {
+        // Five columns are left for the query after the prefix and the
+        // cursor's column; `本語` fills four, `語本語` would need six.
+        assert_eq!(prompt_line("日本語日本語", 8), ("❯ 本語".to_string(), 6));
+    }
+
+    #[test]
+    fn a_terminal_narrower_than_the_prefix_keeps_the_cursor_on_screen() {
+        let (line, cursor) = prompt_line("abc", 1);
+        assert!(line.width() <= 1, "{line:?} is {} columns", line.width());
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn a_zero_width_terminal_parks_the_cursor_at_zero() {
+        assert_eq!(prompt_line("abc", 0).1, 0);
+    }
+
+    #[test]
+    fn a_short_query_is_shown_whole() {
+        assert_eq!(prompt_line("alpha", 40), ("❯ alpha".to_string(), 7));
+    }
+
+    #[test]
+    fn stats_degrade_to_a_truncation_when_too_narrow() {
+        let line = stats_line(4, Some(1), 100, 200, None, "^Y path");
+        assert_eq!(line.chars().count(), 4);
+    }
+
+    // -------------------------------------------------------------------------
+    // Key handling
+    // -------------------------------------------------------------------------
+
+    /// A picker over three rows that all contain an `a`, so a typed `a` keeps
+    /// every row, with a list `height` rows tall.
+    fn picker(height: usize) -> PickerState<String> {
+        let items: Vec<String> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = items
+            .iter()
+            .map(|s| Row {
+                display: s.clone(),
+                detail: String::new(),
+                search: s.clone(),
+            })
+            .collect();
+        PickerState::new(items, rows, height)
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Feed `events` to the picker one after the other, expecting it to go on.
+    fn feed(state: &mut PickerState<String>, events: &[KeyEvent]) {
+        for &event in events {
+            assert_eq!(handle_key::<_, Action>(state, &KEYS, event), Flow::Continue);
+        }
+    }
+
+    #[test]
+    fn enter_accepts_without_an_action() {
+        let mut s = picker(10);
+        assert_eq!(
+            handle_key(&mut s, &KEYS, press(KeyCode::Enter)),
+            Flow::Accept(None)
+        );
+    }
+
+    #[test]
+    fn an_accept_key_accepts_with_its_action() {
+        let mut s = picker(10);
+        assert_eq!(
+            handle_key(&mut s, &KEYS, ctrl('y')),
+            Flow::Accept(Some(Action::First))
+        );
+    }
+
+    #[test]
+    fn esc_and_ctrl_c_abort() {
+        let mut s = picker(10);
+        assert_eq!(handle_key(&mut s, &KEYS, press(KeyCode::Esc)), Flow::Abort);
+        assert_eq!(handle_key(&mut s, &KEYS, ctrl('c')), Flow::Abort);
+    }
+
+    #[test]
+    fn up_and_ctrl_p_move_toward_worse_matches() {
+        let mut s = picker(10);
+        feed(&mut s, &[press(KeyCode::Up)]);
+        assert_eq!(s.selected_rank(), Some(2));
+        feed(&mut s, &[ctrl('p')]);
+        assert_eq!(s.selected_rank(), Some(3));
+    }
+
+    #[test]
+    fn down_and_ctrl_n_move_toward_the_best() {
+        let mut s = picker(10);
+        feed(&mut s, &[press(KeyCode::Up), press(KeyCode::Up)]);
+        feed(&mut s, &[press(KeyCode::Down)]);
+        assert_eq!(s.selected_rank(), Some(2));
+        feed(&mut s, &[ctrl('n')]);
+        assert_eq!(s.selected_rank(), Some(1));
+    }
+
+    #[test]
+    fn typing_edits_the_query() {
+        let mut s = picker(10);
+        feed(
+            &mut s,
+            &[press(KeyCode::Char('a')), press(KeyCode::Char('B'))],
+        );
+        assert_eq!(s.query(), "aB");
+    }
+
+    #[test]
+    fn alt_letters_and_unbound_ctrl_letters_do_nothing() {
+        let mut s = picker(10);
+        feed(
+            &mut s,
+            &[
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
+                ctrl('x'),
+            ],
+        );
+        assert_eq!(s.query(), "");
+        assert_eq!(s.selected_rank(), Some(1));
+    }
+
+    #[test]
+    fn backspace_deletes_a_character_and_ctrl_w_a_word() {
+        let mut s = picker(10);
+        for c in "al ph".chars() {
+            feed(&mut s, &[press(KeyCode::Char(c))]);
+        }
+        feed(&mut s, &[press(KeyCode::Backspace)]);
+        assert_eq!(s.query(), "al p");
+        feed(&mut s, &[ctrl('w')]);
+        assert_eq!(s.query(), "al ");
+    }
+
+    // A list two rows tall pages one row per half page and two per full page,
+    // so a swapped page size or direction lands on a different rank.
+
+    #[test]
+    fn ctrl_u_pages_half_toward_worse_matches_and_keeps_the_query() {
+        let mut s = picker(2);
+        feed(&mut s, &[press(KeyCode::Char('a')), ctrl('u')]);
+        assert_eq!(s.query(), "a");
+        assert_eq!(s.selected_rank(), Some(2));
+    }
+
+    #[test]
+    fn page_up_pages_a_full_page_toward_worse_matches() {
+        let mut s = picker(2);
+        feed(&mut s, &[press(KeyCode::PageUp)]);
+        assert_eq!(s.selected_rank(), Some(3));
+    }
+
+    #[test]
+    fn ctrl_d_pages_half_toward_the_best() {
+        let mut s = picker(2);
+        feed(&mut s, &[press(KeyCode::Up), press(KeyCode::Up), ctrl('d')]);
+        assert_eq!(s.selected_rank(), Some(2));
+    }
+
+    #[test]
+    fn page_down_pages_a_full_page_toward_the_best() {
+        let mut s = picker(2);
+        feed(
+            &mut s,
+            &[
+                press(KeyCode::Up),
+                press(KeyCode::Up),
+                press(KeyCode::PageDown),
+            ],
+        );
+        assert_eq!(s.selected_rank(), Some(1));
+    }
+
+    #[test]
+    fn a_key_release_is_ignored() {
+        let mut s = picker(10);
+        let release =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(handle_key(&mut s, &KEYS, release), Flow::Continue);
+    }
+}

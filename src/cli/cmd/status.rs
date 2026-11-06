@@ -770,7 +770,7 @@ pub(super) fn pad_left(text: &str, width: usize) -> String {
 
 /// Shows control characters of a name in the escaped form of the spec, so
 /// that a name cannot move the cursor or end a line.
-pub(super) fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     let mut shown = String::new();
     for character in text.chars() {
         if character.is_control() {
@@ -787,7 +787,7 @@ pub(super) fn sanitize(text: &str) -> String {
 
 /// Cuts `text` to `width` columns by replacing its middle with `…`,
 /// keeping the start and the end. A text that fits stays as it is.
-pub(super) fn mid(text: &str, width: usize) -> String {
+pub(crate) fn mid(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
     }

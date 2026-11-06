@@ -11,13 +11,14 @@ readme = "README.md"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 filetime = "0.2.29"
 glob = "0.3.4"
 ignore = "0.4.34"
 jiff = { version = "0.2.39", features = ["serde"] }
 libc = "0.2.191"
 nucleo = "0.5.0"
-rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "pty", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
@@ -27,6 +28,7 @@ toml = "1.1.8"
 toml_edit = "0.25.17"
 ulid = "3.0.0"
 unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 whoami = "2.1.3"
 zstd = { version = "0.14.3", default-features = false, features = ["experimental", "zstdmt"] }
