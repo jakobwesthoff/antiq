@@ -147,6 +147,14 @@ fn rows(report: &ArchiveReport) -> Vec<Row> {
             detail: format!("{} archive, verified", size_text(done.archive_size)),
         });
     }
+    for done in report.reclaimed.iter().flatten() {
+        rows.push(Row {
+            path: sanitize(&done.path.to_string()),
+            size: Some(done.size),
+            word: Word::Removed,
+            detail: "unchanged, the archive stays as it was".to_string(),
+        });
+    }
     for row in report.kept.iter().flatten() {
         let detail = match (row.how, &row.recovered_as) {
             (KeptHow::Unearthed, _) => "changed after it was verified, unearthed again".to_string(),
@@ -197,20 +205,29 @@ fn finished_lines(report: &ArchiveReport, style: Style) -> Vec<String> {
     lines
 }
 
-/// `archived 2 pieces \u{b7} 1.6 GB`, then the counts of the other rows.
+/// `archived 2 pieces \u{b7} 1.6 GB`, then the counts of the other rows. A run
+/// that only reclaimed pieces starts with `reclaimed` instead.
 fn header(report: &ArchiveReport) -> String {
     let archived = report.archived.as_deref().unwrap_or_default();
-    let total: u64 = archived.iter().map(|done| done.size).sum();
-    let noun = if archived.len() == 1 {
-        "piece"
+    let reclaimed = report.reclaimed.as_deref().unwrap_or_default();
+    let (verb, total, count) = if archived.is_empty() && !reclaimed.is_empty() {
+        (
+            "reclaimed",
+            reclaimed.iter().map(|done| done.size).sum(),
+            reclaimed.len(),
+        )
     } else {
-        "pieces"
+        (
+            "archived",
+            archived.iter().map(|done| done.size).sum(),
+            archived.len(),
+        )
     };
-    let mut header = format!(
-        "archived {} {noun} \u{b7} {}",
-        archived.len(),
-        size_text(total)
-    );
+    let noun = if count == 1 { "piece" } else { "pieces" };
+    let mut header = format!("{verb} {count} {noun} \u{b7} {}", size_text(total));
+    if verb == "archived" && !reclaimed.is_empty() {
+        header.push_str(&format!(", {} reclaimed", reclaimed.len()));
+    }
     let kept = report.kept.as_deref().map_or(0, <[_]>::len);
     if kept > 0 {
         header.push_str(&format!(", {kept} kept"));
@@ -318,7 +335,8 @@ mod tests {
     use super::*;
     use antiq::id::ObjectId;
     use antiq::ops::archive::{
-        ArchiveAction, Archived, Kept, KeptHow, SkipReason, Skipped, Unfinished, UnfinishedWhere,
+        ArchiveAction, Archived, Kept, KeptHow, Reclaimed, SkipReason, Skipped, Unfinished,
+        UnfinishedWhere,
     };
     use antiq::plan::Plan;
     use antiq::relpath::RelPath;
@@ -351,10 +369,16 @@ mod tests {
         let mut plan = Plan::new();
         plan.push(action("projects/a", 412_000_000));
         plan.push(action("projects/b", 1_600_000_000));
+        plan.push(ArchiveAction::Reclaim {
+            path: RelPath::parse("projects/c").expect("valid"),
+            id: id(5),
+            size: 7_000,
+        });
         let report = ArchiveReport {
             dry_run: true,
             plan: Some(plan),
             archived: None,
+            reclaimed: None,
             skipped: None,
             kept: None,
             unfinished: None,
@@ -366,6 +390,7 @@ mod tests {
             stdout: [
                 "Would archive projects/a (412 MB)",
                 "Would archive projects/b (1.6 GB)",
+                "Would reclaim projects/c (7.0 kB)",
             ],
             stderr: [
                 "note: the collection is on an NFS mount",
@@ -380,6 +405,7 @@ mod tests {
             dry_run: true,
             plan: Some(Plan::new()),
             archived: None,
+            reclaimed: None,
             skipped: None,
             kept: None,
             unfinished: None,
@@ -440,6 +466,7 @@ mod tests {
             dry_run: false,
             plan: None,
             archived: Some(archived),
+            reclaimed: Some(Vec::new()),
             skipped: Some(skipped),
             kept: Some(kept),
             unfinished: Some(Vec::new()),
@@ -485,6 +512,34 @@ mod tests {
                 ),
             ],
         )
+    }
+
+    #[test]
+    fn a_reclaimed_piece_is_a_removed_row_and_the_header_counts_it() {
+        let mut report = run_report(
+            vec![archived("projects/a", 412_000_000, 88_000_000)],
+            Vec::new(),
+            Vec::new(),
+        );
+        report.reclaimed = Some(vec![Reclaimed {
+            id: id(4),
+            path: path("projects/b"),
+            size: 1_600_000_000,
+        }]);
+        let lines = render(&report, wide());
+        insta::assert_snapshot!(lines.stdout.join("\n"), @"
+        archived 1 piece \u{b7} 412 MB, 1 reclaimed
+
+          projects/a  412 MB  removed  88 MB archive, verified
+          projects/b  1.6 GB  removed  unchanged, the archive stays as it was
+        ");
+        report.archived = Some(Vec::new());
+        let lines = render(&report, wide());
+        insta::assert_snapshot!(lines.stdout.join("\n"), @"
+        reclaimed 1 piece \u{b7} 1.6 GB
+
+          projects/b  1.6 GB  removed  unchanged, the archive stays as it was
+        ");
     }
 
     #[test]

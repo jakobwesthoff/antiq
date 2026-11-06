@@ -219,7 +219,7 @@ pub struct Piece {
     pub detail: Detail,
     /// The time the piece was last unearthed, for the idle clock.
     #[serde(skip)]
-    unearthed: Option<Timestamp>,
+    pub(crate) unearthed: Option<Timestamp>,
     /// A diverged folder is neither archived nor synced.
     #[serde(skip)]
     diverged: bool,

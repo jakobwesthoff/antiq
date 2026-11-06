@@ -138,6 +138,7 @@ fn an_idle_piece_is_archived_and_its_folder_removed() {
     assert!(row["archive_size"].as_u64().expect("a number") > 0);
     let id = row["id"].as_str().expect("an ID");
     assert_eq!(id.len(), 26);
+    assert_eq!(json["reclaimed"], json!([]));
     assert_eq!(json["skipped"], json!([]));
     assert_eq!(json["kept"], json!([]));
     assert_eq!(json["unfinished"], json!([]));
@@ -149,6 +150,7 @@ fn an_idle_piece_is_archived_and_its_folder_removed() {
             "format",
             "command",
             "archived",
+            "reclaimed",
             "skipped",
             "kept",
             "unfinished",

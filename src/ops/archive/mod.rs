@@ -196,6 +196,14 @@ pub enum ArchiveAction {
         /// Apparent size in bytes.
         size: u64,
     },
+    /// An unearthed piece that equals its archive: the folder goes and no
+    /// new archive is made.
+    Reclaim {
+        path: RelPath,
+        id: ObjectId,
+        /// Apparent size in bytes.
+        size: u64,
+    },
 }
 
 impl PlanAction for ArchiveAction {
@@ -203,6 +211,9 @@ impl PlanAction for ArchiveAction {
         match self {
             ArchiveAction::Archive { path, size, .. } => {
                 format!("archive {path} ({})", size_text(*size))
+            }
+            ArchiveAction::Reclaim { path, size, .. } => {
+                format!("reclaim {path} ({})", size_text(*size))
             }
         }
     }
@@ -220,6 +231,16 @@ pub struct Archived {
     pub payload_version: u32,
 }
 
+/// A piece whose folder was removed because it equals the archive it was
+/// unearthed from. No archive was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reclaimed {
+    pub id: ObjectId,
+    pub path: RelPath,
+    /// Apparent size of the folder in bytes.
+    pub size: u64,
+}
+
 /// Why a piece was not archived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -231,6 +252,9 @@ pub enum SkipReason {
     /// The folder differs from what was packed from it.
     Differs,
     NoSpace,
+    /// The archive is not proven good: the local payload fails its check
+    /// and no check of the remote copy is recorded.
+    PendingRemote,
     Error,
 }
 
@@ -302,6 +326,9 @@ pub struct ArchiveReport {
     pub archived: Option<Vec<Archived>>,
     /// Real runs only.
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimed: Option<Vec<Reclaimed>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<Vec<Skipped>>,
     /// Real runs only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -355,10 +382,14 @@ pub fn size_text(bytes: u64) -> String {
 struct Candidate {
     path: RelPath,
     id: Option<ObjectId>,
+    /// `New`, `Live` or `Unearthed`.
+    kind: PieceKind,
+    /// When the piece was last unearthed.
+    unearthed: Option<Timestamp>,
 }
 
-/// The idle, unpinned pieces in state `new` or `live`, in path order, with
-/// the warnings `status` has for the collection.
+/// The idle, unpinned pieces in state `new`, `live` or `unearthed`, in path
+/// order, with the warnings `status` has for the collection.
 fn candidates(
     collection: &Collection,
     clock: &dyn Clock,
@@ -374,11 +405,18 @@ fn candidates(
     let candidates = report
         .pieces
         .iter()
-        .filter(|piece| matches!(piece.state, PieceKind::New | PieceKind::Live))
+        .filter(|piece| {
+            matches!(
+                piece.state,
+                PieceKind::New | PieceKind::Live | PieceKind::Unearthed
+            )
+        })
         .filter(|piece| piece.flags.contains(&Flag::Idle))
         .map(|piece| Candidate {
             path: piece.path.clone(),
             id: piece.id,
+            kind: piece.state,
+            unearthed: piece.unearthed,
         })
         .collect();
     Ok((candidates, report.warnings))
@@ -407,7 +445,7 @@ pub(crate) fn plan_with(
     clock: &dyn Clock,
     seams: &dyn Seams,
 ) -> Result<ArchiveReport, ArchiveError> {
-    let (candidates, warnings) = candidates(collection, clock, seams, false)?;
+    let (candidates, mut warnings) = candidates(collection, clock, seams, false)?;
     let config = &collection.config().collection;
     let root = open_root(collection)?;
     let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
@@ -417,16 +455,31 @@ pub(crate) fn plan_with(
     for candidate in candidates {
         let tree =
             walk::walk_piece_with(&root, &candidate.path, &junk, &rules, seams.walk_hooks())?;
-        plan.push(ArchiveAction::Archive {
-            size: apparent_size(&tree),
-            path: candidate.path,
-            id: candidate.id,
-        });
+        let size = apparent_size(&tree);
+        if candidate.kind != PieceKind::Unearthed {
+            plan.push(ArchiveAction::Archive {
+                size,
+                path: candidate.path,
+                id: candidate.id,
+            });
+            continue;
+        }
+        match unearthed::plan_action(collection, &junk, &root, &candidate, size) {
+            Ok((action, warning)) => {
+                plan.push(action);
+                warnings.extend(warning);
+            }
+            Err(refusal) => warnings.push(Warning::new(format!(
+                "`{}` would be skipped: {}",
+                candidate.path, refusal.message
+            ))),
+        }
     }
     Ok(ArchiveReport {
         dry_run: true,
         plan: Some(plan),
         archived: None,
+        reclaimed: None,
         skipped: None,
         kept: None,
         unfinished: None,
@@ -468,6 +521,7 @@ pub(crate) fn archive_with(
     let mut warnings: Vec<Warning> = guard.warnings().to_vec();
     warnings.extend(found);
     let mut archived = Vec::new();
+    let mut reclaimed = Vec::new();
     let mut skipped = Vec::new();
     let mut kept = Vec::new();
     let mut unfinished = Vec::new();
@@ -515,6 +569,7 @@ pub(crate) fn archive_with(
                         new::PieceOutcome::Dropped => {}
                         new::PieceOutcome::Skipped(row) => skipped.push(row),
                         new::PieceOutcome::Archived(row) => archived.push(row),
+                        new::PieceOutcome::Reclaimed(row) => reclaimed.push(row),
                         new::PieceOutcome::Kept(row) => kept.push(row),
                         new::PieceOutcome::Unfinished(row) => unfinished.push(row),
                     }
@@ -550,6 +605,7 @@ pub(crate) fn archive_with(
         dry_run: false,
         plan: None,
         archived: Some(archived),
+        reclaimed: Some(reclaimed),
         skipped: Some(skipped),
         kept: Some(kept),
         unfinished: Some(unfinished),
@@ -675,7 +731,9 @@ mod tests {
                 .actions
                 .iter()
                 .map(|action| match action {
-                    ArchiveAction::Archive { path, .. } => path.to_string(),
+                    ArchiveAction::Archive { path, .. } | ArchiveAction::Reclaim { path, .. } => {
+                        path.to_string()
+                    }
                 })
                 .collect()
         }
@@ -772,12 +830,7 @@ mod tests {
         let plan = world.plan();
         assert!(plan.dry_run);
         let actions = plan.plan.expect("a dry run has a plan").actions;
-        let listed: Vec<(String, Option<ObjectId>)> = actions
-            .iter()
-            .map(|action| match action {
-                ArchiveAction::Archive { path, id, .. } => (path.to_string(), *id),
-            })
-            .collect();
+        let listed: Vec<(String, Option<ObjectId>)> = actions.iter().map(parts).collect();
         let live_id = ObjectId::from_ulid(ulid::Ulid::from_parts(1_600_000_000_001, 1));
         assert_eq!(
             listed,
@@ -787,6 +840,14 @@ mod tests {
                 ("c".to_string(), None)
             ]
         );
+    }
+
+    /// The path and the ID of a planned action.
+    pub(super) fn parts(action: &ArchiveAction) -> (String, Option<ObjectId>) {
+        match action {
+            ArchiveAction::Archive { path, id, .. } => (path.to_string(), *id),
+            ArchiveAction::Reclaim { path, id, .. } => (path.to_string(), Some(*id)),
+        }
     }
 
     /// `world` holds an idle piece `sibling` next to whatever the test
@@ -837,7 +898,9 @@ mod tests {
             .actions
             .iter()
             .map(|action| match action {
-                ArchiveAction::Archive { path, .. } => path.to_string(),
+                ArchiveAction::Archive { path, .. } | ArchiveAction::Reclaim { path, .. } => {
+                    path.to_string()
+                }
             })
             .collect();
         assert_eq!(planned, ["sibling"]);
@@ -868,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unearthed_piece_is_not_planned() {
+    fn a_live_piece_unearthed_two_days_ago_is_not_planned() {
         let mut world = world();
         world.file("work/note.txt", 30);
         live_piece(&world, 1, "work", COLLECTION_ID, |entry| {

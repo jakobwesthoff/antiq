@@ -22,12 +22,12 @@
 //! 10. delete the tree and set the entry to `gone`, or give a different tree
 //!     back (see `finish`).
 
-mod finish;
+pub(super) mod finish;
 
 use super::durable::{self, Matched};
 use super::{
-    ArchiveError, Archived, Candidate, Kept, Seams, SkipReason, Skipped, Step, Unfinished,
-    UnfinishedWhere, apparent_size, size_text,
+    ArchiveError, Archived, Candidate, Kept, Reclaimed, Seams, SkipReason, Skipped, Step,
+    Unfinished, UnfinishedWhere, apparent_size, size_text,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -41,6 +41,7 @@ use crate::meta::{
     Checksum, CreatedSource, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload,
     PayloadKind,
 };
+use crate::ops::status::PieceKind;
 use crate::pack::names::{MemberKind, MemberName, portability_warnings};
 use crate::pack::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Pool, workers_for_piece,
@@ -131,6 +132,7 @@ pub(super) enum PieceOutcome {
     Dropped,
     Skipped(Skipped),
     Archived(Archived),
+    Reclaimed(Reclaimed),
     Kept(Kept),
     Unfinished(Unfinished),
 }
@@ -143,7 +145,7 @@ pub(super) struct PieceResult {
 }
 
 /// Why a piece stops before its end.
-enum Stop {
+pub(super) enum Stop {
     Dropped,
     Skip {
         reason: SkipReason,
@@ -160,10 +162,10 @@ enum Stop {
     Fail(ArchiveError),
 }
 
-type Flow<T> = Result<T, Stop>;
+pub(super) type Flow<T> = Result<T, Stop>;
 
 impl Stop {
-    fn error(message: impl Into<String>) -> Stop {
+    pub(super) fn error(message: impl Into<String>) -> Stop {
         Stop::Skip {
             reason: SkipReason::Error,
             message: message.into(),
@@ -172,7 +174,7 @@ impl Stop {
 
     /// A failed call: out of space is told apart, as it frees the space the
     /// next piece can use.
-    fn from_error(error: &(dyn Error + 'static)) -> Stop {
+    pub(super) fn from_error(error: &(dyn Error + 'static)) -> Stop {
         let reason = if is_out_of_space(error) {
             SkipReason::NoSpace
         } else {
@@ -235,6 +237,8 @@ pub(super) fn archive_piece(
         cx,
         path: &candidate.path,
         known: candidate.id,
+        is_unearthed: candidate.kind == PieceKind::Unearthed,
+        unearthed: candidate.unearthed,
         warnings: Vec::new(),
         listing_stored: false,
     };
@@ -272,24 +276,29 @@ struct Stored {
     matched: Matched,
 }
 
-struct Piece<'a, 'c> {
-    cx: &'a Context<'c>,
-    path: &'a RelPath,
+pub(super) struct Piece<'a, 'c> {
+    pub(super) cx: &'a Context<'c>,
+    pub(super) path: &'a RelPath,
     /// The ID the piece had before the run.
-    known: Option<ObjectId>,
-    warnings: Vec<Warning>,
-    listing_stored: bool,
+    pub(super) known: Option<ObjectId>,
+    /// The piece is an unearthed one: its folder is compared with the
+    /// archive it came from before anything is packed.
+    is_unearthed: bool,
+    /// When the piece was last unearthed, for the idle clock.
+    unearthed: Option<Timestamp>,
+    pub(super) warnings: Vec<Warning>,
+    pub(super) listing_stored: bool,
 }
 
 impl Piece<'_, '_> {
-    fn at(&self, step: Step) -> Flow<()> {
+    pub(super) fn at(&self, step: Step) -> Flow<()> {
         self.cx
             .seams
             .at(step, self.path)
             .map_err(|error| Stop::from_error(&error))
     }
 
-    fn store(&self) -> Store<'_> {
+    pub(super) fn store(&self) -> Store<'_> {
         Store::new(self.cx.collection)
     }
 
@@ -302,12 +311,15 @@ impl Piece<'_, '_> {
             .sub(self.path)
             .map_err(|error| Stop::from_error(&error))?;
         self.warnings.extend(tree_warnings(&tree));
+        if self.is_unearthed {
+            return self.rearchive(&sub, size);
+        }
         let stored = match self.adopt(&sub)? {
             Some(stored) => stored,
             None => self.pack_and_store(&tree, &sub, size)?,
         };
         let mut entry = self.write_entry(&stored)?;
-        self.mark_removing(&mut entry, &stored)?;
+        self.mark_removing(&mut entry, &stored.payload.file)?;
         let durable = durable::seal(self.cx.lock, stored.matched, &stored.payload, &entry)
             .expect("the entry was just marked removing for this payload");
         Ok(match self.remove_folder(&durable, entry)? {
@@ -339,7 +351,7 @@ impl Piece<'_, '_> {
             cx.seams.walk_hooks(),
         )
         .map_err(|error| Stop::Fail(error.into()))?;
-        match idle::check(&cx.root, &tree, None, &cx.idle, cx.clock.now()) {
+        match idle::check(&cx.root, &tree, self.unearthed, &cx.idle, cx.clock.now()) {
             Ok(check) => match check.verdict {
                 IdleVerdict::Idle { .. } => Ok(tree),
                 _ => Err(Stop::Dropped),
@@ -742,25 +754,29 @@ impl Piece<'_, '_> {
         Ok(entry)
     }
 
-    fn mark_removing(&self, entry: &mut TrackingEntry, stored: &Stored) -> Flow<()> {
-        let cx = self.cx;
-        // The folder moves to this name in the next step, which refuses to
-        // replace anything. Finding something here now means the refusal
-        // could only be about this leftover.
-        let trash = cx.collection.trash_path(stored.id);
+    /// The folder moves to `trash/<id>` after the entry is `removing`, and
+    /// that move refuses to replace anything. Finding something at the name
+    /// first means the refusal could only be about this leftover.
+    pub(super) fn check_trash_free(&self, id: ObjectId) -> Flow<()> {
+        let trash = self.cx.collection.trash_path(id);
         match fs::symlink_metadata(&trash) {
-            Ok(_) => {
-                return Err(Stop::error(format!(
-                    "{} is in the way of the trash",
-                    trash.display()
-                )));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Stop::from_error(&error)),
+            Ok(_) => Err(Stop::error(format!(
+                "{} is in the way of the trash",
+                trash.display()
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Stop::from_error(&error)),
         }
+    }
+
+    /// Sets the entry `removing`, naming the archive payload the folder is
+    /// compared with.
+    pub(super) fn mark_removing(&self, entry: &mut TrackingEntry, payload: &FileName) -> Flow<()> {
+        let cx = self.cx;
+        self.check_trash_free(entry.id)?;
         self.at(Step::MarkRemoving)?;
         entry.state = EntryState::Removing;
-        entry.removing_payload = Some(stored.payload.file.clone());
+        entry.removing_payload = Some(payload.clone());
         tracking::write(cx.collection, cx.lock, cx.clock, entry)
             .map_err(|error| Stop::from_error(&error))
     }

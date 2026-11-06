@@ -1456,8 +1456,8 @@ one of them is removed. When such pieces are archived in the same run, the
 outcome of each depends on timing: it can be kept as unearthed or skipped
 with reason `differs` instead of being removed.
 
-The pieces `archive` takes are the ones `status` marks `idle` that are new
-or live. Right before packing, each is walked again with the collection's
+The pieces `archive` takes are the ones `status` marks `idle` that are new,
+live or unearthed. Right before packing, each is walked again with the collection's
 rules and judged again. A piece that is no longer idle is left out of the
 run without a report. A piece whose walk finds an entry it cannot read, a
 mount point, an excluded path or a nested collection is skipped with that
@@ -1502,10 +1502,38 @@ An unearthed piece that has not changed against its listing is
 reclaimed: the folder is removed the same way and the archive stays,
 with no new payload and no upload. (ADR 0035) The listing compared is
 the one of the payload version the piece was unearthed from, recorded
-in its tracking entry. A changed one replaces its
+in its tracking entry. Two machines can both have made that version; the
+payloads this machine holds are compared, or all of them when it holds
+none, and the piece is reclaimed when the folder equals one of them. A
+superseded payload is not compared. An entry that records no version, or
+whose version has no payload left, is compared with the newest archive
+that is not superseded. A payload whose listing cannot be read is passed
+over. The comparison applies the collection's junk list to the listing and
+to the folder.
+
+A reclaim records its metadata change first (lifecycle `archived`, live
+payload removed, a `reclaim` history entry), then sets the entry to
+`removing` naming the archive payload, then removes the folder by steps 3
+to 5 above. A reclaim that stops half way is finished by the repairs of the
+next run. A change that an earlier run recorded is not recorded twice. A
+trash tree in the way of the move skips the reclaim before anything is
+written. A folder that is no longer the archive when it is walked in the
+trash goes back as unearthed at the same version.
+
+A reclaim needs the archive payload: it must be in the store and pass the
+stream check with the size and SHA-256 of the metadata, or the metadata
+must record a check of the remote copy. When the local file fails and the
+remote check is recorded, a warning says that the remote copy is the good
+one, the folder is removed, and the local file and its entry stay. Without
+either, the piece is skipped with reason `pending_remote` and nothing
+changes.
+
+A changed one replaces its
 archive with a new payload. A replacement that loses nothing happens
-without asking. Content is lost when paths were removed or a file's
-content, mode, link target or modification time changed. Then antiq
+without asking. Content is lost when a path was removed or when an
+entry's type, size, content, mode or link target, or a file's modification
+time, changed; the mode of a directory counts, its modification time does
+not. Then antiq
 shows what would be lost and asks: replace, fork or skip; without a
 terminal it skips and lists the piece as needing a decision. A skip
 answered on a terminal leaves nothing pending, and the run exits 3. A
@@ -2191,18 +2219,22 @@ given, and exits 3. Under `--json` nothing goes to stderr.
 
 `archive --dry-run` has `dry_run` (true), `actions` and `warnings`, in
 that order. An action is `{action: "archive", path, id, size}` for each
-idle piece the next `archive` takes, in path order. `id` is null for a
-new piece and `size` is the piece's apparent size in bytes (a file with
-several names counts once).
+idle piece the next `archive` archives, and `{action: "reclaim", path, id,
+size}` for each unearthed piece it reclaims, in path order. `id` is null
+for a new piece and `size` is the piece's apparent size in bytes (a file
+with several names counts once). A piece the run would skip has no action
+and a warning.
 
-`archive` has `archived`, `skipped`, `kept`, `unfinished` and `warnings`,
-in that order, each list in path order. `archived` has `{id, path, size,
-archive_size, payload_version}` for each piece whose folder was removed:
-`size` is the apparent size in bytes and `archive_size` the bytes of the
-stored archive. `skipped` has `{id, path, reason, message}` for each piece
+`archive` has `archived`, `reclaimed`, `skipped`, `kept`, `unfinished` and
+`warnings`, in that order, each list in path order. `archived` has `{id,
+path, size, archive_size, payload_version}` for each piece whose folder was
+removed: `size` is the apparent size in bytes and `archive_size` the bytes
+of the stored archive. `reclaimed` has `{id, path, size}` for each unearthed
+piece whose folder was removed without a new archive. `skipped` has `{id, path, reason, message}` for each piece
 left alone; `id` is present only for a piece that had an ID before the
 run. `reason` is `unreadable`, `mount_point`, `excluded`,
-`nested_collection`, `differs`, `no_space` or `error`. `kept` has `{id,
+`nested_collection`, `differs`, `no_space`, `pending_remote` or `error`.
+`kept` has `{id,
 path, how, recovered_as}` for each piece that was archived and whose folder
 was not removed because it differs from the archive: `how` is `unearthed`
 when the folder is back at its path and `recovered` when it is below

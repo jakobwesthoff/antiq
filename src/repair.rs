@@ -196,6 +196,41 @@ pub(crate) fn records_unearth(metadata: &Metadata, machine: &str, time: Timestam
     })
 }
 
+/// The archive payloads an unearthed folder can have come from: those of
+/// the version the entry was unearthed from. Two machines can both make
+/// version N, so the ones this machine holds are the candidates and the
+/// folder may be any of them; without a local one every payload of the
+/// version is. A superseded payload is never a candidate. An entry that
+/// records no version has none.
+pub(crate) fn unearthed_candidates<'a>(
+    entry: &TrackingEntry,
+    metadata: &'a Metadata,
+) -> Vec<&'a Payload> {
+    let Some(version) = entry.unearthed_payload_version else {
+        return Vec::new();
+    };
+    let of_version: Vec<&Payload> = metadata
+        .payloads
+        .iter()
+        .filter(|payload| {
+            payload.kind == PayloadKind::Archive
+                && payload.version == version
+                && !payload.superseded
+        })
+        .collect();
+    let held: Vec<&Payload> = of_version
+        .iter()
+        .copied()
+        .filter(|payload| {
+            entry
+                .local_payloads
+                .iter()
+                .any(|local| local.file == payload.file)
+        })
+        .collect();
+    if held.is_empty() { of_version } else { held }
+}
+
 /// The archive payload of an import that is still a recorded change, if
 /// `metadata` is one.
 ///
@@ -851,32 +886,10 @@ impl Repairs<'_> {
     /// Whether the folder at the entry's path equals the listing of the
     /// archive payload version that the entry was unearthed from.
     fn is_unearthed_tree(&self, entry: &TrackingEntry) -> bool {
-        let Some(version) = entry.unearthed_payload_version else {
-            return false;
-        };
         let Ok(Some(current)) = Store::new(self.collection).current(entry.id) else {
             return false;
         };
-        // Two machines can both make version N. The ones this machine
-        // holds are the candidates, and the folder may be any of them;
-        // without a local one every payload of the version is.
-        let of_version: Vec<&Payload> = current
-            .metadata
-            .payloads
-            .iter()
-            .filter(|payload| payload.kind == PayloadKind::Archive && payload.version == version)
-            .collect();
-        let held: Vec<&Payload> = of_version
-            .iter()
-            .copied()
-            .filter(|payload| {
-                entry
-                    .local_payloads
-                    .iter()
-                    .any(|local| local.file == payload.file)
-            })
-            .collect();
-        let candidates = if held.is_empty() { of_version } else { held };
+        let candidates = unearthed_candidates(entry, &current.metadata);
         let Ok(tree) = self.root.sub(&entry.path) else {
             return false;
         };

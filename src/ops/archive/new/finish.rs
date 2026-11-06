@@ -31,7 +31,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 /// How a stored piece ended.
-pub(super) enum Finished {
+pub(in crate::ops::archive) enum Finished {
     /// The folder is deleted.
     Removed,
     /// The folder, or a copy of it, is still there.
@@ -176,7 +176,7 @@ impl Piece<'_, '_> {
         Stop::Unfinished { id, place, message }
     }
 
-    pub(super) fn remove_folder(
+    pub(in crate::ops::archive) fn remove_folder(
         &mut self,
         durable: &DurableArchive,
         mut entry: TrackingEntry,
