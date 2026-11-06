@@ -831,6 +831,40 @@ mod tests {
     }
 
     #[test]
+    fn a_top_that_cannot_be_searched_is_reported_and_nothing_is_written() {
+        let mut tree = collection();
+        let locked = tree.unreadable_dir("q");
+        assert!(
+            fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let error = put(&open(&tree), &path("q"), ".antiq-pin", b"", &RealSite)
+            .expect_err("the top cannot be searched");
+
+        assert!(error.to_string().contains("q/.antiq-pin"), "{error}");
+        assert!(temp_leftovers(&tree).is_empty());
+    }
+
+    #[test]
+    fn a_tmp_that_cannot_be_written_is_reported_and_the_top_stays_untouched() {
+        let tree = collection();
+        let _restore = read_only_top(&tree);
+        let _restore_tmp = RestoreModes(vec![tree.path(".antiq/tmp")]);
+        fs::set_permissions(tree.path(".antiq/tmp"), fs::Permissions::from_mode(0o555))
+            .expect("the mode is set");
+        assert!(
+            fs::write(tree.path(".antiq/tmp/probe"), "").is_err(),
+            "the test needs a user that a read-only directory stops"
+        );
+
+        let error = put_real(&tree, b"x\n").expect_err("no temp file can be made");
+
+        assert!(error.to_string().contains("create"), "{error}");
+        assert_eq!(fs::read_dir(tree.path("p")).expect("reads").count(), 0);
+    }
+
+    #[test]
     fn a_stale_temp_of_the_next_name_is_skipped() {
         let tree = collection();
         let pid = std::process::id();
