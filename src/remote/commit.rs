@@ -112,6 +112,14 @@ pub enum Refusal {
 /// committed, and calling again with the same request finds it and returns
 /// the outcome without writing.
 ///
+/// A named file that is gone after the rename and cannot be put again
+/// leaves the version committed and is an `Err`. When the put itself
+/// fails, that error comes back unchanged, so away stays away and an I/O
+/// error stays an I/O error. When the put succeeds and the file is still
+/// not there, the error is [`RemoteError::Broken`], naming the file and
+/// the version. The caller treats any `Err` as not committed and keeps its
+/// local archive.
+///
 /// A refusal after the claim that is known before the rename
 /// (`PayloadMissing`, `NewerCommitted`) removes the claim and the temp
 /// file, unless the version number is taken. Every other stop leaves them:
@@ -569,6 +577,7 @@ fn confirm(
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
+    use crate::error::{ErrorKind, HasKind};
     use crate::lock;
     use crate::meta::{
         self, Checksum, CreatedSource, FileName, Lifecycle, Metadata, Payload, PayloadKind,
@@ -1354,7 +1363,23 @@ mod tests {
         let error = world
             .commit(0, &metadata("a", true))
             .expect_err("the payload is gone");
+        assert!(matches!(error, RemoteError::Broken(_)), "{error:?}");
         assert!(error.to_string().contains(PAYLOAD), "{error}");
+        assert!(error.to_string().contains("meta.1"), "{error}");
+        assert!(world.names().contains(&"meta.1".to_string()));
+    }
+
+    #[test]
+    fn a_failing_repair_put_after_the_rename_returns_its_own_error() {
+        let world = World::new();
+        world.remote.before(Op::ListDir, 4, |inner| {
+            inner.delete(id(), PAYLOAD).expect("deleted")
+        });
+        world.remote.fail(Op::PutPayload, 3, Fault::Away);
+        let error = world
+            .commit(0, &metadata("a", true))
+            .expect_err("the repair put fails");
+        assert_eq!(error.kind(), ErrorKind::RemoteAway, "{error}");
         assert!(world.names().contains(&"meta.1".to_string()));
     }
 
