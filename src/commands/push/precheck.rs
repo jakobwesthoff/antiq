@@ -302,12 +302,12 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<Inspected, Stop> {
     // cannot be listed is reported as such and not as a marker that is
     // missing.
     let empty = (io.is_empty)(&canonical).map_err(|error| failed(&error, &canonical))?;
-    let probe =
-        match read_marker(&canonical, &canonical.display().to_string()).map_err(Stop::Refuse)? {
-            Some(probe) => probe,
-            None if empty => Probe::Empty,
-            None => Probe::NotEmpty,
-        };
+    let shown = canonical.display().to_string();
+    let probe = match read_marker(&canonical).map_err(|error| marker_stop(&error, &shown))? {
+        Some(probe) => probe,
+        None if empty => Probe::Empty,
+        None => Probe::NotEmpty,
+    };
     Ok((probe, canonical, Some(directory)))
 }
 
@@ -366,19 +366,34 @@ fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(u64, u64
 /// The most of a marker file that is read; a real one is a line of JSON.
 const MARKER_LIMIT: u64 = 64 * 1024;
 
-/// Reads `.antiq-target` of the directory `dir`, which `shown` names in
-/// messages, `None` when there is none.
+/// The refusal for a marker that cannot be read.
+fn marker_unreadable(error: &io::Error, shown: &str) -> PushError {
+    PushError::Target {
+        problem: format!("the marker {FILE_NAME} in {shown} is not readable: {error}"),
+    }
+}
+
+/// How a failed read of the marker of a path target counts: the five errors
+/// of a share that is gone are unreachable, every other error is a
+/// refusal.
+fn marker_stop(error: &io::Error, shown: &str) -> Stop {
+    if is_gone(error) {
+        Stop::Unreachable(format!("the target {shown} cannot be reached: {error}"))
+    } else {
+        Stop::Refuse(marker_unreadable(error, shown))
+    }
+}
+
+/// Reads `.antiq-target` of the directory `dir`, `None` when there is
+/// none.
 /// The file is looked at without following links, so that a link cannot
 /// stand in for a marker.
-fn read_marker(dir: &Path, shown: &str) -> Result<Option<Probe>, PushError> {
+fn read_marker(dir: &Path) -> Result<Option<Probe>, io::Error> {
     let path = dir.join(FILE_NAME);
-    let unreadable = |error: io::Error| PushError::Target {
-        problem: format!("the marker {FILE_NAME} in {shown} is not readable: {error}"),
-    };
     let meta = match fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(unreadable(error)),
+        Err(error) => return Err(error),
     };
     if !meta.is_file() {
         return Ok(Some(Probe::MarkerUnreadable(
@@ -386,9 +401,7 @@ fn read_marker(dir: &Path, shown: &str) -> Result<Option<Probe>, PushError> {
         )));
     }
     let mut bytes = Vec::new();
-    fs::File::open(&path)
-        .and_then(|file| file.take(MARKER_LIMIT).read_to_end(&mut bytes))
-        .map_err(unreadable)?;
+    fs::File::open(&path).and_then(|file| file.take(MARKER_LIMIT).read_to_end(&mut bytes))?;
     Ok(Some(match Marker::parse(&bytes) {
         Ok(marker) => Probe::Marker(marker),
         Err(MarkerError::TooNew { found }) => Probe::MarkerTooNew(found),
@@ -567,7 +580,8 @@ fn fetch_marker(remote: &Remote, run: Runner) -> Result<Probe, PushError> {
             String::from_utf8_lossy(&outcome.stderr).trim()
         )));
     }
-    Ok(read_marker(scratch.path(), remote.shown)?
+    Ok(read_marker(scratch.path())
+        .map_err(|error| marker_unreadable(&error, remote.shown))?
         .unwrap_or_else(|| Probe::MarkerUnreadable("the fetch left no file".into())))
 }
 
@@ -793,6 +807,31 @@ mod tests {
 
     fn error(errno: rustix::io::Errno) -> io::Error {
         io::Error::from_raw_os_error(errno.raw_os_error())
+    }
+
+    #[test]
+    fn a_marker_read_that_fails_with_a_gone_share_error_is_unreachable() {
+        use rustix::io::Errno;
+        for errno in [
+            Errno::NOTCONN,
+            Errno::HOSTDOWN,
+            Errno::HOSTUNREACH,
+            Errno::NETUNREACH,
+            Errno::TIMEDOUT,
+        ] {
+            match marker_stop(&error(errno), "/mnt/nas") {
+                Stop::Unreachable(reason) => {
+                    assert!(reason.contains("/mnt/nas"), "{errno}: {reason}");
+                }
+                other => panic!("{errno}: expected unreachable, got {other:?}"),
+            }
+        }
+        match marker_stop(&error(rustix::io::Errno::ACCESS), "/mnt/nas") {
+            Stop::Refuse(refusal) => {
+                assert!(refusal.to_string().contains("not readable"), "{refusal}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
