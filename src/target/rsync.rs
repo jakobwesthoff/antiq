@@ -432,6 +432,50 @@ impl Call {
     }
 }
 
+/// What an exit status of rsync means, from the EXIT VALUES of rsync(1). 255
+/// is the status of ssh, which rsync passes on for an error of the
+/// connection.
+pub fn exit_meaning(code: i32) -> Option<&'static str> {
+    Some(match code {
+        1 => "syntax or usage error",
+        2 => "protocol incompatibility",
+        3 => "errors selecting input/output files, directories",
+        4 => "requested action not supported",
+        5 => "error starting client-server protocol",
+        10 => "error in socket I/O",
+        11 => "error in file I/O",
+        12 => "error in rsync protocol data stream",
+        13 => "errors with program diagnostics",
+        14 => "error in IPC code",
+        15 => "sibling process crashed",
+        16 => "sibling process was killed by a signal",
+        19 => "received SIGUSR1",
+        20 => "received SIGINT, SIGTERM, or SIGHUP",
+        21 => "some error returned by waitpid()",
+        22 => "error allocating core memory buffers",
+        23 => "some files or attributes were not transferred",
+        24 => "some source files vanished",
+        25 => "the --max-delete limit stopped deletions",
+        30 => "timeout in data send/receive",
+        35 => "timeout waiting for daemon connection",
+        255 => "ssh reported an error",
+        _ => return None,
+    })
+}
+
+/// How a failed call ended, as the title of an error: `rsync ended with exit
+/// 23 (some files or attributes were not transferred)`.
+pub fn ended(outcome: &Outcome) -> String {
+    match (outcome.code, outcome.signal) {
+        (Some(code), _) => match exit_meaning(code) {
+            Some(meaning) => format!("rsync ended with exit {code} ({meaning})"),
+            None => format!("rsync ended with exit {code}"),
+        },
+        (None, Some(signal)) => format!("rsync was ended by signal {signal}"),
+        (None, None) => "rsync ended for an unknown reason".to_string(),
+    }
+}
+
 /// How a call ended, in the words `std::process::ExitStatus` uses.
 fn status_text(outcome: &Outcome) -> String {
     match (outcome.code, outcome.signal) {
@@ -1301,6 +1345,42 @@ mod tests {
             .list(&options(), &nas())
             .run(&RunLog::discard())
             .unwrap_or_else(|error| panic!("{error} ({})", fake.path().display()))
+    }
+
+    #[test]
+    fn the_title_of_a_failed_call_names_the_meaning_of_its_exit_code() {
+        let ended = |code, signal| {
+            let mut outcome = Outcome::finished(code, "", "");
+            outcome.signal = signal;
+            super::ended(&outcome)
+        };
+        assert_eq!(
+            ended(Some(23), None),
+            "rsync ended with exit 23 (some files or attributes were not transferred)"
+        );
+        assert_eq!(
+            ended(Some(255), None),
+            "rsync ended with exit 255 (ssh reported an error)"
+        );
+        assert_eq!(
+            ended(Some(30), None),
+            "rsync ended with exit 30 (timeout in data send/receive)"
+        );
+        assert_eq!(ended(Some(99), None), "rsync ended with exit 99");
+        assert_eq!(ended(None, Some(9)), "rsync was ended by signal 9");
+        assert_eq!(ended(None, None), "rsync ended for an unknown reason");
+    }
+
+    #[test]
+    fn every_exit_code_rsync_documents_has_a_meaning() {
+        for code in [
+            1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25, 30, 35, 255,
+        ] {
+            assert!(exit_meaning(code).is_some(), "{code}");
+        }
+        for code in [0, 6, 7, 9, 17, 100] {
+            assert_eq!(exit_meaning(code), None, "{code}");
+        }
     }
 
     #[test]

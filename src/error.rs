@@ -26,6 +26,7 @@ use crate::commands::status::StatusError;
 use crate::commands::survey::SurveyError;
 use crate::commands::unearth::UnearthError;
 use crate::config::ConfigError;
+use crate::external::summary::Said;
 use crate::filesystem::FilesystemError;
 use crate::id::IdError;
 use crate::idle::IdleError;
@@ -351,10 +352,10 @@ impl Error {
                 Value::from(whole_seconds(started).to_string()),
             );
         }
-        if let Some((lines, more)) = find_rsync_said(self.wrapped()) {
+        if let Some(said) = find_said(self.wrapped()) {
             details.insert(
-                "rsync_said".into(),
-                serde_json::json!({ "lines": lines, "more": more }),
+                "program_said".into(),
+                serde_json::to_value(said).expect("what a program said serialises"),
             );
         }
         details
@@ -429,15 +430,19 @@ fn find_candidates<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&
     None
 }
 
-/// The lines rsync said, and how many more it said, in the push error that
-/// `error` or one of its sources is.
-fn find_rsync_said<'a>(
-    error: &'a (dyn std::error::Error + 'static),
-) -> Option<(&'a [String], usize)> {
+/// What the program said, in the push error that `error` or one of its
+/// sources is.
+pub fn find_said<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a Said> {
     let mut link = Some(error);
     while let Some(current) = link {
-        if let Some(PushError::TargetRefusesModes { shown, more }) = current.downcast_ref() {
-            return Some((shown, *more));
+        if let Some(
+            PushError::TargetRefusesModes { said }
+            | PushError::Mirror { said, .. }
+            | PushError::MarkerRun { said, .. }
+            | PushError::ListingFailed { said, .. },
+        ) = current.downcast_ref()
+        {
+            return Some(said);
         }
         link = current.source();
     }
@@ -1185,8 +1190,7 @@ mod tests {
             (
                 "target refuses modes",
                 push::PushError::TargetRefusesModes {
-                    shown: vec!["rsync: [receiver] chmod \"/t\" failed".into()],
-                    more: 0,
+                    said: Said::of("rsync", b"rsync: [receiver] chmod \"/t\" failed\n"),
                 }
                 .into(),
                 "antiq::push::target_refuses_modes",

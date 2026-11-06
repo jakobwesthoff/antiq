@@ -6,10 +6,11 @@
 //! on, stops as unreachable, or is refused.
 
 use super::PushError;
+use crate::external::summary::Said;
 use crate::filesystem::device;
 use crate::id::ObjectId;
 use crate::target::marker::{FILE_NAME, Marker, MarkerError};
-use crate::target::rsync::{Call, Options, Outcome, Rsync, RsyncError};
+use crate::target::rsync::{self, Call, Options, Outcome, Rsync, RsyncError};
 use crate::target::url::TargetUrl;
 use std::fs;
 use std::io::{self, Read};
@@ -553,16 +554,13 @@ fn says_missing(stderr: &str) -> bool {
 }
 
 fn listing_failed(remote: &Remote, outcome: &Outcome) -> PushError {
-    let how = match outcome.code {
-        Some(code) => format!("ended with exit {code}"),
-        None => "was ended by a signal".to_string(),
-    };
-    PushError::Target {
+    PushError::ListingFailed {
         problem: format!(
-            "listing the target {} {how}: {}",
+            "listing the target {} failed: {}",
             remote.shown,
-            String::from_utf8_lossy(&outcome.stderr).trim()
+            rsync::ended(outcome)
         ),
+        said: Said::of("rsync", &outcome.stderr),
     }
 }
 
@@ -577,7 +575,7 @@ fn fetch_marker(remote: &Remote, run: Runner) -> Result<Probe, PushError> {
     if outcome.code != Some(0) {
         return Ok(Probe::MarkerUnreadable(format!(
             "fetching it failed: {}",
-            String::from_utf8_lossy(&outcome.stderr).trim()
+            rsync::ended(&outcome)
         )));
     }
     Ok(read_marker(scratch.path())
@@ -1250,7 +1248,7 @@ mod tests {
         ] {
             let script = Script::new(vec![outcome(Some(12), "", stderr)]);
             assert!(
-                matches!(ssh().inspect(&script), Err(PushError::Target { .. })),
+                matches!(ssh().inspect(&script), Err(PushError::ListingFailed { .. })),
                 "{stderr}"
             );
         }
@@ -1264,8 +1262,11 @@ mod tests {
         ] {
             let script = Script::new(vec![outcome(Some(255), "", &format!("{line}\n"))]);
             match ssh().inspect(&script) {
-                Err(PushError::Target { problem }) => {
-                    assert!(problem.contains(line), "{problem}");
+                Err(PushError::ListingFailed { problem, said }) => {
+                    assert!(
+                        said.groups.iter().any(|group| group.line == line),
+                        "{said:?}"
+                    );
                     assert!(problem.contains("255"), "{problem}");
                 }
                 other => panic!("expected a refusal, got {other:?}"),
@@ -1283,7 +1284,9 @@ mod tests {
         let denied = "rsync: [sender] change_dir \"/srv\" failed: Permission denied (13)\n";
         let script = Script::new(vec![outcome(Some(23), "", denied)]);
         match ssh().inspect(&script) {
-            Err(PushError::Target { problem }) => assert!(problem.contains("Permission denied")),
+            Err(PushError::ListingFailed { said, .. }) => {
+                assert!(said.groups[0].line.contains("Permission denied"));
+            }
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -1291,11 +1294,13 @@ mod tests {
     #[test]
     fn a_timeout_or_a_signal_of_the_listing_is_a_refusal() {
         for (code, expected) in [(Some(30), "exit 30"), (None, "signal")] {
-            let script = Script::new(vec![outcome(code, "", "Timeout in data send/receive\n")]);
+            let mut ended = outcome(code, "", "Timeout in data send/receive\n");
+            ended.signal = code.is_none().then_some(9);
+            let script = Script::new(vec![ended]);
             match ssh().inspect(&script) {
-                Err(PushError::Target { problem }) => {
+                Err(PushError::ListingFailed { problem, said }) => {
                     assert!(problem.contains(expected), "{problem}");
-                    assert!(problem.contains("Timeout in data"), "{problem}");
+                    assert_eq!(said.groups[0].line, "Timeout in data send/receive");
                 }
                 other => panic!("expected a refusal, got {other:?}"),
             }
@@ -1435,7 +1440,7 @@ mod tests {
             (
                 outcome(Some(23), "", "rsync: link_stat failed\n"),
                 None,
-                "failed: rsync: link_stat",
+                "failed: rsync ended with exit 23",
             ),
             (outcome(Some(0), "", ""), None, "left no file"),
             (outcome(Some(0), "", ""), Some("not json\n"), ""),

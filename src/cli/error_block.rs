@@ -10,7 +10,8 @@ use super::console::rich::Rich;
 use super::unresolved::pasteable_line;
 use antiq::code_span::CodeSpan;
 use antiq::commands::push::PushError;
-use antiq::error::explanation;
+use antiq::error::{explanation, find_said};
+use antiq::external::shell_quote;
 use antiq::versions::naming::VersionLookupError;
 use miette::Diagnostic;
 use std::path::Path;
@@ -55,19 +56,49 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
             block = block.candidate(stamp);
         }
     }
-    if let Some(PushError::TargetRefusesModes { shown, more }) =
-        description.library_error.and_then(find::<PushError>)
-    {
-        for line in shown {
-            block = block.rsync_said(Rich::new().text(line));
+    let said = description
+        .library_error
+        .and_then(|error| find_said(error.wrapped()));
+    if let Some(said) = said {
+        for group in said.shown() {
+            let counted = format!("{}\u{d7} {}", group.count, group.line);
+            block = block.program_said(&said.program, Rich::new().text(&counted));
+            if let Some(example) = &group.example {
+                block =
+                    block.program_said(&said.program, Rich::new().text(&format!("e.g. {example}")));
+            }
         }
-        let rest = match more {
-            0 => None,
-            1 => Some("and 1 more line".to_string()),
-            more => Some(format!("and {more} more lines")),
-        };
-        if let Some(rest) = rest {
-            block = block.rsync_said(Rich::new().text(&rest));
+        let more = said.more_kinds();
+        if more > 0 {
+            let rest = match more {
+                1 => "and 1 more kind of line".to_string(),
+                more => format!("and {more} more kinds of lines"),
+            };
+            block = block.program_said(&said.program, Rich::new().text(&rest));
+        }
+    }
+    if let Some(note) = &description.log {
+        let mut paragraphs = Vec::new();
+        match &note.path {
+            Some(path) => {
+                let path = path.display().to_string();
+                paragraphs.push(Para::Pre(format!("Full output: {path}")));
+                paragraphs.push(Para::Pre(format!(
+                    "Read it with: zstd -dc {} | less",
+                    shell_quote(&path)
+                )));
+            }
+            None => {
+                if let Some(warning) = &note.warning {
+                    paragraphs.push(Para::Text(Rich::new().text(warning).capitalised()));
+                }
+            }
+        }
+        for paragraph in paragraphs {
+            block = match said {
+                Some(said) => block.program_said(&said.program, paragraph),
+                None => block.run_log(paragraph),
+            };
         }
     }
     for step in &description.contexts {
@@ -161,12 +192,13 @@ mod tests {
     use super::super::console::block::Para;
     use super::super::console::env::Env;
     use super::super::console::rich::Rich;
-    use super::super::describe;
+    use super::super::{LogNote, describe};
     use super::block_for;
     use antiq::collection::CollectionError;
     use antiq::commands::push::{PushError, VersionCommand};
     use antiq::commands::rebuild::RebuildError;
     use antiq::commands::restore::RestoreError;
+    use antiq::external::summary::Said;
     use antiq::listing::ListingError;
     use antiq::lock::LockError;
     use antiq::reference::ReferenceError;
@@ -376,17 +408,35 @@ mod tests {
         );
     }
 
+    /// What rsync said when a share refused the modes of `files` files, and
+    /// then rsync's closing line.
+    fn refused(files: usize) -> Said {
+        let mut stderr = String::new();
+        for number in 1..=files {
+            stderr.push_str(&format!(
+                "rsync: [receiver] mkstemp \"/t/.note{number}.md\" failed: Operation not permitted (1)\n"
+            ));
+        }
+        stderr.push_str("rsync error: some files/attrs were not transferred (code 23)\n");
+        Said::of("rsync", stderr.as_bytes())
+    }
+
+    fn with_log(error: PushError, path: Option<&str>, warning: Option<&str>) -> anyhow::Error {
+        anyhow::Error::new(antiq::Error::from(error))
+            .context("push the antiq collection")
+            .context(LogNote {
+                path: path.map(Into::into),
+                warning: warning.map(Into::into),
+            })
+    }
+
     #[test]
-    fn a_target_that_refuses_modes_names_the_option_and_the_first_lines() {
-        let error = PushError::TargetRefusesModes {
-            shown: vec![
-                "rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)".into(),
-                "rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)".into(),
-            ],
-            more: 37,
-        };
+    fn a_target_that_refuses_modes_names_the_option_and_groups_what_rsync_said() {
+        let error = PushError::TargetRefusesModes { said: refused(40) };
+        let error = with_log(error, Some("/logs/push-1.log.zst"), None);
+        let lines = block_for(&describe(&error), None).render(&Env::new(true, false, true, 100));
         assert_eq!(
-            rich(error, &["push the antiq collection"]),
+            lines,
             [
                 "▌ ✖ ERROR",
                 "▌ The mirror failed: the target does not let rsync set file modes (rsync exit 23)",
@@ -398,9 +448,11 @@ mod tests {
                 "▌     rsync_args = [\"--no-perms\"]",
                 "▌",
                 "▌ What rsync said",
-                "▌   rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
-                "▌   rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
-                "▌   and 37 more lines",
+                "▌   40× rsync: [receiver] mkstemp \"…\" failed: Operation not permitted (1)",
+                "▌   e.g. /t/.note1.md",
+                "▌   1× rsync error: some files/attrs were not transferred (code 23)",
+                "▌   Full output: /logs/push-1.log.zst",
+                "▌   Read it with: zstd -dc /logs/push-1.log.zst | less",
                 "▌",
                 "▌ What antiq was doing",
                 "▌   Attempting to push the antiq collection.",
@@ -409,57 +461,124 @@ mod tests {
     }
 
     #[test]
-    fn a_pipe_gets_what_rsync_said_after_the_fix() {
-        let error = PushError::TargetRefusesModes {
-            shown: vec![
-                "rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)".into(),
-                "rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)".into(),
-            ],
-            more: 37,
-        };
+    fn a_pipe_gets_what_rsync_said_and_the_log_after_the_fix() {
+        let error = PushError::TargetRefusesModes { said: refused(40) };
+        let error = with_log(error, Some("/logs/push-1.log.zst"), None);
         assert_eq!(
-            plain(error, &["push the antiq collection"]),
+            block_for(&describe(&error), None).render_plain(),
             [
                 "error: the mirror failed: the target does not let rsync set file modes (rsync exit 23)",
                 "  fix: Add this to .antiq/config.toml:",
                 "         [target]",
                 "         rsync_args = [\"--no-perms\"]",
-                "  rsync said: rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
-                "              rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
-                "              and 37 more lines",
+                "  rsync said: 40× rsync: [receiver] mkstemp \"…\" failed: Operation not permitted (1)",
+                "              e.g. /t/.note1.md",
+                "              1× rsync error: some files/attrs were not transferred (code 23)",
+                "              Full output: /logs/push-1.log.zst",
+                "              Read it with: zstd -dc /logs/push-1.log.zst | less",
                 "  while attempting to push the antiq collection",
             ]
         );
     }
 
     #[test]
-    fn no_line_beyond_the_shown_ones_adds_no_count() {
-        let error = PushError::TargetRefusesModes {
-            shown: vec![
-                "rsync: [receiver] chmod \"/t\" failed: Operation not permitted (1)".into(),
-            ],
-            more: 0,
+    fn more_kinds_than_the_five_shown_are_counted() {
+        let stderr: String = (1..=7).map(|kind| format!("kind {kind}\n")).collect();
+        let error = PushError::Mirror {
+            title: "rsync ended with exit 1".into(),
+            said: Said::of("rsync", stderr.as_bytes()),
         };
         let lines = rich(error, &[]);
         assert!(
-            lines.iter().all(|line| !line.contains(" more line")),
+            lines
+                .iter()
+                .any(|line| line == "▌   and 2 more kinds of lines"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("kind 6")),
             "{lines:?}"
         );
     }
 
     #[test]
-    fn a_single_line_beyond_the_shown_ones_is_counted_in_the_singular() {
-        let error = PushError::TargetRefusesModes {
-            shown: vec![
-                "rsync: [receiver] chmod \"/t\" failed: Operation not permitted (1)".into(),
-            ],
-            more: 1,
+    fn one_more_kind_is_counted_in_the_singular() {
+        let stderr: String = (1..=6).map(|kind| format!("kind {kind}\n")).collect();
+        let error = PushError::Mirror {
+            title: "rsync ended with exit 1".into(),
+            said: Said::of("rsync", stderr.as_bytes()),
         };
         let lines = rich(error, &[]);
         assert!(
-            lines.iter().any(|line| line == "▌   and 1 more line"),
+            lines
+                .iter()
+                .any(|line| line == "▌   and 1 more kind of line"),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn an_error_without_words_of_a_program_shows_the_log_in_a_section_of_its_own() {
+        let error = PushError::Target {
+            problem: "the target is full".into(),
+        };
+        let error = with_log(error, Some("/logs/push-1.log.zst"), None);
+        let lines = block_for(&describe(&error), None).render(&Env::new(true, false, true, 100));
+        assert_eq!(
+            lines,
+            [
+                "▌ ✖ ERROR",
+                "▌ The target is full",
+                "▌",
+                "▌ Run log",
+                "▌   Full output: /logs/push-1.log.zst",
+                "▌   Read it with: zstd -dc /logs/push-1.log.zst | less",
+                "▌",
+                "▌ What antiq was doing",
+                "▌   Attempting to push the antiq collection.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_space_is_kept_and_quoted_in_the_command() {
+        let error = PushError::Target {
+            problem: "x".into(),
+        };
+        let error = with_log(error, Some("/my logs/push 1.log.zst"), None);
+        let lines = block_for(&describe(&error), None).render_plain();
+        assert!(
+            lines.contains(&"  log: Full output: /my logs/push 1.log.zst".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(
+                &"       Read it with: zstd -dc '/my logs/push 1.log.zst' | less".to_string()
+            ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_that_was_not_written_says_why() {
+        let error = PushError::Target {
+            problem: "x".into(),
+        };
+        let error = with_log(error, None, Some("no log was written to /logs: denied"));
+        let lines = block_for(&describe(&error), None).render_plain();
+        assert!(
+            lines.contains(&"  log: No log was written to /logs: denied".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_note_of_the_log_is_no_step_of_the_run() {
+        let error = PushError::Target {
+            problem: "x".into(),
+        };
+        let error = with_log(error, Some("/logs/a.log.zst"), None);
+        assert_eq!(describe(&error).contexts, ["push the antiq collection"]);
     }
 
     #[test]

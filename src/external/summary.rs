@@ -16,6 +16,32 @@ pub struct Group {
     pub example: Option<String>,
 }
 
+/// What a program said on stderr: its name and the groups of its lines.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Said {
+    pub program: String,
+    pub groups: Vec<Group>,
+}
+
+impl Said {
+    pub fn of(program: &str, stderr: &[u8]) -> Said {
+        Said {
+            program: program.to_string(),
+            groups: group_lines(&String::from_utf8_lossy(stderr)),
+        }
+    }
+
+    /// The groups a terminal or a pipe shows.
+    pub fn shown(&self) -> &[Group] {
+        &self.groups[..self.groups.len().min(GROUPS_SHOWN)]
+    }
+
+    /// How many kinds of lines [`shown`](Said::shown) leaves out.
+    pub fn more_kinds(&self) -> usize {
+        self.groups.len().saturating_sub(GROUPS_SHOWN)
+    }
+}
+
 /// The groups of a stderr text, in order of first appearance.
 pub fn group_lines(stderr: &str) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
@@ -114,6 +140,22 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].line, "what \"is this");
         assert_eq!(groups[0].example, None);
+    }
+
+    #[test]
+    fn a_terminal_shows_five_groups_and_counts_the_kinds_it_leaves_out() {
+        let stderr: String = (1..=7).map(|kind| format!("kind {kind}\n")).collect();
+        let said = Said::of("rsync", stderr.as_bytes());
+        assert_eq!(said.groups.len(), 7);
+        assert_eq!(said.shown().len(), 5);
+        assert_eq!(said.more_kinds(), 2);
+        assert_eq!(said.shown()[4].line, "kind 5");
+    }
+
+    #[test]
+    fn five_kinds_or_fewer_leave_nothing_out() {
+        let said = Said::of("rsync", b"a\nb\n");
+        assert_eq!((said.shown().len(), said.more_kinds()), (2, 0));
     }
 
     #[test]

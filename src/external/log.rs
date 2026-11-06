@@ -25,6 +25,10 @@ pub const KEPT: usize = 10;
 /// with `zstd -dc <path> | less`.
 pub const SUFFIX: &str = ".log.zst";
 
+/// The ending of the log of a run that failed. Retention keeps the newest
+/// one of these beyond the [`KEPT`] newest logs.
+const FAILED_SUFFIX: &str = "-failed.log.zst";
+
 /// How long output may wait in the compressor. A run that is killed loses at
 /// most this much of its stdout; stderr lines and the ends of calls are
 /// flushed at once.
@@ -255,6 +259,34 @@ impl RunLog {
         self.state.lock().expect("a log writer does not panic")
     }
 
+    /// Marks the log as the one of a failed run by renaming it, so that a
+    /// later run does not push it out while a person has yet to read it.
+    pub fn mark_failed(&self) {
+        let mut state = self.lock();
+        let Some(path) = state.path.clone() else {
+            return;
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let Some(stem) = name.strip_suffix(SUFFIX) else {
+            return;
+        };
+        if name.ends_with(FAILED_SUFFIX) {
+            return;
+        }
+        // Another run of the same second may have been marked already.
+        let mut failed = path.with_file_name(format!("{stem}{FAILED_SUFFIX}"));
+        let mut attempt = 2;
+        while failed.exists() {
+            failed = path.with_file_name(format!("{stem}-{attempt}{FAILED_SUFFIX}"));
+            attempt += 1;
+        }
+        // The open file follows its rename. If the rename fails the log is
+        // an ordinary one.
+        if fs::rename(&path, &failed).is_ok() {
+            state.path = Some(failed);
+        }
+    }
+
     /// Starts the record of one call. The file is created here, so a
     /// program that fails to start leaves no trace in it.
     pub fn start_call(&self, command_line: &str) -> CallLog<'_> {
@@ -368,7 +400,8 @@ fn create(target: &Target) -> io::Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
-/// Deletes all but the [`KEPT`] newest logs of the directory. Newest means
+/// Deletes all but the [`KEPT`] newest logs of the directory and the newest
+/// log of a failed run. Newest means
 /// the modification time, with the name as tie-break: a name carries local
 /// time and the command, neither of which orders runs across a time zone
 /// change or two commands. A failure to delete leaves the file.
@@ -392,8 +425,13 @@ fn prune(directory: &Path) {
         })
         .collect();
     logs.sort_by(|left, right| (&right.0, &right.1).cmp(&(&left.0, &left.1)));
-    for (_, _, path) in logs.into_iter().skip(KEPT) {
-        let _ = fs::remove_file(path);
+    let newest_failure = logs
+        .iter()
+        .position(|(_, name, _)| name.ends_with(FAILED_SUFFIX));
+    for (index, (_, _, path)) in logs.into_iter().enumerate() {
+        if index >= KEPT && Some(index) != newest_failure {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -539,6 +577,72 @@ pub(crate) mod tests {
         assert!(newest.exists());
         assert!(other.exists(), "another collection's log stays");
         assert!(note.exists(), "a file that is no log stays");
+    }
+
+    /// A log of `collection` written and, when `failed`, marked as failed.
+    fn write_marked(logs: &Logs, collection: &Path, failed: bool) -> PathBuf {
+        let log = logs.open("push", collection, now());
+        log.start_call("rsync --version");
+        if failed {
+            log.mark_failed();
+        }
+        log.path().expect("the log was created")
+    }
+
+    fn age(path: &Path, seconds: i64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(seconds, 0))
+            .expect("settable");
+    }
+
+    #[test]
+    fn the_log_of_a_failed_run_is_renamed_and_still_the_file_of_the_run() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let log = logs.open("push", Path::new("/c"), now());
+        let call = log.start_call("rsync --version");
+        let before = log.path().expect("a path");
+
+        log.mark_failed();
+        log.mark_failed();
+        call.stderr(Instant::now(), b"late line\n");
+        let after = log.path().expect("a path");
+        drop(log);
+
+        assert!(!before.exists());
+        assert!(
+            after.to_string_lossy().ends_with("-failed.log.zst"),
+            "{after:?}"
+        );
+        assert!(
+            !after.to_string_lossy().contains("failed-failed"),
+            "{after:?}"
+        );
+        assert!(read_log(&after).contains("err late line"));
+    }
+
+    #[test]
+    fn the_newest_failed_log_stays_beyond_the_ten_newest() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let collection = Path::new("/nonexistent/ours");
+        let old_failure = write_marked(&logs, collection, true);
+        age(&old_failure, 1_600_000_000);
+        let newer_failure = write_marked(&logs, collection, true);
+        age(&newer_failure, 1_600_000_100);
+        let mut ordinary = Vec::new();
+        for index in 0..KEPT {
+            let path = write_marked(&logs, collection, false);
+            age(&path, 1_600_001_000 + index as i64);
+            ordinary.push(path);
+        }
+
+        let latest = write_marked(&logs, collection, false);
+
+        assert!(!old_failure.exists(), "an older failure goes");
+        assert!(newer_failure.exists(), "the newest failure stays");
+        assert!(!ordinary[0].exists(), "the oldest ordinary log goes");
+        assert!(ordinary[1..].iter().all(|path| path.exists()));
+        assert!(latest.exists());
     }
 
     #[test]

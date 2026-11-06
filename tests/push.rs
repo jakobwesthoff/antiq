@@ -745,6 +745,24 @@ fn refused_message(run: &Run) -> String {
     run.error_text()
 }
 
+/// What the program said, as the groups of the error: each normalised line
+/// with its example.
+fn said_text(run: &Run) -> String {
+    let said = &run.json()["error"]["program_said"];
+    let groups = said["groups"].as_array().expect("the error holds groups");
+    groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{} {}",
+                group["line"].as_str().expect("a line"),
+                group["example"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn passes_the_precheck(run: &Run) {
     goes_on(run);
 }
@@ -1126,7 +1144,8 @@ fn other_ssh_failures_are_refused_with_the_line() {
         fake.answer_all("", &ssh_text(name), 255);
 
         for args in [&[][..], &["--if-reachable"][..], &["--init"][..]] {
-            let message = refused_message(&push(&collection, args));
+            let run = push(&collection, args);
+            let message = format!("{}\n{}", refused_message(&run), said_text(&run));
             assert!(message.contains(line), "{name} {args:?}: {message}");
         }
     }
@@ -1155,7 +1174,8 @@ fn another_exit_23_of_the_listing_is_refused_even_with_init() {
     );
 
     for args in [&[][..], &["--init"][..]] {
-        let message = refused_message(&push(&collection, args));
+        let run = push(&collection, args);
+        let message = format!("{}\n{}", refused_message(&run), said_text(&run));
         assert!(message.contains("Permission denied"), "{args:?}: {message}");
     }
 }
@@ -1504,7 +1524,7 @@ fn a_marker_run_that_fails_is_exit_1_with_rsyncs_text() {
     let message = run.error_message();
     assert!(message.contains("marker"), "{message}");
     assert!(message.contains("exit 11"), "{message}");
-    assert!(message.contains("mkdir"), "{message}");
+    assert!(said_text(&run).contains("mkdir"), "{}", said_text(&run));
     assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
 }
 
@@ -1752,14 +1772,17 @@ fn a_target_that_refuses_file_modes_gets_the_option_that_fixes_it() {
         assert!(fix.contains("rsync_args = [\"--no-perms\"]"), "{fix}");
         assert!(!fix.contains("does not let rsync set file modes"), "{fix}");
         assert!(!fix.contains("[receiver]"), "{fix}");
-        let said = &json["error"]["rsync_said"];
-        let lines = said["lines"].as_array().expect("the lines are a list");
-        assert_eq!(lines.len(), 3, "{said}");
-        assert!(
-            lines[2].as_str().expect("a line").contains("note3.md"),
-            "{said}"
+        assert!(json["error"].get("rsync_said").is_none());
+        let said = &json["error"]["program_said"];
+        assert_eq!(said["program"], "rsync");
+        let groups = said["groups"].as_array().expect("the groups are a list");
+        assert_eq!(groups.len(), 2, "{said}");
+        assert_eq!(groups[0]["count"], 40, "{said}");
+        assert_eq!(
+            groups[0]["line"],
+            "rsync: [receiver] mkstemp \"…\" failed: Operation not permitted (1)"
         );
-        assert_eq!(said["more"], 38, "{said}");
+        assert_eq!(groups[0]["example"], "/mnt/shadow/beta/.note1.md.A3Kcxa");
     }
 }
 
@@ -1782,11 +1805,21 @@ fn the_text_of_a_target_that_refuses_file_modes_is_short_in_a_pipe() {
     assert!(run.stderr.contains("--no-perms"), "{}", run.stderr);
     assert_eq!(
         run.stderr.matches("[receiver]").count(),
-        3,
+        1,
         "{}",
         run.stderr
     );
-    assert!(run.stderr.contains("and 38 more lines"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("40× rsync: [receiver] mkstemp"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("e.g. /mnt/shadow/beta/.note1.md.A3Kcxa"),
+        "{}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -1969,8 +2002,13 @@ fn a_failing_second_mirror_is_exit_1_and_no_deletion_means_one_call() {
     fake.answer(2, ">f+++++++++ projects/x\n", "", 0);
     fake.answer(3, "", "rsync: write failed\n", 11);
 
-    let message = refused_message(&push(&collection, &[]));
-    assert!(message.contains("write failed"), "{message}");
+    let run = push(&collection, &[]);
+    refused_message(&run);
+    assert!(
+        said_text(&run).contains("write failed"),
+        "{}",
+        said_text(&run)
+    );
 
     let (collection, fake, _target) = pushing();
     fake.answer_all(">f+++++++++ projects/x\n", "", 0);

@@ -45,7 +45,7 @@ pub fn render_blocks(blocks: &[Block], env: &Env) -> Vec<String> {
 /// the table it refers to and the info after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Part {
-    Block(Block),
+    Block(Box<Block>),
     /// Lines that only a terminal shows, such as a caption and a table. A
     /// pipe gets the data in the plain lines of the blocks.
     Terminal(Vec<String>),
@@ -56,7 +56,7 @@ pub fn render_parts(parts: &[Part], env: &Env) -> Vec<String> {
     let mut lines = Vec::new();
     for part in parts {
         let rendered = match part {
-            Part::Block(block) => render_blocks(std::slice::from_ref(block), env),
+            Part::Block(block) => render_blocks(std::slice::from_ref(&**block), env),
             Part::Terminal(shown) if env.rich => shown.clone(),
             Part::Terminal(_) => Vec::new(),
         };
@@ -217,7 +217,7 @@ impl Block {
                     lines.push(bar.line(&line));
                 }
                 self.section(env, &bar, "How to fix it", &self.how, &mut lines);
-                self.section(env, &bar, "What rsync said", &self.said, &mut lines);
+                self.section(env, &bar, &self.said_title(), &self.said, &mut lines);
                 let steps: Vec<Para> = self
                     .doing
                     .iter()
@@ -331,6 +331,20 @@ impl Block {
         }
     }
 
+    fn said_title(&self) -> String {
+        match &self.said_by {
+            Some(program) => format!("What {program} said"),
+            None => "Run log".to_string(),
+        }
+    }
+
+    fn said_label(&self) -> String {
+        match &self.said_by {
+            Some(program) => format!("{program} said"),
+            None => "log".to_string(),
+        }
+    }
+
     fn plain_title(&self) -> String {
         self.message
             .clone()
@@ -348,7 +362,7 @@ impl Block {
             Kind::Error => {
                 lines.push(format!("error: {}", self.plain_title()));
                 labelled(&mut lines, "fix", &self.how);
-                labelled(&mut lines, "rsync said", &self.said);
+                labelled(&mut lines, &self.said_label(), &self.said);
                 for candidate in &self.candidates {
                     lines.push(format!("    candidate: {candidate}"));
                 }

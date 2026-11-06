@@ -7,8 +7,9 @@
 use super::PushError;
 use super::precheck::{Runner, Scratch};
 use super::summary;
+use crate::external::summary::Said;
 use crate::target::marker::{self, Marker};
-use crate::target::rsync::{Options, Outcome, Rsync};
+use crate::target::rsync::{self, Options, Outcome, Rsync};
 use crate::target::url::TargetUrl;
 use std::io;
 use std::path::Path;
@@ -46,17 +47,14 @@ pub(super) fn send_marker(sender: &Sender, marker: &Marker, run: Runner) -> Resu
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&outcome.stderr);
-    if outcome.code == Some(12) && lacks_fsync(&stderr) {
-        return Err(PushError::MarkerRun {
-            detail: LACKS_FSYNC.to_string(),
-        });
-    }
-    let how = match outcome.code {
-        Some(code) => format!("rsync ended with exit {code}"),
-        None => "rsync was ended by a signal".to_string(),
+    let title = if outcome.code == Some(12) && lacks_fsync(&stderr) {
+        LACKS_FSYNC.to_string()
+    } else {
+        rsync::ended(&outcome)
     };
     Err(PushError::MarkerRun {
-        detail: format!("{how}: {}", stderr.trim()),
+        title,
+        said: Said::of("rsync", &outcome.stderr),
     })
 }
 
@@ -72,10 +70,6 @@ fn lacks_fsync(stderr: &str) -> bool {
 }
 
 const IO_ERROR_LINE: &str = "IO error encountered -- skipping file deletion";
-
-/// How many of rsync's lines the error of a target that refuses file modes
-/// shows. A share with many files prints one line for each.
-const REFUSED_LINES_SHOWN: usize = 3;
 
 /// Whether the error text of an exit 23 holds a refusal of the receiver to
 /// create a temporary file (`mkstemp`) or to change a mode (`chmod`, which
@@ -105,12 +99,13 @@ fn quoted(line: &str) -> Option<&str> {
 }
 
 /// Reads the exit status of a mirror run (step 8): 0 and 24 are success,
-/// everything else is an error that carries rsync's text.
+/// everything else is an error that names the exit code and summarises
+/// what rsync said.
 pub(super) fn classify(outcome: &Outcome) -> Result<Finished, PushError> {
     let stdout = String::from_utf8_lossy(&outcome.stdout);
     let stderr = String::from_utf8_lossy(&outcome.stderr);
-    let said = stderr.trim();
-    let detail = match outcome.code {
+    let said = || Said::of("rsync", &outcome.stderr);
+    let title = match outcome.code {
         Some(0) => {
             return Ok(Finished {
                 vanished: Vec::new(),
@@ -134,28 +129,21 @@ pub(super) fn classify(outcome: &Outcome) -> Result<Finished, PushError> {
                 .filter_map(quoted)
                 .collect();
             format!(
-                "rsync could not read parts of the collection (exit 23), so no deletion reached the target; it could not open {}: {said}",
+                "rsync could not read parts of the collection (exit 23), so no deletion reached the target; it could not open {}",
                 directories.join(", ")
             )
         }
         // rsync -a sets the mode of every file it writes. A share that
         // forbids that fails each file on its own, with one line each.
         Some(23) if refuses_modes(&stderr) => {
-            let mut lines = stderr.lines().filter(|line| !line.trim().is_empty());
-            let shown: Vec<String> = lines
-                .by_ref()
-                .take(REFUSED_LINES_SHOWN)
-                .map(str::to_string)
-                .collect();
-            return Err(PushError::TargetRefusesModes {
-                shown,
-                more: lines.count(),
-            });
+            return Err(PushError::TargetRefusesModes { said: said() });
         }
-        Some(code) => format!("rsync ended with exit {code}: {said}"),
-        None => format!("rsync was ended by a signal: {said}"),
+        _ => rsync::ended(outcome),
     };
-    Err(PushError::Mirror { detail })
+    Err(PushError::Mirror {
+        title,
+        said: said(),
+    })
 }
 
 /// What the mirror needs to run.
@@ -304,7 +292,9 @@ mod tests {
     }
 
     fn answer(code: Option<i32>, stderr: &str) -> Result<Outcome, RsyncError> {
-        Ok(Outcome::finished(code, Vec::new(), stderr))
+        let mut outcome = Outcome::finished(code, Vec::new(), stderr);
+        outcome.signal = code.is_none().then_some(9);
+        Ok(outcome)
     }
 
     #[test]
@@ -359,7 +349,8 @@ mod tests {
                 )
             });
             match result {
-                Err(PushError::MarkerRun { detail }) => {
+                Err(PushError::MarkerRun { title, said }) => {
+                    let detail = said_text(&title, &said);
                     assert!(detail.contains(text), "{detail}");
                     assert!(detail.contains("mkdir"), "{detail}");
                 }
@@ -384,7 +375,8 @@ mod tests {
                 answer(Some(12), stderr)
             });
             match result {
-                Err(PushError::MarkerRun { detail }) => {
+                Err(PushError::MarkerRun { title, said }) => {
+                    let detail = said_text(&title, &said);
                     assert!(detail.contains("[target] rsync_path"), "{detail}");
                     assert!(detail.contains("fsync = false"), "{detail}");
                 }
@@ -395,7 +387,8 @@ mod tests {
             answer(Some(12), "rsync: protocol broke\n")
         });
         match result {
-            Err(PushError::MarkerRun { detail }) => {
+            Err(PushError::MarkerRun { title, said }) => {
+                let detail = said_text(&title, &said);
                 assert!(!detail.contains("fsync"), "{detail}");
                 assert!(detail.contains("exit 12"), "{detail}");
             }
@@ -437,12 +430,28 @@ mod tests {
     }
 
     fn outcome_of(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
-        Outcome::finished(code, stdout, stderr)
+        let mut outcome = Outcome::finished(code, stdout, stderr);
+        outcome.signal = code.is_none().then_some(9);
+        outcome
+    }
+
+    /// The title of an error and the lines of what rsync said, as one text.
+    fn said_text(title: &str, said: &Said) -> String {
+        let mut text = title.to_string();
+        for group in &said.groups {
+            text.push('\n');
+            text.push_str(&group.line);
+            if let Some(example) = &group.example {
+                text.push(' ');
+                text.push_str(example);
+            }
+        }
+        text
     }
 
     fn mirror_error(outcome: Outcome) -> String {
         match classify(&outcome) {
-            Err(PushError::Mirror { detail }) => detail,
+            Err(PushError::Mirror { title, said }) => said_text(&title, &said),
             other => panic!("expected a mirror error, got {other:?}"),
         }
     }
@@ -490,38 +499,39 @@ mod tests {
         stderr
     }
 
-    fn refused_error(outcome: Outcome) -> (Vec<String>, usize) {
+    fn refused_error(outcome: Outcome) -> Said {
         match classify(&outcome) {
-            Err(PushError::TargetRefusesModes { shown, more }) => (shown, more),
+            Err(PushError::TargetRefusesModes { said }) => said,
             other => panic!("expected a refused-modes error, got {other:?}"),
         }
     }
 
     #[test]
     fn exit_23_with_the_receiver_refusing_mkstemp_is_a_target_that_refuses_modes() {
-        let (shown, more) = refused_error(outcome_of(Some(23), "", &refused_modes(5)));
-        assert_eq!(shown.len(), REFUSED_LINES_SHOWN);
-        assert!(shown[0].contains("note1.md"), "{shown:?}");
-        assert!(shown[2].contains("note3.md"), "{shown:?}");
-        // Two more file lines and rsync's closing line.
-        assert_eq!(more, 3);
+        let said = refused_error(outcome_of(Some(23), "", &refused_modes(5)));
+        // The five refusals are one kind of line, rsync's closing line the
+        // other.
+        assert_eq!(said.groups.len(), 2, "{said:?}");
+        assert_eq!(said.groups[0].count, 5);
+        assert_eq!(
+            said.groups[0].example.as_deref(),
+            Some("/mnt/shadow/beta/.note1.md.A3Kcxa")
+        );
     }
 
     #[test]
     fn a_receiver_chmod_refusal_is_the_same_case() {
         let stderr =
             "rsync: [receiver] chmod \"/mnt/shadow/beta\" failed: Operation not permitted (1)\n";
-        let (shown, more) = refused_error(outcome_of(Some(23), "", stderr));
-        assert_eq!(shown.len(), 1);
-        assert_eq!(more, 0);
+        let said = refused_error(outcome_of(Some(23), "", stderr));
+        assert_eq!(said.groups.len(), 1);
     }
 
     #[test]
     fn a_receiver_that_fails_to_set_permissions_is_the_same_case() {
         let stderr = "rsync: [receiver] failed to set permissions on \"/mnt/shadow/beta\": Operation not permitted (1)\n";
-        let (shown, more) = refused_error(outcome_of(Some(23), "", stderr));
-        assert_eq!(shown.len(), 1);
-        assert_eq!(more, 0);
+        let said = refused_error(outcome_of(Some(23), "", stderr));
+        assert_eq!(said.groups.len(), 1);
     }
 
     #[test]
@@ -762,7 +772,10 @@ mod tests {
         let (result, calls) = mirrored(answers, false);
         assert_eq!(calls.len(), 2);
         match result {
-            Err(PushError::Mirror { detail }) => assert!(detail.contains("exit 30"), "{detail}"),
+            Err(PushError::Mirror { title, said }) => {
+                let detail = said_text(&title, &said);
+                assert!(detail.contains("exit 30"), "{detail}");
+            }
             other => panic!("expected a mirror error, got {other:?}"),
         }
 
@@ -777,7 +790,10 @@ mod tests {
             ),
         ];
         match mirrored(answers, false).0 {
-            Err(PushError::Mirror { detail }) => assert!(detail.contains("disk full"), "{detail}"),
+            Err(PushError::Mirror { title, said }) => {
+                let detail = said_text(&title, &said);
+                assert!(detail.contains("disk full"), "{detail}");
+            }
             other => panic!("expected a mirror error, got {other:?}"),
         }
 
@@ -797,7 +813,8 @@ mod tests {
             ),
         ];
         match mirrored(answers, false).0 {
-            Err(PushError::Mirror { detail }) => {
+            Err(PushError::Mirror { title, said }) => {
+                let detail = said_text(&title, &said);
                 assert!(detail.contains("first problem"), "{detail}");
             }
             other => panic!("expected a mirror error, got {other:?}"),

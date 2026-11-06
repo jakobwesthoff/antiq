@@ -182,13 +182,14 @@ pub fn run(mut command: Command, log: &RunLog, on_segment: &mut Segments) -> io:
 fn command_line(command: &Command) -> String {
     std::iter::once(command.get_program())
         .chain(command.get_args())
-        .map(|word| quoted(&word.to_string_lossy()))
+        .map(|word| shell_quote(&word.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// `word` in single quotes unless it is plain.
-fn quoted(word: &str) -> String {
+/// `word` in single quotes unless it is plain, so that a shell reads it as
+/// one word.
+pub fn shell_quote(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .chars()
@@ -371,10 +372,10 @@ mod tests {
 
     #[test]
     fn a_word_with_a_quote_or_a_space_is_quoted_in_the_log() {
-        assert_eq!(quoted("--exclude=/a"), "--exclude=/a");
-        assert_eq!(quoted("a b"), "'a b'");
-        assert_eq!(quoted("it's"), "'it'\\''s'");
-        assert_eq!(quoted(""), "''");
+        assert_eq!(shell_quote("--exclude=/a"), "--exclude=/a");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 
     #[test]

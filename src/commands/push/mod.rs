@@ -9,6 +9,7 @@ use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::external::RunLog;
+use crate::external::summary::Said;
 use crate::machine::MachineError;
 use crate::plan::{HeldDryRun, Plan};
 use crate::progress::Observer;
@@ -123,6 +124,10 @@ pub enum PushError {
     /// The target cannot be used; the text says what is wrong with it.
     #[error("{problem}")]
     Target { problem: String },
+    /// The listing of the target failed. The problem is the title, what
+    /// rsync said follows in a section of its own.
+    #[error("{problem}")]
+    ListingFailed { problem: String, said: Said },
     /// The target cannot be reached, which `--if-reachable` accepts.
     #[diagnostic(code(antiq::push::unreachable))]
     #[error("{reason}")]
@@ -157,8 +162,8 @@ pub enum PushError {
         #[source]
         source: std::io::Error,
     },
-    #[error("the mirror failed: {detail}")]
-    Mirror { detail: String },
+    #[error("the mirror failed: {title}")]
+    Mirror { title: String, said: Said },
     /// The mirror ended with exit 23 because the receiver refused to set
     /// the modes of the files it wrote.
     #[diagnostic(
@@ -167,14 +172,12 @@ pub enum PushError {
     )]
     #[error("the mirror failed: the target does not let rsync set file modes (rsync exit 23)")]
     TargetRefusesModes {
-        /// The first lines rsync printed, which the error shows in a
-        /// section of its own and in the details of the JSON error.
-        shown: Vec<String>,
-        /// How many lines rsync printed beyond `shown`.
-        more: usize,
+        /// What rsync said, which the error shows in a section of its own
+        /// and in the details of the JSON error.
+        said: Said,
     },
-    #[error("sending the marker to the target failed: {detail}")]
-    MarkerRun { detail: String },
+    #[error("sending the marker to the target failed: {title}")]
+    MarkerRun { title: String, said: Said },
     #[error("cannot name this machine")]
     Machine(
         #[source]
@@ -212,6 +215,7 @@ impl HasKind for PushError {
             | PushError::NameClash { .. }
             | PushError::TrashNotEmpty { .. }
             | PushError::Target { .. }
+            | PushError::ListingFailed { .. }
             | PushError::Scratch { .. }
             | PushError::MarkerRun { .. }
             | PushError::Mirror { .. }

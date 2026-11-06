@@ -14,12 +14,13 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::{numeric_header, pad, sanitize, thousands};
-use crate::cli::{Context, PushArgs};
+use crate::cli::{Context, LogNote, PushArgs};
 use antiq::clock::{Clock, SystemClock};
 use antiq::collection::Collection;
 use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push, push_observed};
 use antiq::external::Logs;
 use antiq::progress::Operation;
+use antiq::report::Warning;
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -92,9 +93,28 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
             _ => Vec::new(),
         },
     )?;
-    let outcome = result
-        .map_err(antiq::Error::from)
-        .context("push the antiq collection")?;
+    let outcome = match result {
+        Ok(PushOutcome::Report(mut report)) => {
+            if let Some(warning) = log.warning() {
+                report.warnings.push(Warning::new(warning));
+            }
+            PushOutcome::Report(report)
+        }
+        Ok(other) => other,
+        Err(error) => {
+            log.mark_failed();
+            let failure =
+                anyhow::Error::new(antiq::Error::from(error)).context("push the antiq collection");
+            let (path, warning) = (log.path(), log.warning());
+            // A push that failed before any program started has no log to
+            // name.
+            return Err(if path.is_some() || warning.is_some() {
+                failure.context(LogNote { path, warning })
+            } else {
+                failure
+            });
+        }
+    };
 
     match outcome {
         PushOutcome::HeldDryRun(held) => {

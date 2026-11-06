@@ -258,14 +258,14 @@ fn build(
             block = ambiguous_version(explained, example, action);
         }
     }
-    parts.push(Part::Block(block));
+    parts.push(Part::Block(Box::new(block)));
     if let Some(lines) = table_lines {
         parts.push(Part::Terminal(lines));
     }
-    parts.push(Part::Block(Block::info(
+    parts.push(Part::Block(Box::new(Block::info(
         Rich::new().text(&format!("Nothing was {}.", action.done)),
-    )));
-    parts.extend(hint.map(Part::Block));
+    ))));
+    parts.extend(hint.map(|block| Part::Block(Box::new(block))));
     parts
 }
 

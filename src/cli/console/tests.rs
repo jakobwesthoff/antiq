@@ -480,9 +480,9 @@ fn a_rich_error_leaves_its_candidates_to_the_table_under_it() {
 #[test]
 fn a_group_is_its_parts_with_an_empty_line_between_them_on_a_terminal() {
     let parts = [
-        Part::Block(Block::error(rich("Ambiguous"))),
+        Part::Block(Box::new(Block::error(rich("Ambiguous")))),
         Part::Terminal(vec!["The 2 pieces".to_string(), "PIECE".to_string()]),
-        Part::Block(Block::info(rich("Nothing was unearthed."))),
+        Part::Block(Box::new(Block::info(rich("Nothing was unearthed.")))),
     ];
     assert_eq!(
         render_parts(&parts, &bare(80)),
@@ -502,9 +502,11 @@ fn a_group_is_its_parts_with_an_empty_line_between_them_on_a_terminal() {
 #[test]
 fn a_group_on_a_pipe_keeps_the_plain_lines_of_its_blocks_only() {
     let parts = [
-        Part::Block(Block::error(rich("Ambiguous")).candidate("projects/scanner")),
+        Part::Block(Box::new(
+            Block::error(rich("Ambiguous")).candidate("projects/scanner"),
+        )),
         Part::Terminal(vec!["PIECE".to_string()]),
-        Part::Block(Block::info(rich("Nothing was unearthed."))),
+        Part::Block(Box::new(Block::info(rich("Nothing was unearthed.")))),
     ];
     assert_eq!(
         render_parts(&parts, &Env::pipe()),

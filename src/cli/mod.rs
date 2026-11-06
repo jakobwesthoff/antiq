@@ -23,7 +23,7 @@ use antiq::commands::forget::{self, Which};
 use antiq::error::ErrorKind;
 use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -301,7 +301,23 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
 // Reporting a failed run
 // =========================================================
 
-/// The error of a run in the three parts a report shows.
+/// Where the log of a failed run is, added as the outermost context of the
+/// error of a command that keeps one. It is no step of the run.
+#[derive(Debug, Clone)]
+struct LogNote {
+    /// The log, when it was written.
+    path: Option<PathBuf>,
+    /// Why the log is missing or incomplete, when it is.
+    warning: Option<String>,
+}
+
+impl std::fmt::Display for LogNote {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "keep the log of the run")
+    }
+}
+
+/// The error of a run in the parts a report shows.
 struct Description<'a> {
     /// The library error in the chain, if there is one.
     library_error: Option<&'a antiq::Error>,
@@ -310,10 +326,15 @@ struct Description<'a> {
     root: String,
     /// What the run was doing, innermost first.
     contexts: Vec<String>,
+    /// The log of the run, when the command keeps one.
+    log: Option<LogNote>,
 }
 
 fn describe(error: &anyhow::Error) -> Description<'_> {
-    let chain: Vec<&(dyn std::error::Error + 'static)> = error.chain().collect();
+    let log = error.downcast_ref::<LogNote>().cloned();
+    // The note is the outermost context, so it is the first link.
+    let skipped = usize::from(log.is_some());
+    let chain: Vec<&(dyn std::error::Error + 'static)> = error.chain().skip(skipped).collect();
     let library_error = chain.iter().position(|link| link.is::<antiq::Error>());
     let (root, outer) = match library_error {
         Some(index) => {
@@ -331,6 +352,7 @@ fn describe(error: &anyhow::Error) -> Description<'_> {
         library_error: library_error.and_then(|index| chain[index].downcast_ref()),
         root,
         contexts: outer.iter().rev().map(ToString::to_string).collect(),
+        log,
     }
 }
 
@@ -341,10 +363,21 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
         Err(error) => error,
     };
     let description = describe(&error);
-    let (kind, details) = match description.library_error {
+    let (kind, mut details) = match description.library_error {
         Some(library_error) => (library_error.kind(), library_error.details()),
         None => (ErrorKind::Other, Map::new()),
     };
+    if let Some(note) = &description.log {
+        details.insert(
+            "log".into(),
+            note.path
+                .as_ref()
+                .map_or(Value::Null, |path| Value::from(path.display().to_string())),
+        );
+        if let Some(warning) = &note.warning {
+            details.insert("log_warning".into(), Value::from(warning.clone()));
+        }
+    }
     // When the output itself fails there is nowhere left to report that.
     let _ = if cli.json {
         let explained = description

@@ -47,6 +47,9 @@ pub struct Block {
     pub(super) fix: Option<Rich>,
     pub(super) how: Vec<Para>,
     pub(super) said: Vec<Para>,
+    /// The program whose words `said` holds; without one `said` is the log
+    /// of the run.
+    pub(super) said_by: Option<String>,
     pub(super) doing: Vec<String>,
     pub(super) candidates: Vec<String>,
     pub(super) pipe: Option<String>,
@@ -62,6 +65,7 @@ impl Block {
             fix: None,
             how: Vec::new(),
             said: Vec::new(),
+            said_by: None,
             doing: Vec::new(),
             candidates: Vec::new(),
             pipe: None,
@@ -122,9 +126,17 @@ impl Block {
         self
     }
 
-    /// A paragraph of the "What rsync said" section of an error, which
+    /// A paragraph of the "What <program> said" section of an error, which
     /// follows "How to fix it".
-    pub fn rsync_said(mut self, paragraph: impl Into<Para>) -> Block {
+    pub fn program_said(mut self, program: &str, paragraph: impl Into<Para>) -> Block {
+        self.said_by = Some(program.to_string());
+        self.said.push(paragraph.into());
+        self
+    }
+
+    /// A paragraph of the "Run log" section of an error, for an error that
+    /// no program's words explain.
+    pub fn run_log(mut self, paragraph: impl Into<Para>) -> Block {
         self.said.push(paragraph.into());
         self
     }
