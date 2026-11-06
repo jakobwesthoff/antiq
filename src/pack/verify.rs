@@ -4,9 +4,110 @@
 
 //! Verifying a package against a folder or a listing.
 
+use super::hashing::HashingReader;
+use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
-use crate::fsx::tree::TreeRoot;
+use crate::fsx::tree::{TreeError, TreeRoot};
+use crate::listing::{LinkTarget, ListingEntry, ListingType};
+use crate::relpath::RelPath;
+use crate::select::Rules;
+use crate::tree::{EntryKind, TreeEntry};
+use crate::walk::walk_piece;
+use rustix::io::Errno;
+use std::collections::{BTreeMap, HashMap};
+use std::fs::Metadata;
+use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+
+/// What differs between a package or a listing and a folder at one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Type,
+    Size,
+    Mtime,
+    Mode,
+    Link,
+    Content,
+}
+
+/// A way a folder differs from a package or a listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Difference {
+    /// The package or listing holds the path, the folder does not.
+    Removed(RelPath),
+    /// The folder holds the path, the package or listing does not.
+    Added(RelPath),
+    /// Both hold the path and these fields differ.
+    Changed { path: RelPath, fields: Vec<Field> },
+    /// The file was replaced, resized or touched while it was read.
+    ChangedWhileRead(RelPath),
+}
+
+impl Difference {
+    pub fn path(&self) -> &RelPath {
+        match self {
+            Difference::Removed(path)
+            | Difference::Added(path)
+            | Difference::ChangedWhileRead(path)
+            | Difference::Changed { path, .. } => path,
+        }
+    }
+}
+
+/// What the walk's `lstat` said about one entry of the folder. The walk
+/// that comes after the folder has been moved compares against these.
+///
+/// The top entry's `ctime_ns` changes whenever antiq moves the piece, as
+/// the move adds owner write to the directory and restores its mode, so a
+/// consumer compares the top's `kind`, `inode` and `mtime_ns` only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LstatRecord {
+    /// Relative to the folder; the folder itself is the root path.
+    pub path: RelPath,
+    pub kind: EntryKind,
+    pub size: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
+    pub inode: u64,
+}
+
+impl LstatRecord {
+    fn of(entry: &TreeEntry) -> LstatRecord {
+        LstatRecord {
+            path: entry.path.clone(),
+            kind: entry.kind,
+            size: entry.size,
+            mtime_ns: entry.mtime_ns,
+            ctime_ns: entry.ctime_ns,
+            inode: entry.inode,
+        }
+    }
+}
+
+/// The outcome of comparing a folder with a listing.
+#[derive(Debug)]
+pub struct Compared {
+    /// In path order; empty when the folder equals the listing.
+    pub differences: Vec<Difference>,
+    /// The `lstat` of every entry of the folder, in path order.
+    pub record: Vec<LstatRecord>,
+    listing: Vec<ListingEntry>,
+}
+
+impl Compared {
+    /// The proof that the folder equals the listing, or the differences.
+    pub fn into_verified(self) -> Result<Verified, Vec<Difference>> {
+        if self.differences.is_empty() {
+            Ok(Verified {
+                record: self.record,
+                listing: self.listing,
+            })
+        } else {
+            Err(self.differences)
+        }
+    }
+}
 
 /// Compares `package` with the tree below `root`.
 pub fn verify_strict(
@@ -15,4 +116,855 @@ pub fn verify_strict(
     _rules: &WalkRules,
 ) -> Result<Verified, PackError> {
     Err(PackError::NotImplemented("the strict verify"))
+}
+
+/// Compares the tree below `root` with `listing`: path, type, size,
+/// modification time, mode, link target and content hash. Directory
+/// modification times, symlink modes and junk files do not count.
+pub fn compare_with_listing(
+    listing: &[ListingEntry],
+    root: &TreeRoot,
+    rules: &WalkRules,
+) -> Result<Compared, PackError> {
+    compare_with_listing_observed(listing, root, rules, &mut |_, _| {})
+}
+
+/// The points in reading a file at which a test can change the folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The walk has recorded the file; nothing has opened it yet.
+    AfterWalk,
+    /// The file has been read to its end; its final `fstat` is still to
+    /// come.
+    AfterRead,
+}
+
+fn compare_with_listing_observed(
+    listing: &[ListingEntry],
+    root: &TreeRoot,
+    rules: &WalkRules,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Compared, PackError> {
+    let folder = read_folder(root, rules, observe)?;
+    let listing_lines = without_junk(listing, rules);
+    let mut differences = compare(&listing_lines, &folder.lines, &folder.changed, false);
+    differences.extend(folder.changed.into_iter().map(Difference::ChangedWhileRead));
+    differences.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(Compared {
+        differences,
+        record: folder.record,
+        listing: listing.to_vec(),
+    })
+}
+
+/// The folder as the package of it would describe it.
+struct Folder {
+    /// The listing lines of the entries the package would hold, in path
+    /// order, the top directory not among them.
+    lines: Vec<ListingEntry>,
+    /// Files that were not the ones the walk recorded when they were read,
+    /// and so have no line.
+    changed: Vec<RelPath>,
+    record: Vec<LstatRecord>,
+}
+
+/// Walks the folder the way packing does and reads every file it would
+/// pack.
+fn read_folder(
+    root: &TreeRoot,
+    rules: &WalkRules,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Folder, PackError> {
+    let no_rules = Rules::new(&[], &[]).expect("no patterns are valid");
+    let walked = walk_piece(root, &RelPath::root(), &rules.junk, &no_rules)?;
+    // Packing refuses a walk with a problem, so no package holds such a
+    // folder.
+    if let Some(problem) = walked.problems().first() {
+        return Err(PackError::TreeHasProblems(problem.clone()));
+    }
+    let mut lines = Vec::new();
+    let mut changed = Vec::new();
+    let mut record = Vec::new();
+    let mut first_link: HashMap<(u64, u64), RelPath> = HashMap::new();
+    let mut directories = DirectoryStack::new(root);
+    for entry in walked.entries() {
+        record.push(LstatRecord::of(entry));
+        match entry.kind {
+            EntryKind::Directory if entry.path.is_root() => {}
+            EntryKind::Directory => {
+                lines.push(listing_line(entry, ListingType::Dir, 0, None, None))
+            }
+            EntryKind::Symlink => {
+                let target = entry
+                    .link_target
+                    .clone()
+                    .expect("lstat reads the target of every symlink it reports");
+                let link = Some(LinkTarget::from_bytes(target));
+                lines.push(listing_line(entry, ListingType::Symlink, 0, link, None));
+            }
+            EntryKind::File => {
+                // Packing stores the first path in byte order of a file
+                // with several names and links the others to it.
+                if entry.nlink > 1 {
+                    let key = (entry.device, entry.inode);
+                    if let Some(first) = first_link.get(&key) {
+                        let link = Some(LinkTarget::from_bytes(first.as_bytes().to_vec()));
+                        lines.push(listing_line(entry, ListingType::Hardlink, 0, link, None));
+                        continue;
+                    }
+                    first_link.insert(key, entry.path.clone());
+                }
+                match read_file(&mut directories, entry, observe)? {
+                    Read::Hashed(sha256) => lines.push(listing_line(
+                        entry,
+                        ListingType::File,
+                        entry.size,
+                        None,
+                        Some(sha256),
+                    )),
+                    Read::Changed => changed.push(entry.path.clone()),
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Folder {
+        lines,
+        changed,
+        record,
+    })
+}
+
+/// How reading a file went.
+enum Read {
+    Hashed(String),
+    /// The file is no longer the one the walk recorded.
+    Changed,
+}
+
+/// Reads the file `entry` names and hashes it, and checks that it was the
+/// file the walk recorded from the first byte to the last: the handle
+/// opened has the recorded inode, size, modification time and ctime, and
+/// still has them once the file is read.
+fn read_file(
+    directories: &mut DirectoryStack<'_>,
+    entry: &TreeEntry,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Read, PackError> {
+    let read = |source| PackError::Read {
+        path: entry.path.clone(),
+        source,
+    };
+    observe(Stage::AfterWalk, &entry.path);
+    let mut file = match directories.open_file(entry) {
+        Ok(file) => file,
+        Err(error) if is_replaced(&error) => return Ok(Read::Changed),
+        Err(error) => return Err(read(error)),
+    };
+    if !is_recorded(&file.metadata().map_err(read)?, entry) {
+        return Ok(Read::Changed);
+    }
+    let mut reader = HashingReader::new(&mut file);
+    io::copy(&mut reader, &mut io::sink()).map_err(read)?;
+    let (length, sha256) = (reader.bytes_read(), reader.sha256());
+    observe(Stage::AfterRead, &entry.path);
+    if length != entry.size || !is_recorded(&file.metadata().map_err(read)?, entry) {
+        return Ok(Read::Changed);
+    }
+    Ok(Read::Hashed(sha256))
+}
+
+/// Whether opening failed because the entry is not what the walk saw:
+/// gone, a symlink now, or another kind of file. A directory above it that
+/// became a symlink gives `ELOOP` where the open follows nothing, and
+/// `ENOTDIR` where the directory is opened as a path.
+fn is_replaced(error: &io::Error) -> bool {
+    let errno = error.raw_os_error();
+    error.kind() == io::ErrorKind::NotFound
+        || errno == Some(Errno::LOOP.raw_os_error())
+        || errno == Some(Errno::NOTDIR.raw_os_error())
+        || matches!(TreeError::of(error), Some(TreeError::NotRegular(_)))
+}
+
+/// Whether the open file is the entry the walk recorded.
+fn is_recorded(file: &Metadata, entry: &TreeEntry) -> bool {
+    let nanoseconds =
+        |seconds: i64, nanos: i64| i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+    file.ino() == entry.inode
+        && file.len() == entry.size
+        && nanoseconds(file.mtime(), file.mtime_nsec()) == entry.mtime_ns
+        && nanoseconds(file.ctime(), file.ctime_nsec()) == entry.ctime_ns
+}
+
+/// The lines of a package or listing that the walk of a folder would not
+/// meet: a junk name is junk when it is not a directory.
+fn without_junk(lines: &[ListingEntry], rules: &WalkRules) -> Vec<ListingEntry> {
+    let is_junk = |line: &ListingEntry| {
+        line.kind != ListingType::Dir
+            && line
+                .path
+                .components()
+                .last()
+                .is_some_and(|name| rules.junk.iter().any(|junk| junk.as_bytes() == name))
+    };
+    lines
+        .iter()
+        .filter(|line| !is_junk(line))
+        .cloned()
+        .collect()
+}
+
+/// The differences between two sets of lines, in path order. `left` is
+/// the package or listing, `right` the folder.
+fn compare(
+    left: &[ListingEntry],
+    right: &[ListingEntry],
+    skip: &[RelPath],
+    directory_times: bool,
+) -> Vec<Difference> {
+    type Pair<'a> = (Option<&'a ListingEntry>, Option<&'a ListingEntry>);
+    let mut pairs: BTreeMap<&RelPath, Pair<'_>> = BTreeMap::new();
+    for line in left {
+        pairs.entry(&line.path).or_default().0 = Some(line);
+    }
+    for line in right {
+        pairs.entry(&line.path).or_default().1 = Some(line);
+    }
+    let mut differences = Vec::new();
+    for (path, pair) in pairs {
+        if skip.contains(path) {
+            continue;
+        }
+        match pair {
+            (Some(then), Some(now)) => {
+                let fields = differing(then, now, directory_times);
+                if !fields.is_empty() {
+                    differences.push(Difference::Changed {
+                        path: path.clone(),
+                        fields,
+                    });
+                }
+            }
+            (Some(_), None) => differences.push(Difference::Removed(path.clone())),
+            (None, _) => differences.push(Difference::Added(path.clone())),
+        }
+    }
+    differences
+}
+
+/// The fields in which two lines of one path differ. A different type
+/// stands for itself: the other fields have no meaning across types.
+fn differing(then: &ListingEntry, now: &ListingEntry, directory_times: bool) -> Vec<Field> {
+    if then.kind != now.kind {
+        return vec![Field::Type];
+    }
+    let mut fields = Vec::new();
+    if then.size != now.size {
+        fields.push(Field::Size);
+    }
+    if then.mtime != now.mtime && (directory_times || then.kind != ListingType::Dir) {
+        fields.push(Field::Mtime);
+    }
+    // Linux cannot set the mode of a symlink, so a mode compared here
+    // would differ between the platforms for the same package.
+    if then.mode != now.mode && then.kind != ListingType::Symlink {
+        fields.push(Field::Mode);
+    }
+    if then.link != now.link {
+        fields.push(Field::Link);
+    }
+    if then.sha256 != now.sha256 {
+        fields.push(Field::Content);
+    }
+    fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::package::pack_piece;
+    use crate::testing::tree::Tree;
+    use crate::tree::Problem;
+    use filetime::FileTime;
+
+    fn path(text: &str) -> RelPath {
+        RelPath::parse(text).expect("valid path")
+    }
+
+    /// A piece `proj` and the listing its package has.
+    fn packed(tree: &Tree) -> Vec<ListingEntry> {
+        pack_piece(tree, "proj").packed.listing
+    }
+
+    fn compare_dir(dir: &Path, listing: &[ListingEntry]) -> Vec<Difference> {
+        let root = TreeRoot::open(dir).expect("the folder opens");
+        compare_with_listing(listing, &root, &WalkRules::default())
+            .expect("the comparison runs")
+            .differences
+    }
+
+    fn compare(tree: &Tree, listing: &[ListingEntry]) -> Vec<Difference> {
+        compare_dir(&tree.path("proj"), listing)
+    }
+
+    fn mixed() -> Tree {
+        let mut tree = Tree::new();
+        tree.file_with("proj/src/main.rs", "fn main() {}", 0o600, 1_000_000_000);
+        tree.file_with("proj/notes.txt", "hello", 0o644, 1_000_000_001);
+        tree.symlink("proj/src/link", "main.rs");
+        tree.dir("proj/empty");
+        tree
+    }
+
+    fn changed(text: &str, fields: &[Field]) -> Difference {
+        Difference::Changed {
+            path: path(text),
+            fields: fields.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_folder_equals_the_listing_it_was_packed_to() {
+        let tree = mixed();
+        assert_eq!(compare(&tree, &packed(&tree)), []);
+    }
+
+    #[test]
+    fn a_file_edited_to_the_same_size_and_time_differs_in_content() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let file = tree.path("proj/notes.txt");
+        std::fs::write(&file, "HELLO").expect("the file is written");
+        filetime::set_file_mtime(&file, FileTime::from_unix_time(1_000_000_001, 0))
+            .expect("the time is set");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Content])]
+        );
+    }
+
+    #[test]
+    fn a_deleted_file_is_removed() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/notes.txt")).expect("the file is removed");
+        assert_eq!(
+            compare(&tree, &listing),
+            [Difference::Removed(path("notes.txt"))]
+        );
+    }
+
+    #[test]
+    fn a_new_file_is_added() {
+        let mut tree = mixed();
+        let listing = packed(&tree);
+        tree.file("proj/src/new.rs", "x");
+        assert_eq!(
+            compare(&tree, &listing),
+            [Difference::Added(path("src/new.rs"))]
+        );
+    }
+
+    #[test]
+    fn a_changed_modification_time_differs_in_mtime() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        filetime::set_file_mtime(
+            tree.path("proj/notes.txt"),
+            FileTime::from_unix_time(1_000_000_002, 0),
+        )
+        .expect("the time is set");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Mtime])]
+        );
+    }
+
+    #[test]
+    fn a_changed_mode_differs_in_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tree = mixed();
+        let listing = packed(&tree);
+        std::fs::set_permissions(
+            tree.path("proj/notes.txt"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("the mode is set");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Mode])]
+        );
+    }
+
+    #[test]
+    fn a_repointed_symlink_differs_in_link() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/src/link")).expect("the link is removed");
+        std::os::unix::fs::symlink("other.rs", tree.path("proj/src/link")).expect("a new link");
+        // The new link has a new modification time of its own.
+        let fields = compare(&tree, &listing);
+        assert!(
+            matches!(&fields[..], [Difference::Changed { path, fields }]
+                if path.to_string() == "src/link" && fields.contains(&Field::Link)),
+            "{fields:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_directory_differs_in_type_only() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/notes.txt")).expect("the file is removed");
+        std::fs::create_dir(tree.path("proj/notes.txt")).expect("the directory is made");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Type])]
+        );
+    }
+
+    #[test]
+    fn a_grown_file_differs_in_size() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let file = tree.path("proj/notes.txt");
+        std::fs::write(&file, "hello world").expect("the file is written");
+        filetime::set_file_mtime(&file, FileTime::from_unix_time(1_000_000_001, 0))
+            .expect("the time is set");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Size, Field::Content])]
+        );
+    }
+
+    #[test]
+    fn a_symlink_mode_does_not_count() {
+        let tree = mixed();
+        let mut listing = packed(&tree);
+        listing
+            .iter_mut()
+            .find(|line| line.path == path("src/link"))
+            .expect("the line exists")
+            .mode = 0o700;
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    #[test]
+    fn a_newer_directory_time_does_not_count() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        filetime::set_file_mtime(
+            tree.path("proj/src"),
+            FileTime::from_unix_time(2_000_000_000, 0),
+        )
+        .expect("the time is set");
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    #[test]
+    fn a_listing_line_without_a_hash_differs_in_content() {
+        let tree = mixed();
+        let mut listing = packed(&tree);
+        listing
+            .iter_mut()
+            .find(|line| line.path == path("notes.txt"))
+            .expect("the line exists")
+            .sha256 = None;
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("notes.txt", &[Field::Content])]
+        );
+    }
+
+    #[test]
+    fn a_renamed_folder_still_equals_its_listing() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        std::fs::rename(tree.path("proj"), tree.path("renamed")).expect("the folder is renamed");
+        assert_eq!(compare_dir(&tree.path("renamed"), &listing), []);
+    }
+
+    #[test]
+    fn a_folder_past_1024_bytes_of_path_equals_its_listing() {
+        use crate::testing::deep_path;
+        use std::io::Write;
+        let tree = Tree::new();
+        let collection = TreeRoot::open(tree.root()).expect("opens");
+        collection
+            .create_dir(&path("proj"), 0o755)
+            .expect("the piece is made");
+        let piece = collection.sub(&path("proj")).expect("opens");
+        let deep = deep_path(6);
+        for level in 1..=6 {
+            let directory: Vec<&[u8]> = deep.components().take(level).collect();
+            piece
+                .create_dir(
+                    &RelPath::from_bytes(directory.join(&b'/')).expect("valid"),
+                    0o755,
+                )
+                .expect("the directory is made");
+        }
+        piece
+            .create_file(&deep.concat(&path("data.txt")), 0o644)
+            .expect("the file is made")
+            .write_all(b"deep")
+            .expect("written");
+        let listing = packed(&tree);
+        assert_eq!(listing.len(), 7);
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    fn junk_rules() -> WalkRules {
+        WalkRules {
+            junk: vec![crate::relpath::Name::from_bytes(b".DS_Store".to_vec()).expect("a name")],
+        }
+    }
+
+    fn compare_with_rules(
+        tree: &Tree,
+        listing: &[ListingEntry],
+        rules: &WalkRules,
+    ) -> Vec<Difference> {
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        compare_with_listing(listing, &root, rules)
+            .expect("the comparison runs")
+            .differences
+    }
+
+    #[test]
+    fn junk_on_disk_does_not_count() {
+        use crate::testing::package::pack_piece_without;
+        let mut tree = mixed();
+        let listing = pack_piece_without(&tree, "proj", &junk_rules().junk)
+            .packed
+            .listing;
+        tree.file("proj/src/.DS_Store", "x");
+        assert_eq!(compare_with_rules(&tree, &listing, &junk_rules()), []);
+    }
+
+    #[test]
+    fn junk_in_the_listing_does_not_count() {
+        let mut tree = mixed();
+        tree.file("proj/src/.DS_Store", "x");
+        let listing = packed(&tree);
+        assert!(
+            listing
+                .iter()
+                .any(|line| line.path == path("src/.DS_Store"))
+        );
+        std::fs::remove_file(tree.path("proj/src/.DS_Store")).expect("the file is removed");
+        assert_eq!(compare_with_rules(&tree, &listing, &junk_rules()), []);
+    }
+
+    #[test]
+    fn a_directory_named_like_junk_is_compared() {
+        let mut tree = mixed();
+        let listing = packed(&tree);
+        tree.dir("proj/.DS_Store");
+        assert_eq!(
+            compare_with_rules(&tree, &listing, &junk_rules()),
+            [Difference::Added(path(".DS_Store"))]
+        );
+    }
+
+    #[test]
+    fn hard_links_equal_the_listing_they_were_packed_to() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/notes-copy.txt");
+        let listing = packed(&tree);
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    #[test]
+    fn a_file_the_listing_holds_twice_but_now_is_a_hard_link_differs_in_type() {
+        let mut tree = mixed();
+        tree.file_with("proj/src/copy.txt", "hello", 0o644, 1_000_000_001);
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/src/copy.txt")).expect("removed");
+        tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("src/copy.txt", &[Field::Type])]
+        );
+    }
+
+    #[test]
+    fn a_hard_link_the_listing_holds_but_now_is_a_copy_differs_in_type() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/src/copy.txt")).expect("removed");
+        tree.file_with("proj/src/copy.txt", "hello", 0o644, 1_000_000_001);
+        assert_eq!(
+            compare(&tree, &listing),
+            [changed("src/copy.txt", &[Field::Type])]
+        );
+    }
+
+    #[test]
+    fn removing_the_first_name_of_a_hard_link_reports_both_names() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/notes.txt")).expect("removed");
+        assert_eq!(
+            compare(&tree, &listing),
+            [
+                Difference::Removed(path("notes.txt")),
+                changed("src/copy.txt", &[Field::Type])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fifo_on_disk_is_not_added() {
+        let mut tree = mixed();
+        let listing = packed(&tree);
+        tree.fifo("proj/queue");
+        assert_eq!(compare(&tree, &listing), []);
+    }
+
+    #[test]
+    fn a_fifo_where_the_listing_has_a_file_is_removed() {
+        let mut tree = mixed();
+        let listing = packed(&tree);
+        std::fs::remove_file(tree.path("proj/notes.txt")).expect("removed");
+        tree.fifo("proj/notes.txt");
+        assert_eq!(
+            compare(&tree, &listing),
+            [Difference::Removed(path("notes.txt"))]
+        );
+    }
+
+    #[test]
+    fn a_folder_with_an_unreadable_directory_is_refused() {
+        let mut tree = mixed();
+        let listing = packed(&tree);
+        let locked = tree.unreadable_dir("proj/locked");
+        assert!(
+            std::fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let error = compare_with_listing(&listing, &root, &WalkRules::default())
+            .expect_err("a walk with a problem is refused");
+        assert!(
+            matches!(&error, PackError::TreeHasProblems(Problem::Unreadable { first })
+                if first.to_string() == "locked"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_record_holds_every_entry_as_lstat_reports_it() {
+        let mut tree = mixed();
+        tree.fifo("proj/queue");
+        let listing = packed(&tree);
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let compared = compare_with_listing(&listing, &root, &WalkRules::default())
+            .expect("the comparison runs");
+        let paths: Vec<String> = compared.record.iter().map(|r| r.path.to_string()).collect();
+        assert_eq!(
+            paths,
+            [
+                "",
+                "empty",
+                "notes.txt",
+                "queue",
+                "src",
+                "src/link",
+                "src/main.rs"
+            ]
+        );
+        for recorded in &compared.record {
+            let seen = root.lstat(&recorded.path).expect("the entry exists");
+            assert_eq!(
+                (
+                    recorded.kind,
+                    recorded.size,
+                    recorded.mtime_ns,
+                    recorded.ctime_ns,
+                    recorded.inode
+                ),
+                (
+                    seen.kind,
+                    seen.size,
+                    seen.mtime_ns,
+                    seen.ctime_ns,
+                    seen.inode
+                ),
+                "{}",
+                recorded.path
+            );
+        }
+    }
+
+    #[test]
+    fn a_comparison_without_differences_gives_the_proof_and_with_them_the_differences() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let equal = compare_with_listing(&listing, &root, &WalkRules::default())
+            .expect("runs")
+            .into_verified()
+            .expect("the folder equals the listing");
+        assert_eq!(equal.listing(), listing);
+        assert_eq!(equal.record().len(), 6);
+
+        std::fs::remove_file(tree.path("proj/notes.txt")).expect("removed");
+        let differences = compare_with_listing(&listing, &root, &WalkRules::default())
+            .expect("runs")
+            .into_verified()
+            .expect_err("the folder differs");
+        assert_eq!(differences, [Difference::Removed(path("notes.txt"))]);
+    }
+
+    /// Compares while `change` runs at the chosen stage for `path`.
+    fn compare_changing(
+        tree: &Tree,
+        listing: &[ListingEntry],
+        at: (Stage, &str),
+        change: impl Fn(&Tree),
+    ) -> Result<Compared, PackError> {
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let mut observe = |stage: Stage, seen: &RelPath| {
+            if (stage, seen.to_string().as_str()) == at {
+                change(tree);
+            }
+        };
+        compare_with_listing_observed(listing, &root, &WalkRules::default(), &mut observe)
+    }
+
+    fn only_changed_while_read(compared: Compared, expected: &str) {
+        assert_eq!(
+            compared.differences,
+            [Difference::ChangedWhileRead(path(expected))]
+        );
+    }
+
+    #[test]
+    fn a_file_changed_between_the_walk_and_its_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "notes.txt"), |t| {
+            std::fs::write(t.path("proj/notes.txt"), "hello again").expect("written");
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn a_file_changed_after_its_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterRead, "notes.txt"), |t| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(t.path("proj/notes.txt"))
+                .expect("opens");
+            file.write_all(b"!").expect("written");
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn differences_of_every_kind_come_in_path_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut tree = mixed();
+        tree.file_with("proj/a.txt", "a", 0o644, 1_000_000_001);
+        let listing = packed(&tree);
+        std::fs::set_permissions(
+            tree.path("proj/a.txt"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("the mode is set");
+        tree.file("proj/zzz", "new");
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "notes.txt"), |t| {
+            std::fs::write(t.path("proj/notes.txt"), "hello again").expect("written");
+        })
+        .expect("runs");
+        assert_eq!(
+            compared.differences,
+            [
+                changed("a.txt", &[Field::Mode]),
+                Difference::ChangedWhileRead(path("notes.txt")),
+                Difference::Added(path("zzz")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_touched_after_its_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterRead, "notes.txt"), |t| {
+            filetime::set_file_mtime(
+                t.path("proj/notes.txt"),
+                FileTime::from_unix_time(1_000_000_009, 0),
+            )
+            .expect("the time is set");
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_fifo_between_the_walk_and_its_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "notes.txt"), |t| {
+            std::fs::remove_file(t.path("proj/notes.txt")).expect("removed");
+            let status = std::process::Command::new("mkfifo")
+                .arg(t.path("proj/notes.txt"))
+                .status()
+                .expect("mkfifo runs");
+            assert!(status.success());
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn a_file_that_vanished_between_the_walk_and_its_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "notes.txt"), |t| {
+            std::fs::remove_file(t.path("proj/notes.txt")).expect("removed");
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "notes.txt");
+    }
+
+    #[test]
+    fn a_directory_replaced_by_a_symlink_before_its_file_is_read_is_changed_while_read() {
+        let tree = mixed();
+        let listing = packed(&tree);
+        let compared = compare_changing(&tree, &listing, (Stage::AfterWalk, "src/main.rs"), |t| {
+            std::fs::rename(t.path("proj/src"), t.path("proj/moved")).expect("moved");
+            std::os::unix::fs::symlink("moved", t.path("proj/src")).expect("linked");
+        })
+        .expect("runs");
+        only_changed_while_read(compared, "src/main.rs");
+    }
+
+    #[test]
+    fn a_file_the_owner_cannot_read_fails_the_comparison_naming_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tree = mixed();
+        let listing = packed(&tree);
+        let file = tree.path("proj/notes.txt");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let unreadable = std::fs::File::open(&file).is_err();
+        let root = TreeRoot::open(&tree.path("proj")).expect("opens");
+        let result = compare_with_listing(&listing, &root, &WalkRules::default());
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(unreadable, "the test needs a user that mode 000 locks out");
+        let error = result.expect_err("the file cannot be read");
+        assert!(
+            matches!(&error, PackError::Read { path, .. } if path.to_string() == "notes.txt"),
+            "{error:?}"
+        );
+    }
 }

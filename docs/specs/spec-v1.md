@@ -860,8 +860,16 @@ walk rules. Junk files are left out. While it reads, it records each
 entry's lstat (size, modification time in nanoseconds, ctime, inode).
 (ADR 0033)
 
-Reclaiming compares the folder with the archive's listing. Directory
-modification times and junk files do not count. It requires a local
+Reclaiming compares the folder with the archive's listing: path, type,
+size, modification time, mode, link target and content hash. Directory
+modification times and junk files do not count, junk files are left out
+of the listing side too, and the symlink modes are not compared (Linux
+cannot set a symlink's mode). The top-level directory has no line in the
+listing and is not compared. A file that is replaced, resized or touched
+while it is read is reported as changed while read. A folder whose walk
+finds a problem (an unreadable entry, a mount point, an excluded path) is
+refused. The comparison also hands back the lstat record of the folder
+that the deletion steps compare against. It requires a local
 archive that passes the stream check or a remote copy whose check is
 recorded; otherwise the piece is not reclaimed and is listed as pending
 remote work. (ADR 0033, ADR 0035)

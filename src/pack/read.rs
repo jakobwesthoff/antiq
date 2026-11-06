@@ -390,7 +390,16 @@ mod tests {
     }
 
     #[test]
-    fn a_modification_time_above_i64_is_damaged() {
+    fn a_modification_time_with_bit_63_set_is_damaged() {
+        let mut field = [0; 12];
+        field[0] = 0x80;
+        field[4] = 0x80;
+        let reason = damaged_by(&compress(&tar_with_time_field(field)));
+        assert!(reason.contains("64 bits"), "{reason}");
+    }
+
+    #[test]
+    fn a_modification_time_beyond_64_bits_is_damaged() {
         let mut field = [0; 12];
         field[0] = 0x80;
         field[3] = 1;

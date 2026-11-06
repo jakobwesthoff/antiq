@@ -105,18 +105,44 @@ pub struct Packed {
     pub notes: Vec<PackNote>,
 }
 
-/// Rules for comparing a package with a tree. Filled in by the strict
-/// verify.
+/// Rules for comparing a package or a listing with a tree.
 #[derive(Debug, Default)]
-pub struct WalkRules;
+pub struct WalkRules {
+    /// Files with these names are left out on both sides, as the walk
+    /// leaves them out when packing.
+    pub junk: Vec<Name>,
+}
 
 /// Rules for the target of an extraction. Filled in by the extraction.
 #[derive(Debug, Default)]
 pub struct TargetRules;
 
-/// What a strict verify records. Filled in by the strict verify.
+/// The proof that a folder equals a package or a listing. Only the
+/// comparisons in [`verify`] make one.
+///
+/// ```compile_fail
+/// // The fields are private, so a value cannot be made without a
+/// // comparison that found no difference.
+/// let _ = antiq::pack::Verified { record: vec![], listing: vec![] };
+/// ```
 #[derive(Debug)]
-pub struct Verified;
+pub struct Verified {
+    record: Vec<verify::LstatRecord>,
+    listing: Vec<ListingEntry>,
+}
+
+impl Verified {
+    /// The `lstat` of every entry of the folder, in path order.
+    pub fn record(&self) -> &[verify::LstatRecord] {
+        &self.record
+    }
+
+    /// What the folder was compared with: the members of the package in
+    /// archive order, or the listing given.
+    pub fn listing(&self) -> &[ListingEntry] {
+        &self.listing
+    }
+}
 
 /// What an extraction reports. Filled in by the extraction.
 #[derive(Debug)]
@@ -243,8 +269,10 @@ pub enum PackError {
     NoTopDirectory,
     #[error("the piece has no folder name to name the archive's top-level directory after")]
     NoContainerName,
-    #[error("the piece cannot be packed: {0:?}")]
+    #[error("the walk of the piece found a problem: {0:?}")]
     TreeHasProblems(Problem),
+    #[error("cannot walk the piece")]
+    Walk(#[from] crate::walk::WalkError),
     #[error("{0} is not implemented")]
     NotImplemented(&'static str),
     #[error("cannot open the package")]
@@ -277,7 +305,7 @@ mod tests {
         let (dir, root) = empty_root();
         let errors = [
             TarZstd
-                .verify_strict(dir.path(), &root, &WalkRules)
+                .verify_strict(dir.path(), &root, &WalkRules::default())
                 .expect_err("not implemented")
                 .to_string(),
             TarZstd

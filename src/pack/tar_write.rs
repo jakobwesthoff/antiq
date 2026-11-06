@@ -16,6 +16,7 @@ use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, PieceTree, TreeEntry};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -38,6 +39,29 @@ enum MemberKind {
     Dir,
     Symlink,
     Hardlink,
+}
+
+/// The listing line of a member whose header is written from `entry`. The
+/// strict verify builds the lines of a folder with this function too, so
+/// that a folder and the archive made from it are compared on the same
+/// terms.
+pub(super) fn listing_line(
+    entry: &TreeEntry,
+    kind: ListingType,
+    size: u64,
+    link: Option<LinkTarget>,
+    sha256: Option<String>,
+) -> ListingEntry {
+    let (mtime, _) = stored_mtime(entry.mtime_ns);
+    ListingEntry {
+        path: entry.path.clone(),
+        kind,
+        size,
+        mtime: i64::try_from(mtime).unwrap_or(i64::MAX),
+        mode: entry.mode & PERMISSION_BITS,
+        link,
+        sha256,
+    }
 }
 
 /// The modification time as the header stores it: whole seconds, rounded
@@ -251,16 +275,8 @@ impl<W: Write> TarWriter<W> {
         link: Option<LinkTarget>,
         sha256: Option<String>,
     ) {
-        let (mtime, _) = stored_mtime(entry.mtime_ns);
-        self.listing.push(ListingEntry {
-            path: entry.path.clone(),
-            kind,
-            size,
-            mtime: i64::try_from(mtime).unwrap_or(i64::MAX),
-            mode: entry.mode & PERMISSION_BITS,
-            link,
-            sha256,
-        });
+        self.listing
+            .push(listing_line(entry, kind, size, link, sha256));
     }
 
     fn add_file(
@@ -389,6 +405,12 @@ impl<'a> DirectoryStack<'a> {
 
     /// Opens the regular file the entry names.
     pub fn open(&mut self, entry: &TreeEntry) -> io::Result<Box<dyn Read>> {
+        Ok(Box::new(self.open_file(entry)?))
+    }
+
+    /// Like [`open`](Self::open), keeping the handle a file, so that its
+    /// `fstat` can be read.
+    pub(super) fn open_file(&mut self, entry: &TreeEntry) -> io::Result<File> {
         let components: Vec<&[u8]> = entry.path.components().collect();
         let (file_name, directories) = components
             .split_last()
@@ -412,7 +434,7 @@ impl<'a> DirectoryStack<'a> {
         }
 
         let parent = self.handles.last().unwrap_or(self.root);
-        Ok(Box::new(parent.open_read(&single(file_name))?))
+        parent.open_read(&single(file_name))
     }
 }
 
