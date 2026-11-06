@@ -231,3 +231,27 @@ is read cold once.
 The cold run took 34.7 ms (zstd, 14 threads) and 36.2 ms (plain, one
 thread) more than the best warm run. Times 10 (not measured at that size)
 the cold runs are 569 ms (zstd, 14 threads) and 652 ms (plain, 1 thread).
+
+## Summary of the figures
+
+All from the tables above, 30 listings of 50 000 entries (299.3 MB plain,
+92.2 MB zstd), times 10 for 300 listings.
+
+- A pattern with the line prefix takes 377 ms (hash lines) or 211 ms
+  (comment lines) on plain files with one thread, whatever the query. The
+  path-only pattern with a check of the candidate lines takes 21 to 92
+  ms, and is the same for hash and comment lines.
+- `memchr::memmem` with the line check takes 27.3 ms for a literal
+  (10.9 GB/s) and the `regex` crate 29.1 ms (literal), 57.3 ms (case-insensitive
+  literal) and 30.9 ms (`src/.*\.rs$`), plain, one thread. `grep-searcher`
+  with `grep-regex` takes 37.5, 68.1 and 92.0 ms.
+- zstd files take 186 to 254 ms with one thread, of which decoding is 173.4
+  ms (1.73 GB/s of plain text).
+- `regex` and `memmem` with 14 threads take 6.1 to 9.8 ms (plain) and 19.3
+  to 25.5 ms (zstd) for the 30 listings. `grep-searcher` with the `re`
+  query takes 31.1 to 36.8 ms (plain) and 38.4 to 40.5 ms (zstd).
+- Times 10 for 300 listings, `regex`: with 14 threads 61 to 98 ms plain and
+  194 to 255 ms zstd; with one thread 0.21 to 0.57 s plain and 1.8 to 2.1 s
+  zstd.
+- Cold cache adds 35 to 36 ms for 30 listings in the two combinations
+  measured.
