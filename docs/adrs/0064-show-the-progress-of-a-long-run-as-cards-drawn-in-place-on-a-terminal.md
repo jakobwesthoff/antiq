@@ -73,4 +73,7 @@ wider by then, the climb can be too long and reach finished lines. Where a
 terminal does not join the rows of a line again when the window gets wider
 (kitty), a window that was narrowed and widened again leaves a fragment of
 the region's top on the screen. Rows that scrolled into the scrollback
-because the window got shorter stay there.
+because the window got shorter stay there. When a run ends or a panic
+halts it while the size has not held for a redraw interval, the region is
+taken off with a climb of one row per line, which can leave the top of the
+old region behind but reaches no finished line.

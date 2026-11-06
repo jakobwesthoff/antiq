@@ -52,6 +52,8 @@ pub(crate) struct Driver<'o> {
     /// frames have read it.
     seen_size: (usize, usize),
     seen_since: Duration,
+    /// The time of the last frame.
+    last_frame: Duration,
     /// The first message prints this above the cards.
     header: Option<String>,
     /// A panic elsewhere cleared the region: finished lines go out plainly.
@@ -84,6 +86,7 @@ impl<'o> Driver<'o> {
             last_size: (0, 0),
             seen_size: (0, 0),
             seen_since: Duration::ZERO,
+            last_frame: Duration::ZERO,
             header,
             halted: false,
         }
@@ -108,13 +111,26 @@ impl<'o> Driver<'o> {
         self.cards.has_ready()
     }
 
+    /// Whether the size the frames read has been the same for a whole
+    /// [`TICK`] at `now`.
+    fn size_has_held(&self, now: Duration) -> bool {
+        now.saturating_sub(self.seen_since) >= TICK
+    }
+
     /// The sequence that takes the cursor to the start of the region and
     /// erases everything from there on. The terminal has `columns` columns
-    /// now, which decides how many rows the region takes on screen.
-    fn erase(&self, columns: usize) -> String {
+    /// now, which decides how many rows the region takes on screen, if the
+    /// width is `settled`. A width that may still change climbs one row per
+    /// line: each line takes at least that many rows at any width, so the
+    /// climb stays short of a finished line.
+    fn erase(&self, columns: usize, settled: bool) -> String {
         let mut sequence = String::from("\r");
         if !self.shown.is_empty() {
-            let rows = rows_to_climb(&self.shown, columns, self.reflow);
+            let rows = if settled {
+                rows_to_climb(&self.shown, columns, self.reflow)
+            } else {
+                self.shown.len()
+            };
             sequence.push_str(&format!("\x1b[{rows}A"));
         }
         sequence.push_str("\x1b[J");
@@ -143,11 +159,15 @@ impl<'o> Driver<'o> {
             self.seen_size = size;
             self.seen_since = now;
         }
-        let settled = now.saturating_sub(self.seen_since) >= TICK;
+        let settled = self.size_has_held(now);
         let drawn = self.live && !self.halted && !self.shown.is_empty();
+        self.last_frame = now;
         if draw_region && drawn && size != self.last_size && !settled {
             return Ok(());
         }
+        // The end of a run takes the region off whatever the size is doing;
+        // a frame that draws has waited for the size to hold.
+        let settled_width = draw_region || settled;
         let (columns, rows) = size;
         let ready = self.cards.take_ready();
         let lines: Vec<String> = ready
@@ -172,7 +192,7 @@ impl<'o> Driver<'o> {
             return Ok(());
         }
         self.last_size = size;
-        let mut prefix = self.erase(columns);
+        let mut prefix = self.erase(columns, settled_width);
         if !lines.is_empty() {
             self.out
                 .stdout_raw(format!("{prefix}{}", Self::text(&lines)).as_bytes())?;
@@ -188,7 +208,9 @@ impl<'o> Driver<'o> {
     /// Takes the region off the screen.
     pub(crate) fn clear(&mut self) -> io::Result<()> {
         if self.live && !self.shown.is_empty() {
-            let erase = self.erase(self.size().0);
+            let size = self.size();
+            let settled = size == self.seen_size && self.size_has_held(self.last_frame);
+            let erase = self.erase(size.0, settled);
             self.out.stdout_raw(erase.as_bytes())?;
             self.shown.clear();
         }

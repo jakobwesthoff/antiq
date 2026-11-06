@@ -611,19 +611,74 @@ fn a_line_owed_while_the_size_changes_is_written_when_it_holds() {
     });
 }
 
+/// How often `needle` is in a line of `lines`.
+fn count_in(lines: &[String], needle: &str) -> usize {
+    lines.iter().filter(|line| line.contains(needle)).count()
+}
+
 #[test]
-fn the_end_of_a_run_clears_the_region_even_while_the_size_changes() {
+fn a_line_owed_when_the_run_ends_during_a_drag_is_written_once_and_no_card_stays() {
     dragged(|driver, size, _capture, watcher| {
+        let before = watcher.sync().lines()[..3].to_vec();
         watcher.screen.resize(60, 24, true);
         resize_to(size, (60, 24));
-        driver.finish(secs(6), Vec::new()).unwrap();
+        driver.message(done("piece/0", 1), secs(6)).unwrap();
+        driver.frame(secs(6), true).unwrap();
+        driver.finish(secs(7), Vec::new()).unwrap();
         let lines = watcher.sync().lines();
-        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert_eq!(lines[..3], before[..], "{lines:#?}");
+        assert_eq!(count_in(&lines, "✔ piece/0"), 1, "{lines:#?}");
+        assert_eq!(count_in(&lines, "packing"), 0, "{lines:#?}");
     });
 }
 
 #[test]
-fn a_halt_after_a_narrowing_takes_the_whole_region_off_the_screen() {
+fn a_line_owed_when_a_panic_halts_the_run_during_a_drag_is_written_once_below_the_finished_lines() {
+    dragged(|driver, size, _capture, watcher| {
+        let before = watcher.sync().lines()[..3].to_vec();
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.message(done("piece/0", 1), secs(6)).unwrap();
+        driver.frame(secs(6), true).unwrap();
+        driver.halt().unwrap();
+        driver.frame(secs(6), true).unwrap();
+        let lines = watcher.sync().lines();
+        // The size had not held for a tick, so the halt climbs short of a
+        // finished line and may leave the top of the old region behind.
+        assert_eq!(lines[..3], before[..], "{lines:#?}");
+        assert_eq!(count_in(&lines, "✔ piece/0"), 1, "{lines:#?}");
+    });
+}
+
+#[test]
+fn the_end_of_a_run_during_a_drag_that_went_back_to_the_wide_window_erases_no_finished_line() {
+    dragged(|driver, size, _capture, watcher| {
+        let before = watcher.sync().lines()[..3].to_vec();
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.frame(secs(6), true).unwrap();
+        // The window is wide again, but the driver has not read that yet.
+        watcher.screen.resize(100, 24, true);
+        driver.finish(secs(6), Vec::new()).unwrap();
+        let lines = watcher.sync().lines();
+        assert_eq!(lines[..3], before[..], "{lines:#?}");
+    });
+}
+
+#[test]
+fn the_end_of_a_run_while_the_size_changes_erases_no_finished_line() {
+    dragged(|driver, size, _capture, watcher| {
+        let before = watcher.sync().lines()[..3].to_vec();
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.finish(secs(6), Vec::new()).unwrap();
+        let lines = watcher.sync().lines();
+        assert_eq!(lines[..3], before[..], "{lines:#?}");
+    });
+}
+
+#[test]
+fn a_halt_after_a_narrowing_that_held_takes_the_whole_region_off_the_screen() {
     let (capture, mut out) = terminal(100, 24, true);
     let mut watcher = Watcher::new(&capture, 100, 24);
     let size = window((100, 24));
@@ -632,12 +687,14 @@ fn a_halt_after_a_narrowing_takes_the_whole_region_off_the_screen() {
     let finished = watcher.sync().lines()[..3].to_vec();
     watcher.screen.resize(60, 24, true);
     resize_to(&size, (60, 24));
+    driver.frame(secs(6), true).unwrap();
+    driver.frame(secs(7), true).unwrap();
     driver.halt().unwrap();
     assert_eq!(watcher.sync().lines(), finished);
 }
 
 #[test]
-fn the_end_of_a_run_after_a_narrowing_takes_the_whole_region_off_the_screen() {
+fn the_end_of_a_run_after_a_narrowing_that_held_takes_the_whole_region_off_the_screen() {
     let (capture, mut out) = terminal(100, 24, true);
     let mut watcher = Watcher::new(&capture, 100, 24);
     let size = window((100, 24));
@@ -646,7 +703,8 @@ fn the_end_of_a_run_after_a_narrowing_takes_the_whole_region_off_the_screen() {
     let finished = watcher.sync().lines()[..3].to_vec();
     watcher.screen.resize(60, 24, true);
     resize_to(&size, (60, 24));
-    driver.finish(secs(6), Vec::new()).unwrap();
+    driver.frame(secs(6), true).unwrap();
+    driver.finish(secs(7), Vec::new()).unwrap();
     assert_eq!(watcher.sync().lines(), finished);
 }
 
