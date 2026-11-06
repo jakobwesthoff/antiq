@@ -5,9 +5,13 @@
 //! Name checks for extraction.
 
 use super::TargetRules;
-use crate::relpath::RelPath;
+use crate::fsx::tree::TreeRoot;
+use crate::relpath::{Name, RelPath};
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
+use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 /// What a name limit counts.
@@ -230,6 +234,123 @@ pub fn portability_warnings(paths: &[RelPath]) -> Vec<PortabilityWarning> {
         }
     }
     warnings
+}
+
+// =========================================================
+// Probing a volume
+// =========================================================
+
+/// The directory a probe works in, below the root it probes. Dropping it
+/// removes what the probe created, on every way out of the probe.
+struct ProbeDirectory<'a> {
+    root: &'a TreeRoot,
+    path: RelPath,
+    created: Vec<RelPath>,
+}
+
+/// Distinguishes the probe directories of one process.
+static PROBES: AtomicU64 = AtomicU64::new(0);
+
+impl<'a> ProbeDirectory<'a> {
+    fn create(root: &'a TreeRoot) -> io::Result<ProbeDirectory<'a>> {
+        let number = PROBES.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".antiq-probe-{}-{number}", std::process::id());
+        let path =
+            RelPath::root().join(&Name::from_bytes(name.into_bytes()).expect("a valid name"));
+        root.create_dir(&path, 0o700)?;
+        Ok(ProbeDirectory {
+            root,
+            path,
+            created: Vec::new(),
+        })
+    }
+
+    fn entry(&self, name: &[u8]) -> RelPath {
+        let name = Name::from_bytes(name.to_vec()).expect("the probe only uses valid names");
+        self.path.join(&name)
+    }
+
+    /// Creates a file in the probe directory and remembers it for removal.
+    fn create_file(&mut self, name: &[u8]) -> io::Result<File> {
+        let path = self.entry(name);
+        let file = self.root.create_file(&path, 0o600)?;
+        self.created.push(path);
+        Ok(file)
+    }
+
+    /// Whether the probe directory holds an entry that the volume finds
+    /// under `name`.
+    fn finds(&self, name: &[u8]) -> io::Result<bool> {
+        match self.root.lstat(&self.entry(name)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for ProbeDirectory<'_> {
+    fn drop(&mut self) {
+        // Best effort: a probe that failed halfway is the reason to be
+        // here, and its error is the one worth reporting.
+        for path in self.created.iter().rev() {
+            let _ = self.root.remove_file(path);
+        }
+        let _ = self.root.remove_dir(&self.path);
+    }
+}
+
+/// Whether a failed attempt to create a file with a name that is not
+/// UTF-8 shows that the volume refuses such names. APFS answers with
+/// `EILSEQ`; any other failure says nothing about names.
+fn refuses_non_utf8(attempt: io::Result<File>) -> io::Result<bool> {
+    match attempt {
+        Ok(_) => Ok(false),
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+/// APFS counts a name's length in UTF-16 code units, other filesystems in
+/// bytes.
+const NAME_LIMIT_UNIT: LengthUnit = if cfg!(target_os = "macos") {
+    LengthUnit::Utf16Units
+} else {
+    LengthUnit::Bytes
+};
+
+impl TargetRules {
+    /// The rules of the volume that `root` is on, found by trying them in
+    /// a directory of their own below `root`, which is empty again when
+    /// the probe returns.
+    pub fn probe(root: &TreeRoot) -> io::Result<TargetRules> {
+        let mut directory = ProbeDirectory::create(root)?;
+
+        // A name that exists in lower case is found under its upper-case
+        // spelling only on a volume that ignores case.
+        let lower = directory.create_file(b"antiq-probe-case")?;
+        let case_insensitive = directory.finds(b"ANTIQ-PROBE-CASE")?;
+
+        directory.create_file("antiq-probe-caf\u{e9}".as_bytes())?;
+        let normalization_insensitive = directory.finds("antiq-probe-cafe\u{301}".as_bytes())?;
+
+        let requires_utf8 = refuses_non_utf8(directory.create_file(b"antiq-probe-\xff"))?;
+
+        // The open file stands for the volume: the root has no public
+        // descriptor of its own to ask.
+        let name_max = rustix::fs::fstatvfs(&lower)?.f_namemax;
+        let max = usize::try_from(name_max).map_err(io::Error::other)?;
+
+        Ok(TargetRules {
+            case_insensitive,
+            normalization_insensitive,
+            requires_utf8,
+            name_limit: NameLimit {
+                max,
+                unit: NAME_LIMIT_UNIT,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -531,5 +652,124 @@ mod tests {
     #[test]
     fn the_root_path_has_no_name_to_check() {
         assert_eq!(check_paths(&[RelPath::root()], &TargetRules::macos()), []);
+    }
+}
+
+/// Probing real directories.
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_root() -> (tempfile::TempDir, TreeRoot) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = TreeRoot::open(dir.path()).expect("the dir opens");
+        (dir, root)
+    }
+
+    fn is_empty(root: &TreeRoot) -> bool {
+        root.read_dir(&RelPath::root())
+            .expect("the root lists")
+            .is_empty()
+    }
+
+    #[test]
+    fn a_probe_leaves_the_root_empty() {
+        let (_dir, root) = temp_root();
+        TargetRules::probe(&root).expect("the probe runs");
+        assert!(is_empty(&root));
+    }
+
+    #[test]
+    fn the_probe_directory_removes_what_it_created_when_it_is_dropped() {
+        let (_dir, root) = temp_root();
+        {
+            let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
+            probe.create_file(b"one").expect("a file is created");
+            probe.create_file(b"two").expect("a file is created");
+            assert!(!is_empty(&root));
+        }
+        assert!(is_empty(&root));
+    }
+
+    #[test]
+    fn two_probe_directories_get_different_names() {
+        let (_dir, root) = temp_root();
+        let first = ProbeDirectory::create(&root).expect("the first is created");
+        let second = ProbeDirectory::create(&root).expect("the second is created");
+        assert_ne!(first.path, second.path);
+    }
+
+    #[test]
+    fn a_probe_directory_finds_an_entry_under_the_name_it_was_created_with() {
+        let (_dir, root) = temp_root();
+        let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
+        probe.create_file(b"here").expect("a file is created");
+        assert!(probe.finds(b"here").expect("the lookup works"));
+        assert!(!probe.finds(b"missing").expect("the lookup works"));
+    }
+
+    #[test]
+    fn a_lookup_that_fails_for_another_reason_is_an_error() {
+        let (_dir, root) = temp_root();
+        let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
+        probe.create_file(b"plain").expect("a file is created");
+        // A name below a file cannot be looked up: the error is not "not
+        // found".
+        let directory = probe.path.clone();
+        probe.path = directory.join(&Name::from_bytes(b"plain".to_vec()).expect("a valid name"));
+        assert!(probe.finds(b"inside").is_err());
+        probe.path = directory;
+    }
+
+    #[test]
+    fn only_an_illegal_byte_sequence_shows_that_the_volume_refuses_non_utf8() {
+        let illegal = io::Error::from_raw_os_error(libc::EILSEQ);
+        assert!(refuses_non_utf8(Err(illegal)).expect("a known answer"));
+        let created = tempfile::tempfile().expect("a file");
+        assert!(!refuses_non_utf8(Ok(created)).expect("a known answer"));
+        let other = io::Error::from_raw_os_error(libc::ENOSPC);
+        assert!(refuses_non_utf8(Err(other)).is_err());
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_written_gives_an_error_and_stays_empty() {
+        let (dir, root) = temp_root();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("the mode can be set");
+        assert!(
+            !rustix::process::geteuid().is_root(),
+            "this test needs a user the permissions bind"
+        );
+        let result = TargetRules::probe(&root);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("the mode can be restored");
+        assert!(result.is_err());
+        assert!(is_empty(&root));
+    }
+
+    /// What the volume does, observed with plain paths.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_probe_reports_what_the_temp_volume_does() {
+        let (dir, root) = temp_root();
+        let rules = TargetRules::probe(&root).expect("the probe runs");
+
+        std::fs::write(dir.path().join("lower"), b"").expect("a file");
+        let case_insensitive = dir.path().join("LOWER").exists();
+        std::fs::write(dir.path().join("caf\u{e9}"), b"").expect("a file");
+        let normalization_insensitive = dir.path().join("cafe\u{301}").exists();
+        let non_utf8 = dir.path().join(std::ffi::OsStr::from_bytes(b"a\xff"));
+        let requires_utf8 = std::fs::write(non_utf8, b"").is_err();
+        let name_max = rustix::fs::statvfs(dir.path())
+            .expect("the volume answers")
+            .f_namemax as usize;
+
+        assert_eq!(rules.case_insensitive, case_insensitive);
+        assert_eq!(rules.normalization_insensitive, normalization_insensitive);
+        assert_eq!(rules.requires_utf8, requires_utf8);
+        assert_eq!(rules.name_limit.max, name_max);
+        assert_eq!(rules.name_limit.unit, LengthUnit::Utf16Units);
     }
 }
