@@ -12,8 +12,10 @@
 use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 
 /// The format number of the JSON envelope.
 const ENVELOPE_FORMAT: u32 = 1;
@@ -33,10 +35,18 @@ impl Sink {
     }
 
     fn write_line(&mut self, line: &str) -> io::Result<()> {
+        self.write_line_bytes(line.as_bytes())
+    }
+
+    fn write_line_bytes(&mut self, line: &[u8]) -> io::Result<()> {
         if self.closed {
             return Ok(());
         }
-        let written = writeln!(self.writer, "{line}").and_then(|()| self.writer.flush());
+        let written = self
+            .writer
+            .write_all(line)
+            .and_then(|()| self.writer.write_all(b"\n"))
+            .and_then(|()| self.writer.flush());
         match written {
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
                 self.closed = true;
@@ -203,6 +213,13 @@ impl Output {
         self.stdout.write_line(text)
     }
 
+    /// Writes a line of a command's result to stdout as the bytes it is.
+    /// For output that a shell reads back, such as a path.
+    #[allow(dead_code, reason = "`find --print` prints through it")]
+    pub fn line_os(&mut self, text: &OsStr) -> io::Result<()> {
+        self.stdout.write_line_bytes(text.as_bytes())
+    }
+
     /// Writes a line of a message to the user to stderr.
     #[allow(dead_code, reason = "the commands print through it as they are built")]
     pub fn note(&mut self, text: &str) -> io::Result<()> {
@@ -269,6 +286,14 @@ pub mod testing {
 
         pub fn stderr(&self) -> String {
             text(&self.stderr)
+        }
+
+        /// What was written to stdout, whether it is UTF-8 or not.
+        pub fn stdout_bytes(&self) -> Vec<u8> {
+            self.stdout
+                .lock()
+                .expect("no test panics while reading")
+                .clone()
         }
     }
 
@@ -407,6 +432,41 @@ mod tests {
             .expect("memory accepts writes");
         assert_eq!(capture.stdout(), "Created the collection\n");
         assert_eq!(capture.stderr(), "nothing else was done\n");
+    }
+
+    #[test]
+    fn a_line_of_bytes_is_written_as_it_is() {
+        let capture = Capture::default();
+        let mut out = capture.output(false);
+        out.line_os(OsStr::from_bytes(b"/work/100% done/a\xff"))
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout_bytes(), b"/work/100% done/a\xff\n");
+        assert_eq!(capture.stderr(), "");
+    }
+
+    #[test]
+    fn a_line_of_bytes_to_a_closed_pipe_is_dropped() {
+        let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        out.line_os(OsStr::new("one"))
+            .expect("a closed pipe is no error");
+        out.line_os(OsStr::new("two"))
+            .expect("a closed pipe is no error");
+        assert_eq!(
+            *flushes.lock().expect("no test panics while counting"),
+            1,
+            "nothing is written after the pipe closed"
+        );
+    }
+
+    #[test]
+    fn another_write_failure_of_a_line_of_bytes_is_an_error() {
+        let (disk, _) = FailsOnFlush::new(io::ErrorKind::StorageFull);
+        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()), false);
+        let error = out
+            .line_os(OsStr::new("one"))
+            .expect_err("a full disk is reported");
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     }
 
     #[test]

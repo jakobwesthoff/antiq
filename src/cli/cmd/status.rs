@@ -83,7 +83,7 @@ enum Kind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Color {
+pub(super) enum Color {
     Plain,
     Dim,
     Bold,
@@ -451,7 +451,7 @@ fn render(report: &StatusReport, now: Timestamp, style: Style) -> Lines {
     Lines { stdout, stderr }
 }
 
-fn paint(style: Style, color: Color, text: &str) -> String {
+pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
     let code = match color {
         Color::Plain => return text.to_string(),
         Color::Dim => "\x1b[2m",
@@ -756,21 +756,21 @@ fn row_lines(row: &Row, age: &str, columns: &Columns, style: Style, wide: bool) 
 // Text
 // =========================================================
 
-fn spaces(count: usize) -> String {
+pub(super) fn spaces(count: usize) -> String {
     " ".repeat(count)
 }
 
-fn pad(text: &str, width: usize) -> String {
+pub(super) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", spaces(width.saturating_sub(text.width())))
 }
 
-fn pad_left(text: &str, width: usize) -> String {
+pub(super) fn pad_left(text: &str, width: usize) -> String {
     format!("{}{text}", spaces(width.saturating_sub(text.width())))
 }
 
 /// Shows control characters of a name in the escaped form of the spec, so
 /// that a name cannot move the cursor or end a line.
-fn sanitize(text: &str) -> String {
+pub(super) fn sanitize(text: &str) -> String {
     let mut shown = String::new();
     for character in text.chars() {
         if character.is_control() {
@@ -787,7 +787,7 @@ fn sanitize(text: &str) -> String {
 
 /// Cuts `text` to `width` columns by replacing its middle with `…`,
 /// keeping the start and the end. A text that fits stays as it is.
-fn mid(text: &str, width: usize) -> String {
+pub(super) fn mid(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
     }
@@ -823,7 +823,7 @@ fn mid(text: &str, width: usize) -> String {
 
 /// Breaks `text` into lines of at most `width` columns at spaces; a word
 /// longer than a line is cut.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut line = String::new();

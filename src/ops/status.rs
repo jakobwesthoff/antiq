@@ -20,7 +20,7 @@ use crate::meta::{HistoryAction, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::relpath::{Name, RelPath, escape};
 use crate::remote::away;
 use crate::remote::{self, RemoteState};
-use crate::report::{CommandReport, Warning};
+use crate::report::{self, CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
 use crate::store::{Current, Source, Store, StoreError};
 use crate::tracking::{
@@ -364,31 +364,7 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     let collection = request.collection;
     let own = collection.id();
     let config = &collection.config().collection;
-    let mut warnings = Vec::new();
-    let mut unknown_keys = collection.config().unknown_collection_keys.clone();
-    unknown_keys.sort();
-    for key in &unknown_keys {
-        warnings.push(Warning::new(format!(
-            "the key `{key}` under [collection] is unknown and ignored"
-        )));
-    }
-    match request.probes.fs_kind(collection.root()) {
-        Ok(FsKind::Smb) => warnings.push(Warning::new("the collection is on an SMB mount")),
-        Ok(FsKind::Nfs) => warnings.push(Warning::new("the collection is on an NFS mount")),
-        Ok(FsKind::Local | FsKind::Other) => {}
-        Err(error) => warnings.push(Warning::new(format!(
-            "cannot tell what kind of filesystem the collection is on: {error}"
-        ))),
-    }
-    // The lock is only read: taking it would make `status` a run of its own.
-    match lock::holder(&collection.lock_path()) {
-        Ok(Some(holder)) => warnings.push(Warning::new(format!(
-            "another run holds the lock (pid {}, machine {}, started {})",
-            holder.pid, holder.machine, holder.started
-        ))),
-        Ok(None) => {}
-        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
-    }
+    let mut warnings = report::notes_with(collection, request.probes.fs_kind(collection.root()));
     let last_sync = read_last_sync(collection, &mut warnings);
 
     // =====================================================
