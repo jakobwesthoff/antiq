@@ -249,8 +249,8 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Import(args) => cmd::import::run(&ctx, args),
         Command::List(args) => cmd::list::run(&ctx, args, out),
         Command::Grep(args) => cmd::grep::run(&ctx, args, out),
-        Command::Pin(args) => cmd::pin::pin(&ctx, args),
-        Command::Unpin(args) => cmd::pin::unpin(&ctx, args),
+        Command::Pin(args) => cmd::pin::pin(&ctx, args, out),
+        Command::Unpin(args) => cmd::pin::unpin(&ctx, args, out),
         Command::Push(args) => cmd::push::run(&ctx, args),
     }
 }

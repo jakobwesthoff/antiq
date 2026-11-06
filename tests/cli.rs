@@ -223,8 +223,28 @@ fn list_needs_a_collection() {
         assert_eq!(run.json()["command"], "list");
     }
 }
-command_line!(pin, "pin", ["pin", "piece", "-n"]);
-command_line!(unpin, "unpin", ["unpin", "piece", "-n"]);
+
+#[test]
+fn pin_and_unpin_need_a_collection() {
+    for command in ["pin", "unpin"] {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args([command, "piece", "-n"])
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection", "{command}");
+        assert_eq!(run.json()["command"], command);
+    }
+}
+
 command_line!(push, "push", ["push"]);
 command_line!(push_with_init, "push", ["push", "--init", "--dry-run"]);
 command_line!(push_with_force, "push", ["push", "--force"]);

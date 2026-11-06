@@ -1338,6 +1338,22 @@ header and every note that needs the store, and exits 0.
 `pin <piece>` and `unpin <piece>` create or remove `.antiq-pin` at the top
 of a live piece (see "Pins"). `-n` says which.
 
+The piece is a live piece, given as a path or a search word. A folder that
+is not present, or that no pattern selects, is the error kind
+`unknown_reference`. An empty `<piece>` is a usage error. A run prints
+`Pinned <piece>`, `Unpinned <piece>`, `<piece> is already pinned` or
+`<piece> is not pinned` and exits 0; `pin` on a piece that is pinned
+already writes nothing and still flushes the piece's directory.
+
+A dry run prints the repairs as `Would ...` lines, then `Would pin <piece>`
+or `Would unpin <piece>`. When the piece is in the state asked for it
+prints the sentence of a real run instead of `Nothing to do.`. It assumes
+the repairs were done, so a folder that repair 4 gives back to its live
+path is found when a pattern selects it. It refuses what a real run
+refuses: a pin file that is a directory, and, for `pin` on a piece that
+has no pin, a top on another device (reason "mount point"). A rename that
+fails with `EXDEV` in the real run cannot be foreseen.
+
 ## Push
 
 `push [--init] [--force] [--if-reachable]` mirrors the collection to the
@@ -1651,7 +1667,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece or the version of `forget` is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `pin`, `unpin` or `forget`, or the version of `forget`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
@@ -1684,6 +1700,13 @@ it as stamps, newest first; it is empty for a piece whose name matches.
 `stamp` and `reason`, and is empty when there are none. Under `--json` a
 skipped version and the lock note appear only in the object, while the note
 that nothing matched is on stderr as in text output.
+
+`pin` and `unpin` add `piece`, `pinned` (whether the piece is pinned after
+the run), `changed` (whether the pin was in the other state before it),
+`repairs` and `warnings`, as for `forget`. A dry run has `piece`, `pinned`
+and `changed` after `dry_run`, then `actions` and `warnings`: the repair
+actions first, then `{"kind": "pin", "piece": ...}` or `{"kind": "unpin",
+"piece": ...}` when `changed` is true.
 
 `forget` adds `forgotten`, `failed`, `repairs` and `warnings` (as for
 `list`, plus the repairs that failed). Each forgotten version is `piece`, `stamp` (the version stamp),
