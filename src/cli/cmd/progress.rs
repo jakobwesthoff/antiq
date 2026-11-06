@@ -7,40 +7,96 @@
 //! and the pieces that never sent an event.
 
 use crate::cli::Context;
-use crate::cli::console::cards::{Config, Count, Ready, Summary, Tone};
-use crate::cli::console::live::{Label, Setup};
+use crate::cli::console::cards::{Cards, Config, Count, Ready, Summary, Tone};
+use crate::cli::console::live::{Label, Setup, observed};
 use crate::cli::output::Output;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::push::PushReport;
-use antiq::progress::{Operation, Outcome};
+use antiq::progress::{Observer, Operation, Outcome};
+use anyhow::Context as _;
 use std::path::Path;
 use std::time::Duration;
 
-/// Cards are for a real run on a terminal. A pipe, `--json` and a dry run
-/// keep the lines they always had.
-pub(super) fn is_live(ctx: &Context, dry_run: bool, out: &Output) -> bool {
-    !ctx.json && !dry_run && out.stdout_env().rich
+/// How a command describes itself to the cards.
+pub(super) struct Description {
+    /// The operations whose count does not read `N/M files`.
+    pub counts: &'static [(Operation, Count)],
+    /// Printed above the cards when the first event arrives.
+    pub header: Option<String>,
+    /// How the version of an unearth reads; the stamp for any other command.
+    pub label: Label,
 }
 
-/// The setup of the cards of one run. `label` shows the version of an
-/// unearth.
-pub(super) fn setup(
-    counts: &'static [(Operation, Count)],
-    ctx: &Context,
-    out: &Output,
-    header: Option<String>,
-    label: Label,
-) -> Setup {
-    Setup {
-        config: Config {
+impl Description {
+    pub(super) fn new(counts: &'static [(Operation, Count)]) -> Description {
+        Description {
             counts,
+            header: None,
+            label: Box::new(|stamp, _| stamp.to_string()),
+        }
+    }
+}
+
+/// The cards of a run that showed them, kept for the last line.
+pub(super) struct Shown {
+    cards: Cards,
+    took: Duration,
+}
+
+impl Shown {
+    /// The closing line, painted like the lines above it.
+    pub(super) fn summary_line(&self, summary: &Summary) -> String {
+        self.cards.summary_line(summary)
+    }
+
+    /// An empty line, then the closing line.
+    pub(super) fn print_summary(&self, out: &mut Output, summary: &Summary) -> anyhow::Result<()> {
+        out.line("").context("print the result")?;
+        out.line(&self.summary_line(summary))
+            .context("print the result")
+    }
+
+    /// From the start of the run to its end.
+    pub(super) fn took(&self) -> Duration {
+        self.took
+    }
+}
+
+/// Runs a command with cards when its stdout is a terminal that shows them,
+/// and plainly otherwise. A pipe, `--json` and a dry run keep the lines they
+/// always had.
+///
+/// `watched` is the library call that tells an observer what it does,
+/// `unwatched` the one that does not. `missing` names the pieces of the
+/// result that never sent an event, which get their line at the end.
+pub(super) fn watch<T>(
+    ctx: &Context,
+    out: &mut Output,
+    dry_run: bool,
+    description: Description,
+    watched: impl FnOnce(&dyn Observer) -> T,
+    unwatched: impl FnOnce() -> T,
+    missing: impl FnOnce(&T) -> Vec<Ready>,
+) -> anyhow::Result<(T, Option<Shown>)> {
+    if ctx.json || dry_run || !out.stdout_env().rich {
+        return Ok((unwatched(), None));
+    }
+    let setup = Setup {
+        config: Config {
+            counts: description.counts,
             style: out.stdout_style(),
             directory: ctx.directory.clone(),
         },
-        header,
-        label,
+        header: description.header,
+        label: description.label,
         panic_hook: true,
-    }
+    };
+    let run = observed(out, setup, watched, missing).context("show the progress")?;
+    let shown = Shown {
+        cards: run.cards,
+        took: run.took,
+    };
+    Ok((run.value, Some(shown)))
 }
 
 pub(super) fn plural(count: usize, one: &str, many: &str) -> String {

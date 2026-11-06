@@ -4,10 +4,9 @@
 
 //! The `unearth` command: brings a version back and removes it.
 
-use super::progress;
+use super::progress::{self, Description};
 use crate::cli::console::block::Block;
 use crate::cli::console::cards::{Count, Summary, Tone};
-use crate::cli::console::live::observed;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
@@ -45,31 +44,21 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
     let style = out.stdout_style();
     // On a terminal the piece shows as a card while it comes back, and its
     // line replaces the line of the pipe.
-    let mut cards = None;
-    let result = if progress::is_live(ctx, args.dry_run, out) {
-        let label_zone = zone.clone();
-        let setup = progress::setup(
-            COUNTS,
-            ctx,
-            out,
-            None,
-            Box::new(move |stamp, siblings| {
-                let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
-                label(stamp, &siblings, style, &label_zone)
-            }),
-        );
-        let run = observed(
-            out,
-            setup,
-            |observer| unearth_observed(&collection, &request, &SystemClock, &zone, observer),
-            |_| Vec::new(),
-        )
-        .context("show the progress")?;
-        cards = Some((run.cards, run.took));
-        run.value
-    } else {
-        unearth(&collection, &request, &SystemClock, &zone)
-    };
+    let label_zone = zone.clone();
+    let mut description = Description::new(COUNTS);
+    description.label = Box::new(move |stamp, siblings| {
+        let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
+        label(stamp, &siblings, style, &label_zone)
+    });
+    let (result, shown) = progress::watch(
+        ctx,
+        out,
+        args.dry_run,
+        description,
+        |observer| unearth_observed(&collection, &request, &SystemClock, &zone, observer),
+        || unearth(&collection, &request, &SystemClock, &zone),
+        |_| Vec::new(),
+    )?;
     let outcome = result
         .map_err(antiq::Error::from)
         .context("unearth the version")?;
@@ -113,18 +102,17 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
                     .context("print the result")?;
             } else {
                 let lines = done_lines(&report, style, &zone);
-                if let Some((cards, took)) = &cards {
-                    let summary = done_summary(&report, collection.root(), &ctx.start, *took);
-                    out.line("").context("print the result")?;
-                    out.line(&cards.summary_line(&summary))
-                        .context("print the result")?;
+                if let Some(shown) = &shown {
+                    let summary =
+                        done_summary(&report, collection.root(), &ctx.start, shown.took());
+                    shown.print_summary(out, &summary)?;
                 } else {
                     for line in &lines.stdout {
                         out.line(line).context("print the result")?;
                     }
                 }
                 out.notices(&lines.notices).context("print the notes")?;
-                if cards.is_none() {
+                if shown.is_none() {
                     for line in &lines.stderr {
                         out.note(line).context("print the notes")?;
                     }

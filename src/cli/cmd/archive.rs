@@ -5,8 +5,8 @@
 //! The `archive` command: archives due pieces, or one piece now.
 
 use super::progress;
-use crate::cli::console::cards::{Cards, Count, items};
-use crate::cli::console::live::observed;
+use super::progress::{Description, Shown};
+use crate::cli::console::cards::{Count, items};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
@@ -46,30 +46,18 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
     };
     // On a terminal the pieces show as cards while they work, and the lines
     // they leave behind replace the lines of the pipe.
-    let mut cards = None;
-    let result = if progress::is_live(ctx, args.dry_run, out) {
-        let setup = progress::setup(
-            COUNTS,
-            ctx,
-            out,
-            None,
-            Box::new(|stamp, _| stamp.to_string()),
-        );
-        let run = observed(
-            out,
-            setup,
-            |observer| archive_observed(&collection, &SystemClock, &request, observer),
-            |result| match result {
-                Ok(Outcome::Archived(report)) => progress::archive_pieces(report),
-                _ => Vec::new(),
-            },
-        )
-        .context("show the progress")?;
-        cards = Some((run.cards, run.took));
-        run.value
-    } else {
-        archive(&collection, &SystemClock, &request)
-    };
+    let (result, shown) = progress::watch(
+        ctx,
+        out,
+        args.dry_run,
+        Description::new(COUNTS),
+        |observer| archive_observed(&collection, &SystemClock, &request, observer),
+        || archive(&collection, &SystemClock, &request),
+        |result| match result {
+            Ok(Outcome::Archived(report)) => progress::archive_pieces(report),
+            _ => Vec::new(),
+        },
+    )?;
     let outcome = result
         .map_err(antiq::Error::from)
         .context(if args.dry_run {
@@ -80,8 +68,8 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
 
     match outcome {
         Outcome::Archived(report) => {
-            match cards {
-                Some((cards, took)) => print_cards_report(&cards, took, &report, out)?,
+            match shown {
+                Some(shown) => print_cards_report(&shown, &report, out)?,
                 None => print_report(ctx, &report, out)?,
             }
             Ok(report.exit_code())
@@ -129,17 +117,14 @@ fn rerun_text(plan: &ArchivePlan) -> String {
 /// The lines of the pieces are on the screen already: a blank line, the
 /// summary, and the notes. A run without a piece prints the text of the pipe.
 fn print_cards_report(
-    cards: &Cards,
-    took: std::time::Duration,
+    shown: &Shown,
     report: &ArchiveReport,
     out: &mut Output,
 ) -> anyhow::Result<()> {
-    let Some(summary) = progress::archive_summary(report, took) else {
+    let Some(summary) = progress::archive_summary(report, shown.took()) else {
         return print_pipe_lines(report, out);
     };
-    out.line("").context("print the result")?;
-    out.line(&cards.summary_line(&summary))
-        .context("print the result")?;
+    shown.print_summary(out, &summary)?;
     print_notices(report, out)
 }
 
