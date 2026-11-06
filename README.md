@@ -261,6 +261,16 @@ For an ssh target, `url = "backup@nas.local:/volume1/antiq/projects"`, the
 ssh options such as a port go into `~/.ssh/config`. ssh is the recommended
 way to reach a NAS.
 
+> [!TIP]
+> A NAS share that does not let rsync set file modes makes `push` fail
+> with "the target does not let rsync set file modes". Tell rsync to leave
+> the modes alone in `.antiq/config.toml`:
+>
+> ```toml
+> [target]
+> rsync_args = ["--no-perms"]
+> ```
+
 The target is a mirror, not a backup: whatever is deleted in the
 collection is deleted on the target by the next push. The reference below
 says more under "Good to know".

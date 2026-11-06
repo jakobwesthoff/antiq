@@ -362,6 +362,39 @@ mod tests {
     }
 
     #[test]
+    fn a_target_that_refuses_modes_names_the_option_and_the_first_lines() {
+        let error = PushError::TargetRefusesModes {
+            shown: vec![
+                "rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)".into(),
+                "rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)".into(),
+            ],
+            more: 37,
+        };
+        assert_eq!(
+            rich(error, &["push the antiq collection"]),
+            [
+                " ✖ ERROR",
+                "▌ The mirror failed: the target does not let rsync set file modes (rsync exit 23)",
+                "▌",
+                "▌ How to fix it",
+                "▌   The target does not let rsync set file modes. Add this to .antiq/config.toml:",
+                "▌",
+                "▌     [target]",
+                "▌     rsync_args = [\"--no-perms\"]",
+                "▌",
+                "▌   rsync said:",
+                "▌",
+                "▌     rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
+                "▌     rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
+                "▌     and 37 more lines",
+                "▌",
+                "▌ What antiq was doing",
+                "▌   Attempting to push the antiq collection.",
+            ]
+        );
+    }
+
+    #[test]
     fn the_commands_of_a_damaged_store_are_pasteable_from_another_directory() {
         let piece = RelPath::parse("my docs/scan").expect("a path");
         let stamp = Stamp::parse("2026-11-05T120211").expect("a stamp");

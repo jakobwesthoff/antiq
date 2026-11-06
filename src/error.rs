@@ -1144,6 +1144,16 @@ mod tests {
                 ErrorKind::Other,
             ),
             (
+                "target refuses modes",
+                push::PushError::TargetRefusesModes {
+                    shown: vec!["rsync: [receiver] chmod \"/t\" failed".into()],
+                    more: 0,
+                }
+                .into(),
+                "antiq::push::target_refuses_modes",
+                ErrorKind::Other,
+            ),
+            (
                 "push over marker",
                 push::PushError::MarkerFormat(marker_too_new()).into(),
                 "antiq::target::marker_too_new",

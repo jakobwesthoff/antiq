@@ -1719,6 +1719,70 @@ fn a_failed_mirror_is_exit_1_with_rsyncs_text_also_under_if_reachable() {
     }
 }
 
+/// What rsync prints when the share refuses `chmod`: a line for each file.
+fn refused_modes_stderr(files: usize) -> String {
+    let lines: String = (1..=files)
+        .map(|number| {
+            format!(
+                "rsync: [receiver] mkstemp \"/mnt/shadow/beta/.note{number}.md.A3Kcxa\" failed: Operation not permitted (1)\n"
+            )
+        })
+        .collect();
+    format!("{lines}rsync error: some files/attrs were not transferred (code 23) at main.c(1338)\n")
+}
+
+#[test]
+fn a_target_that_refuses_file_modes_gets_the_option_that_fixes_it() {
+    for args in [&[][..], &["-n"][..]] {
+        let target = Target::new();
+        let (collection, fake) = targeted(&target.path());
+        target.marker(&collection);
+        fake.answer_all("", &refused_modes_stderr(40), 23);
+
+        let run = push(&collection, args);
+
+        assert_eq!(run.code(), 1, "{}", run.stdout);
+        assert_eq!(run.error_kind(), "other");
+        let json = run.json();
+        assert_eq!(
+            json["error"]["code"], "antiq::push::target_refuses_modes",
+            "{args:?}"
+        );
+        let fix = run.error_fix();
+        assert!(fix.contains("rsync_args = [\"--no-perms\"]"), "{fix}");
+        assert!(fix.contains("does not let rsync set file modes"), "{fix}");
+        assert!(fix.contains("note3.md"), "{fix}");
+        assert!(!fix.contains("note4.md"), "{fix}");
+        assert!(fix.contains("and 38 more lines"), "{fix}");
+    }
+}
+
+#[test]
+fn the_text_of_a_target_that_refuses_file_modes_is_short_in_a_pipe() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.answer_all("", &refused_modes_stderr(40), 23);
+
+    let run = push_text(&collection, &[]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("the target does not let rsync set file modes"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("--no-perms"), "{}", run.stderr);
+    assert_eq!(
+        run.stderr.matches("[receiver]").count(),
+        3,
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("and 38 more lines"), "{}", run.stderr);
+}
+
 #[test]
 fn a_mirror_ended_by_a_signal_is_exit_1() {
     let target = Target::new();

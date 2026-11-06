@@ -158,6 +158,19 @@ pub enum PushError {
     },
     #[error("the mirror failed: {detail}")]
     Mirror { detail: String },
+    /// The mirror ended with exit 23 because the receiver refused to set
+    /// the modes of the files it wrote.
+    #[diagnostic(
+        code(antiq::push::target_refuses_modes),
+        help("{}", refused_modes_help(.shown, *.more))
+    )]
+    #[error("the mirror failed: the target does not let rsync set file modes (rsync exit 23)")]
+    TargetRefusesModes {
+        /// The first lines rsync printed.
+        shown: Vec<String>,
+        /// How many lines rsync printed beyond `shown`.
+        more: usize,
+    },
     #[error("sending the marker to the target failed: {detail}")]
     MarkerRun { detail: String },
     #[error("cannot name this machine")]
@@ -166,6 +179,21 @@ pub enum PushError {
         #[diagnostic_source]
         MachineError,
     ),
+}
+
+/// The help of [`PushError::TargetRefusesModes`]: the option that stops
+/// rsync from setting modes, then what rsync said as preformatted lines.
+fn refused_modes_help(shown: &[String], more: usize) -> String {
+    let mut help = String::from(
+        "The target does not let rsync set file modes. Add this to `.antiq/config.toml`:\n\n  [target]\n  rsync_args = [\"--no-perms\"]\n\nrsync said:\n\n",
+    );
+    help.push_str(&indented(shown));
+    match more {
+        0 => {}
+        1 => help.push_str("\n  and 1 more line"),
+        more => help.push_str(&format!("\n  and {more} more lines")),
+    }
+    help
 }
 
 /// The lines of the damaged versions as the preformatted lines of a help.
@@ -200,6 +228,7 @@ impl HasKind for PushError {
             | PushError::Scratch { .. }
             | PushError::MarkerRun { .. }
             | PushError::Mirror { .. }
+            | PushError::TargetRefusesModes { .. }
             | PushError::MarkerMismatch { .. }
             | PushError::MarkerFormat(MarkerError::Invalid { .. }) => ErrorKind::Other,
         }

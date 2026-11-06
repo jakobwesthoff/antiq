@@ -1835,7 +1835,15 @@ target. `--init` and `--force` are each refused together with
    under `--if-reachable`. With exit 23
    and the line `IO error encountered -- skipping file deletion`, push
    says that no deletion reached the target and names the directories
-   rsync could not open. Exit 12 with ``unrecognized option `--fsync'``
+   rsync could not open. With exit 23 and a line of the target's side
+   (`[receiver]`) that names `mkstemp` or `chmod` and `Operation not
+   permitted`, the target does not let rsync set file modes. `push` then
+   fails with the code `antiq::push::target_refuses_modes`, kind `other`.
+   Its fix says that the target does not let rsync set file modes, names
+   `rsync_args = ["--no-perms"]` under `[target]` in `.antiq/config.toml`,
+   and shows the first three lines of rsync's error output and the number
+   of the lines beyond them. The `IO error encountered` case takes
+   precedence when both apply. Exit 12 with ``unrecognized option `--fsync'``
    (openrsync) or `--fsync: unknown option` (older rsync) is reported as:
    the target's rsync (openrsync, or older than 3.2.4) lacks `--fsync`;
    set `[target] rsync_path` to a 3.2.4+ rsync there, or `fsync = false`.

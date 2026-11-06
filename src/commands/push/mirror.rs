@@ -73,6 +73,20 @@ fn lacks_fsync(stderr: &str) -> bool {
 
 const IO_ERROR_LINE: &str = "IO error encountered -- skipping file deletion";
 
+/// How many of rsync's lines the error of a target that refuses file modes
+/// shows. A share with many files prints one line for each.
+const REFUSED_LINES_SHOWN: usize = 3;
+
+/// Whether the error text of an exit 23 holds a refusal of the receiver to
+/// create a temporary file (`mkstemp`) or to change a mode (`chmod`).
+fn refuses_modes(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("[receiver]")
+            && line.contains("Operation not permitted")
+            && (line.contains("mkstemp") || line.contains("chmod"))
+    })
+}
+
 /// What a finished mirror run tells beyond its itemized changes.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Finished {
@@ -120,6 +134,20 @@ pub(super) fn classify(outcome: &Outcome) -> Result<Finished, PushError> {
                 "rsync could not read parts of the collection (exit 23), so no deletion reached the target; it could not open {}: {said}",
                 directories.join(", ")
             )
+        }
+        // rsync -a sets the mode of every file it writes. A share that
+        // forbids that fails each file on its own, with one line each.
+        Some(23) if refuses_modes(&stderr) => {
+            let mut lines = stderr.lines().filter(|line| !line.trim().is_empty());
+            let shown: Vec<String> = lines
+                .by_ref()
+                .take(REFUSED_LINES_SHOWN)
+                .map(str::to_string)
+                .collect();
+            return Err(PushError::TargetRefusesModes {
+                shown,
+                more: lines.count(),
+            });
         }
         Some(code) => format!("rsync ended with exit {code}: {said}"),
         None => format!("rsync was ended by a signal: {said}"),
@@ -449,6 +477,73 @@ mod tests {
         assert!(detail.contains("/srv/coll/locked"), "{detail}");
         assert!(detail.contains("/srv/coll/odd"), "{detail}");
         assert!(detail.contains("exit 23"), "{detail}");
+    }
+
+    /// The stderr of a push to a share that refuses `chmod`: one line for
+    /// each file, then rsync's closing line.
+    fn refused_modes(files: usize) -> String {
+        let mut stderr = String::new();
+        for number in 1..=files {
+            stderr.push_str(&format!(
+                "rsync: [receiver] mkstemp \"/mnt/shadow/beta/.note{number}.md.A3Kcxa\" failed: Operation not permitted (1)\n"
+            ));
+        }
+        stderr.push_str(
+            "rsync error: some files/attrs were not transferred (code 23) at main.c(1338)\n",
+        );
+        stderr
+    }
+
+    fn refused_error(outcome: Outcome) -> (Vec<String>, usize) {
+        match classify(&outcome) {
+            Err(PushError::TargetRefusesModes { shown, more }) => (shown, more),
+            other => panic!("expected a refused-modes error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_23_with_the_receiver_refusing_mkstemp_is_a_target_that_refuses_modes() {
+        let (shown, more) = refused_error(outcome_of(Some(23), "", &refused_modes(5)));
+        assert_eq!(shown.len(), REFUSED_LINES_SHOWN);
+        assert!(shown[0].contains("note1.md"), "{shown:?}");
+        assert!(shown[2].contains("note3.md"), "{shown:?}");
+        // Two more file lines and rsync's closing line.
+        assert_eq!(more, 3);
+    }
+
+    #[test]
+    fn a_receiver_chmod_refusal_is_the_same_case() {
+        let stderr =
+            "rsync: [receiver] chmod \"/mnt/shadow/beta\" failed: Operation not permitted (1)\n";
+        let (shown, more) = refused_error(outcome_of(Some(23), "", stderr));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(more, 0);
+    }
+
+    #[test]
+    fn other_receiver_refusals_and_other_exits_are_not_the_case() {
+        let unrelated =
+            "rsync: [receiver] mkstemp \"/mnt/x\" failed: No space left on device (28)\n";
+        let sender_side = "rsync: [sender] chmod \"/srv/x\" failed: Operation not permitted (1)\n";
+        let refused = refused_modes(1);
+        for (code, stderr) in [
+            (Some(23), unrelated),
+            (Some(23), sender_side),
+            (Some(11), refused.as_str()),
+        ] {
+            let detail = mirror_error(outcome_of(code, "", stderr));
+            assert!(detail.contains("rsync ended with exit"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn the_io_error_line_keeps_precedence_over_refused_modes() {
+        let stdout = format!("{IO_ERROR_LINE}\n");
+        let detail = mirror_error(outcome_of(Some(23), &stdout, &refused_modes(1)));
+        assert!(
+            detail.contains("no deletion reached the target"),
+            "{detail}"
+        );
     }
 
     #[test]
