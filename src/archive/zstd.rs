@@ -447,6 +447,34 @@ mod tests {
     }
 
     #[test]
+    fn a_flush_reports_the_progression_and_leaves_a_frame_that_still_decodes() {
+        let counter = Counter::new();
+        let sink = Recording {
+            counter: counter.clone(),
+            seen: Vec::new(),
+        };
+        let mut encoder =
+            encoder_counted(sink, &ZstdSettings::fast(), Some(&counter)).expect("an encoder");
+        let input = sample(100_000);
+        encoder.write_all(&input).expect("the sink accepts");
+        encoder.flush().expect("the flush ends");
+        // 100 KB are below the 256 KiB between two reads, so only the flush
+        // can have raised the counter.
+        assert_eq!(counter.done(), input.len() as u64);
+        encoder.write_all(&input).expect("the sink accepts");
+        encoder.finish().expect("the frame ends");
+        assert_eq!(counter.done(), 2 * input.len() as u64);
+    }
+
+    #[test]
+    fn a_parameter_zstd_refuses_is_an_error_of_the_encoder_start() {
+        let error = encoder_with(Vec::new(), &[CParameter::WindowLog(99)], None)
+            .err()
+            .expect("a window of 2^99 is out of range");
+        assert!(error.to_string().contains("out of bound"), "{error}");
+    }
+
+    #[test]
     fn the_progression_is_read_every_256_kib_fed() {
         let counter = Counter::new();
         let mut encoder =
