@@ -2204,7 +2204,7 @@ turns, the piece in bold, its size and the operation: `packing`,
 the percentage and a count: `N/M files`, `N/M entries` for the removing of
 `archive`, and sizes such as `412 MB/1.2 GB` for the operations whose count
 is the content bytes of the piece: the `packing` and `verifying` of
-`archive` and the `verifying` of `unearth`, `fork` and `rebuild`. A `push` has a card
+`archive`, the `extracting` and `verifying` of `unearth` and `fork` and the `verifying` of `rebuild`. A `push` has a card
 of its own kind, described below. A count shows numbers only in units that match the card (its
 size, files, entries). The bar of `packing` follows the content bytes of
 the files among the bytes of the tar stream that the compressor has
@@ -2213,16 +2213,20 @@ stream count for nothing. The bar of the `verifying` of `archive` follows the
 content bytes of the members as the archive hands them out and those of the
 files of the folder as they are read, against twice the size of the files;
 its count shows both numbers halved, in the units of the size. The bar of
-the `verifying` of an `unearth` or a `fork` follows the content bytes of
-the files compared with the listing, against the same size. The `rebuild`
+the `extracting` of an `unearth` or a `fork` follows the content bytes of
+the regular files as they are written, against the content bytes of the
+listing; a version without a listing has no total, so its `extracting` shows
+a moving bar and the bytes written. The bar of the `verifying` of an `unearth`
+or a `fork` follows the content bytes of the files compared with the
+listing, against the same size. The `rebuild`
 reads the archive once, and the same read hashes the file and gives the
 members. Its `verifying` follows the content bytes of the members as the
 archive hands them out. The size of its card and the total of its bar are
 the content bytes of the listing where the version has one. Where it has
 none, the size is blank and the count shows the content bytes checked so
 far (`412 MB`) under the moving bar, with no total and no percentage. An operation
-whose total is not known yet, and the `verifying` of an `unearth` or a
-`fork` whose files hold no bytes, has a bar with a moving lit part and no percentage or
+whose total is not known yet, and the `extracting` and `verifying` of an
+`unearth` or a `fork` whose files hold no bytes, has a bar with a moving lit part and no percentage or
 count. The percentage is rounded and stays at 99 until the operation is
 done.
 

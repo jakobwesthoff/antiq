@@ -32,7 +32,7 @@ screen during the run and the lines that remain after it look alike.
 The bar of an operation follows the work in bytes where bytes are what
 takes time, and counts the content bytes of the piece's files, the unit of
 the size on the card: packing counts the content bytes among those the
-compressor has consumed, and the verifying of an archive the content bytes
+compressor has consumed, the extracting of an unearth or a fork the content bytes of the regular files as they are written, against those of the listing, and the verifying of an archive the content bytes
 of the members as the archive hands them out plus those of the files of the
 folder as they are read, with the count under the bar halved. The verifying of a
 rebuild counts the content bytes of the members of its single read of the archive; without a

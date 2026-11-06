@@ -317,7 +317,7 @@ mod tests {
     fn the_cards_of_a_fork_count_files_while_extracting_and_bytes_while_verifying() {
         use antiq::progress::Operation;
         for (operation, word, count) in [
-            (Operation::Extracting, "extracting", "1/4 files"),
+            (Operation::Extracting, "extracting", "1 B/4 B"),
             (Operation::Verifying, "verifying", "1 B/4 B"),
         ] {
             let [first, second] = progress::card_of(super::super::unearth::COUNTS, operation, 1, 4);

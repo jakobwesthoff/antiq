@@ -449,6 +449,9 @@ impl<'a> Extraction<'a> {
                         break;
                     }
                     file.write_all(&self.chunk[..count]).map_err(at)?;
+                    if let Some(counter) = self.counter {
+                        counter.add(count as u64);
+                    }
                 }
                 file.set_permissions(Permissions::from_mode(mode))
                     .map_err(at)?;
@@ -459,9 +462,6 @@ impl<'a> Extraction<'a> {
                 self.flush.file(&file, &path).map_err(at)?;
                 drop(file);
                 self.files += 1;
-                if let Some(counter) = self.counter {
-                    counter.add(1);
-                }
             }
             Kind::Symlink(target) => {
                 parent.create_symlink(&leaf, &target).map_err(at)?;
@@ -552,9 +552,9 @@ pub fn unpack_flushed(
     unpack_with(package, staging, rules, flush, None)
 }
 
-/// [`unpack_flushed`], adding one to `counter` for every regular file once
-/// it is extracted. A symlink and a hard link are no files, as in the
-/// `files` of a listing.
+/// [`unpack_flushed`], adding the bytes of every regular file to `counter`
+/// as they are written, so the counter measures against the content bytes
+/// of a listing. A symlink and a hard link have none of their own.
 pub fn unpack_counted(
     package: &Path,
     staging: &TreeRoot,

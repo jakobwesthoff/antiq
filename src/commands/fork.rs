@@ -755,7 +755,7 @@ mod tests {
             recorder.lines(),
             [
                 "started projects/scanner 25 2026-11-04T090211",
-                "projects/scanner Extracting 2/2",
+                "projects/scanner Extracting 25/25",
                 "projects/scanner Verifying 25/25",
                 "finished projects/scanner 25 Files(2)",
             ]
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_of_a_version_without_a_listing_counts_the_files_it_extracted() {
+    fn a_fork_of_a_version_without_a_listing_counts_the_bytes_it_extracted() {
         let world = World::new(&[NEW]);
         fs::remove_file(world.version_path(VersionFile::Listing)).expect("removes");
         let recorder = Recorder::new();
@@ -818,7 +818,7 @@ mod tests {
             recorder.lines(),
             [
                 "started projects/scanner - 2026-11-04T090211",
-                "projects/scanner Extracting 2/0",
+                "projects/scanner Extracting 25/0",
                 "finished projects/scanner 0 Files(2)",
             ]
         );

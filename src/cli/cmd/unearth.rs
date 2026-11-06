@@ -25,18 +25,26 @@ use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 
-/// The verifying of an unearth counts the content bytes of the files it
-/// compares, as the size on the card does. Every other count is a
-/// count of files, which is what the cards show for an operation without an
-/// entry here. `fork` brings a version back the same way and uses the same
-/// list.
-pub(super) const COUNTS: &[(Operation, Count)] = &[(
-    Operation::Verifying,
-    Count {
-        text: sizes,
-        percent: true,
-    },
-)];
+/// Extracting and verifying count the content bytes of the files, as the
+/// size on the card does. The removing of the staging area counts files,
+/// which is what the cards show for an operation without an entry here.
+/// `fork` brings a version back the same way and uses the same list.
+pub(super) const COUNTS: &[(Operation, Count)] = &[
+    (
+        Operation::Extracting,
+        Count {
+            text: sizes,
+            percent: true,
+        },
+    ),
+    (
+        Operation::Verifying,
+        Count {
+            text: sizes,
+            percent: true,
+        },
+    ),
+];
 
 pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -314,9 +322,9 @@ mod tests {
     }
 
     #[test]
-    fn the_cards_of_an_unearth_count_files_and_show_the_bytes_compared_as_sizes() {
+    fn the_cards_of_an_unearth_show_the_bytes_extracted_and_compared_as_sizes() {
         for (operation, word, count) in [
-            (Operation::Extracting, "extracting", "1/4 files"),
+            (Operation::Extracting, "extracting", "1 B/4 B"),
             (Operation::Verifying, "verifying", "1 B/4 B"),
             (Operation::Removing, "removing", "1/4 files"),
         ] {

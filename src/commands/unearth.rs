@@ -1517,7 +1517,7 @@ mod tests {
             recorder.lines(),
             [
                 "started projects/scanner 25 2026-11-03T081500",
-                "projects/scanner Extracting 2/2",
+                "projects/scanner Extracting 25/25",
                 "projects/scanner Verifying 25/25",
                 "projects/scanner Removing 0/0",
                 "finished projects/scanner 25 Files(2)",

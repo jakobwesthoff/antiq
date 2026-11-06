@@ -8,7 +8,7 @@ use crate::archive::TargetRules;
 use crate::archive::extract::ExtractionFlush;
 use crate::archive::extract::unpack_counted;
 use crate::archive::names::{MemberName, check_members};
-use crate::archive::verify::compare_with_listing_counted;
+use crate::archive::verify::{compare_with_listing_counted, content_bytes};
 use crate::archive::{PackError, WalkRules};
 use crate::code_span::CodeSpan;
 use crate::collection::Collection;
@@ -1217,12 +1217,7 @@ fn place(
         .map_err(io_at("start the flush in", &extract))?;
     let extracting = placement.tracker.operation(Operation::Extracting);
     if let Some(listing) = source.listing {
-        let files = listing
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == ListingType::File)
-            .count();
-        extracting.set_total(files as u64);
+        extracting.set_total(content_bytes(&listing.entries));
     }
     let unpacked = unpack_counted(&archive, &staging, &volume, &flush, &extracting)?;
     placed.files = unpacked.files;
@@ -2798,18 +2793,18 @@ mod bring_tests {
     }
 
     #[test]
-    fn the_extraction_counts_the_regular_files_and_not_the_links() {
+    fn the_extraction_counts_the_content_bytes_of_the_regular_files_and_not_the_links() {
         use crate::testing::recording::Recorder;
         let world = World::new();
         let recorder = Recorder::new();
 
         done(world.run_reporting(&world.spy(), Tracker::new(&recorder, "projects/scanner")));
 
-        // main.rs and src/lib.rs; the symlink and the hard link are members
-        // of the archive but not files, as in the `files` of a listing.
+        // The bytes of main.rs and src/lib.rs; the symlink and the hard link are members
+        // of the archive but have no content bytes of their own, as in a listing.
         assert_eq!(
             recorder.lines().first().map(String::as_str),
-            Some("projects/scanner Extracting 2/2")
+            Some("projects/scanner Extracting 25/25")
         );
     }
 
