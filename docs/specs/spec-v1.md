@@ -756,9 +756,12 @@ or `doomed/`, the parents that became empty go too. (ADR 0059)
 5. **Died unearth:** for each live piece whose `.antiq-restored` names a
    version stamp, delete what is left of that version of that piece (the
    `.tar.zst` first, if it still exists, then its sidecars), and rewrite
-   the marker to the time alone. A stamp that names nothing is simply
-   dropped from the marker. A version copied back by hand between a crash
-   and the next run is deleted, and the repair names it.
+   the marker to the time alone, after the deletion succeeded. A stamp
+   that names nothing is simply dropped from the marker. A marker that
+   cannot be read is a warning and the piece is skipped. A tree that
+   repair 4 gives back counts as the live piece for this repair. A version
+   copied back by hand between a crash and the next run is deleted, and the
+   repair names it.
 6. **Empty store folders:** remove folders under `pieces/` that hold
    nothing.
 

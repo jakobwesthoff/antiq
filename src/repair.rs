@@ -10,8 +10,10 @@ use crate::filesystem::moves::move_dir;
 use crate::filesystem::remove::{remove_tree, remove_tree_at};
 use crate::filesystem::tree::TreeRoot;
 use crate::lock::RunLock;
+use crate::markers::{self, RESTORED_FILE, RealSite, Restored};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
+use crate::select::{Rules, select};
 use crate::tree::EntryKind;
 use crate::versions::VersionsError;
 use crate::versions::names::{VersionFile, parse_file_name};
@@ -256,12 +258,15 @@ pub fn plan(collection: &Collection) -> Planned {
         repairs: Vec::new(),
         warnings: Vec::new(),
         gone: BTreeSet::new(),
+        given_back: Vec::new(),
     };
     planner.scan_store();
     planner.interrupted_archives();
     planner.temporary_files();
     planner.doomed();
     planner.trash();
+    planner.restored();
+    planner.empty_folders();
     Planned {
         repairs: planner.repairs,
         warnings: planner.warnings,
@@ -275,6 +280,9 @@ struct Planner<'a> {
     warnings: Vec<Warning>,
     /// Paths below `pieces/` that the repairs planned so far remove.
     gone: BTreeSet<RelPath>,
+    /// Trees repair 4 gives back to their live path, with the folder of
+    /// `trash/` they lie in now, for repair 5 to read their markers.
+    given_back: Vec<(RelPath, RelPath)>,
 }
 
 /// A tree or leftover entry below `<area>/<stamp>/`, found by [`Planner::trees_below`].
@@ -431,20 +439,27 @@ impl Planner<'_> {
     }
 
     /// Marks `folder` and the parents above it as gone when nothing is
-    /// left in them, as [`store::remove_empty_chain`] removes them.
-    fn simulate_chain(&mut self, pieces: &TreeRoot, folder: &RelPath) {
+    /// left in them, as [`store::remove_empty_chain`] removes them, and
+    /// returns them, the deepest first.
+    fn simulate_chain(&mut self, pieces: &TreeRoot, folder: &RelPath) -> Vec<RelPath> {
+        let mut removed = Vec::new();
         let mut at = folder.clone();
         while !at.is_root() {
             let entries = match pieces.read_dir(&at) {
                 Ok(entries) => entries,
-                Err(error) => return self.cannot_read("pieces", &at, error),
+                Err(error) => {
+                    self.cannot_read("pieces", &at, error);
+                    return removed;
+                }
             };
             if entries.iter().any(|entry| !self.gone.contains(&entry.path)) {
-                return;
+                return removed;
             }
             self.gone.insert(at.clone());
+            removed.push(at.clone());
             at = parent_of(&at);
         }
+        removed
     }
 
     // ---- 2: temporary files ----
@@ -507,6 +522,11 @@ impl Planner<'_> {
                 }) => {
                     let destination = if is_dir && self.live_is_free(&collection, &claimed, &tree) {
                         claimed.insert(tree.clone());
+                        let now = match &stamp {
+                            Some(stamp) => RelPath::root().join(stamp).concat(&tree),
+                            None => tree.clone(),
+                        };
+                        self.given_back.push((tree.clone(), now));
                         Destination::Live
                     } else {
                         Destination::Recovered
@@ -549,6 +569,128 @@ impl Planner<'_> {
             .any(|path| path == live || is_below(path, live))
             || collection.lstat(live).is_ok();
         parent_ok && !taken
+    }
+
+    // ---- 5: died unearth ----
+
+    fn restored(&mut self) {
+        let collection = self.collection;
+        let root = match TreeRoot::open(collection.root()) {
+            Ok(root) => root,
+            Err(error) => return self.cannot_read("", &RelPath::root(), error),
+        };
+        let config = &collection.config().collection;
+        let rules = match Rules::new(&config.patterns, &config.exclude)
+            .and_then(|rules| rules.bind(&root))
+        {
+            Ok(rules) => rules,
+            Err(error) => return self.cannot_read("", &RelPath::root(), error),
+        };
+        let mut candidates: Vec<(RelPath, Option<RelPath>)> = match select(&root, &rules) {
+            Ok(selection) => selection
+                .pieces()
+                .iter()
+                .map(|piece| (piece.clone(), None))
+                .collect(),
+            Err(error) => return self.cannot_read("", &RelPath::root(), error),
+        };
+        for (tree, now) in self.given_back.clone() {
+            if rules.matches(&tree) {
+                candidates.push((tree, Some(now)));
+            }
+        }
+        candidates.sort();
+        let trash = match open_dir(&collection.trash_dir()) {
+            Ok(trash) => trash,
+            Err(error) => return self.cannot_read("trash", &RelPath::root(), error),
+        };
+        let pieces = self.pieces_root();
+        for (piece, in_trash) in candidates {
+            let read = match (&in_trash, &trash) {
+                (Some(now), Some(trash)) => markers::read_restored(trash, now),
+                (Some(_), None) => continue,
+                (None, _) => markers::read_restored(&root, &piece),
+            };
+            let version = match read {
+                Ok(Some(Restored {
+                    version: Some(version),
+                    ..
+                })) => version,
+                Ok(_) => continue,
+                Err(error) => {
+                    let at = in_trash.map_or_else(|| piece.to_string(), |now| place("trash", &now));
+                    self.warn(failure(
+                        "read the restored marker",
+                        format!("{at}/{RESTORED_FILE}"),
+                        error,
+                    ));
+                    continue;
+                }
+            };
+            let delete = self.plan_unearthed(pieces.as_ref(), &piece, &version);
+            self.repairs.push(Repair::DeleteRestoredVersion {
+                piece,
+                version,
+                delete,
+            });
+        }
+    }
+
+    /// Whether the store holds files of `version` of `piece`; when it does,
+    /// they and the folders they leave empty count as gone.
+    fn plan_unearthed(
+        &mut self,
+        pieces: Option<&TreeRoot>,
+        piece: &RelPath,
+        version: &Stamp,
+    ) -> bool {
+        let Some(pieces) = pieces else { return false };
+        let folder = match store::lookup_exact(pieces, piece) {
+            Ok(Some(folder)) => folder,
+            Ok(None) => return false,
+            Err(error) => {
+                self.cannot_read("pieces", piece, error);
+                return false;
+            }
+        };
+        let Some(scan) = &self.scan else { return false };
+        let Some(found) = scan
+            .pieces
+            .iter()
+            .chain(&scan.sidecar_only)
+            .filter(|candidate| candidate.path == folder)
+            .flat_map(|candidate| &candidate.versions)
+            .find(|candidate| candidate.stamp == *version)
+            .cloned()
+        else {
+            return false;
+        };
+        for kind in VersionFile::ALL {
+            for file in found.files(kind) {
+                self.gone
+                    .insert(child_of(&folder, &name_of(file.as_bytes())));
+            }
+        }
+        self.simulate_chain(pieces, &folder);
+        true
+    }
+
+    // ---- 6: empty store folders ----
+
+    fn empty_folders(&mut self) {
+        let Some(pieces) = self.pieces_root() else {
+            return;
+        };
+        let Some(scan) = &self.scan else { return };
+        let leaves = scan.empty_folders.clone();
+        for leaf in leaves {
+            if self.gone.contains(&leaf) {
+                continue;
+            }
+            for folder in self.simulate_chain(&pieces, &leaf) {
+                self.repairs.push(Repair::RemoveEmptyFolder { folder });
+            }
+        }
     }
 
     /// The trees and leftovers below `trash/` or `doomed/`, then the
@@ -963,8 +1105,110 @@ fn apply(
                 destination: given.destination,
             }))
         }
-        _ => Ok(None),
+        Repair::DeleteRestoredVersion { piece, .. } => unearthed(collection, piece),
+        Repair::RemoveEmptyFolder { folder } => {
+            remove_store_folder(collection, folder).map(|done| done.then(|| repair.clone()))
+        }
     }
+}
+
+/// Deletes what is left of the version a marker names, and only then drops
+/// the stamp from the marker, so a failure leaves the marker to repeat the
+/// repair on the next run.
+fn unearthed(collection: &Collection, piece: &RelPath) -> Result<Option<Repair>, RepairError> {
+    let read = "read the restored marker";
+    let at = format!("{piece}/{RESTORED_FILE}");
+    let root =
+        TreeRoot::open(collection.root()).map_err(|error| failure(read, at.clone(), error))?;
+    let marker = markers::read_restored(&root, piece).map_err(|error| failure(read, at, error))?;
+    let Some(Restored {
+        time,
+        version: Some(version),
+    }) = marker
+    else {
+        return Ok(None);
+    };
+    let step = "delete the rest of an unearthed version";
+    let pieces = open_dir(&collection.pieces_dir())
+        .map_err(|error| failure(step, piece.to_string(), error))?;
+    let mut deleted = false;
+    if let Some(pieces) = &pieces
+        && let Some(folder) = store::lookup_exact(pieces, piece)
+            .map_err(|error| failure(step, piece.to_string(), error))?
+    {
+        let found = stored_version(pieces, &folder, &version)
+            .map_err(|error| failure(step, piece.to_string(), error))?;
+        if !(found.archives.is_empty() && found.listings.is_empty() && found.checksums.is_empty()) {
+            store::delete_version(pieces, &folder, &found)
+                .map_err(|error| failure(step, piece.to_string(), error))?;
+            deleted = true;
+        }
+    }
+    let bare = Restored {
+        time,
+        version: None,
+    }
+    .render();
+    markers::put(&root, piece, RESTORED_FILE, bare.as_bytes(), &RealSite)
+        .map_err(|error| failure("rewrite the restored marker", piece.to_string(), error))?;
+    Ok(Some(Repair::DeleteRestoredVersion {
+        piece: piece.clone(),
+        version,
+        delete: deleted,
+    }))
+}
+
+/// Removes the folder `path` with `rmdir` alone. Returns `false` for a
+/// folder that is gone or holds something by now: a repair that failed
+/// before leaves its folder non-empty, which is no failure of this one.
+fn remove_if_empty(root: &TreeRoot, path: &RelPath) -> io::Result<bool> {
+    match root.remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes the empty folder `folder` of `pieces/`. A folder that is gone
+/// or holds something by now is no longer this repair's.
+fn remove_store_folder(collection: &Collection, folder: &RelPath) -> Result<bool, RepairError> {
+    let step = "remove an empty store folder";
+    let here = place("pieces", folder);
+    let root = TreeRoot::open(&collection.pieces_dir())
+        .map_err(|error| failure(step, here.clone(), error))?;
+    if !remove_if_empty(&root, folder).map_err(|error| failure(step, here.clone(), error))? {
+        return Ok(false);
+    }
+    flush_dir_of(&RealDurable, &root, &parent_of(folder))
+        .map_err(|error| failure(step, here, error))?;
+    Ok(true)
+}
+
+/// The files of the version `stamp` that lie in the store folder `folder`.
+fn stored_version(pieces: &TreeRoot, folder: &RelPath, stamp: &Stamp) -> io::Result<StoreVersion> {
+    let mut stored = StoreVersion {
+        stamp: *stamp,
+        archives: Vec::new(),
+        listings: Vec::new(),
+        checksums: Vec::new(),
+    };
+    for entry in pieces.read_dir(folder)? {
+        let file = OsStr::from_bytes(entry.name.as_bytes());
+        if let Some((found, kind)) = parse_file_name(file)
+            && found == *stamp
+        {
+            let list = match kind {
+                VersionFile::Archive => &mut stored.archives,
+                VersionFile::Listing => &mut stored.listings,
+                VersionFile::Checksum => &mut stored.checksums,
+            };
+            list.push(file.to_os_string());
+        }
+    }
+    Ok(stored)
 }
 
 fn give_back_in(
@@ -991,28 +1235,8 @@ fn delete_sidecars(
     let here = place("pieces", piece);
     let pieces = TreeRoot::open(&collection.pieces_dir())
         .map_err(|error| failure(step, here.clone(), error))?;
-    let mut stored = StoreVersion {
-        stamp: *version,
-        archives: Vec::new(),
-        listings: Vec::new(),
-        checksums: Vec::new(),
-    };
-    let entries = pieces
-        .read_dir(piece)
+    let stored = stored_version(&pieces, piece, version)
         .map_err(|error| failure(step, here.clone(), error))?;
-    for entry in entries {
-        let file = OsStr::from_bytes(entry.name.as_bytes());
-        if let Some((found, kind)) = parse_file_name(file)
-            && found == *version
-        {
-            let list = match kind {
-                VersionFile::Archive => &mut stored.archives,
-                VersionFile::Listing => &mut stored.listings,
-                VersionFile::Checksum => &mut stored.checksums,
-            };
-            list.push(file.to_os_string());
-        }
-    }
     // A `.tar.zst` that appeared since the plan was made makes it a version.
     if !stored.archives.is_empty() {
         return Ok(false);
@@ -1086,10 +1310,8 @@ fn remove_chain(
         Area::Doomed => collection.doomed_dir(),
     };
     let root = TreeRoot::open(&dir).map_err(|error| failure(step, here.clone(), error))?;
-    match root.remove_dir(&below) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(failure(step, here, error)),
+    if !remove_if_empty(&root, &below).map_err(|error| failure(step, here.clone(), error))? {
+        return Ok(false);
     }
     flush_dir_of(&RealDurable, &root, &parent_of(&below))
         .map_err(|error| failure(step, here, error))?;
@@ -1697,6 +1919,16 @@ mod tests {
             outcome.warnings
         );
         assert!(exists(&temp, &format!(".antiq/doomed/{S}/a/f")));
+        assert!(
+            !exists(&temp, ".antiq/trash/empty-stamp"),
+            "repair 4 removed the empty chain"
+        );
+        assert_eq!(
+            outcome.warnings.len(),
+            1,
+            "the folder above the tree is not empty, which is no failure: {:?}",
+            outcome.warnings
+        );
     }
 
     #[test]
@@ -1997,6 +2229,7 @@ mod tests {
         assert!(exists(&temp, &format!(".antiq/trash/{S}/a/f")));
         assert!(!exists(&temp, ".antiq/tmp/x"));
         assert!(!exists(&temp, &format!(".antiq/doomed/{S}")));
+        assert!(!exists(&temp, ".antiq/pieces/empty"), "repair 6 ran");
     }
 
     mod give_back_unit {
@@ -2085,5 +2318,281 @@ mod tests {
             );
             assert!(exists(&temp, "a/b/f"));
         }
+    }
+
+    // ---- repair 5 ----
+
+    const T0: &str = "2026-11-01T10:00:00Z";
+
+    fn marker(temp: &mut TempCollection, piece: &str, content: &str) {
+        temp.tree()
+            .file(&format!("{piece}/.antiq-restored"), content);
+    }
+
+    fn marked(stamp: &str) -> String {
+        format!("restored {T0} version {stamp}\n")
+    }
+
+    fn marker_of(temp: &TempCollection, relative: &str) -> String {
+        fs::read_to_string(temp.root().join(relative)).expect("the marker exists")
+    }
+
+    #[test]
+    fn a_died_unearth_loses_the_rest_of_its_version_and_the_stamp_in_the_marker() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        marker(&mut temp, "p", &marked(S));
+
+        let outcome = repaired(&temp);
+
+        assert!(
+            !exists(&temp, ".antiq/pieces/p"),
+            "the version and its folder are gone"
+        );
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+        assert_eq!(
+            done_lines(&outcome),
+            [format!("delete version {S} of p that an unearth left")]
+        );
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_stamp_that_names_nothing_is_only_dropped() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", "2026-11-04T090212", &WHOLE);
+        marker(&mut temp, "p", &marked(S));
+
+        let outcome = repaired(&temp);
+
+        assert!(exists(&temp, ".antiq/pieces/p"), "another version stays");
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+        assert_eq!(
+            done_lines(&outcome),
+            [format!(
+                "drop the stamp {S} from the marker of p, which names no version"
+            )]
+        );
+    }
+
+    #[test]
+    fn the_sidecars_of_an_unearthed_version_go_too() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &SIDECARS);
+        marker(&mut temp, "p", &marked(S));
+
+        repaired(&temp);
+
+        assert!(!exists(&temp, ".antiq/pieces/p"));
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+    }
+
+    #[test]
+    fn only_the_marked_piece_is_touched() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        lay(&mut temp, ".antiq/pieces", "q", S, &WHOLE);
+        marker(&mut temp, "p", &marked(S));
+        marker(&mut temp, "r", &format!("restored {T0}\n"));
+
+        repaired(&temp);
+
+        assert!(!exists(&temp, ".antiq/pieces/p"));
+        assert!(exists(&temp, ".antiq/pieces/q"));
+        assert_eq!(
+            marker_of(&temp, "r/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+    }
+
+    #[test]
+    fn a_marker_that_does_not_parse_is_a_warning_and_nothing_else() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        marker(&mut temp, "p", "garbage\n");
+
+        let outcome = repaired(&temp);
+
+        assert!(exists(&temp, ".antiq/pieces/p"));
+        assert_eq!(marker_of(&temp, "p/.antiq-restored"), "garbage\n");
+        assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+        assert!(
+            outcome.warnings[0]
+                .message
+                .starts_with("cannot read the restored marker p/.antiq-restored: "),
+            "{:?}",
+            outcome.warnings
+        );
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_deleted_leaves_the_marker_and_is_a_warning() {
+        assert_not_root();
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        marker(&mut temp, "p", &marked(S));
+        let folder = temp.root().join(".antiq/pieces/p");
+        let _restore = RestoreModes(vec![folder.clone()]);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            marked(S),
+            "the marker keeps the stamp"
+        );
+        assert!(
+            outcome.warnings[0]
+                .message
+                .starts_with("cannot delete the rest of an unearthed version p: "),
+            "{:?}",
+            outcome.warnings
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("chmod");
+        repaired(&temp);
+        assert!(
+            !exists(&temp, ".antiq/pieces/p"),
+            "the next run completes both"
+        );
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_rewritten_is_a_warning_and_the_next_run_drops_the_stamp() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        marker(&mut temp, "p", &marked(S));
+        fs::remove_dir(temp.root().join(".antiq/tmp")).expect("tmp is empty");
+
+        let outcome = repaired(&temp);
+
+        assert!(
+            !exists(&temp, ".antiq/pieces/p"),
+            "the version is deleted already"
+        );
+        assert_eq!(marker_of(&temp, "p/.antiq-restored"), marked(S));
+        assert!(
+            outcome.warnings[0]
+                .message
+                .starts_with("cannot rewrite the restored marker p: "),
+            "{:?}",
+            outcome.warnings
+        );
+        fs::create_dir(temp.root().join(".antiq/tmp")).expect("tmp is back");
+        let second = repaired(&temp);
+        assert_eq!(
+            done_lines(&second),
+            [format!(
+                "drop the stamp {S} from the marker of p, which names no version"
+            )]
+        );
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+    }
+
+    #[test]
+    fn a_marked_piece_given_back_in_the_same_run_is_repaired_after_it() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+        temp.tree().file(&format!(".antiq/trash/{S}/p/f"), "x");
+        temp.tree()
+            .file(&format!(".antiq/trash/{S}/p/.antiq-restored"), marked(S));
+        let collection = collection(&temp);
+
+        let planned = plan(&collection);
+        let lines: Vec<String> = planned.repairs.iter().map(Repair::describe).collect();
+        assert_eq!(lines[0], format!("move .antiq/trash/{S}/p back to p"),);
+        assert_eq!(
+            lines[1..],
+            [
+                format!("remove the empty folder .antiq/trash/{S}"),
+                format!("delete version {S} of p that an unearth left"),
+            ],
+            "the marker is read in trash/ and its repair follows the move"
+        );
+
+        repaired(&temp);
+
+        assert_eq!(
+            marker_of(&temp, "p/.antiq-restored"),
+            format!("restored {T0}\n")
+        );
+        assert!(!exists(&temp, ".antiq/pieces/p"));
+    }
+
+    // ---- repair 6 ----
+
+    #[test]
+    fn empty_store_folders_and_their_empty_parents_go_but_pieces_stays() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().dir(".antiq/pieces/e/f/g");
+
+        let outcome = repaired(&temp);
+
+        assert!(!exists(&temp, ".antiq/pieces/e"));
+        assert!(exists(&temp, ".antiq/pieces"));
+        assert_eq!(
+            done_lines(&outcome),
+            [
+                "remove the empty folder .antiq/pieces/e/f/g",
+                "remove the empty folder .antiq/pieces/e/f",
+                "remove the empty folder .antiq/pieces/e",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_with_sidecars_or_a_stray_file_stays() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &SIDECARS);
+        temp.tree().file(".antiq/pieces/b/notes.txt", "x");
+        temp.tree().dir(".antiq/pieces/b/empty");
+
+        let outcome = repaired(&temp);
+
+        assert!(exists(&temp, ".antiq/pieces/a"));
+        assert!(exists(&temp, ".antiq/pieces/b/notes.txt"));
+        assert_eq!(
+            done_lines(&outcome),
+            ["remove the empty folder .antiq/pieces/b/empty"]
+        );
+    }
+
+    #[test]
+    fn a_parent_that_repair_1_empties_goes_after_its_empty_sibling() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "p/a", S, &SIDECARS);
+        stage(&mut temp, "p/a", S);
+        temp.tree().dir(".antiq/pieces/p/b");
+
+        let outcome = repaired(&temp);
+
+        assert!(!exists(&temp, ".antiq/pieces/p"));
+        assert_eq!(
+            done_lines(&outcome),
+            [
+                format!(
+                    "delete the sidecars of {S} in .antiq/pieces/p/a (the archive is not there)"
+                ),
+                "delete .antiq/tmp/pack".to_string(),
+                "remove the empty folder .antiq/pieces/p/b".to_string(),
+                "remove the empty folder .antiq/pieces/p".to_string(),
+            ]
+        );
     }
 }
