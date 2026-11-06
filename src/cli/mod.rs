@@ -39,20 +39,30 @@ pub struct Cli {
 pub enum Command {
     /// Make a directory a collection
     Init(InitArgs),
-    /// Show the pieces by state
+    /// Show the pieces that have a state
     Status,
-    /// Archive idle pieces and remove their folders
-    Archive(DryRunArgs),
-    /// Bring an archived piece back
+    /// Archive due pieces, or one piece now
+    Archive(ArchiveArgs),
+    /// Bring a version back and remove it
     Unearth(UnearthArgs),
-    /// Give an unearthed piece a new ID
+    /// Extract a working copy of a version
     Fork(ForkArgs),
+    /// Delete a version, or all of them
+    Forget(ForgetArgs),
+    /// Repair a damaged version
+    Rebuild(RebuildArgs),
+    /// Pack a folder as a version
+    Import(ImportArgs),
+    /// List the versions
+    List(ListArgs),
+    /// Search the paths of all archived files
+    Grep(GrepArgs),
     /// Keep a piece from being archived
     Pin(PieceArgs),
     /// Let a piece be archived again
     Unpin(PieceArgs),
-    /// Register existing compressed tar archives as archived pieces
-    Import(ImportArgs),
+    /// Mirror the collection to the target
+    Push(PushArgs),
 }
 
 impl Command {
@@ -64,9 +74,14 @@ impl Command {
             Command::Archive(_) => "archive",
             Command::Unearth(_) => "unearth",
             Command::Fork(_) => "fork",
+            Command::Forget(_) => "forget",
+            Command::Rebuild(_) => "rebuild",
+            Command::Import(_) => "import",
+            Command::List(_) => "list",
+            Command::Grep(_) => "grep",
             Command::Pin(_) => "pin",
             Command::Unpin(_) => "unpin",
-            Command::Import(_) => "import",
+            Command::Push(_) => "push",
         }
     }
 }
@@ -80,64 +95,127 @@ pub struct InitArgs {
     #[arg(long)]
     pub yes: bool,
     /// Print the plan and change nothing
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
-pub struct DryRunArgs {
+pub struct ArchiveArgs {
+    /// Path or search word of the piece to archive now
+    pub piece: Option<OsString>,
     /// Print the plan and change nothing
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct UnearthArgs {
-    /// Path or ULID of the piece
+    /// Path or search word of the piece
     pub piece: OsString,
-    /// Unearth into this directory
-    #[arg(long, value_name = "PATH")]
-    pub to: Option<PathBuf>,
-    /// Payload version of the archive to unearth
-    #[arg(long, value_name = "N")]
-    pub version: Option<u32>,
+    /// Version to bring back
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
     /// Print the plan and change nothing
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ForkArgs {
-    /// Path or ULID of the piece
+    /// Path or search word of the piece
     pub piece: OsString,
-    /// Name of the forked piece
-    #[arg(long, value_name = "NAME")]
+    /// Version to extract
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Path of the working copy in the collection
+    #[arg(long, value_name = "NEW PATH")]
     pub name: Option<OsString>,
     /// Print the plan and change nothing
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
-pub struct PieceArgs {
-    /// Path or ULID of the piece
+pub struct ForgetArgs {
+    /// Path or search word of the piece
     pub piece: OsString,
+    /// Version to delete
+    #[arg(
+        required_unless_present = "all_versions",
+        conflicts_with = "all_versions"
+    )]
+    pub version: Option<String>,
+    /// Delete every version of the piece
+    #[arg(long, requires = "force")]
+    pub all_versions: bool,
+    /// Confirm `--all-versions`
+    #[arg(long, requires = "all_versions", conflicts_with = "version")]
+    pub force: bool,
     /// Print the plan and change nothing
-    #[arg(long)]
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RebuildArgs {
+    /// Path or search word of the piece
+    pub piece: OsString,
+    /// Version to repair
+    pub version: String,
+    /// Print the plan and change nothing
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// Path of the piece in the collection, for one archive; by default the
-    /// archive's top-level folder at the collection root
-    #[arg(long, value_name = "PATH")]
-    pub path: Option<PathBuf>,
-    /// Archives to register
-    #[arg(required = true, value_name = "FILE")]
-    pub files: Vec<PathBuf>,
+    /// Folder to pack
+    pub folder: PathBuf,
+    /// Path of the piece in the collection
+    #[arg(long = "as", value_name = "PATH")]
+    pub as_path: Option<PathBuf>,
+    /// Time to give the version
+    #[arg(long, value_name = "TIME")]
+    pub time: Option<String>,
     /// Print the plan and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Fuzzy pattern that selects pieces
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GrepArgs {
+    /// Regular expression matched against archived paths
+    pub pattern: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PieceArgs {
+    /// Path or search word of the piece
+    pub piece: OsString,
+    /// Print the plan and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PushArgs {
+    /// Create the target's marker and directory
+    #[arg(long, conflicts_with = "if_reachable")]
+    pub init: bool,
+    /// Push although the target's marker names another host or path
+    #[arg(long, conflicts_with = "if_reachable")]
+    pub force: bool,
+    /// Exit 0 when the target cannot be reached
     #[arg(long)]
+    pub if_reachable: bool,
+    /// Print the plan and change nothing
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
 
@@ -193,13 +271,18 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
     };
     match &cli.command {
         Command::Init(args) => cmd::init::run(&ctx, args, out),
-        Command::Status => cmd::not_implemented(&ctx, "status"),
-        Command::Archive(_) => cmd::not_implemented(&ctx, "archive"),
-        Command::Unearth(_) => cmd::not_implemented(&ctx, "unearth"),
-        Command::Fork(_) => cmd::not_implemented(&ctx, "fork"),
-        Command::Pin(_) => cmd::not_implemented(&ctx, "pin"),
-        Command::Unpin(_) => cmd::not_implemented(&ctx, "unpin"),
-        Command::Import(_) => cmd::not_implemented(&ctx, "import"),
+        Command::Status => cmd::status::run(&ctx),
+        Command::Archive(args) => cmd::archive::run(&ctx, args),
+        Command::Unearth(args) => cmd::unearth::run(&ctx, args),
+        Command::Fork(args) => cmd::fork::run(&ctx, args),
+        Command::Forget(args) => cmd::forget::run(&ctx, args),
+        Command::Rebuild(args) => cmd::rebuild::run(&ctx, args),
+        Command::Import(args) => cmd::import::run(&ctx, args),
+        Command::List(args) => cmd::list::run(&ctx, args),
+        Command::Grep(args) => cmd::grep::run(&ctx, args),
+        Command::Pin(args) => cmd::pin::pin(&ctx, args),
+        Command::Unpin(args) => cmd::pin::unpin(&ctx, args),
+        Command::Push(args) => cmd::push::run(&ctx, args),
     }
 }
 
@@ -553,6 +636,76 @@ mod tests {
         );
         assert_eq!(guess(&["antiq", "--", "status"]), None);
         assert_eq!(guess(&["antiq"]), None);
+    }
+
+    #[test]
+    fn dry_run_has_a_long_and_a_short_spelling() {
+        for flag in ["-n", "--dry-run"] {
+            let init = parse(&["init", flag]);
+            assert!(
+                matches!(&init.command, Command::Init(args) if args.dry_run),
+                "{flag}"
+            );
+            let archive = parse(&["archive", flag]);
+            assert!(
+                matches!(&archive.command, Command::Archive(args) if args.dry_run),
+                "{flag}"
+            );
+            let push = parse(&["push", flag]);
+            assert!(
+                matches!(&push.command, Command::Push(args) if args.dry_run),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_takes_patterns_and_yes() {
+        let cli = parse(&["init", "--pattern", "a*", "--pattern", "b*", "--yes", "-n"]);
+        let Command::Init(args) = cli.command else {
+            panic!("the command is init");
+        };
+        assert_eq!(args.patterns, ["a*", "b*"]);
+        assert!(args.yes && args.dry_run);
+    }
+
+    #[test]
+    fn the_arguments_of_every_command_reach_its_struct() {
+        let cli = parse(&["archive", "projects/scanner"]);
+        assert!(matches!(&cli.command, Command::Archive(args)
+            if args.piece.as_deref() == Some(std::ffi::OsStr::new("projects/scanner"))));
+        let cli = parse(&["unearth", "p", "--version", "v1"]);
+        assert!(matches!(&cli.command, Command::Unearth(args)
+            if args.version.as_deref() == Some("v1")));
+        let cli = parse(&["fork", "p", "--version", "v1", "--name", "copy"]);
+        assert!(matches!(&cli.command, Command::Fork(args)
+            if args.version.as_deref() == Some("v1")
+                && args.name.as_deref() == Some(std::ffi::OsStr::new("copy"))));
+        let cli = parse(&["forget", "p", "v1"]);
+        assert!(matches!(&cli.command, Command::Forget(args)
+            if args.version.as_deref() == Some("v1") && !args.all_versions));
+        let cli = parse(&["forget", "p", "--all-versions", "--force"]);
+        assert!(matches!(&cli.command, Command::Forget(args)
+            if args.version.is_none() && args.all_versions && args.force));
+        let cli = parse(&["rebuild", "p", "v1"]);
+        assert!(matches!(&cli.command, Command::Rebuild(args) if args.version == "v1"));
+        let cli = parse(&["import", "dir", "--as", "proj", "--time", "2020-01-01"]);
+        assert!(matches!(&cli.command, Command::Import(args)
+            if args.folder == std::path::Path::new("dir")
+                && args.as_path.as_deref() == Some(std::path::Path::new("proj"))
+                && args.time.as_deref() == Some("2020-01-01")));
+        let cli = parse(&["list", "scan"]);
+        assert!(
+            matches!(&cli.command, Command::List(args) if args.query.as_deref() == Some("scan"))
+        );
+        let cli = parse(&["grep", "main.rs"]);
+        assert!(matches!(&cli.command, Command::Grep(args) if args.pattern == "main.rs"));
+        let cli = parse(&["push", "--init", "--force"]);
+        assert!(
+            matches!(&cli.command, Command::Push(args) if args.init && args.force && !args.if_reachable)
+        );
+        let cli = parse(&["push", "--if-reachable"]);
+        assert!(matches!(&cli.command, Command::Push(args) if args.if_reachable));
     }
 
     #[cfg(unix)]

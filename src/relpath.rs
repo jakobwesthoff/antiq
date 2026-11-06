@@ -204,8 +204,8 @@ impl<'de> Deserialize<'de> for RelPath {
     }
 }
 
-/// The path `given` leads to, relative to `root`. Piece references, `--to`
-/// and `--path` take this way into the collection.
+/// The path `given` leads to, relative to `root`. Piece references, `--as`
+/// and `--name` take this way into the collection.
 ///
 /// A relative `given` starts at `cwd`. `.` and `..` are resolved from the
 /// text of the paths alone, without asking the filesystem. `root` and `cwd`

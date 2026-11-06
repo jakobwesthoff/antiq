@@ -2,10 +2,21 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! One module per command that has an implementation, and the stand-in for
-//! those that have none.
+//! One module per command, and the stand-in for commands that have no
+//! implementation yet.
 
+pub mod archive;
+pub mod forget;
+pub mod fork;
+pub mod grep;
+pub mod import;
 pub mod init;
+pub mod list;
+pub mod pin;
+pub mod push;
+pub mod rebuild;
+pub mod status;
+pub mod unearth;
 
 use crate::cli::Context;
 use antiq::collection::Collection;

@@ -12,8 +12,9 @@ use std::process::Stdio;
 use support::cmd::Antiq;
 use support::tree::TempCollection;
 
-const COMMANDS: [&str; 8] = [
-    "init", "status", "archive", "unearth", "fork", "pin", "unpin", "import",
+const COMMANDS: [&str; 13] = [
+    "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "list", "grep",
+    "pin", "unpin", "push",
 ];
 
 /// Runs `antiq --json <args>`.
@@ -22,7 +23,7 @@ fn json_run(args: &[&str]) -> support::cmd::Run {
 }
 
 #[test]
-fn help_lists_the_eight_subcommands() {
+fn help_lists_the_thirteen_subcommands() {
     let run = Antiq::new().arg("--help").run();
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let mut listed: Vec<&str> = run
@@ -70,130 +71,184 @@ fn status_takes_no_dry_run() {
     );
 }
 
-/// For a command: its options parse, and outside a collection it fails
-/// with the kind `not_a_collection`.
-macro_rules! accepts_and_needs_a_collection {
+/// For a command line: its arguments parse, outside a collection the run
+/// fails with the kind `not_a_collection`, and inside one with the kind
+/// `not_implemented`.
+macro_rules! command_line {
     ($name:ident, $command:expr, [$($arg:expr),*]) => {
-        #[test]
-        fn $name() {
-            let dir = tempfile::tempdir().expect("the temp dir is writable");
-            let run = Antiq::new()
-                .args(["--json", "-C"])
-                .arg(dir.path())
-                .args([$($arg),*])
-                .run();
-            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-            assert_eq!(run.error_kind(), "not_a_collection");
-            assert_eq!(run.json()["command"], $command);
+        mod $name {
+            use super::*;
+
+            #[test]
+            fn needs_a_collection() {
+                let dir = tempfile::tempdir().expect("the temp dir is writable");
+                let run = Antiq::new()
+                    .args(["--json", "-C"])
+                    .arg(dir.path())
+                    .args([$($arg),*])
+                    .run();
+                assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
+                assert_eq!(run.error_kind(), "not_a_collection");
+                assert_eq!(run.json()["command"], $command);
+            }
+
+            #[test]
+            fn is_not_implemented() {
+                let collection = TempCollection::minimal();
+                let run = Antiq::new()
+                    .args(["--json", "-C"])
+                    .arg(collection.root())
+                    .args([$($arg),*])
+                    .run();
+                assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
+                assert_eq!(run.error_kind(), "not_implemented");
+                assert_eq!(run.error_message(), concat!($command, " is not implemented"));
+                assert_eq!(run.json()["command"], $command);
+            }
         }
     };
+}
+
+command_line!(status, "status", ["status"]);
+command_line!(archive_everything, "archive", ["archive", "-n"]);
+command_line!(
+    archive_one_piece,
+    "archive",
+    ["archive", "piece", "--dry-run"]
+);
+command_line!(
+    unearth,
+    "unearth",
+    ["unearth", "piece", "--version", "2026-11-04T090211", "-n"]
+);
+command_line!(
+    fork,
+    "fork",
+    ["fork", "piece", "--version", "v", "--name", "copy", "-n"]
+);
+command_line!(forget_a_version, "forget", ["forget", "piece", "v", "-n"]);
+command_line!(
+    forget_all_versions,
+    "forget",
+    ["forget", "piece", "--all-versions", "--force", "-n"]
+);
+command_line!(rebuild, "rebuild", ["rebuild", "piece", "v", "-n"]);
+command_line!(
+    import,
+    "import",
+    [
+        "import",
+        "dir",
+        "--as",
+        "proj",
+        "--time",
+        "2020-01-01",
+        "-n"
+    ]
+);
+command_line!(list_all, "list", ["list"]);
+command_line!(list_a_query, "list", ["list", "query"]);
+command_line!(grep, "grep", ["grep", "pattern"]);
+command_line!(pin, "pin", ["pin", "piece", "-n"]);
+command_line!(unpin, "unpin", ["unpin", "piece", "-n"]);
+command_line!(push, "push", ["push"]);
+command_line!(push_with_init, "push", ["push", "--init", "--dry-run"]);
+command_line!(push_with_force, "push", ["push", "--force"]);
+command_line!(push_if_reachable, "push", ["push", "--if-reachable", "-n"]);
+
+/// A command line that does not parse: exit 2, kind `usage`, and the
+/// message contains `fragment`.
+fn assert_usage(args: &[&str], fragment: &str) {
+    let run = json_run(args);
+    assert_eq!(run.code(), 2, "args: {args:?}, stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert!(
+        run.error_message().contains(fragment),
+        "args: {args:?}, message: {}",
+        run.error_message()
+    );
 }
 
 #[test]
-fn status_takes_nothing() {
-    let dir = tempfile::tempdir().expect("the temp dir is writable");
-    let run = Antiq::new()
-        .args(["--json", "-C"])
-        .arg(dir.path())
-        .arg("status")
-        .run();
-    assert_eq!(
-        run.code(),
-        1,
-        "stdout: {}, stderr: {}",
-        run.stdout,
-        run.stderr
+fn forget_needs_a_version_or_all_versions() {
+    assert_usage(&["forget", "piece"], "required arguments were not provided");
+}
+
+#[test]
+fn forget_takes_a_version_or_all_versions_not_both() {
+    assert_usage(
+        &["forget", "piece", "v", "--all-versions", "--force"],
+        "cannot be used with",
     );
-    assert_eq!(run.error_kind(), "not_a_collection");
-    assert_eq!(run.json()["command"], "status");
 }
 
-accepts_and_needs_a_collection!(
-    unearth_takes_its_options,
-    "unearth",
-    [
-        "unearth",
-        "piece",
-        "--to",
-        "out",
-        "--version",
-        "3",
-        "--dry-run"
-    ]
-);
-accepts_and_needs_a_collection!(
-    fork_takes_a_name_and_dry_run,
-    "fork",
-    ["fork", "piece", "--name", "copy", "--dry-run"]
-);
-accepts_and_needs_a_collection!(pin_takes_dry_run, "pin", ["pin", "piece", "--dry-run"]);
-accepts_and_needs_a_collection!(
-    unpin_takes_dry_run,
-    "unpin",
-    ["unpin", "piece", "--dry-run"]
-);
-accepts_and_needs_a_collection!(
-    import_takes_a_file_and_a_path,
-    "import",
-    ["import", "--path", "dir", "one.tar.zst", "--dry-run"]
-);
-
-/// For a command without an implementation: inside a collection its
-/// options parse and the run fails with the kind `not_implemented`.
-macro_rules! is_not_implemented {
-    ($name:ident, $command:expr, [$($arg:expr),*]) => {
-        #[test]
-        fn $name() {
-            let collection = TempCollection::minimal();
-            let run = Antiq::new()
-                .args(["--json", "-C"])
-                .arg(collection.root())
-                .args([$($arg),*])
-                .run();
-            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-            assert_eq!(run.error_kind(), "not_implemented");
-            assert_eq!(run.error_message(), concat!($command, " is not implemented"));
-            assert_eq!(run.json()["command"], $command);
-        }
-    };
+#[test]
+fn forget_all_versions_needs_force() {
+    assert_usage(
+        &["forget", "piece", "--all-versions"],
+        "required arguments were not provided",
+    );
 }
 
-is_not_implemented!(status_is_not_implemented, "status", ["status"]);
-is_not_implemented!(
-    archive_is_not_implemented,
-    "archive",
-    ["archive", "--dry-run"]
-);
-is_not_implemented!(
-    unearth_is_not_implemented,
-    "unearth",
-    [
-        "unearth",
-        "piece",
-        "--to",
-        "out",
-        "--version",
-        "3",
-        "--dry-run"
-    ]
-);
-is_not_implemented!(
-    fork_is_not_implemented,
-    "fork",
-    ["fork", "piece", "--name", "copy", "--dry-run"]
-);
-is_not_implemented!(
-    import_is_not_implemented,
-    "import",
-    ["import", "--path", "dir", "one.tar.zst", "--dry-run"]
-);
-is_not_implemented!(pin_is_not_implemented, "pin", ["pin", "piece", "--dry-run"]);
-is_not_implemented!(
-    unpin_is_not_implemented,
-    "unpin",
-    ["unpin", "piece", "--dry-run"]
-);
-accepts_and_needs_a_collection!(archive_takes_dry_run, "archive", ["archive", "--dry-run"]);
+#[test]
+fn forget_force_goes_with_all_versions_only() {
+    assert_usage(&["forget", "piece", "v", "--force"], "cannot be used with");
+    assert_usage(
+        &["forget", "piece", "--force"],
+        "required arguments were not provided",
+    );
+}
+
+#[test]
+fn push_init_is_refused_with_if_reachable() {
+    assert_usage(&["push", "--init", "--if-reachable"], "cannot be used with");
+}
+
+#[test]
+fn push_force_is_refused_with_if_reachable() {
+    assert_usage(
+        &["push", "--force", "--if-reachable"],
+        "cannot be used with",
+    );
+}
+
+#[test]
+fn unearth_has_no_to() {
+    assert_usage(
+        &["unearth", "piece", "--to", "out"],
+        "unexpected argument '--to'",
+    );
+}
+
+#[test]
+fn rebuild_needs_a_version() {
+    assert_usage(
+        &["rebuild", "piece"],
+        "required arguments were not provided",
+    );
+}
+
+#[test]
+fn import_needs_a_folder() {
+    assert_usage(&["import"], "required arguments were not provided");
+}
+
+#[test]
+fn list_takes_one_query() {
+    assert_usage(&["list", "a", "b"], "unexpected argument 'b'");
+}
+
+#[test]
+fn grep_needs_a_pattern() {
+    assert_usage(&["grep"], "required arguments were not provided");
+}
+
+#[test]
+fn list_and_grep_and_status_take_no_dry_run() {
+    assert_usage(&["list", "-n"], "unexpected argument '-n'");
+    assert_usage(&["grep", "-n", "x"], "unexpected argument '-n'");
+    assert_usage(&["status", "-n"], "unexpected argument '-n'");
+}
 
 /// A name that is not a command is a usage error that names no command.
 macro_rules! is_not_a_command {
