@@ -71,6 +71,7 @@ const OTHER_BYTES: i32 = 47;
 /// uploads leave.
 const LIST_DIR: &str = r#"_dir="$1/$2"
 [ -d "$_dir" ] || exit 0
+antiq_searchable "$_dir" || exit 1
 for _f in "$_dir"/* "$_dir"/.[!.]* "$_dir"/..?*; do
     [ -e "$_f" ] || [ -h "$_f" ] || continue
     _n=${_f##*/}
@@ -84,7 +85,8 @@ for _f in "$_dir"/* "$_dir"/.[!.]* "$_dir"/..?*; do
 done
 "#;
 
-const LIST_OBJECTS: &str = r#"for _d in "$1"/objects/*; do
+const LIST_OBJECTS: &str = r#"[ ! -d "$1/objects" ] || antiq_searchable "$1/objects" || exit 1
+for _d in "$1"/objects/*; do
     [ -d "$_d" ] || continue
     _n=${_d##*/}
     case $_n in *[!A-Za-z0-9]*) continue ;; esac
@@ -94,7 +96,8 @@ done
 
 /// The head of the metadata pull; the `case` arms that name the highest
 /// known version of each object follow, then [`PULL_TAIL`].
-const PULL_HEAD: &str = r#"for _d in "$1"/objects/*; do
+const PULL_HEAD: &str = r#"[ ! -d "$1/objects" ] || antiq_searchable "$1/objects" || exit 1
+for _d in "$1"/objects/*; do
     [ -d "$_d" ] || continue
     _o=${_d##*/}
     case $_o in *[!A-Za-z0-9]*) continue ;; esac
@@ -108,6 +111,7 @@ const PULL_HEAD: &str = r#"for _d in "$1"/objects/*; do
 /// prefilter: antiq applies its own version rules to what comes back.
 const PULL_TAIL: &str = r#"        *) _h=0 ;;
     esac
+    antiq_searchable "$_d" || exit 1
     for _f in "$_d"/meta.[1-9]*; do
         [ -f "$_f" ] || continue
         _n=${_f##*/}
@@ -275,6 +279,9 @@ const FETCH_CHECK: &str = r#"[ -f "$1/objects/$2/$3" ] || exit 44
 /// - `antiq_root_kind ROOT` sets `_root_kind` to `dir`, `missing` (absent
 ///   below a directory that can be searched) or `unusable`, and
 ///   `_root_why` to the reason for `unusable`.
+/// - `antiq_searchable DIR` fails with a message unless DIR can be read
+///   and searched. A glob over a directory that cannot be read matches
+///   nothing, and the listing would look empty.
 /// - `antiq_emit KIND FILE [ARG...]` prints `@KIND ARG... <length>`, the
 ///   file and a newline.
 /// - `antiq_root_check ROOT` ends the script unless ROOT is a directory
@@ -322,6 +329,11 @@ antiq_sha256() {
     fi
     printf '%s
 ' "$_hash"
+}
+antiq_searchable() {
+    [ -r "$1" ] && [ -x "$1" ] && return 0
+    printf 'cannot read the directory %s\n' "$1" >&2
+    return 1
 }
 antiq_emit() {
     _kind=$1
@@ -2461,6 +2473,63 @@ mod tests {
             .collect();
         assert_eq!(versions, [(9, &b"nine"[..]), (10, &b"ten"[..])]);
         assert!(found.iter().all(|file| file.id == object()));
+    }
+
+    /// Runs `check` while `dir` cannot be listed (mode 0300), then gives the
+    /// directory its permissions back. Does nothing when the directory stays
+    /// listable, as for the superuser.
+    fn with_unlistable(dir: &Path, check: impl FnOnce()) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o300)).expect("chmod");
+        if std::fs::read_dir(dir).is_err() {
+            check();
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+
+    #[test]
+    fn an_object_directory_that_cannot_be_listed_is_an_io_error() {
+        let far = Far::new();
+        let dir = far.object_dir(OBJECT);
+        with_unlistable(&dir, || {
+            let error = far.remote().list_dir(object()).expect_err("unlistable");
+            assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        });
+    }
+
+    #[test]
+    fn the_objects_directory_that_cannot_be_listed_is_an_io_error_for_the_object_list() {
+        let far = Far::new();
+        far.object_dir(OBJECT);
+        with_unlistable(&far.root().join("objects"), || {
+            let error = far.remote().list_objects().expect_err("unlistable");
+            assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        });
+    }
+
+    #[test]
+    fn the_objects_directory_that_cannot_be_listed_is_an_io_error_for_the_pull() {
+        let far = Far::new();
+        put_meta(&far, OBJECT, "meta.1", "a");
+        with_unlistable(&far.root().join("objects"), || {
+            let error = far
+                .remote()
+                .pull_metadata(&KnownVersions::new())
+                .expect_err("unlistable");
+            assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        });
+    }
+
+    #[test]
+    fn an_object_directory_that_cannot_be_listed_is_an_io_error_for_the_pull() {
+        let far = Far::new();
+        put_meta(&far, OBJECT, "meta.1", "a");
+        with_unlistable(&far.object_dir(OBJECT), || {
+            let error = far
+                .remote()
+                .pull_metadata(&KnownVersions::new())
+                .expect_err("unlistable");
+            assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        });
     }
 
     #[test]

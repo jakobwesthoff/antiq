@@ -1010,7 +1010,9 @@ with that check.
 
 A listing gives, for each entry of an object's directory, its name, its
 kind, its size and its modification time, dot names included. A name
-with a byte outside `[A-Za-z0-9._%-]` is left out. The metadata pull is
+with a byte outside `[A-Za-z0-9._%-]` is left out. A directory
+that cannot be read or searched (`objects/`, an object's directory) is an
+I/O error, never an empty listing. The metadata pull is
 one script for all objects: for each object it prints the
 `meta.<digits>` files (no leading zero) above the highest version this
 machine has, and antiq then applies the version rules to the names. The
