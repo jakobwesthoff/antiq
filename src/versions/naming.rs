@@ -34,37 +34,82 @@ pub fn local_text(stamp: &Stamp, zone: &TimeZone) -> String {
         .to_string()
 }
 
+/// The zone the machine is in now: `TZ` when it is set, the system's zone
+/// otherwise.
+pub fn system_zone() -> TimeZone {
+    TimeZone::system()
+}
+
+/// How text output names each of `stamps`: its local time, with the UTC
+/// offset added where another of `stamps` renders alike.
+pub fn local_labels(stamps: &[Stamp], zone: &TimeZone) -> Vec<String> {
+    let texts: Vec<String> = stamps.iter().map(|stamp| local_text(stamp, zone)).collect();
+    stamps
+        .iter()
+        .zip(&texts)
+        .map(|(stamp, text)| {
+            if texts.iter().filter(|other| *other == text).count() > 1 {
+                format!("{text} {}", offset_text(stamp, zone))
+            } else {
+                text.clone()
+            }
+        })
+        .collect()
+}
+
+/// The UTC offset of `zone` at `stamp`, `+02:00`.
+fn offset_text(stamp: &Stamp, zone: &TimeZone) -> String {
+    stamp
+        .time()
+        .to_zoned(zone.clone())
+        .strftime("%:z")
+        .to_string()
+}
+
 /// Finds the version `input` names among `versions`.
 ///
 /// The spelling of the input decides what it is matched against, and the
 /// two are never mixed. An input with a `T` is a prefix of a version
 /// stamp. Any other input is a prefix of the version's time in `zone`, and
-/// an incomplete version has no such time to match. A version whose text
-/// equals the input wins over the versions it is a prefix of.
+/// an incomplete version has no such time to match. Where text output adds
+/// the UTC offset to the time ([`local_labels`]), the input may carry it
+/// or leave it out. A version whose text equals the input wins over the
+/// versions it is a prefix of.
 pub fn find_version(input: &str, versions: &[Candidate], zone: &TimeZone) -> Lookup {
-    let texts: Vec<(Stamp, String)> = if input.contains('T') {
+    let texts: Vec<(Stamp, Vec<String>)> = if input.contains('T') {
         versions
             .iter()
-            .map(|version| (version.stamp, version.stamp.to_string()))
+            .map(|version| (version.stamp, vec![version.stamp.to_string()]))
             .collect()
     } else {
-        versions
+        let complete: Vec<Stamp> = versions
             .iter()
             .filter(|version| !version.incomplete)
-            .map(|version| (version.stamp, local_text(&version.stamp, zone)))
+            .map(|version| version.stamp)
+            .collect();
+        let labels = local_labels(&complete, zone);
+        complete
+            .iter()
+            .zip(labels)
+            .map(|(stamp, label)| {
+                let mut renderings = vec![local_text(stamp, zone)];
+                if label != renderings[0] {
+                    renderings.push(label);
+                }
+                (*stamp, renderings)
+            })
             .collect()
     };
-    let mut found: Vec<Stamp> = texts
-        .iter()
-        .filter(|(_, text)| text == input)
-        .map(|(stamp, _)| *stamp)
-        .collect();
-    if found.is_empty() {
-        found = texts
+    let matching = |matches: &dyn Fn(&str) -> bool| -> Vec<Stamp> {
+        texts
             .iter()
-            .filter(|(_, text)| text.starts_with(input))
+            .filter(|(_, renderings)| renderings.iter().any(|text| matches(text)))
             .map(|(stamp, _)| *stamp)
-            .collect();
+            .collect()
+    };
+    let mut found = matching(&|text| text == input);
+    if found.is_empty() {
+        found = matching(&|text| text.starts_with(input));
     }
     found.sort();
     match found.as_slice() {
@@ -250,6 +295,135 @@ mod tests {
             );
         }
         assert_eq!(find("2026-11-04", &[], &berlin()), Lookup::NoMatch);
+    }
+
+    /// The repeated hour of the end of daylight saving time in Berlin:
+    /// 02:30 happens at 00:30 UTC (+02:00) and again at 01:30 UTC (+01:00).
+    fn repeated_hour() -> [Candidate; 2] {
+        [complete("2026-10-25T003000"), complete("2026-10-25T013000")]
+    }
+
+    #[test]
+    fn two_versions_that_render_alike_get_the_offset() {
+        let stamps = [stamp("2026-10-25T003000"), stamp("2026-10-25T013000")];
+        assert_eq!(
+            local_labels(&stamps, &berlin()),
+            ["2026-10-25 02:30:00 +02:00", "2026-10-25 02:30:00 +01:00"]
+        );
+    }
+
+    #[test]
+    fn versions_that_render_apart_get_no_offset() {
+        let stamps = [stamp("2026-11-04T090211"), stamp("2026-11-04T090212")];
+        assert_eq!(
+            local_labels(&stamps, &berlin()),
+            ["2026-11-04 10:02:11", "2026-11-04 10:02:12"]
+        );
+    }
+
+    #[test]
+    fn one_repeated_pair_does_not_mark_a_third_version() {
+        let stamps = [
+            stamp("2026-10-25T003000"),
+            stamp("2026-10-25T013000"),
+            stamp("2026-10-25T020000"),
+        ];
+        let labels = local_labels(&stamps, &berlin());
+        assert_eq!(labels[2], "2026-10-25 03:00:00");
+        assert!(labels[0].ends_with("+02:00") && labels[1].ends_with("+01:00"));
+    }
+
+    #[test]
+    fn versions_of_one_second_are_both_marked_though_the_offset_is_the_same() {
+        let stamps = [stamp("2026-11-04T090211"), stamp("2026-11-04T090211-2")];
+        assert_eq!(
+            local_labels(&stamps, &berlin()),
+            ["2026-11-04 10:02:11 +01:00", "2026-11-04 10:02:11 +01:00"]
+        );
+    }
+
+    #[test]
+    fn an_input_with_the_offset_names_one_of_the_repeated_times() {
+        let versions = repeated_hour();
+        assert_eq!(
+            find("2026-10-25 02:30:00 +02:00", &versions, &berlin()),
+            Lookup::Found(stamp("2026-10-25T003000"))
+        );
+        assert_eq!(
+            find("2026-10-25 02:30:00 +01:00", &versions, &berlin()),
+            Lookup::Found(stamp("2026-10-25T013000"))
+        );
+        assert_eq!(
+            find("2026-10-25 02:30:00 +02", &versions, &berlin()),
+            Lookup::Found(stamp("2026-10-25T003000"))
+        );
+    }
+
+    #[test]
+    fn an_input_without_the_offset_names_both_repeated_times() {
+        assert_eq!(
+            find("2026-10-25 02:30:00", &repeated_hour(), &berlin()),
+            Lookup::Several(vec![stamp("2026-10-25T003000"), stamp("2026-10-25T013000")])
+        );
+    }
+
+    #[test]
+    fn an_offset_where_the_output_shows_none_names_nothing() {
+        let versions = [complete("2026-11-04T090211")];
+        assert_eq!(
+            find("2026-11-04 10:02:11 +01:00", &versions, &berlin()),
+            Lookup::NoMatch
+        );
+    }
+
+    #[test]
+    fn an_incomplete_version_does_not_make_a_complete_one_show_its_offset() {
+        let versions = [
+            complete("2026-10-25T003000"),
+            incomplete("2026-10-25T013000"),
+        ];
+        assert_eq!(
+            find("2026-10-25 02:30:00 +02:00", &versions, &berlin()),
+            Lookup::NoMatch
+        );
+        assert_eq!(
+            find("2026-10-25 02:30:00", &versions, &berlin()),
+            Lookup::Found(stamp("2026-10-25T003000"))
+        );
+    }
+
+    /// Set in the environment of the child process of
+    /// [`the_system_zone_follows_tz`], which runs this test alone.
+    const CHILD: &str = "ANTIQ_SYSTEM_ZONE_CHILD";
+
+    #[test]
+    fn the_child_of_the_system_zone_test() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let at = stamp("2026-11-04T090211");
+        println!("LOCAL={}", local_text(&at, &system_zone()));
+    }
+
+    /// `TZ` cannot be set in this process: the environment is shared with
+    /// the other test threads. A child process gets it instead.
+    #[test]
+    fn the_system_zone_follows_tz() {
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "versions::naming::tests::the_child_of_the_system_zone_test",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("TZ", "Europe/Berlin")
+            .env(CHILD, "1")
+            .output()
+            .expect("the test binary runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("LOCAL=2026-11-04 10:02:11"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
