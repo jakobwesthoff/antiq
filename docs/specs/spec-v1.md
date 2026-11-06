@@ -1971,8 +1971,8 @@ and `damaged_versions` adds `"reasons"`, a list of texts. `doomed` holds
 `{"path", "first_entry", "cause"}` with the cause `locked`,
 `directory_not_writable` or `null`; `spelling` holds `{"live", "stored"}`.
 `recovered`, `trash`, `unparsable_files` and the paths of `doomed` are
-relative to `.antiq/`. While the lock is held, a `note` field names the
-holder.
+relative to `.antiq/`. `warnings` is a list of `{message}` objects. While
+the lock is held, a `note` field names the holder.
 
 `unearth` has `unearthed` (false when the version did not fit), `piece`,
 `stamp`, `version` (the time of the stamp in UTC, RFC 3339), `path`,

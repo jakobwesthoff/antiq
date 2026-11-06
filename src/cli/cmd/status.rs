@@ -507,11 +507,7 @@ fn payload(report: &StatusReport, now: Timestamp) -> Value {
             .collect::<Vec<_>>(),
         "unreadable_directories": report.unreadable_directories,
         "unparsable_files": report.unparsable,
-        "warnings": report
-            .warnings
-            .iter()
-            .map(|warning| warning.message.as_str())
-            .collect::<Vec<_>>(),
+        "warnings": report.warnings,
         "store_error": report.store_error,
     });
     if let Some(holder) = &report.holder {
@@ -1120,7 +1116,7 @@ mod tests {
             found["store_error"],
             "cannot read the store: pieces/notes: denied"
         );
-        assert_eq!(found["warnings"], json!(["a warning"]));
+        assert_eq!(found["warnings"], json!([{"message": "a warning"}]));
         assert!(found.get("note").is_none());
         assert_eq!(found["pieces"], json!([]));
     }
