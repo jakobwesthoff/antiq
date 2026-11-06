@@ -151,9 +151,10 @@ walk reads whether an entry is a mount root. On Linux that is the
 `STATX_ATTR_MOUNT_ROOT` attribute of `statx`; a kernel older than 5.8
 does not report it, and there only the device numbers decide. On macOS
 it is the mount point name of the directory (`f_mntonname`) differing
-from its parent's. A firmlink at the top of the system volume compares as
-a mount root there, so a piece containing one is refused, which is the
-safe direction. A directory that cannot be searched is not compared on
+from its parent's. A firmlink (macOS links directories such as `/Users`,
+`/Library` and `/usr/local` into the data volume) compares as a mount
+root there, so a piece containing one is refused, which is the safe
+direction. A directory that cannot be searched is not compared on
 macOS; the delete helper reads its flag again once it has given the
 directory owner access and has opened it.
 The walk does not enter an excluded directory either: a piece that

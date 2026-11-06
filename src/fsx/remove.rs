@@ -103,9 +103,8 @@ fn remove_tree_with(
         );
         return Err(failure("remove", root, path)(source));
     }
-    // The device the removal has to stay on is the one of the directory
-    // holding the top, so a top that is itself a mount point is refused,
-    // and so is the root of a mount on that same device.
+    // The removal has to stay on the device of `root`, so a top on another
+    // device is refused, and so is the root of a mount on that same device.
     let holder = root
         .lstat(&RelPath::root())
         .map_err(failure("stat", root, &RelPath::root()))?;
@@ -615,7 +614,7 @@ mod tests {
     /// soft limit on macOS is 256.
     fn allow_many_open_files() {
         use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-        const NEEDED: u64 = 1_200;
+        const NEEDED: u64 = 2_048;
         let limit = getrlimit(Resource::Nofile);
         let wanted = limit.maximum.map_or(NEEDED, |maximum| maximum.min(NEEDED));
         if limit.current.is_none_or(|current| current < wanted) {

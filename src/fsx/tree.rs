@@ -647,10 +647,11 @@ fn mount_names_differ(own: &[u8], parent: &[u8]) -> bool {
 }
 
 /// What the failure of opening a directory to compare its mount point name
-/// means. A directory the process may not search cannot be entered either,
-/// so it counts as no mount root; one that was replaced since its `lstat`
-/// has changed; anything else, a shortage of descriptors included, is
-/// reported.
+/// means. A directory the process may not search reads as no mount root.
+/// The walk cannot enter it, which makes the piece unreadable, and
+/// `remove_tree` reads the flag again once it has given the directory owner
+/// access. One that was replaced since its `lstat` has changed; anything
+/// else, a shortage of descriptors included, is reported.
 #[cfg(target_os = "macos")]
 fn mount_root_after_failed_open(errno: Errno) -> io::Result<bool> {
     match errno {
@@ -789,6 +790,15 @@ mod tests {
             let error = mount_root_after_failed_open(errno).expect_err("fails");
             assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()), "{errno}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernel_reports_the_root_and_proc_as_mount_roots() {
+        let root = TreeRoot::open(Path::new("/")).expect("opens");
+        assert!(root.lstat(&RelPath::root()).expect("stat").mount_root);
+        assert!(root.lstat(&path("proc")).expect("stat").mount_root);
+        assert!(!root.lstat(&path("etc")).expect("stat").mount_root);
     }
 
     #[cfg(target_os = "linux")]

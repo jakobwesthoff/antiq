@@ -247,6 +247,20 @@ mod tests {
         assert!(is_mount_point(Path::new("/proc")).expect("answers"));
     }
 
+    /// Whether the run may mount: only the privileged Linux container sets
+    /// `ANTIQ_PRIVILEGED_TESTS=1`. Elsewhere the mount tests report that
+    /// they skipped and pass, so a run with the ignored tests included does
+    /// not fail on a machine that cannot mount. Where the variable is set,
+    /// a mount that fails fails the test.
+    #[cfg(target_os = "linux")]
+    fn privileged() -> bool {
+        let allowed = std::env::var("ANTIQ_PRIVILEGED_TESTS").is_ok_and(|value| value == "1");
+        if !allowed {
+            eprintln!("skipped: set ANTIQ_PRIVILEGED_TESTS=1 as root to run the mount tests");
+        }
+        allowed
+    }
+
     /// A bind mount of `source` at `target`, undone when dropped. Mounting
     /// needs CAP_SYS_ADMIN, which the privileged Linux container has.
     #[cfg(target_os = "linux")]
@@ -279,8 +293,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
     fn a_bind_mount_is_a_mount_root_on_its_parents_device() {
+        if !privileged() {
+            return;
+        }
         use std::os::unix::fs::MetadataExt;
         let mut tree = Tree::new();
         tree.file("src/precious", "x");
@@ -303,8 +319,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
     fn removing_a_tree_stops_at_a_bind_mount_and_leaves_its_source_alone() {
+        if !privileged() {
+            return;
+        }
         use crate::fsx::{FsxError, remove::remove_tree};
         let mut tree = Tree::new();
         tree.file("src/precious", "x");
@@ -323,8 +341,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
     fn the_walk_reports_a_bind_mount_inside_a_piece_and_as_a_piece() {
+        if !privileged() {
+            return;
+        }
         use crate::select::Rules;
         use crate::tree::Problem;
         use crate::walk::walk_piece;
