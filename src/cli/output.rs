@@ -369,11 +369,11 @@ mod tests {
         details.insert("pid".into(), json!(4242));
         capture
             .output(false)
-            .json_error(Some("sync"), ErrorKind::LockHeld, "held", &details)
+            .json_error(Some("archive"), ErrorKind::LockHeld, "held", &details)
             .expect("memory accepts writes");
         assert_eq!(
             capture.stdout(),
-            "{\"format\":1,\"command\":\"sync\",\"error\":\
+            "{\"format\":1,\"command\":\"archive\",\"error\":\
              {\"kind\":\"lock_held\",\"message\":\"held\",\"pid\":4242}}\n"
         );
         assert_eq!(capture.stderr(), "");
@@ -412,9 +412,9 @@ mod tests {
     fn a_closed_pipe_drops_the_output_without_an_error() {
         let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
         let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
-        out.json(Some("find"), &json!({}))
+        out.json(Some("status"), &json!({}))
             .expect("a closed pipe is no error");
-        out.json(Some("find"), &json!({}))
+        out.json(Some("status"), &json!({}))
             .expect("a closed pipe is no error");
         assert_eq!(
             *flushes.lock().expect("no test panics while counting"),
@@ -501,7 +501,7 @@ mod tests {
         let (disk, _) = FailsOnFlush::new(io::ErrorKind::StorageFull);
         let mut out = Output::new(Box::new(disk), Box::new(Vec::new()), false);
         let error = out
-            .json(Some("find"), &json!({}))
+            .json(Some("status"), &json!({}))
             .expect_err("a full disk is reported");
         assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     }
