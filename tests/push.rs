@@ -9,6 +9,7 @@ mod support;
 use std::fs;
 use std::path::Path;
 use support::cmd::{Antiq, Run, hold_lock, snapshot};
+use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection};
 
 fn collection() -> Collection {
@@ -30,6 +31,27 @@ fn add_target_table(collection: &Collection, lines: &str) {
 fn set_url(collection: &Collection, url: &str) {
     let quoted = serde_json::to_string(url).expect("a string serialises");
     add_target_table(collection, &format!("url = {quoted}"));
+}
+
+/// Adds a key line to the `[target]` table that `set_url` wrote.
+fn add_target_key(collection: &Collection, line: &str) {
+    let path = collection.path(".antiq/config.toml");
+    let text = fs::read_to_string(&path).expect("the config exists");
+    assert!(text.contains("[target]\n"), "the target table exists");
+    fs::write(
+        &path,
+        text.replacen("[target]\n", &format!("[target]\n{line}\n"), 1),
+    )
+    .expect("the config can be written");
+}
+
+/// A stand-in rsync that reports `version`, set as `[target] rsync`.
+fn use_fake_rsync(collection: &Collection, version: &str) -> FakeRsync {
+    let fake = FakeRsync::new(version);
+    let path = serde_json::to_string(fake.path().to_str().expect("a UTF-8 path"))
+        .expect("a string serialises");
+    add_target_key(collection, &format!("rsync = {path}"));
+    fake
 }
 
 fn push(collection: &Collection, args: &[&str]) -> Run {
@@ -421,4 +443,62 @@ fn a_listing_that_cannot_be_read_is_an_error_not_a_pass() {
     assert_eq!(run.code(), 1, "{}", run.stdout);
     assert_eq!(run.error_kind(), "other", "{}", run.stdout);
     assert!(run.error_message().contains("store"), "{}", run.stdout);
+}
+
+// =========================================================
+// Step 3: the local rsync
+// =========================================================
+
+#[test]
+fn an_rsync_that_is_too_old_or_not_rsync_is_refused_with_its_path() {
+    let versions = [
+        "openrsync: protocol version 29\nrsync version 2.6.9 compatible\n",
+        "rsync  version 3.2.3  protocol version 31\n",
+        "rsync  version 3.1.0  protocol version 31\n",
+    ];
+    for version in versions {
+        let collection = stored(&[]);
+        let fake = use_fake_rsync(&collection, version);
+
+        let run = push(&collection, &[]);
+
+        assert_eq!(run.code(), 1, "{version:?}: {}", run.stdout);
+        assert_eq!(run.error_kind(), "other", "{version:?}");
+        let message = run.error_message();
+        assert!(message.contains("[target] rsync"), "{version:?}: {message}");
+        let path = fake.path();
+        assert!(
+            message.contains(path.to_str().expect("a UTF-8 path")),
+            "{version:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_dry_run_checks_the_rsync_too() {
+    let collection = stored(&[]);
+    let _fake = use_fake_rsync(&collection, "rsync  version 3.2.3  protocol version 31\n");
+
+    let run = push(&collection, &["-n"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other");
+    assert!(run.error_message().contains("[target] rsync"));
+}
+
+#[test]
+fn an_rsync_of_3_2_4_goes_on_to_the_next_step() {
+    for args in [&[][..], &["-n"][..]] {
+        let collection = stored(&[]);
+        let _fake = use_fake_rsync(&collection, "rsync  version 3.2.4  protocol version 31\n");
+
+        let run = push(&collection, args);
+
+        assert_eq!(
+            run.error_kind(),
+            "not_implemented",
+            "{args:?}: {}",
+            run.stdout
+        );
+    }
 }

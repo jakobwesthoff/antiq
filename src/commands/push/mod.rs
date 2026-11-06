@@ -11,6 +11,7 @@ use crate::plan::HeldDryRun;
 use crate::relpath::RelPath;
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
+use crate::target::rsync::{Rsync, RsyncError};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,8 @@ pub enum PushError {
     RootNotUtf8 { path: PathBuf },
     // The wrapped error is a source and not transparent, so that the
     // holder of a held lock stays visible to the error details.
+    #[error("cannot use the local rsync")]
+    Rsync(#[source] RsyncError),
     #[error("cannot start the run")]
     Run(#[source] RunError),
     #[error("cannot read the store")]
@@ -69,6 +72,7 @@ impl HasKind for PushError {
         match self {
             PushError::NoTarget => ErrorKind::NoTarget,
             PushError::Run(error) => error.kind(),
+            PushError::Rsync(error) => error.kind(),
             PushError::Unfinished => ErrorKind::NotImplemented,
             PushError::Url(_)
             | PushError::RootNotUtf8 { .. }
@@ -108,17 +112,29 @@ pub fn push(
     utf8_root(collection.root())?;
 
     let started = run::start(collection, clock, request.dry_run).map_err(PushError::Run)?;
-    match started {
+    // The guard, when there is one, holds the lock until push returns.
+    let _guard = match started {
         Started::DryRun {
             holder: Some(holder),
             ..
-        } => Ok(PushOutcome::HeldDryRun(HeldDryRun::new(&holder))),
-        Started::DryRun { holder: None, .. } => Err(PushError::Unfinished),
+        } => return Ok(PushOutcome::HeldDryRun(HeldDryRun::new(&holder))),
+        Started::DryRun { holder: None, .. } => None,
         Started::Guarded(guard) => {
             store::check(collection, guard.warnings())?;
-            Err(PushError::Unfinished)
+            Some(guard)
         }
-    }
+    };
+
+    let _rsync = local_rsync(collection)?;
+    Err(PushError::Unfinished)
+}
+
+/// The rsync that runs the push: `[target] rsync`, else the first good one
+/// on `PATH` or in the usual install directories. The error names the
+/// executable it refused and the key that overrides the search.
+fn local_rsync(collection: &Collection) -> Result<Rsync, PushError> {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    Rsync::resolve(collection.config().target.rsync.as_deref(), &path_var).map_err(PushError::Rsync)
 }
 
 /// The parsed `[target] url`.
