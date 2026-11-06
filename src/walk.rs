@@ -55,6 +55,13 @@ pub(crate) trait Hooks {
     /// works on `path`.
     fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error>;
 
+    /// The owner to use for the entry at `path`, relative to the piece's
+    /// top, in place of the `reported` one. A test cannot create a file
+    /// that belongs to someone else.
+    fn owner(&self, _path: &RelPath, reported: u32) -> u32 {
+        reported
+    }
+
     /// The kind to use for the entry at `path` in place of the `reported`
     /// one, which a listing may leave as `Unknown`.
     fn listed_kind(&self, _path: &RelPath, reported: EntryKind) -> EntryKind {
@@ -144,6 +151,8 @@ pub(crate) fn walk_piece_with(
         nested_collections: Vec::new(),
         rule_files: Vec::new(),
         marker_faults: Vec::new(),
+        locked: Vec::new(),
+        locked_parent: None,
         first_failure: None,
     };
     let root = RelPath::root();
@@ -173,7 +182,11 @@ pub(crate) fn walk_piece_with(
             walker.mount_points.push(root.clone());
         }
         let is_directory = top_entry.kind == EntryKind::Directory;
+        walker.note_locked(&root, &top_entry, || collection.user_can_write(top))?;
         walker.entries.push(top_entry);
+        if !top.is_root() {
+            walker.check_parent(collection, top)?;
+        }
         if !is_directory {
             let not_a_directory = io::Error::from_raw_os_error(Errno::NOTDIR.raw_os_error());
             walker.note_failure(&root, not_a_directory)?;
@@ -214,6 +227,19 @@ pub(crate) fn walk_piece_with(
             .nested_collections
             .into_iter()
             .map(|root| Problem::NestedCollection { root }),
+    );
+    walker.locked.sort();
+    problems.extend(
+        walker
+            .locked
+            .into_iter()
+            .map(|path| Problem::Locked { path }),
+    );
+    problems.extend(
+        walker
+            .locked_parent
+            .into_iter()
+            .map(|path| Problem::LockedParent { path }),
     );
     walker.rule_files.sort();
     problems.extend(
@@ -278,6 +304,10 @@ struct Walker<'a> {
     rule_files: Vec<(RelPath, Option<usize>)>,
     /// The marker names at the top that are not files.
     marker_faults: Vec<Name>,
+    /// The entries that are locked.
+    locked: Vec<RelPath>,
+    /// The directory above the top, if it is locked.
+    locked_parent: Option<RelPath>,
     /// The smallest path, in entry order, that could not be read.
     first_failure: Option<RelPath>,
 }
@@ -412,6 +442,65 @@ impl Walker<'_> {
         Ok(())
     }
 
+    /// Notes `entry` at `path` if it is locked: immutable or append-only,
+    /// or a directory that another user owns and this one cannot write.
+    /// Removing or moving it would fail halfway. A directory the user owns
+    /// is never locked by its mode, since removal gives itself owner access.
+    /// `writable` asks whether the user can write the directory.
+    fn note_locked(
+        &mut self,
+        path: &RelPath,
+        entry: &TreeEntry,
+        writable: impl FnOnce() -> io::Result<bool>,
+    ) -> Result<(), WalkError> {
+        let mut locked = entry.flag_locked;
+        let owner = self.hooks.owner(path, entry.uid);
+        if !locked
+            && entry.kind == EntryKind::Directory
+            && owner != rustix::process::geteuid().as_raw()
+        {
+            locked = self
+                .attempt(path, Call::Stat, writable)?
+                .is_some_and(|writable| !writable);
+        }
+        if locked {
+            self.locked.push(path.clone());
+        }
+        Ok(())
+    }
+
+    /// Notes the directory that holds the top if it is locked, whoever owns
+    /// it: antiq changes nothing outside the piece, so a parent the user
+    /// cannot write keeps the piece from being removed or moved.
+    fn check_parent(&mut self, collection: &TreeRoot, top: &RelPath) -> Result<(), WalkError> {
+        let parent = directories_above(top).pop().unwrap_or_else(RelPath::root);
+        let check = || -> io::Result<bool> {
+            let entry = collection.lstat(&parent)?;
+            Ok(entry.flag_locked || !collection.user_can_write(&parent)?)
+        };
+        // The hook is asked about the parent's path in the collection: the
+        // root path already stands for the top's own `lstat`.
+        let result = match self.hooks.fault(&parent, Call::Stat) {
+            Some(error) => Err(error),
+            None => check(),
+        };
+        match result {
+            Ok(false) => {}
+            Ok(true) => self.locked_parent = Some(parent),
+            Err(error) if is_out_of_descriptors(&error) => {
+                return Err(WalkError::OutOfDescriptors {
+                    piece: self.piece.clone(),
+                    path: parent,
+                    source: error,
+                });
+            }
+            // A parent that cannot be checked cannot be shown to be
+            // writable, and the piece in it cannot be removed or moved.
+            Err(_) => self.locked_parent = Some(parent),
+        }
+        Ok(())
+    }
+
     /// A marker name at the top of the piece that is not a file refuses the
     /// piece: it would be packed or deleted without anyone having read it.
     /// A symlink is a pin, but not a restored marker.
@@ -480,6 +569,7 @@ impl Walker<'_> {
         };
         entry.path = child.clone();
         entry.class = self.classify(level, &listed, &entry);
+        self.note_locked(&child, &entry, || level.directory.user_can_write(&single))?;
         // Compared without regard to case: on a volume that ignores case
         // `.ANTIQ` is the marker too, and on one that does not the worst
         // outcome is a refused piece, never a deleted collection.
@@ -557,6 +647,8 @@ mod tests {
         above_mount_roots: Vec<RelPath>,
         faults: Vec<(RelPath, Call, Errno)>,
         depth: Option<usize>,
+        /// Entries that another user owns.
+        foreign_owner: Vec<RelPath>,
     }
 
     impl Hooks for Staged {
@@ -578,6 +670,14 @@ mod tests {
 
         fn prefix_mount_root(&self, prefix: &RelPath, reported: bool) -> bool {
             reported || self.above_mount_roots.contains(prefix)
+        }
+
+        fn owner(&self, path: &RelPath, reported: u32) -> u32 {
+            if self.foreign_owner.contains(path) {
+                reported + 1
+            } else {
+                reported
+            }
         }
 
         fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
@@ -1225,6 +1325,215 @@ mod tests {
         );
     }
 
+    /// Makes the directory read-only; the mode comes back when the guard
+    /// drops.
+    fn close(tree: &Tree, relative: &str) -> crate::fsx::RestoreModes {
+        let directory = tree.path(relative);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
+            .expect("the mode is set");
+        assert_ne!(
+            rustix::process::geteuid().as_raw(),
+            0,
+            "root writes anywhere"
+        );
+        crate::fsx::RestoreModes(vec![directory])
+    }
+
+    #[test]
+    fn a_directory_someone_else_owns_and_the_user_cannot_write_is_locked() {
+        let mut tree = Tree::new();
+        tree.file("piece/theirs/f", "x");
+        tree.file("piece/theirs-writable/f", "x");
+        tree.file("piece/mine/f", "x");
+        let _closed = close(&tree, "piece/theirs");
+        let _closed_mine = close(&tree, "piece/mine");
+        let hooks = Staged {
+            foreign_owner: vec![path("theirs"), path("theirs-writable")],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("walks");
+        assert_eq!(
+            walked.problems(),
+            [Problem::Locked {
+                path: path("theirs")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_top_someone_else_owns_and_the_user_cannot_write_is_locked() {
+        let mut tree = Tree::new();
+        tree.file("piece/f", "x");
+        let _closed = close(&tree, "piece");
+        let hooks = Staged {
+            foreign_owner: vec![RelPath::root()],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &PieceRules::none(), &hooks).expect("walks");
+        assert_eq!(
+            walked.problems(),
+            [Problem::Locked {
+                path: RelPath::root()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_directory_the_user_owns_is_not_locked_whatever_its_mode() {
+        let mut tree = Tree::new();
+        tree.file("piece/mine/f", "x");
+        let _closed = close(&tree, "piece/mine");
+        let walked = walk(&tree, "piece");
+        assert_eq!(walked.problems(), []);
+        assert!(walked.entries().iter().all(|entry| !entry.flag_locked));
+    }
+
+    #[test]
+    fn a_top_whose_parent_the_user_cannot_write_is_locked_by_its_parent() {
+        let mut tree = Tree::new();
+        tree.file("area/piece/f", "x");
+        let _closed = close(&tree, "area");
+        let walked = walk(&tree, "area/piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::LockedParent { path: path("area") }]
+        );
+    }
+
+    #[test]
+    fn the_collection_root_is_the_parent_of_a_top_directly_below_it() {
+        let mut tree = Tree::new();
+        tree.file("piece/f", "x");
+        let _closed = close(&tree, "");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::LockedParent {
+                path: RelPath::root()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_walk_from_the_root_of_the_handle_has_no_parent_to_check() {
+        let mut tree = Tree::new();
+        tree.file("f", "x");
+        let _closed = close(&tree, "");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let walked = walk_piece(
+            &root,
+            &RelPath::root(),
+            &no_selection(),
+            &PieceRules::none(),
+        )
+        .expect("walks");
+        assert_eq!(walked.problems(), []);
+    }
+
+    #[test]
+    fn problems_come_in_the_order_the_status_lines_are_printed() {
+        let mut tree = Tree::new();
+        tree.file("area/piece/a/.antiqignore", "bad\\\n");
+        tree.dir("area/piece/b/.antiq");
+        tree.dir("area/piece/c-theirs");
+        tree.fifo("area/piece/.antiq-pin");
+        let unreadable = tree.unreadable_dir("area/piece/d");
+        assert_cannot_read(&unreadable);
+        let _closed = close(&tree, "area/piece/c-theirs");
+        let _parent = close(&tree, "area");
+        let hooks = Staged {
+            foreign_owner: vec![path("c-theirs")],
+            ..Staged::default()
+        };
+        let walked = walk_with(
+            &tree,
+            "area/piece",
+            &PieceRules::new(&[], &[]).expect("rules"),
+            &hooks,
+        )
+        .expect("walks");
+        let order: Vec<&str> = walked
+            .problems()
+            .iter()
+            .map(|problem| match problem {
+                Problem::Unreadable { .. } => "unreadable",
+                Problem::MountPoint { .. } => "mount",
+                Problem::Excluded { .. } => "excluded",
+                Problem::NestedCollection { .. } => "nested",
+                Problem::Locked { .. } => "locked",
+                Problem::LockedParent { .. } => "locked parent",
+                Problem::RuleFile { .. } => "rule file",
+                Problem::MarkerNotAFile { .. } => "marker",
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "unreadable",
+                "nested",
+                "locked",
+                "locked parent",
+                "rule file",
+                "marker"
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_immutable_file_or_directory_is_locked_wherever_it_lies() {
+        let mut tree = Tree::new();
+        tree.file("piece/plain", "x");
+        tree.file("piece/frozen", "x");
+        tree.file("piece/dir/inner", "x");
+        tree.file("piece/skip/deep/frozen", "x");
+        tree.immutable("piece/frozen");
+        tree.immutable("piece/dir");
+        tree.immutable("piece/skip/deep/frozen");
+        let walked = walk_ruled(&tree, &["skip/"], &[]);
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::Locked { path: path("dir") },
+                Problem::Locked {
+                    path: path("frozen")
+                },
+                Problem::Locked {
+                    path: path("skip/deep/frozen")
+                },
+            ]
+        );
+        assert_eq!(class_of(&walked, "skip/deep/frozen"), Class::Ignored);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_immutable_top_is_locked_at_the_root_path() {
+        let mut tree = Tree::new();
+        tree.file("piece/f", "x");
+        tree.immutable("piece");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::Locked {
+                path: RelPath::root()
+            }]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_immutable_parent_locks_the_top_whatever_its_owner() {
+        let mut tree = Tree::new();
+        tree.file("area/piece/f", "x");
+        tree.immutable("area");
+        let walked = walk(&tree, "area/piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::LockedParent { path: path("area") }]
+        );
+    }
+
     #[test]
     fn a_collection_marker_inside_the_piece_is_reported_with_the_directory_holding_it() {
         let mut tree = Tree::new();
@@ -1452,6 +1761,34 @@ mod tests {
                 marker_problem(".antiq-restored")
             ]
         );
+    }
+
+    #[test]
+    fn a_parent_that_cannot_be_checked_is_a_locked_parent_not_an_unreadable_top() {
+        let mut tree = Tree::new();
+        tree.file("area/piece/f", "x");
+        let hooks = Staged {
+            faults: vec![(path("area"), Call::Stat, Errno::IO)],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "area/piece", &PieceRules::none(), &hooks).expect("walks");
+        assert_eq!(
+            walked.problems(),
+            [Problem::LockedParent { path: path("area") }]
+        );
+    }
+
+    #[test]
+    fn running_out_of_descriptors_while_checking_the_parent_ends_the_run() {
+        let mut tree = Tree::new();
+        tree.file("area/piece/f", "x");
+        let hooks = Staged {
+            faults: vec![(path("area"), Call::Stat, Errno::MFILE)],
+            ..Staged::default()
+        };
+        let error =
+            walk_with(&tree, "area/piece", &PieceRules::none(), &hooks).expect_err("the run fails");
+        assert!(matches!(error, WalkError::OutOfDescriptors { .. }));
     }
 
     #[test]

@@ -28,9 +28,9 @@ use crate::relpath::{Name, RelPath};
 use crate::tree::{Class, EntryKind, TreeEntry};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{
-    AtFlags, Dir, Mode, OFlags, RawMode, RenameFlags, Timespec, Timestamps, UTIME_OMIT, chmodat,
-    fcntl_getfl, fcntl_setfl, fstat, linkat, mkdirat, open, openat, readlinkat, renameat,
-    renameat_with, statat, symlinkat, unlinkat, utimensat,
+    Access, AtFlags, Dir, Mode, OFlags, RawMode, RenameFlags, Timespec, Timestamps, UTIME_OMIT,
+    accessat, chmodat, fcntl_getfl, fcntl_setfl, fstat, linkat, mkdirat, open, openat, readlinkat,
+    renameat, renameat_with, statat, symlinkat, unlinkat, utimensat,
 };
 use rustix::io::Errno;
 use std::fs::File;
@@ -165,6 +165,18 @@ impl TreeRoot {
             flag_locked: raw.flag_locked,
             class: Class::Counted,
         })
+    }
+
+    /// Whether the user can write the entry at `path`, relative to this
+    /// root, by the effective user and group IDs and whatever the mode and
+    /// the flags of the volume say.
+    pub fn user_can_write(&self, path: &RelPath) -> io::Result<bool> {
+        let (dir, name) = self.split_or_root(path)?;
+        match accessat(dir.as_fd(), name, Access::WRITE_OK, AtFlags::EACCESS) {
+            Ok(()) => Ok(true),
+            Err(Errno::ACCESS | Errno::PERM | Errno::ROFS) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// The target of the symlink at `path`, relative to this root.
@@ -1857,6 +1869,37 @@ mod tests {
             .read_dir(&path("file"))
             .expect_err("not a directory");
         assert_eq!(raw_error(&error), Some(Errno::NOTDIR.raw_os_error()));
+    }
+
+    #[test]
+    fn the_user_can_write_a_directory_it_may_write_and_not_one_it_may_not() {
+        let mut tree = Tree::new();
+        tree.dir("open");
+        let closed = tree.dir("closed");
+        fs::set_permissions(&closed, Permissions::from_mode(0o555)).expect("the mode is set");
+        let _restore = crate::fsx::RestoreModes(vec![closed]);
+        assert_ne!(
+            rustix::process::geteuid().as_raw(),
+            0,
+            "root writes anywhere"
+        );
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+
+        assert!(root.user_can_write(&path("open")).expect("answers"));
+        assert!(!root.user_can_write(&path("closed")).expect("answers"));
+        assert!(root.user_can_write(&RelPath::root()).expect("answers"));
+        let system = TreeRoot::open(Path::new("/")).expect("the system root opens");
+        assert!(!system.user_can_write(&RelPath::root()).expect("answers"));
+    }
+
+    #[test]
+    fn a_missing_entry_cannot_be_asked_about_writing() {
+        let tree = Tree::new();
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let error = root
+            .user_can_write(&path("absent"))
+            .expect_err("no such entry");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

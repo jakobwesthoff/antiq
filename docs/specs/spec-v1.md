@@ -215,10 +215,14 @@ with a soft limit of 256.
 A piece with an entry that carries an immutable or append-only flag
 (macOS `st_flags` `UF_IMMUTABLE`, `SF_IMMUTABLE`, `UF_APPEND`,
 `SF_APPEND`; Linux `statx` `STATX_ATTR_IMMUTABLE`, `STATX_ATTR_APPEND`),
-or a directory, the top's parent included, that the user does not own and
-cannot write, is locked: it is never archived, and `status` names it ("locked: <path>"). A directory the user
-owns but has made unwritable is not locked, since removal gives itself
-owner access.
+or a directory inside the piece that the user does not own and cannot
+write, is locked: it is never archived, and `status` names it ("locked:
+<path>"). A directory the user owns but has made unwritable is not locked,
+since removal gives itself owner access. The directory that holds the
+top is locked when it carries such a flag or when the user cannot write
+it, whoever owns it, since antiq changes nothing outside the piece.
+`status` names it as "locked: <path>", the path relative to the collection
+root.
 
 The walk before packing also enters ignored paths for these checks (see
 "Ignore and timeless rules").
