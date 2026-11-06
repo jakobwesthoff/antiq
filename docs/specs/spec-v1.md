@@ -1380,6 +1380,10 @@ without an archive is incomplete and not searched. A path is searched as
 `<piece>/<path>`, in its unescaped bytes. Files, symbolic links and hard
 links are searched, directory entries are not.
 
+Only the listing is read, so a version that is damaged in another way, such
+as one with no checksum file or an archive whose size differs from its
+listing, is searched as long as its listing reads.
+
 A version that cannot be searched is skipped with a warning naming the piece
 and the version, and the exit code stays 0. That is a version with no
 listing file or two, a listing that cannot be opened or read, one that does
