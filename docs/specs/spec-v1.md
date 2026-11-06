@@ -241,7 +241,9 @@ archived, still backed up, and shown as pinned. Any entry of that name
 that is not a directory pins the piece, a dangling symlink included; a
 directory of that name is not a pin, and `unpin` refuses to remove it.
 `pin` and `unpin` create and remove the file and refuse on a piece whose
-folder is not present. A pin and its removal are durable when `pin` and
+folder is not present. They take a new piece, which has no ID yet, as well
+as an object. A piece that is in the state asked for is left as it is and
+reported as such. A pin and its removal are durable when `pin` and
 `unpin` return: the file and the entry in the piece's directory are
 flushed. The pin is checked before the idle and empty tests. (ADR 0024)
 
@@ -1470,7 +1472,8 @@ An answer that does not fit the pending decision is a usage error.
 Every state-changing command takes `--dry-run`, which prints the plan
 and changes nothing; under `--json` the plan is JSON. (ADR 0046) A dry
 run takes no lock and may read the remote; it writes nothing, locally or
-on the remote. On the console a plan is one `Would ...` line per action,
+on the remote. A dry run neither runs nor lists the start-of-run repairs.
+On the console a plan is one `Would ...` line per action,
 or `Nothing to do.` when there is none, followed by the place where the
 brake would hold, if it would: `The brake would hold at <planned> of
 <set size>:` and one line per item, up to ten, with path and ID.
@@ -1591,7 +1594,9 @@ given, and exits 3. Under `--json` nothing goes to stderr.
 
 `fork` has no payload defined yet.
 
-`pin` and `unpin` have no payload defined yet.
+`pin` and `unpin` add `id` (null for a new piece), `path`, `pinned` (whether
+the piece is pinned afterwards), `changed` (whether the command changed the
+pin file) and `warnings`.
 
 `sync` has no payload defined yet.
 

@@ -7,5 +7,6 @@
 #![allow(dead_code)]
 
 pub mod cmd;
+pub mod objects;
 pub mod sshd;
 pub mod tree;

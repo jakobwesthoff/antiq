@@ -7,7 +7,7 @@
 use crate::collection::Collection;
 use crate::fsx::FsxError;
 use crate::fsx::device::{self, FsKind};
-use crate::lock;
+use crate::lock::{self, Holder};
 use serde::Serialize;
 
 /// Something the user should know that did not stop the run.
@@ -66,14 +66,20 @@ pub(crate) fn notes_with(
     }
     // The lock is only read: taking it would make the caller a run of its own.
     match lock::holder(&collection.lock_path()) {
-        Ok(Some(holder)) => warnings.push(Warning::new(format!(
-            "another run holds the lock (pid {}, machine {}, started {})",
-            holder.pid, holder.machine, holder.started
-        ))),
+        Ok(Some(holder)) => warnings.push(lock_note(&holder)),
         Ok(None) => {}
         Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
     }
     warnings
+}
+
+/// The note for a run that holds the lock while a command that takes none
+/// looks at the collection.
+pub fn lock_note(holder: &Holder) -> Warning {
+    Warning::new(format!(
+        "another run holds the lock (pid {}, machine {}, started {})",
+        holder.pid, holder.machine, holder.started
+    ))
 }
 
 #[cfg(test)]
