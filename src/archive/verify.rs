@@ -5,7 +5,7 @@
 //! Verifying a package against a folder or a listing.
 
 use super::hashing::HashingReader;
-use super::read::{Package, damaged, read_package_observing};
+use super::read::{Package, read_package_observing};
 use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
 use crate::filesystem::tree::{TreeError, TreeRoot};
@@ -16,12 +16,14 @@ use crate::select::Rules;
 use crate::tree::{EntryKind, Problem, TreeEntry};
 use crate::walk::{Hooks, KeptFolder, MAX_DEPTH, RealFs, only_blocks_removal, walk_piece_with};
 use rustix::io::Errno;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{File, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::rc::Rc;
 
 /// What differs between a package or a listing and a folder at one path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,12 +301,40 @@ fn read_archive(
     on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
 ) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
-    let mut hashed = HashingReader::new(file);
+    read_stream(package, file, archive, on_file)
+}
+
+/// [`read_archive`] for the bytes of `source`, which is the file `package`.
+fn read_stream(
+    package: &Path,
+    source: impl io::Read,
+    archive: Option<&ArchiveHash<'_>>,
+    on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
+) -> Result<Package, PackError> {
+    let failure = Rc::new(RefCell::new(None));
+    let mut hashed = HashingReader::new(Remembering {
+        inner: source,
+        failure: Rc::clone(&failure),
+    });
     let read = read_package_observing(&mut hashed, on_file);
     let Some(archive) = archive else {
         return read;
     };
     let drained = io::copy(&mut hashed, &mut io::sink());
+    // A hash of a partial read says nothing about the file, so a failed
+    // read ends here, before the hash is compared. The decoder may have
+    // turned the failure into a damaged stream, which is why the reader
+    // kept it.
+    let unreadable = |source| PackError::ReadFile {
+        path: package.to_path_buf(),
+        source,
+    };
+    if let Some(source) = failure.take() {
+        return Err(unreadable(source));
+    }
+    if let Err(source) = drained {
+        return Err(unreadable(source));
+    }
     let actual = hashed.sha256();
     if actual != archive.sha256 {
         return Err(PackError::ArchiveDiffers {
@@ -315,8 +345,28 @@ fn read_archive(
             ),
         });
     }
-    drained.map_err(damaged)?;
     read
+}
+
+/// A reader that keeps a copy of the first error of its source, apart from
+/// an interrupted call, which the caller retries.
+struct Remembering<R> {
+    inner: R,
+    failure: Rc<RefCell<Option<io::Error>>>,
+}
+
+impl<R: io::Read> io::Read for Remembering<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf).inspect_err(|error| {
+            let mut kept = self.failure.borrow_mut();
+            if error.kind() != io::ErrorKind::Interrupted && kept.is_none() {
+                *kept = Some(match error.raw_os_error() {
+                    Some(code) => io::Error::from_raw_os_error(code),
+                    None => io::Error::new(error.kind(), error.to_string()),
+                });
+            }
+        })
+    }
 }
 
 /// Reads the folder; in a staging tree the directories whose mode keeps
@@ -1311,6 +1361,42 @@ mod tests {
             .expect_err("the walk has a problem");
 
         assert!(matches!(&error, PackError::TreeHasProblems(_)), "{error:?}");
+    }
+
+    /// Reads `data` and then fails, as a disk does that goes bad.
+    struct FailsAfter<'a> {
+        data: &'a [u8],
+    }
+
+    impl io::Read for FailsAfter<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.data.is_empty() {
+                return Err(io::Error::other("the disk failed"));
+            }
+            io::Read::read(&mut self.data, buf)
+        }
+    }
+
+    #[test]
+    fn a_read_error_of_the_archive_file_is_reported_as_that_and_not_as_a_different_archive() {
+        let (_dir, archive, package, _tree) = archived();
+        let cut = package.bytes.len() / 2;
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+        let source = FailsAfter {
+            data: &package.bytes[..cut],
+        };
+
+        let error = read_stream(&archive, source, Some(&expected), &mut |_| Ok(()))
+            .expect_err("the file cannot be read to its end");
+
+        assert!(
+            matches!(&error, PackError::ReadFile { path, source }
+                if path == &archive && source.to_string() == "the disk failed"),
+            "{error:?}"
+        );
     }
 
     #[test]
