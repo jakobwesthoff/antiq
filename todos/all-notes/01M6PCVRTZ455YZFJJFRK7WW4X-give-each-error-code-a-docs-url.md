@@ -16,12 +16,8 @@ explains that code.
 
 ## Open
 
-- Which page a code points to. The README rework
-  (Rework the README and docs into a pitch and a tutorial before the
-  release) has to give each code a stable anchor first.
+- Which page a code points to. The README, now a tutorial and a reference,
+  has no section that explains the error codes; it needs a stable anchor per
+  code first.
 - Whether the JSON error gets the url as a key next to `code` and `fix`, and
   whether the console block shows it.
-
-## Relations
-
-- Relates to: [Rework the README and docs into a pitch and a tutorial before the release](01M6NZRSXPYMZVV5WAM0QCNZZJ-rework-the-readme-and-docs-into-a-pitch-and-a-tutorial-before-the.md)
