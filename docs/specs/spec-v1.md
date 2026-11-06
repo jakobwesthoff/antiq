@@ -1627,7 +1627,10 @@ default). A `url` starting with `/` is a path. A `url` does not start with
 `-`, and the host of an ssh target does not hold a `/`. The user, the host
 and the path of an ssh target are not empty when given. A path after the
 host that starts with `:` or `//` is refused, since rsync reads
-`host::module` and `rsync://host/module` as daemon syntax. An IPv6 host is
+`host::module` and `rsync://host/module` as daemon syntax. The path of an
+ssh target holds none of `*`, `?`, `[` and `]`, which rsync leaves to be
+expanded on the target, so that the pre-check and `--delete` could reach
+different directories. An IPv6 host is
 written in brackets, `[::1]:path`. Unknown keys under `[collection]` or
 `[target]` are ignored, and each one is reported in a warning.
 

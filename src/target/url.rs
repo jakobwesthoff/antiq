@@ -31,6 +31,10 @@ pub enum UrlError {
     Brackets { text: String },
     #[error("the path `{text}` starts with `:` or `//`, which rsync reads as daemon syntax")]
     Daemon { text: String },
+    #[error(
+        "the path `{text}` holds `*`, `?`, `[` or `]`, which the shell on the target would expand"
+    )]
+    Wildcard { text: String },
 }
 
 impl HasKind for UrlError {}
@@ -129,6 +133,11 @@ fn parse_ssh(text: &str) -> Result<TargetUrl, UrlError> {
     // instead of running ssh.
     if path.starts_with(':') || path.starts_with("//") {
         return Err(UrlError::Daemon { text: path.into() });
+    }
+    // rsync leaves these in a remote path to be expanded on the target, so
+    // the listing and the deletion could hit different directories.
+    if path.contains(['*', '?', '[', ']']) {
+        return Err(UrlError::Wildcard { text: path.into() });
     }
     Ok(TargetUrl::Ssh {
         user: user.map(String::from),
@@ -261,6 +270,36 @@ mod tests {
         for text in ["rsync://h/x", "ssh://h/p", "host::module", "h:://x"] {
             assert!(matches!(refused(text), UrlError::Daemon { .. }), "{text}");
         }
+    }
+
+    #[test]
+    fn wildcard_characters_in_an_ssh_path_are_refused() {
+        for text in [
+            "h:/a*b",
+            "h:/a?b",
+            "h:/a[1]",
+            "h:/a]",
+            "u@h:*",
+            "[::1]:/a[1]",
+        ] {
+            assert!(matches!(refused(text), UrlError::Wildcard { .. }), "{text}");
+        }
+    }
+
+    #[test]
+    fn brackets_around_the_host_and_wildcards_in_a_local_path_are_no_wildcards() {
+        assert_eq!(
+            TargetUrl::parse("[::1]:/srv/a"),
+            Ok(ssh(None, "[::1]", "/srv/a"))
+        );
+        assert_eq!(
+            TargetUrl::parse("u@[fe80::1]:x"),
+            Ok(ssh(Some("u"), "[fe80::1]", "x"))
+        );
+        assert_eq!(
+            TargetUrl::parse("/Volumes/a[1]*"),
+            Ok(path("/Volumes/a[1]*"))
+        );
     }
 
     #[test]

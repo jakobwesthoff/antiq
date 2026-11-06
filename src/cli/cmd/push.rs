@@ -4,8 +4,36 @@
 
 //! The `push` command: mirrors the collection to the target.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, PushArgs};
+use antiq::clock::SystemClock;
+use antiq::collection::Collection;
+use antiq::commands::push::{PushOutcome, PushRequest, push};
+use anyhow::Context as _;
+use std::path::PathBuf;
 
-pub fn run(ctx: &Context, _args: &PushArgs) -> anyhow::Result<u8> {
-    super::not_implemented(ctx, "push")
+pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
+    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
+    let collection = Collection::find(&start)
+        .map_err(antiq::Error::from)
+        .context("find the collection")?;
+    let request = PushRequest {
+        dry_run: args.dry_run,
+    };
+    let outcome = push(&collection, &request, &SystemClock)
+        .map_err(antiq::Error::from)
+        .context("push the collection")?;
+
+    match outcome {
+        PushOutcome::HeldDryRun(held) => {
+            if ctx.json {
+                out.json(Some("push"), &held).context("print the result")?;
+            } else {
+                for line in held.lines() {
+                    out.line(&line).context("print the result")?;
+                }
+            }
+        }
+    }
+    Ok(0)
 }

@@ -251,7 +251,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Grep(args) => cmd::grep::run(&ctx, args, out),
         Command::Pin(args) => cmd::pin::pin(&ctx, args, out),
         Command::Unpin(args) => cmd::pin::unpin(&ctx, args, out),
-        Command::Push(args) => cmd::push::run(&ctx, args),
+        Command::Push(args) => cmd::push::run(&ctx, args, out),
     }
 }
 

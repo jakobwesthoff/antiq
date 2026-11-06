@@ -281,11 +281,6 @@ fn pin_and_unpin_need_a_collection() {
     }
 }
 
-command_line!(push, "push", ["push"]);
-command_line!(push_with_init, "push", ["push", "--init", "--dry-run"]);
-command_line!(push_with_force, "push", ["push", "--force"]);
-command_line!(push_if_reachable, "push", ["push", "--if-reachable", "-n"]);
-
 /// A command line that does not parse: exit 2, kind `usage`, and the
 /// message contains `fragment`.
 fn assert_usage(args: &[&str], fragment: &str) {
