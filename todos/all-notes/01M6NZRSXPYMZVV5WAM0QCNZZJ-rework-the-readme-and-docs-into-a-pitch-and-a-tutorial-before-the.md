@@ -53,5 +53,5 @@ reworked README has to state the AI and agent context-directory use case
 and both platforms. If it names Claude Code, `claude-code` can replace
 `declutter` or `checksum` (the repository holds the maximum of 20).
 
-Do this after the console overhaul and the live progress rows land, so
-the captures show the final output.
+Do this after the console overhaul and the live progress cards (ADR 0064)
+have landed, so the captures show the final output.
