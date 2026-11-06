@@ -2735,8 +2735,8 @@ Notes for the items that call the strict verify and the listing comparison
   private so that a proof cannot be made from an edited difference list.
 - The stream check reads the frame to its end and checks the zstd
   checksum when the frame carries one; it does not require the checksum
-  flag. antiq's own packages always carry it; I21 (`import`) decides
-  whether an imported archive without one is accepted.
+  flag. antiq's own packages always carry it, and `import` (I21)
+  refuses any frame without it, so every stored payload has one.
 
 ### I13
 
