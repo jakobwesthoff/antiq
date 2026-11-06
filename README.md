@@ -10,7 +10,9 @@
 Archive what you no longer touch, find it when you need it.
 
 antiq is a command-line tool written in Rust for directories where
-working folders pile up. It is in early design, and nothing works yet.
+working folders pile up. It is in early development. `antiq init` makes a
+directory a collection and `antiq status` shows its pieces by state; the
+other commands are not implemented yet.
 
 The pangolin in the logo is [Archie](assets/archie-512.webp), antiq's
 mascot: a small idol of obsidian and gold. Archie shares its name with
