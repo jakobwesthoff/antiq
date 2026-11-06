@@ -171,13 +171,24 @@ impl World {
     /// its environment. What it wrote to stderr comes back as `stderr`
     /// with the terminal's `\r\n` as `\n`; stdout is piped.
     pub fn run_tty_stderr(&self, args: &[&str], envs: &[(&str, &str)]) -> Outcome {
-        let mut terminal = Terminal::open();
-        let mut antiq = Antiq::new()
+        let antiq = Antiq::new()
             .arg("-C")
             .arg(self.collection.root())
-            .args(args)
-            .env("TZ", TIME_ZONE)
-            .stderr(terminal.slave());
+            .args(args);
+        self.run_stderr_terminal(antiq, envs)
+    }
+
+    /// `run_tty_stderr` started inside the collection without `-C`, so that
+    /// a command antiq suggests to copy has no directory in it and its
+    /// text does not depend on the length of the temporary path.
+    pub fn run_tty_stderr_from_root(&self, args: &[&str], envs: &[(&str, &str)]) -> Outcome {
+        let antiq = Antiq::new().current_dir(self.collection.root()).args(args);
+        self.run_stderr_terminal(antiq, envs)
+    }
+
+    fn run_stderr_terminal(&self, antiq: Antiq, envs: &[(&str, &str)]) -> Outcome {
+        let mut terminal = Terminal::open();
+        let mut antiq = antiq.env("TZ", TIME_ZONE).stderr(terminal.slave());
         for (key, value) in envs {
             antiq = antiq.env(key, value);
         }

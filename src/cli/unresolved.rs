@@ -522,9 +522,26 @@ fn shell_word(word: &str) -> String {
 /// The command line the user ran, with the piece and the version replaced
 /// by the given ones where there are any.
 fn command_line(cli: &Cli, piece: Option<&str>, version: Option<&str>) -> String {
+    command_line_for(cli, piece, version, false)
+}
+
+/// The `forget --all-versions` the user ran, with `--force` added: the
+/// command that confirms what the refusal asks for.
+pub(super) fn forget_confirmation(cli: &Cli) -> String {
+    command_line_for(cli, None, None, true)
+}
+
+/// `command_line`, optionally with `--force` on an `--all-versions` forget.
+/// A `-C` the run was given stays, as the copied command has to find the
+/// same collection from wherever it is pasted.
+fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force: bool) -> String {
     let own = |piece_arg: &std::ffi::OsStr| piece_arg.to_string_lossy().into_owned();
     let mut words: Vec<String> = vec!["antiq".to_string()];
     let mut push = |word: &str| words.push(shell_word(word));
+    if let Some(directory) = &cli.directory {
+        push("-C");
+        push(&own(directory.as_os_str()));
+    }
     match &cli.command {
         Command::Archive(args) => {
             push("archive");
@@ -575,7 +592,7 @@ fn command_line(cli: &Cli, piece: Option<&str>, version: Option<&str>) -> String
             push(piece.unwrap_or(&own(&args.piece)));
             if args.all_versions {
                 push("--all-versions");
-                if args.force {
+                if args.force || force {
                     push("--force");
                 }
             } else if let Some(version) = version.or(args.version.as_deref()) {
@@ -886,6 +903,36 @@ mod tests {
             "antiq forget a 2025 -n"
         );
         assert_eq!(command_line(&cli(&["list"]), None, None), "antiq");
+    }
+
+    #[test]
+    fn the_command_to_copy_keeps_the_directory_of_the_run_quoted() {
+        assert_eq!(
+            command_line(
+                &cli(&["-C", "/tmp/my collection", "pin", "scan"]),
+                Some("projects/scanner"),
+                None
+            ),
+            "antiq -C '/tmp/my collection' pin projects/scanner"
+        );
+        assert_eq!(
+            command_line(&cli(&["-C", "/data", "unpin", "scan"]), None, None),
+            "antiq -C /data unpin scan"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_of_forget_all_versions_quotes_the_piece_and_keeps_the_directory() {
+        assert_eq!(
+            forget_confirmation(&cli(&[
+                "-C",
+                "/data",
+                "forget",
+                "my piece",
+                "--all-versions"
+            ])),
+            "antiq -C /data forget 'my piece' --all-versions --force"
+        );
     }
 
     #[test]

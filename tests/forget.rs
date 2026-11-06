@@ -670,7 +670,7 @@ fn the_command_line_refuses_a_missing_or_doubled_target() {
 #[test]
 fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     let world = world(Mode::Text, three_versions);
-    let run = world.run_tty_stderr(
+    let run = world.run_tty_stderr_from_root(
         &["forget", "projects/scanner", "--all-versions"],
         &[("NO_COLOR", "1")],
     );

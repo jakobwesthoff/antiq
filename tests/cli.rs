@@ -601,3 +601,24 @@ fn forget_all_versions_without_force_gets_its_own_error_on_a_pipe() {
          while attempting to forget all versions of tools/backup-script\n"
     );
 }
+
+#[test]
+fn the_forget_confirmation_keeps_the_directory_and_quotes_the_piece() {
+    let run = Antiq::new()
+        .args([
+            "-C",
+            "/tmp/my collection",
+            "forget",
+            "my piece",
+            "--all-versions",
+        ])
+        .run();
+    assert_eq!(run.code(), 2);
+    assert!(
+        run.stderr.contains(
+            "fix: Add --force to confirm: antiq -C '/tmp/my collection' forget 'my piece' --all-versions --force. "
+        ),
+        "{:?}",
+        run.stderr
+    );
+}

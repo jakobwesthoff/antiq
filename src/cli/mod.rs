@@ -266,7 +266,7 @@ fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> 
             &Map::new(),
         )
     } else {
-        let confirm = format!("antiq forget {piece} --all-versions --force");
+        let confirm = unresolved::forget_confirmation(cli);
         out.blocks(&[
             Block::error(Rich::new().path(&piece).text(": --all-versions needs --force"))
                 .why(Rich::parse(

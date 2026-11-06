@@ -51,7 +51,7 @@ fn live_pieces(builder: &mut CollectionBuilder) {
 /// an archive depends on the bytes of its headers, so each digit of a size
 /// is `N`: the width of the column stays checked.
 fn plain(world: &World, args: &[&str]) -> String {
-    let run = world.run_tty_stderr(args, &[("NO_COLOR", "1")]);
+    let run = world.run_tty_stderr_from_root(args, &[("NO_COLOR", "1")]);
     run.expect_code(1);
     mask_sizes(&run.stderr)
 }
