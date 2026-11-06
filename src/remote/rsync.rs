@@ -9,7 +9,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -26,9 +26,26 @@ pub enum RsyncError {
     Refused { path: PathBuf, reason: Refusal },
     #[error("no rsync 3.1 or later found{}", refusals_text(.refusals))]
     NoneFound { refusals: Vec<(PathBuf, String)> },
+    /// rsync ran and ended with a non-zero status, or was killed by a
+    /// signal (`code` is `None`). `stderr` is what it printed, so that the
+    /// caller can tell an ssh failure (status 255) from a transfer problem.
+    #[error("{}", failure_text(*code, stderr))]
+    Failed { code: Option<i32>, stderr: String },
 }
 
 impl crate::error::HasKind for RsyncError {}
+
+fn failure_text(code: Option<i32>, stderr: &str) -> String {
+    let how = match code {
+        Some(code) => format!("rsync failed with exit code {code}"),
+        None => "rsync was killed by a signal".to_string(),
+    };
+    if stderr.is_empty() {
+        how
+    } else {
+        format!("{how}: {stderr}")
+    }
+}
 
 fn refusals_text(refusals: &[(PathBuf, String)]) -> String {
     refusals
@@ -142,6 +159,167 @@ impl Rsync {
     pub fn version(&self) -> RsyncVersion {
         self.version
     }
+
+    /// Prepares one rsync call from `source` to `destination`. Both are
+    /// passed as given, so the caller escapes a remote path (`host:path`).
+    pub fn transfer(
+        &self,
+        settings: &TransferSettings,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> Transfer {
+        let mut args: Vec<OsString> = [
+            "--stats",
+            "--no-human-readable",
+            "--no-whole-file",
+            &format!("--timeout={}", settings.timeout_seconds),
+            "-e",
+        ]
+        .map(OsString::from)
+        .into();
+        args.push(join_rsh(&settings.ssh_command));
+        if let Some(remote_rsync) = &settings.remote_rsync {
+            args.push(format!("--rsync-path={remote_rsync}").into());
+        }
+        if settings.resumable {
+            args.push("--partial-dir=.antiq-partial".into());
+        }
+        args.extend([
+            "--".into(),
+            source.to_os_string(),
+            destination.to_os_string(),
+        ]);
+        Transfer {
+            program: self.path.clone(),
+            args,
+        }
+    }
+}
+
+/// What a transfer needs besides the paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferSettings {
+    /// The ssh command rsync runs as its remote shell, program first.
+    pub ssh_command: Vec<OsString>,
+    /// `--timeout`, the seconds without any data after which rsync gives up.
+    pub timeout_seconds: u32,
+    /// `--rsync-path`, the rsync to run on the remote.
+    pub remote_rsync: Option<String>,
+    /// Keep an interrupted file in `.antiq-partial` so that the next call
+    /// resumes it. Archive uploads set this.
+    pub resumable: bool,
+}
+
+impl TransferSettings {
+    pub fn for_machine(
+        machine: &MachineConfig,
+        ssh_command: Vec<OsString>,
+        resumable: bool,
+    ) -> TransferSettings {
+        TransferSettings {
+            ssh_command,
+            timeout_seconds: machine.rsync_timeout,
+            remote_rsync: machine.remote_rsync.clone(),
+            resumable,
+        }
+    }
+}
+
+/// One prepared rsync call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transfer {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+
+impl Transfer {
+    /// The command to run, with the environment of
+    /// [`scrub_environment`].
+    pub fn command(&self) -> Command {
+        self.build(Command::new(&self.program), inherited_names())
+    }
+
+    fn build(&self, base: Command, inherited: impl IntoIterator<Item = OsString>) -> Command {
+        let mut command = scrub_environment(base, inherited);
+        command.args(&self.args);
+        command
+    }
+
+    /// Runs the call. Any status but zero is a failure, 23 (partial
+    /// transfer), 24 (files vanished) and 30 (timeout) included.
+    pub fn run(&self) -> Result<TransferStats, RsyncError> {
+        let mut command = self.command();
+        command.stdin(Stdio::null());
+        let output = command.output().map_err(|source| RsyncError::Spawn {
+            path: self.program.clone(),
+            source,
+        })?;
+        if !output.status.success() {
+            return Err(RsyncError::Failed {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(parse_stats(&String::from_utf8_lossy(&output.stdout)))
+    }
+}
+
+/// The byte counts of rsync's `--stats` block. A count the output does not
+/// give in the expected form is `None`: unknown, not zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferStats {
+    pub literal_bytes: Option<u64>,
+    pub matched_bytes: Option<u64>,
+    pub bytes_sent: Option<u64>,
+    pub bytes_received: Option<u64>,
+}
+
+/// Reads the counts out of the `--stats` text under `LC_ALL=C` and
+/// `--no-human-readable`, where a count is plain digits. A line that is
+/// missing, or whose number has another form (a thousands separator, a
+/// decimal point), leaves its count unknown instead of guessing.
+fn parse_stats(output: &str) -> TransferStats {
+    let count = |label: &str| {
+        output.lines().find_map(|line| {
+            let number = line.strip_prefix(label)?.strip_prefix(": ")?;
+            let number = number.strip_suffix(" bytes").unwrap_or(number);
+            if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            number.parse().ok()
+        })
+    };
+    TransferStats {
+        literal_bytes: count("Literal data"),
+        matched_bytes: count("Matched data"),
+        bytes_sent: count("Total bytes sent"),
+        bytes_received: count("Total bytes received"),
+    }
+}
+
+/// The value of rsync's `-e` option for an ssh command.
+///
+/// rsync splits that value itself: parts are separated by spaces, single
+/// and double quotes keep spaces in a part, backslashes mean nothing, and a
+/// quote doubled inside a part quoted with the same quote stands for that
+/// quote. Quoting every part in single quotes and doubling the single quotes
+/// inside it therefore carries any argument, an empty one included.
+fn join_rsh(args: &[OsString]) -> OsString {
+    let mut joined = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            joined.push(b' ');
+        }
+        joined.push(b'\'');
+        for &byte in arg.as_bytes() {
+            joined.push(byte);
+            if byte == b'\'' {
+                joined.push(b'\'');
+            }
+        }
+        joined.push(b'\'');
+    }
+    OsString::from_vec(joined)
 }
 
 /// `machine.rsync` is stored as an absolute path so that a run does not
@@ -629,6 +807,497 @@ mod tests {
     fn from_machine_without_a_path_is_not_resolved() {
         let error = Rsync::from_machine(&MachineConfig::default()).expect_err("no path");
         assert!(matches!(error, RsyncError::NotResolved), "{error:?}");
+    }
+
+    // =========================================================
+    // The command line
+    // =========================================================
+
+    fn names(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    fn settings(ssh: &[&str]) -> TransferSettings {
+        TransferSettings {
+            ssh_command: names(ssh),
+            timeout_seconds: 13,
+            remote_rsync: None,
+            resumable: false,
+        }
+    }
+
+    fn argv(transfer: &Transfer) -> Vec<String> {
+        transfer
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn prepared(settings: &TransferSettings) -> Transfer {
+        let fake = Fake::new(RSYNC_3_5_1);
+        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        // Only the argv is inspected; the fake's directory is gone by then.
+        rsync.transfer(
+            settings,
+            OsStr::new("/src/a.tar"),
+            OsStr::new("host:/dest/a"),
+        )
+    }
+
+    #[test]
+    fn argv_has_the_fixed_flags_in_order_and_none_that_overwrite_or_delete() {
+        let transfer = prepared(&settings(&["ssh", "-o", "BatchMode=yes"]));
+        assert_eq!(
+            argv(&transfer),
+            [
+                "--stats",
+                "--no-human-readable",
+                "--no-whole-file",
+                "--timeout=13",
+                "-e",
+                "'ssh' '-o' 'BatchMode=yes'",
+                "--",
+                "/src/a.tar",
+                "host:/dest/a",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_command_runs_the_probed_path_with_the_argv() {
+        let fake = Fake::new(RSYNC_3_5_1);
+        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        let transfer = rsync.transfer(&settings(&["ssh"]), OsStr::new("a"), OsStr::new("b"));
+        let command = transfer.command();
+        assert_eq!(command.get_program(), fake.path().as_os_str());
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let expected: Vec<&OsStr> = transfer.args.iter().map(OsString::as_os_str).collect();
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn argv_passes_rsync_path_when_configured_and_not_otherwise() {
+        let mut with = settings(&["ssh"]);
+        with.remote_rsync = Some("/opt/homebrew/bin/rsync".to_string());
+        let with = argv(&prepared(&with));
+        assert_eq!(with[0], "--stats");
+        assert_eq!(with[5], "'ssh'");
+        assert_eq!(with[6], "--rsync-path=/opt/homebrew/bin/rsync");
+        let without = argv(&prepared(&settings(&["ssh"])));
+        assert_eq!(without[0], "--stats");
+        assert!(
+            !without.iter().any(|arg| arg.starts_with("--rsync-path")),
+            "{without:?}"
+        );
+    }
+
+    #[test]
+    fn argv_has_the_partial_dir_when_resumable_and_not_otherwise() {
+        let mut resumable = settings(&["ssh"]);
+        resumable.resumable = true;
+        let resumable = argv(&prepared(&resumable));
+        assert_eq!(resumable[0], "--stats");
+        assert_eq!(resumable[6], "--partial-dir=.antiq-partial");
+        let plain = argv(&prepared(&settings(&["ssh"])));
+        assert_eq!(plain[0], "--stats");
+        assert!(
+            !plain.iter().any(|arg| arg.starts_with("--partial")),
+            "{plain:?}"
+        );
+    }
+
+    #[test]
+    fn both_optional_flags_come_after_the_remote_shell_and_before_the_paths() {
+        let mut both = settings(&["ssh"]);
+        both.resumable = true;
+        both.remote_rsync = Some("rsync".to_string());
+        let both = argv(&prepared(&both));
+        assert_eq!(
+            both[6..],
+            [
+                "--rsync-path=rsync",
+                "--partial-dir=.antiq-partial",
+                "--",
+                "/src/a.tar",
+                "host:/dest/a",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_settings_come_from_the_machine_config() {
+        let machine = MachineConfig {
+            rsync_timeout: 42,
+            remote_rsync: Some("/usr/local/bin/rsync".to_string()),
+            ..MachineConfig::default()
+        };
+        let settings = TransferSettings::for_machine(&machine, names(&["ssh"]), true);
+        assert_eq!(
+            settings,
+            TransferSettings {
+                ssh_command: names(&["ssh"]),
+                timeout_seconds: 42,
+                remote_rsync: Some("/usr/local/bin/rsync".to_string()),
+                resumable: true,
+            }
+        );
+    }
+
+    #[test]
+    fn the_default_machine_config_gives_the_default_timeout() {
+        let settings =
+            TransferSettings::for_machine(&MachineConfig::default(), names(&["ssh"]), false);
+        assert_eq!(settings.timeout_seconds, 300);
+        assert_eq!(settings.remote_rsync, None);
+    }
+
+    // =========================================================
+    // The -e value
+    // =========================================================
+
+    #[test]
+    fn join_rsh_quotes_every_argument() {
+        let args = names(&[
+            "ssh",
+            "a b",
+            "it's",
+            "say \"hi\"",
+            "back\\slash",
+            "tab\there",
+            "new\nline",
+            "",
+        ]);
+        assert_eq!(
+            join_rsh(&args),
+            OsString::from(
+                "'ssh' 'a b' 'it''s' 'say \"hi\"' 'back\\slash' 'tab\there' 'new\nline' ''"
+            )
+        );
+    }
+
+    #[test]
+    fn join_rsh_keeps_bytes_that_are_not_utf8() {
+        let args = vec![OsString::from_vec(vec![b'a', 0xff, b'\'', b'b'])];
+        assert_eq!(
+            join_rsh(&args).as_bytes(),
+            [b'\'', b'a', 0xff, b'\'', b'\'', b'b', b'\'']
+        );
+    }
+
+    /// rsync is the authority on how it splits its `-e` value: the fixture
+    /// stands in for ssh, records the arguments rsync gives it and fails the
+    /// connection.
+    #[test]
+    fn rsh_round_trips_through_real_rsync() {
+        let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
+            panic!("the round trip needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
+        });
+        let shell = Fake::new("");
+        let hard = [
+            "-o",
+            "ProxyCommand=nc -x 'proxy' %h %p",
+            "it's",
+            "say \"hi\"",
+            "''",
+            "back\\slash",
+            "tab\there",
+            "new\nline",
+            "",
+            "two  spaces",
+        ];
+        let mut ssh = vec![shell.path().into_os_string()];
+        ssh.extend(names(&hard));
+        let transfer = real.transfer(
+            &settings_with(ssh),
+            OsStr::new("/dev/null"),
+            OsStr::new("remote-host:/dest/a"),
+        );
+        let error = transfer.run().expect_err("the stand-in ssh fails");
+        assert!(matches!(error, RsyncError::Failed { .. }), "{error:?}");
+        let log = shell.read("calls.log");
+        let mut recorded: Vec<&[u8]> = log.split(|&byte| byte == 0).collect();
+        recorded.pop();
+        assert_eq!(recorded[0], b"transfer");
+        let expected: Vec<&[u8]> = hard.iter().map(|arg| arg.as_bytes()).collect();
+        assert_eq!(recorded[1..=hard.len()], expected[..]);
+    }
+
+    fn settings_with(ssh_command: Vec<OsString>) -> TransferSettings {
+        TransferSettings {
+            ssh_command,
+            timeout_seconds: 13,
+            remote_rsync: None,
+            resumable: false,
+        }
+    }
+
+    const REAL_RSYNC: &str = "/opt/homebrew/bin/rsync";
+
+    // =========================================================
+    // Statistics
+    // =========================================================
+
+    /// The block rsync 3.5.1 printed for a push of a 2,568 byte file under
+    /// `LC_ALL=C` with `--no-human-readable`.
+    const STATS_3_5_1: &str = "\nNumber of files: 1 (reg: 1)\n\
+Number of created files: 1 (reg: 1)\n\
+Number of deleted files: 0\n\
+Number of regular files transferred: 1\n\
+Total file size: 2568 bytes\n\
+Total transferred file size: 2568 bytes\n\
+Literal data: 2568 bytes\n\
+Number of 4 KiB logical blocks touched: 1\n\
+Matched data: 0 bytes\n\
+File list size: 0\n\
+File list generation time: 0.001 seconds\n\
+File list transfer time: 0.000 seconds\n\
+Total bytes sent: 2652\n\
+Total bytes received: 35\n\
+\n\
+sent 2652 bytes  received 35 bytes  5374.00 bytes/sec\n\
+total size is 2568  speedup is 0.96\n";
+
+    #[test]
+    fn reads_literal_data_1408_bytes() {
+        let stats = parse_stats("Literal data: 1408 bytes\n");
+        assert_eq!(stats.literal_bytes, Some(1408));
+        assert_eq!(stats.matched_bytes, None);
+        assert_eq!(stats.bytes_sent, None);
+        assert_eq!(stats.bytes_received, None);
+    }
+
+    #[test]
+    fn reads_the_recorded_3_5_1_block() {
+        assert_eq!(
+            parse_stats(STATS_3_5_1),
+            TransferStats {
+                literal_bytes: Some(2568),
+                matched_bytes: Some(0),
+                bytes_sent: Some(2652),
+                bytes_received: Some(35),
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_line_is_unknown_not_zero() {
+        let without_matched = STATS_3_5_1.replace("Matched data: 0 bytes\n", "");
+        let stats = parse_stats(&without_matched);
+        assert_eq!(stats.matched_bytes, None);
+        assert_eq!(stats.literal_bytes, Some(2568));
+    }
+
+    #[test]
+    fn no_output_is_all_unknown() {
+        assert_eq!(parse_stats(""), TransferStats::default());
+    }
+
+    #[test]
+    fn a_separator_in_a_number_is_unknown() {
+        for text in [
+            "Literal data: 1.408 bytes\n",
+            "Literal data: 1,408 bytes\n",
+            "Literal data: bytes\n",
+            "Literal data: 99999999999999999999999 bytes\n",
+        ] {
+            assert_eq!(parse_stats(text).literal_bytes, None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_label_must_match_the_whole_line_start() {
+        let stats = parse_stats("Total literal data: 5 bytes\nTotal bytes sent : 5\n");
+        assert_eq!(stats, TransferStats::default());
+    }
+
+    // =========================================================
+    // Running
+    // =========================================================
+
+    fn run_fake(configure: impl FnOnce(&Fake)) -> (Fake, Result<TransferStats, RsyncError>) {
+        let fake = Fake::new(RSYNC_3_5_1);
+        configure(&fake);
+        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        let mut settings = settings(&["ssh", "-p", "2222"]);
+        settings.resumable = true;
+        let result = rsync
+            .transfer(
+                &settings,
+                OsStr::new("/src/a.tar"),
+                OsStr::new("host:/dest/a"),
+            )
+            .run();
+        (fake, result)
+    }
+
+    fn write(fake: &Fake, name: &str, text: &str) {
+        fs::write(fake.dir().join(name), text).expect("the directory is writable");
+    }
+
+    #[test]
+    fn a_successful_transfer_returns_the_stats() {
+        let (_, result) = run_fake(|fake| write(fake, "stdout", STATS_3_5_1));
+        assert_eq!(
+            result.expect("exit 0 succeeds"),
+            TransferStats {
+                literal_bytes: Some(2568),
+                matched_bytes: Some(0),
+                bytes_sent: Some(2652),
+                bytes_received: Some(35),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_0_without_stats_is_ok_with_unknown_stats() {
+        let (_, result) = run_fake(|_| ());
+        assert_eq!(result.expect("exit 0 succeeds"), TransferStats::default());
+    }
+
+    #[test]
+    fn the_fake_receives_the_argv_and_lc_all_c() {
+        let (fake, result) = run_fake(|_| ());
+        result.expect("exit 0 succeeds");
+        let log = fake.read("calls.log");
+        let mut recorded: Vec<&str> = std::str::from_utf8(&log)
+            .expect("text")
+            .split('\0')
+            .collect();
+        recorded.pop();
+        assert_eq!(
+            recorded,
+            [
+                "version",
+                "--version",
+                "transfer",
+                "--stats",
+                "--no-human-readable",
+                "--no-whole-file",
+                "--timeout=13",
+                "-e",
+                "'ssh' '-p' '2222'",
+                "--partial-dir=.antiq-partial",
+                "--",
+                "/src/a.tar",
+                "host:/dest/a",
+            ]
+        );
+        let env = String::from_utf8(fake.read("env.log")).expect("text");
+        assert_eq!(env, "LC_ALL=C\nLC_ALL=C\n");
+    }
+
+    fn failure(code: &str, message: &str) -> RsyncError {
+        let (_, result) = run_fake(|fake| {
+            write(fake, "exit", code);
+            write(fake, "stderr", message);
+            write(fake, "stdout", STATS_3_5_1);
+        });
+        result.expect_err("a non-zero exit fails")
+    }
+
+    #[test]
+    fn exit_23_fails_the_transfer() {
+        match failure("23", "some files could not be transferred\n") {
+            RsyncError::Failed { code, stderr } => {
+                assert_eq!(code, Some(23));
+                assert_eq!(stderr, "some files could not be transferred");
+            }
+            other => panic!("expected a failed transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_24_fails_the_transfer() {
+        match failure("24", "some files vanished\n") {
+            RsyncError::Failed { code, stderr } => {
+                assert_eq!(code, Some(24));
+                assert_eq!(stderr, "some files vanished");
+            }
+            other => panic!("expected a failed transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_30_fails_the_transfer() {
+        match failure("30", "io timeout\n") {
+            RsyncError::Failed { code, stderr } => {
+                assert_eq!(code, Some(30));
+                assert_eq!(stderr, "io timeout");
+            }
+            other => panic!("expected a failed transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failure_message_names_the_code_and_what_rsync_said() {
+        let error = failure("30", "io timeout\n");
+        assert_eq!(
+            error.to_string(),
+            "rsync failed with exit code 30: io timeout"
+        );
+    }
+
+    #[test]
+    fn a_failure_without_output_names_only_the_code() {
+        let error = RsyncError::Failed {
+            code: Some(23),
+            stderr: String::new(),
+        };
+        assert_eq!(error.to_string(), "rsync failed with exit code 23");
+    }
+
+    #[test]
+    fn a_signal_death_fails_the_transfer() {
+        let (_, result) = run_fake(|fake| write(fake, "signal", ""));
+        match result.expect_err("a killed rsync fails") {
+            error @ RsyncError::Failed { code: None, .. } => {
+                assert_eq!(error.to_string(), "rsync was killed by a signal");
+            }
+            other => panic!("expected a failed transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vanished_program_fails_with_spawn() {
+        let (fake, _) = run_fake(|_| ());
+        let rsync = Rsync::probe(&fake.path()).expect("it is still there");
+        fs::remove_file(fake.path()).expect("the link is ours");
+        let result = rsync
+            .transfer(&settings(&["ssh"]), OsStr::new("a"), OsStr::new("b"))
+            .run();
+        assert!(
+            matches!(result, Err(RsyncError::Spawn { .. })),
+            "{result:?}"
+        );
+    }
+
+    /// A copy on this machine with the real rsync: the flags are accepted
+    /// and the stats come out in the form the parser reads.
+    #[test]
+    fn real_rsync_copies_a_file_and_reports_its_stats() {
+        let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
+            panic!("this test needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
+        });
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let source = dir.path().join("a.tar");
+        fs::write(&source, vec![b'x'; 5000]).expect("the directory is writable");
+        let destination = dir.path().join("b.tar");
+        let mut settings = settings(&["ssh"]);
+        settings.resumable = true;
+        settings.remote_rsync = Some(REAL_RSYNC.to_string());
+        let stats = real
+            .transfer(&settings, source.as_os_str(), destination.as_os_str())
+            .run()
+            .expect("a local copy succeeds");
+        assert_eq!(stats.literal_bytes, Some(5000));
+        assert_eq!(stats.matched_bytes, Some(0));
+        assert!(
+            stats.bytes_sent.is_some_and(|sent| sent >= 5000),
+            "{stats:?}"
+        );
+        assert!(stats.bytes_received.is_some(), "{stats:?}");
+        assert_eq!(fs::read(&destination).expect("copied"), vec![b'x'; 5000]);
     }
 
     #[test]
