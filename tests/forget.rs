@@ -678,16 +678,14 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     assert_eq!(
         run.stderr,
         " ✖ ERROR\n\
-         ▌ projects/scanner: --all-versions needs --force\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   --all-versions deletes every stored version of the piece, damaged and\n\
-         ▌   incomplete ones included, and that cannot be undone.\n\
+         ▌ forget --all-versions needs --force, as it deletes every stored version of\n\
+         ▌ projects/scanner, damaged and incomplete ones included, and that cannot be\n\
+         ▌ undone\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Add --force to confirm:\n\
-         ▌   antiq forget projects/scanner --all-versions --force. Check the effect first\n\
-         ▌   with -n.\n\
+         ▌   Add --force to confirm, and check the effect first with -n.\n\
+         ▌\n\
+         ▌   Run antiq forget projects/scanner --all-versions --force to confirm.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to forget all versions of projects/scanner.\n\
@@ -965,4 +963,24 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
             });
         }
     }
+}
+
+#[test]
+fn all_versions_without_force_is_refused_also_as_a_dry_run_and_deletes_nothing() {
+    both(three_versions, |world| {
+        for args in [
+            &["forget", "projects/scanner", "--all-versions"][..],
+            &["forget", "projects/scanner", "--all-versions", "-n"],
+        ] {
+            let run = world.run(args);
+            run.expect_code(2);
+            let shown = format!("{}{}", run.stdout, run.stderr);
+            assert!(shown.contains("needs `--force`"), "{args:?}: {shown}");
+            // A pipe prints the fix without the backticks of its code spans.
+            let confirms = shown.contains("Add `--force` to confirm")
+                || shown.contains("Add --force to confirm");
+            assert!(confirms, "{args:?}: {shown}");
+        }
+        assert!(exists(world, "projects/scanner", SCANNER_NEW));
+    });
 }

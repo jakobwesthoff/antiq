@@ -35,6 +35,7 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
             Some(version) => Which::One(version),
             None => Which::All,
         },
+        force: args.force,
     };
     let zone = system_zone();
 

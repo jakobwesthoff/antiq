@@ -5,6 +5,7 @@
 //! The `forget` operation: deletes one version of a piece, or all of them.
 
 use crate::clock::Clock;
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::plan::LockHeld;
@@ -52,6 +53,15 @@ pub enum ForgetError {
     /// The piece or the version on the command line is empty.
     #[error("{0}")]
     Usage(&'static str),
+    #[diagnostic(
+        code(antiq::forget::all_versions_need_force),
+        help("Add `--force` to confirm, and check the effect first with `-n`.")
+    )]
+    #[error(
+        "`forget --all-versions` needs `--force`, as it deletes every stored version of {}, damaged and incomplete ones included, and that cannot be undone",
+        CodeSpan(.piece)
+    )]
+    AllVersionsNeedForce { piece: String },
     #[error("{0}")]
     Version(
         #[from]
@@ -65,7 +75,7 @@ impl HasKind for ForgetError {
         match self {
             ForgetError::Run(error) => error.kind(),
             ForgetError::Reference(error) => error.kind(),
-            ForgetError::Usage(_) => ErrorKind::Usage,
+            ForgetError::Usage(_) | ForgetError::AllVersionsNeedForce { .. } => ErrorKind::Usage,
             ForgetError::Version(error) => error.kind(),
             ForgetError::Versions(_) => ErrorKind::Other,
         }
@@ -89,6 +99,8 @@ pub struct ForgetRequest<'a> {
     /// A path or a search word.
     pub piece: &'a OsStr,
     pub which: Which<'a>,
+    /// Confirms [`Which::All`], which [`require_force`] refuses without it.
+    pub force: bool,
 }
 
 /// A version that `forget` deleted, or would delete.
@@ -295,9 +307,22 @@ pub fn plan(
     })
 }
 
+/// Refuses [`Which::All`] without `force`. A caller that has to report the
+/// refusal before it looks for the collection calls this on its own; the
+/// operations call it again, so no caller can skip it.
+pub fn require_force(piece: &OsStr, which: Which<'_>, force: bool) -> Result<(), ForgetError> {
+    if matches!(which, Which::All) && !force {
+        return Err(ForgetError::AllVersionsNeedForce {
+            piece: piece.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// The empty piece or version is a flaw of the command line: the shell
 /// passed a variable that was not set.
 fn check_arguments(request: &ForgetRequest<'_>) -> Result<(), ForgetError> {
+    require_force(request.piece, request.which, request.force)?;
     if request.piece.is_empty() {
         return Err(ForgetError::Usage("the piece is empty"));
     }
@@ -385,6 +410,7 @@ fn settled(
 mod tests {
     use super::*;
     use crate::lock::LockError;
+    use miette::Diagnostic;
 
     #[test]
     fn a_usage_error_is_a_usage_kind_and_a_held_lock_keeps_its_kind() {
@@ -394,6 +420,20 @@ mod tests {
             started: "2026-11-04T09:02:11Z".parse().expect("a timestamp"),
         }));
         assert_eq!(held.kind(), ErrorKind::LockHeld);
+    }
+
+    #[test]
+    fn all_versions_without_force_is_refused_as_a_usage_error_naming_the_piece() {
+        let refused = require_force(OsStr::new("tools/scan"), Which::All, false)
+            .expect_err("all versions need the force");
+        assert_eq!(refused.kind(), ErrorKind::Usage);
+        assert_eq!(
+            refused.code().expect("the refusal has a code").to_string(),
+            "antiq::forget::all_versions_need_force"
+        );
+        assert!(refused.to_string().contains("`tools/scan`"), "{refused}");
+        assert!(require_force(OsStr::new("tools/scan"), Which::All, true).is_ok());
+        assert!(require_force(OsStr::new("tools/scan"), Which::One("v1"), false).is_ok());
     }
 
     #[test]

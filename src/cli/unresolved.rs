@@ -54,15 +54,15 @@ enum Source {
 
 /// The command in the words the texts need.
 #[derive(Debug, Clone, Copy)]
-struct Action {
+pub(super) struct Action {
     /// As in "find the piece to unearth".
     verb: &'static str,
     /// As in "Nothing was unearthed."
-    done: &'static str,
+    pub(super) done: &'static str,
     source: Source,
 }
 
-fn action(command: &Command) -> Option<Action> {
+pub(super) fn action(command: &Command) -> Option<Action> {
     let (verb, done, source) = match command {
         Command::Archive(_) => ("archive", "archived", Source::Live),
         Command::Pin(_) => ("pin", "pinned", Source::Live),

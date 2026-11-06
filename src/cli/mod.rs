@@ -14,9 +14,10 @@ pub mod table;
 mod unresolved;
 mod usage;
 
-use self::console::block::Block;
+use self::console::block::{Block, Para};
 use self::console::rich::Rich;
 use self::output::{ErrorReport, Output};
+use antiq::commands::forget::{self, Which};
 use antiq::error::ErrorKind;
 use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -239,61 +240,11 @@ pub struct Context {
 pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
-            if let Some(code) = refuse_all_versions_without_force(&cli, out) {
-                return code;
-            }
             let result = dispatch(&cli, out);
             finish(&cli, result, out)
         }
         Err(error) => report_usage_error(&error, &args, out),
     }
-}
-
-/// `forget --all-versions` without `--force` is refused before anything
-/// runs. clap would refuse it too, but in its own words; this error names
-/// the piece and the command that confirms. Under `--json` the message is
-/// the one clap's `requires` produced, which scripts may match on.
-fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> {
-    let Command::Forget(args) = &cli.command else {
-        return None;
-    };
-    if !args.all_versions || args.force {
-        return None;
-    }
-    let piece = args.piece.to_string_lossy();
-    let _ = if cli.json {
-        out.json_error(
-            Some("forget"),
-            &ErrorReport {
-                kind: ErrorKind::Usage,
-                code: None,
-                message: "the following required arguments were not provided: --force",
-                fix: None,
-                details: &Map::new(),
-            },
-        )
-    } else {
-        let confirm = unresolved::forget_confirmation(cli);
-        out.blocks(&[
-            Block::error(Rich::new().path(&piece).text(": --all-versions needs --force"))
-                .why(Rich::parse(
-                    "`--all-versions` deletes every stored version of the piece, damaged and incomplete ones included, and that cannot be undone.",
-                ))
-                .how(
-                    Rich::new()
-                        .text("Add ")
-                        .cmd("--force")
-                        .text(" to confirm: ")
-                        .cmd(&confirm)
-                        .text(". Check the effect first with ")
-                        .cmd("-n")
-                        .text("."),
-                )
-                .doing(&format!("forget all versions of {piece}")),
-            Block::info(Rich::new().text("Nothing was deleted.")),
-        ])
-    };
-    Some(ErrorKind::Usage.exit_code())
 }
 
 /// The directory the run starts in: the one `-C` names, else the current
@@ -305,6 +256,17 @@ fn start_directory(cli: &Cli) -> anyhow::Result<PathBuf> {
 }
 
 fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
+    // The refusal needs nothing of the collection, so it comes before the
+    // search for one: outside a collection it is still the error to fix.
+    if let Command::Forget(args) = &cli.command {
+        let which = match &args.version {
+            Some(version) => Which::One(version),
+            None => Which::All,
+        };
+        forget::require_force(&args.piece, which, args.force)
+            .map_err(antiq::Error::from)
+            .with_context(|| format!("forget all versions of {}", args.piece.to_string_lossy()))?;
+    }
     let start = start_directory(cli)?;
     let ctx = Context {
         json: cli.json,
@@ -403,9 +365,40 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     {
         out.group(&parts)
     } else {
-        out.blocks(&[error_block::block_for(&description)])
+        out.blocks(&plain_report(cli, &description, kind))
     };
     kind.exit_code()
+}
+
+/// The blocks of an error that has no table: the error block, and the info
+/// that nothing was done when a command that changes things refused its
+/// command line.
+///
+/// Only the CLI knows the invocation, so the command that fixes a refused
+/// `forget --all-versions` is added here to the help the library gives.
+fn plain_report(cli: &Cli, description: &Description, kind: ErrorKind) -> Vec<Block> {
+    let mut block = error_block::block_for(description);
+    let refused_for_force = description
+        .library_error
+        .and_then(error_block::find::<forget::ForgetError>)
+        .is_some_and(|error| matches!(error, forget::ForgetError::AllVersionsNeedForce { .. }));
+    if refused_for_force {
+        block = block.how(Para::Blank).how(
+            Rich::new()
+                .text("Run ")
+                .cmd(&unresolved::forget_confirmation(cli))
+                .text(" to confirm."),
+        );
+    }
+    let mut blocks = vec![block];
+    if kind == ErrorKind::Usage
+        && let Some(action) = unresolved::action(&cli.command)
+    {
+        blocks.push(Block::info(
+            Rich::new().text(&format!("Nothing was {}.", action.done)),
+        ));
+    }
+    blocks
 }
 
 /// Reports an error of clap. Help and version are not errors: clap prints

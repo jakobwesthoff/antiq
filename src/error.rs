@@ -968,6 +968,15 @@ mod tests {
                 ErrorKind::LockHeld,
             ),
             (
+                "forget without force",
+                forget::ForgetError::AllVersionsNeedForce {
+                    piece: "tools/scan".to_string(),
+                }
+                .into(),
+                "antiq::forget::all_versions_need_force",
+                ErrorKind::Usage,
+            ),
+            (
                 "rebuild over lock",
                 rebuild::RebuildError::Run(lock()).into(),
                 "antiq::lock::held",

@@ -1203,9 +1203,12 @@ saying that the version was incomplete. The store folders that the deletion
 leaves empty are removed with it. Deleting every version of a piece
 takes `--all-versions --force`, which also removes the piece's incomplete
 versions and says so for each. `--all-versions` without `--force` is a
-usage error (exit 2) that names the piece and the command that confirms;
-nothing is deleted, and under `--json` its message is `the following
-required arguments were not provided: --force`. A crash inside `forget` can leave an
+usage error (exit 2), refused before the collection is looked for, with the
+code `antiq::forget::all_versions_need_force`. Its message names the piece,
+its fix says to add `--force` and to check the effect first with `-n`, and
+on a terminal and a pipe the fix ends with the command that confirms, built
+from the invocation. Nothing is deleted. Under `--json` the error is
+`{kind: "usage", code, message, fix}`. A crash inside `forget` can leave an
 incomplete version; running the same `forget` again removes it. The next
 `push` mirrors the deletion to the target.
 
@@ -1973,6 +1976,10 @@ of the diagnostic), and its "What antiq was doing" names
 the step "find the piece to <command>" (for a version, "find the version
 to <command>").
 
+A usage error of one of these commands that the library raises, such as the
+refusal of `forget --all-versions` without `--force`, is followed on a
+terminal by the same info "Nothing was <done>.".
+
 - Several pieces match a word. The caption is "The N pieces that match
   `<word>`". For `unearth`, `fork`, `rebuild` and `forget` the table is the
   table of `antiq list` with all versions of the candidate pieces, in which
@@ -2154,7 +2161,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `--init` or `--force` is given with `--if-reachable`, or `forget --all-versions` is given without `--force` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate, or `unearth`, `fork` or `rebuild` is given a piece that holds only incomplete versions | |

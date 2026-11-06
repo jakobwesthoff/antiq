@@ -308,10 +308,7 @@ fn forget_takes_a_version_or_all_versions_not_both() {
 
 #[test]
 fn forget_all_versions_needs_force() {
-    assert_usage(
-        &["forget", "piece", "--all-versions"],
-        "required arguments were not provided",
-    );
+    assert_usage(&["forget", "piece", "--all-versions"], "needs `--force`");
 }
 
 #[test]
@@ -579,13 +576,15 @@ fn a_test_run_does_not_inherit_colour_and_locale_settings_of_the_developer() {
 }
 
 #[test]
-fn forget_all_versions_without_force_keeps_its_json_message_byte_for_byte() {
+fn forget_all_versions_without_force_is_a_usage_error_with_the_code_and_the_fix() {
     let run = json_run(&["forget", "piece", "--all-versions"]);
     assert_eq!(run.code(), 2);
     assert_eq!(
         run.stdout,
         "{\"format\":1,\"command\":\"forget\",\"error\":{\"kind\":\"usage\",\
-         \"message\":\"the following required arguments were not provided: --force\"}}\n"
+         \"code\":\"antiq::forget::all_versions_need_force\",\
+         \"message\":\"`forget --all-versions` needs `--force`, as it deletes every stored version of `piece`, damaged and incomplete ones included, and that cannot be undone\",\
+         \"fix\":\"Add `--force` to confirm, and check the effect first with `-n`.\"}}\n"
     );
     assert_eq!(run.stderr, "");
 }
@@ -599,9 +598,9 @@ fn forget_all_versions_without_force_gets_its_own_error_on_a_pipe() {
     assert_eq!(run.stdout, "");
     assert_eq!(
         run.stderr,
-        "error: tools/backup-script: --all-versions needs --force\n  \
-         why: --all-versions deletes every stored version of the piece, damaged and incomplete ones included, and that cannot be undone.\n  \
-         fix: Add --force to confirm: antiq forget tools/backup-script --all-versions --force. Check the effect first with -n.\n  \
+        "error: `forget --all-versions` needs `--force`, as it deletes every stored version of `tools/backup-script`, damaged and incomplete ones included, and that cannot be undone\n  \
+         fix: Add --force to confirm, and check the effect first with -n.\n       \
+         Run antiq forget tools/backup-script --all-versions --force to confirm.\n  \
          while attempting to forget all versions of tools/backup-script\n"
     );
 }
@@ -620,7 +619,7 @@ fn the_forget_confirmation_keeps_the_directory_and_quotes_the_piece() {
     assert_eq!(run.code(), 2);
     assert!(
         run.stderr.contains(
-            "fix: Add --force to confirm: antiq -C '/tmp/my collection' forget 'my piece' --all-versions --force. "
+            "Run antiq -C '/tmp/my collection' forget 'my piece' --all-versions --force to confirm."
         ),
         "{:?}",
         run.stderr
