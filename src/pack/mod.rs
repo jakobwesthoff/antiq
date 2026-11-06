@@ -322,12 +322,20 @@ pub enum PackError {
         member: String,
         refusal: extract::Refusal,
     },
+    #[error("the package holds names that the target volume cannot hold:\n{}", lines(.0))]
+    UnholdableNames(Vec<names::NameProblem>),
     #[error("cannot extract `{path}`")]
     Extract {
         path: RelPath,
         #[source]
         source: std::io::Error,
     },
+}
+
+/// One line per problem.
+fn lines(problems: &[names::NameProblem]) -> String {
+    let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    lines.join("\n")
 }
 
 impl crate::error::HasKind for PackError {}

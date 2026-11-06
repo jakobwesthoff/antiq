@@ -9,6 +9,7 @@
 //! is opened without following symlinks, so no member is written through
 //! one, and paths past the platform's limit work.
 
+use super::names::check_paths;
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{RelPath, escape};
@@ -514,12 +515,17 @@ impl Write for ZerosOnly {
 pub fn unpack(
     package: &Path,
     staging: &TreeRoot,
-    _rules: &TargetRules,
+    rules: &TargetRules,
 ) -> Result<Unpacked, PackError> {
     // Two passes write nothing, so a package that is refused for what its
-    // headers say leaves staging as it was.
+    // headers say, or for names the volume cannot hold, leaves staging as
+    // it was.
     scan(package)?;
-    gather(package)?;
+    let names = gather(package)?;
+    let problems = check_paths(&names, rules);
+    if !problems.is_empty() {
+        return Err(PackError::UnholdableNames(problems));
+    }
 
     let mut archive = open(package)?;
     let mut extraction = Extraction::new(staging);
@@ -602,24 +608,31 @@ fn scan(package: &Path) -> Result<(), PackError> {
     drain(archive)
 }
 
-/// The second pass classifies and places every member.
-fn gather(package: &Path) -> Result<(), PackError> {
+/// The second pass classifies and places every member and returns their
+/// paths below the container, in archive order, for the name check.
+fn gather(package: &Path) -> Result<Vec<RelPath>, PackError> {
     let mut archive = open(package)?;
     let mut container = None;
     let mut placement = Placement::new();
+    let mut paths = Vec::new();
     for entry in archive.entries().map_err(PackError::Archive)? {
         let entry = entry.map_err(PackError::Archive)?;
         let member = classify(&entry, &mut container)?;
         placement
             .admit(&member)
             .map_err(|refusal| member.refused(refusal))?;
+        if !member.path.is_root() {
+            paths.push(member.path);
+        }
     }
-    drain(archive)
+    drain(archive)?;
+    Ok(paths)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pack::names;
     use crate::pack::zstd::{ZstdSettings, encoder};
     use crate::pack::{PackSettings, Packager, TarZstd};
     use crate::relpath::RelPath;
@@ -1675,6 +1688,159 @@ mod tests {
             .pax(&[("size", "many")])
             .file("proj/f", 0o644, 1_000_000_000, b"ok");
         sandbox.assert_refused_before_any_write(&archive, Refusal::PaxSizeMismatch);
+    }
+
+    // =========================================================
+    // Names the volume cannot hold
+    // =========================================================
+
+    fn case_insensitive() -> TargetRules {
+        TargetRules {
+            case_insensitive: true,
+            ..TargetRules::linux()
+        }
+    }
+
+    fn normalization_insensitive() -> TargetRules {
+        TargetRules {
+            normalization_insensitive: true,
+            ..TargetRules::linux()
+        }
+    }
+
+    /// Unpacks into an empty staging root and returns the problems the
+    /// name check found, checking that nothing was written.
+    fn name_problems(archive: &RawArchive, rules: &TargetRules) -> Vec<names::NameProblem> {
+        let (dir, staged) = staging();
+        let package = package_file(&archive.finish());
+        let error = unpack(&package.path, &staged, rules).expect_err("the names are refused");
+        let PackError::UnholdableNames(problems) = error else {
+            panic!("{error:?}")
+        };
+        let written = std::fs::read_dir(dir.path())
+            .expect("staging lists")
+            .count();
+        assert_eq!(written, 0, "staging is empty");
+        problems
+    }
+
+    fn collision(spellings: &[&str]) -> names::NameProblem {
+        names::NameProblem::Collision {
+            paths: spellings.iter().map(|name| rel(name)).collect(),
+        }
+    }
+
+    #[test]
+    fn names_that_differ_in_case_are_refused_on_a_volume_that_ignores_case() {
+        let mut archive = container();
+        archive
+            .file("proj/README", 0o644, 1_000_000_000, b"1")
+            .file("proj/Readme", 0o644, 1_000_000_000, b"2");
+        assert_eq!(
+            name_problems(&archive, &case_insensitive()),
+            [collision(&["README", "Readme"])]
+        );
+    }
+
+    #[test]
+    fn names_that_differ_in_normalisation_are_refused_on_a_volume_that_ignores_it() {
+        let mut archive = container();
+        archive
+            .file("proj/caf\u{e9}", 0o644, 1_000_000_000, b"1")
+            .file("proj/cafe\u{301}", 0o644, 1_000_000_000, b"2");
+        assert_eq!(
+            name_problems(&archive, &normalization_insensitive()),
+            [collision(&["caf\u{e9}", "cafe\u{301}"])]
+        );
+    }
+
+    #[test]
+    fn a_name_longer_than_the_volume_allows_is_refused() {
+        let name = "\u{e9}".repeat(128);
+        let mut archive = container();
+        archive.long_name(format!("proj/{name}").as_bytes()).file(
+            "proj/x",
+            0o644,
+            1_000_000_000,
+            b"x",
+        );
+        let problems = name_problems(&archive, &TargetRules::linux());
+        assert_eq!(
+            problems,
+            [names::NameProblem::TooLong {
+                path: rel(&name),
+                length: 256,
+                limit: TargetRules::linux().name_limit,
+            }]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_name_of_256_bytes_that_macos_counts_as_128_units_is_extracted() {
+        let name = "\u{e9}".repeat(128);
+        let mut archive = container();
+        archive.long_name(format!("proj/{name}").as_bytes()).file(
+            "proj/x",
+            0o644,
+            1_000_000_000,
+            b"x",
+        );
+        let (_dir, staged) = staging();
+        let package = package_file(&archive.finish());
+        unpack(&package.path, &staged, &TargetRules::macos()).expect("the name is fine");
+        assert_eq!(read(&staged, &name), b"x");
+    }
+
+    fn non_utf8() -> RawArchive {
+        let mut archive = container();
+        archive.member(b"proj/a\xff", b'0', 0o644, 1_000_000_000, b"", b"x");
+        archive
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_is_refused_where_the_volume_requires_utf8() {
+        let problems = name_problems(&non_utf8(), &TargetRules::macos());
+        let odd = RelPath::from_bytes(vec![b'a', 0xff]).expect("a valid path");
+        assert_eq!(problems, [names::NameProblem::NotUtf8 { path: odd }]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_extracted_where_the_volume_takes_it() {
+        let (_dir, staged) = staging();
+        let package = package_file(&non_utf8().finish());
+        unpack(&package.path, &staged, &TargetRules::linux()).expect("the name is fine");
+        assert_eq!(walk(&staged).len(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_name_that_is_not_utf8_fails_on_apfs_when_the_rules_do_not_say_so() {
+        let (_dir, staged) = staging();
+        let package = package_file(&non_utf8().finish());
+        let error = unpack(&package.path, &staged, &TargetRules::linux()).expect_err("fails");
+        assert!(
+            matches!(&error, PackError::Extract { source, .. }
+                if source.raw_os_error() == Some(libc::EILSEQ)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_names_lists_one_line_per_problem() {
+        let mut archive = container();
+        archive
+            .file("proj/README", 0o644, 1_000_000_000, b"1")
+            .file("proj/Readme", 0o644, 1_000_000_000, b"2");
+        let (_dir, staged) = staging();
+        let package = package_file(&archive.finish());
+        let error = unpack(&package.path, &staged, &case_insensitive()).expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "the package holds names that the target volume cannot hold:\n\
+             `README` and `Readme` become one name on this volume"
+        );
     }
 
     /// An archive of directories nested `depth` levels, one name each.
