@@ -11,14 +11,15 @@ use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::lock::{self, Holder};
 use crate::reference::{ReferenceError, stored_spelling};
 use crate::relpath::RelPath;
+use crate::repair::trees_of;
 use crate::report::{self, Warning};
 use crate::tree::EntryKind;
 use crate::versions::VersionsError;
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
 use crate::versions::stamp::Stamp;
-use crate::versions::store::{StoreScan, StoreVersion, lookup_exact, scan};
+use crate::versions::store::{StoreScan, StoreVersion, scan};
 use jiff::Timestamp;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 
 /// Why status failed. A store or a leftover directory that cannot be read
@@ -299,46 +300,7 @@ fn spelling_differences(
 // What trash/, recovered/ and doomed/ hold
 // =========================================================
 
-/// Which store pieces have a version of each stamp, to name a tree the way
-/// repair 4 finds its piece.
-struct Naming {
-    store: TreeRoot,
-    pieces_of: BTreeMap<Stamp, BTreeSet<RelPath>>,
-}
-
-impl Naming {
-    fn new(collection: &Collection, store: &StoreScan) -> Option<Naming> {
-        let root = TreeRoot::open(&collection.pieces_dir()).ok()?;
-        let mut pieces_of: BTreeMap<Stamp, BTreeSet<RelPath>> = BTreeMap::new();
-        for piece in store.pieces.iter().chain(&store.sidecar_only) {
-            for version in &piece.versions {
-                pieces_of
-                    .entry(version.stamp)
-                    .or_default()
-                    .insert(piece.path.clone());
-            }
-        }
-        Some(Naming {
-            store: root,
-            pieces_of,
-        })
-    }
-
-    /// The shortest proper prefix of `inner` that is a store piece with a
-    /// version of `stamp`, matched by the volume's own name equality.
-    fn piece_of(&self, stamp: &Stamp, inner: &RelPath) -> Option<RelPath> {
-        let candidates = self.pieces_of.get(stamp)?;
-        let names: Vec<&[u8]> = inner.components().collect();
-        (1..names.len()).find_map(|taken| {
-            let prefix = RelPath::from_bytes(names[..taken].join(&b'/')).ok()?;
-            let stored = lookup_exact(&self.store, &prefix).ok().flatten()?;
-            candidates.contains(&stored).then_some(prefix)
-        })
-    }
-}
-
 fn read_leftovers(collection: &Collection, store: Option<&StoreScan>, report: &mut StatusReport) {
-    let naming = store.and_then(|store| Naming::new(collection, store));
     for kind in ["recovered", "trash", "doomed"] {
         let opened = TreeRoot::open(&collection.antiq_dir().join(kind)).and_then(|root| {
             let stamps = root.read_dir(&RelPath::root())?;
@@ -354,7 +316,7 @@ fn read_leftovers(collection: &Collection, store: Option<&StoreScan>, report: &m
                 continue;
             }
         };
-        let (trees, warnings) = trees_in(&root, kind, stamps, naming.as_ref());
+        let (trees, warnings) = trees_in(&root, kind, stamps, store);
         report.warnings.extend(warnings);
         match kind {
             "recovered" => report.recovered = trees,
@@ -375,7 +337,7 @@ fn trees_in(
     root: &TreeRoot,
     kind: &str,
     stamps: Vec<DirEntry>,
-    naming: Option<&Naming>,
+    store: Option<&StoreScan>,
 ) -> (Vec<RelPath>, Vec<Warning>) {
     let mut trees = BTreeSet::new();
     let mut warnings = Vec::new();
@@ -388,6 +350,13 @@ fn trees_in(
         let stamp = std::str::from_utf8(entry.name.as_bytes())
             .ok()
             .and_then(|name| name.parse::<Stamp>().ok());
+        // Repair 4 finds the trees of a stamp folder the same way. A folder
+        // that cannot be read is reported by the walk below.
+        let pieces = stamp
+            .as_ref()
+            .zip(store)
+            .map(|(stamp, store)| trees_of(root, &entry.path, store, stamp).unwrap_or_default())
+            .unwrap_or_default();
         let mut named: Vec<RelPath> = Vec::new();
         let mut pending = vec![entry.path.clone()];
         while let Some(directory) = pending.pop() {
@@ -409,10 +378,10 @@ fn trees_in(
                     continue;
                 }
                 let inner = below(&found.path, &entry.path);
-                let tree_inner = stamp
-                    .as_ref()
-                    .zip(naming)
-                    .and_then(|(stamp, naming)| naming.piece_of(stamp, &inner))
+                let tree_inner = pieces
+                    .iter()
+                    .find(|tree| is_below(&inner, tree))
+                    .cloned()
                     .or_else(|| (inner.components().count() > 1).then(|| first_component(&inner)))
                     .unwrap_or(inner);
                 named.push(entry.path.concat(&tree_inner));

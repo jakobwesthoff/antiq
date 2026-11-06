@@ -57,7 +57,7 @@ impl RunGuard {
         machine: Result<String, MachineError>,
     ) -> Result<RunGuard, RunError> {
         let lock = lock::acquire(&collection.lock_path(), &machine?, clock)?;
-        let outcome = repair::run(collection, &lock, clock);
+        let outcome = repair::run(collection, &lock);
         Ok(RunGuard {
             lock,
             warnings: outcome.warnings,

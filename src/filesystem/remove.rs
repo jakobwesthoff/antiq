@@ -6,8 +6,6 @@
 //!
 //! Callers hold the run lock; see the module docs of [`crate::filesystem`].
 
-#![allow(dead_code, reason = "used again by F6")]
-
 use super::{FilesystemError, failure, io_error, shown};
 use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};

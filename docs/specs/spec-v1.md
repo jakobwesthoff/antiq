@@ -731,9 +731,13 @@ or `doomed/`, the parents that became empty go too. (ADR 0059)
    `.antiq/tmp/pack/<stamp>/<piece path>/` whose sidecars already lie in
    `.antiq/pieces/<path>/` without their `.tar.zst`: delete those
    sidecars. The folder is still live, since step 5 waits for step 4.
-2. **Temporary files:** delete what `.antiq/tmp/` holds.
-3. **`doomed/`:** delete every tree there without a comparison. Directory
-   chains that hold no non-directory entry are removed as they are.
+2. **Temporary files:** delete what `.antiq/tmp/` holds, except the
+   `.antiq/tmp/pack/<stamp>/` folder of a version whose sidecars repair 1
+   failed to delete in this run: its staged archive stays until the next
+   run repairs them.
+3. **`doomed/`:** delete every tree there without a comparison, and every
+   entry that is no directory. Directory chains that hold no
+   non-directory entry are removed as they are.
 4. **`trash/`:** rename every tree there back to its live path without a
    comparison, or, when that is not possible for any reason (path taken,
    a parent missing or not a directory, the rename refused), to
