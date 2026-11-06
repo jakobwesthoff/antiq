@@ -28,19 +28,6 @@ const COMMANDS: [&str; 13] = [
 ];
 
 /// Runs `antiq --json <args>`.
-/// A directory that is a collection, for the commands that look for one
-/// before they fail.
-fn collection_root() -> tempfile::TempDir {
-    let root = tempfile::tempdir().expect("a temp dir");
-    std::fs::create_dir(root.path().join(".antiq")).expect("the directory");
-    std::fs::write(
-        root.path().join(".antiq/config.toml"),
-        "[collection]\nid = \"01BX5ZZKBKACTAV9WEVGEMMVRZ\"\n",
-    )
-    .expect("the config");
-    root
-}
-
 fn json_run(args: &[&str]) -> support::cmd::Run {
     Antiq::new().arg("--json").args(args).run()
 }
@@ -288,14 +275,9 @@ accepts_and_needs_a_collection!(
 );
 
 #[test]
-fn a_json_run_prints_one_not_implemented_envelope() {
-    let root = collection_root();
-    let run = json_run(&[
-        "-C",
-        root.path().to_str().expect("UTF-8"),
-        "reconcile",
-        "--prune",
-    ]);
+fn a_json_run_prints_one_error_envelope() {
+    let dir = tempfile::tempdir().expect("the temp dir is writable");
+    let run = json_run(&["-C", dir.path().to_str().expect("UTF-8"), "reconcile"]);
     assert_eq!(run.code(), 1);
     assert_eq!(run.stderr, "");
     let json = run.json();
@@ -303,26 +285,29 @@ fn a_json_run_prints_one_not_implemented_envelope() {
     assert_eq!(keys, ["format", "command", "error"]);
     assert_eq!(json["format"], 1);
     assert_eq!(json["command"], "reconcile");
-    assert_eq!(json["error"]["kind"], "not_implemented");
+    assert_eq!(json["error"]["kind"], "not_a_collection");
     assert_eq!(
         json["error"]["message"],
-        "reconcile --prune is not implemented"
+        format!("{} is not inside a collection", dir.path().display())
     );
 }
 
 #[test]
 fn a_plain_run_prints_its_error_to_stderr() {
-    let root = collection_root();
+    let dir = tempfile::tempdir().expect("the temp dir is writable");
     let run = Antiq::new()
         .arg("-C")
-        .arg(root.path())
-        .args(["reconcile", "--prune"])
+        .arg(dir.path())
+        .arg("reconcile")
         .run();
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
     assert_eq!(
         run.stderr,
-        "error: reconcile --prune is not implemented\n  while attempting to reconcile the index\n"
+        format!(
+            "error: {} is not inside a collection\n  while attempting to find the collection\n",
+            dir.path().display()
+        )
     );
 }
 

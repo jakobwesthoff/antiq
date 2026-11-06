@@ -521,19 +521,6 @@ mod tests {
         (code, capture.stdout(), capture.stderr())
     }
 
-    /// A directory that is a collection, for the commands that look for
-    /// one before they fail.
-    fn collection_root() -> tempfile::TempDir {
-        let root = tempfile::tempdir().expect("a temp dir");
-        std::fs::create_dir(root.path().join(".antiq")).expect("the directory");
-        std::fs::write(
-            root.path().join(".antiq/config.toml"),
-            "[collection]\nid = \"01BX5ZZKBKACTAV9WEVGEMMVRZ\"\n",
-        )
-        .expect("the config");
-        root
-    }
-
     fn parse(args: &[&str]) -> Cli {
         let mut line = vec!["antiq"];
         line.extend_from_slice(args);
@@ -576,25 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn a_command_without_an_implementation_reports_not_implemented() {
-        let root = collection_root();
-        let (code, stdout, stderr) = run_captured(&[
-            "-C",
-            root.path().to_str().expect("UTF-8"),
-            "--json",
-            "reconcile",
-            "--prune",
-        ]);
-        assert_eq!(code, 1);
-        assert_eq!(
-            stdout,
-            "{\"format\":1,\"command\":\"reconcile\",\"error\":\
-             {\"kind\":\"not_implemented\",\"message\":\"reconcile --prune is not implemented\"}}\n"
-        );
-        assert_eq!(stderr, "");
-    }
-
-    #[test]
     fn the_command_name_of_a_nested_command_has_all_its_words() {
         let (_, stdout, _) = run_captured(&["--json", "remote", "remove"]);
         assert!(stdout.contains("\"command\":\"remote remove\""), "{stdout}");
@@ -602,18 +570,17 @@ mod tests {
 
     #[test]
     fn a_plain_run_reports_on_stderr() {
-        let root = collection_root();
-        let (code, stdout, stderr) = run_captured(&[
-            "-C",
-            root.path().to_str().expect("UTF-8"),
-            "reconcile",
-            "--prune",
-        ]);
+        let root = tempfile::tempdir().expect("a temp dir");
+        let (code, stdout, stderr) =
+            run_captured(&["-C", root.path().to_str().expect("UTF-8"), "reconcile"]);
         assert_eq!(code, 1);
         assert_eq!(stdout, "");
         assert_eq!(
             stderr,
-            "error: reconcile --prune is not implemented\n  while attempting to reconcile the index\n"
+            format!(
+                "error: {} is not inside a collection\n  while attempting to find the collection\n",
+                root.path().display()
+            )
         );
     }
 
