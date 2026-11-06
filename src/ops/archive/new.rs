@@ -26,8 +26,8 @@ pub(super) mod finish;
 
 use super::durable::{self, Matched};
 use super::{
-    ArchiveError, Archived, Candidate, Kept, Reclaimed, Seams, SkipReason, Skipped, Step,
-    Unfinished, UnfinishedWhere, apparent_size, size_text,
+    ArchiveError, Archived, Asker, Candidate, Forked, Kept, NeedsDecision, Reclaimed, Seams,
+    SkipReason, Skipped, Step, Unfinished, UnfinishedWhere, apparent_size, size_text,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -53,7 +53,9 @@ use crate::relpath::{Name, RelPath, name_part};
 use crate::report::Warning;
 use crate::select::Rules;
 use crate::store::{Put, Source, Store};
-use crate::tracking::{self, EntryState, LocalPayload, TrackingEntry, VersionTakenOut};
+use crate::tracking::{
+    self, DecisionKind, EntryState, LocalPayload, TrackingEntry, VersionTakenOut,
+};
 use crate::tree::{EntryKind, PieceTree, Problem};
 use crate::walk;
 use jiff::Timestamp;
@@ -71,6 +73,8 @@ pub(super) struct Context<'a> {
     pub clock: &'a dyn Clock,
     pub ids: &'a dyn IdSource,
     pub pool: &'a Pool,
+    /// Whoever answers questions; locked only while one is asked.
+    pub interaction: &'a Asker,
     pub seams: &'a dyn Seams,
     pub junk: Vec<Name>,
     pub rules: Rules,
@@ -135,6 +139,8 @@ pub(super) enum PieceOutcome {
     Reclaimed(Reclaimed),
     Kept(Kept),
     Unfinished(Unfinished),
+    Forked(Forked),
+    NeedsDecision(NeedsDecision),
 }
 
 pub(super) struct PieceResult {
@@ -239,6 +245,7 @@ pub(super) fn archive_piece(
         known: candidate.id,
         is_unearthed: candidate.kind == PieceKind::Unearthed,
         unearthed: candidate.unearthed,
+        history: HistoryAction::Archive,
         warnings: Vec::new(),
         listing_stored: false,
     };
@@ -268,12 +275,38 @@ pub(super) fn archive_piece(
 
 /// The payload and listing of a piece in the object store, and the
 /// metadata that names them.
-struct Stored {
+pub(super) struct Stored {
     id: ObjectId,
-    payload: Payload,
+    pub(super) payload: Payload,
     source: Source,
     /// The verify of the stored package against the folder.
+    pub(super) matched: Matched,
+}
+
+/// A verified package and its listing in the object store, before the
+/// metadata names them.
+pub(super) struct Placed {
+    id: ObjectId,
+    /// The ID time found for a new piece.
+    created: Option<IdTime>,
+    packed: Packed,
+    payload_name: FileName,
+    listing_name: FileName,
+    /// The files this run put in the store.
+    files: Vec<PathBuf>,
     matched: Matched,
+}
+
+impl Placed {
+    /// The listing the package was verified to hold.
+    pub(super) fn listing(&self) -> &[listing::ListingEntry] {
+        self.matched.listing()
+    }
+
+    /// Takes the files of this run out of the store again.
+    pub(super) fn discard(self) {
+        discard(&self.files);
+    }
 }
 
 pub(super) struct Piece<'a, 'c> {
@@ -286,6 +319,8 @@ pub(super) struct Piece<'a, 'c> {
     is_unearthed: bool,
     /// When the piece was last unearthed, for the idle clock.
     unearthed: Option<Timestamp>,
+    /// The history entry a new archive of the piece gets.
+    pub(super) history: HistoryAction,
     pub(super) warnings: Vec<Warning>,
     pub(super) listing_stored: bool,
 }
@@ -312,12 +347,18 @@ impl Piece<'_, '_> {
             .map_err(|error| Stop::from_error(&error))?;
         self.warnings.extend(tree_warnings(&tree));
         if self.is_unearthed {
-            return self.rearchive(&sub, size);
+            return self.rearchive(tree, &sub, size);
         }
         let stored = match self.adopt(&sub)? {
             Some(stored) => stored,
             None => self.pack_and_store(&tree, &sub, size)?,
         };
+        self.remove_stored(stored, size)
+    }
+
+    /// Steps 6 to 10 for a payload that is in the store and recorded: the
+    /// entry, the removal of the folder, the row.
+    pub(super) fn remove_stored(&mut self, stored: Stored, size: u64) -> Flow<PieceOutcome> {
         let mut entry = self.write_entry(&stored)?;
         self.mark_removing(&mut entry, &stored.payload.file)?;
         let durable = durable::seal(self.cx.lock, stored.matched, &stored.payload, &entry)
@@ -340,7 +381,7 @@ impl Piece<'_, '_> {
 
     /// The piece may have changed since `status` judged it: it is walked
     /// with the rules of the run and must still be idle.
-    fn walk_and_judge(&self) -> Flow<PieceTree> {
+    pub(super) fn walk_and_judge(&self) -> Flow<PieceTree> {
         self.at(Step::Walk)?;
         let cx = self.cx;
         let tree = walk::walk_piece_with(
@@ -479,6 +520,18 @@ impl Piece<'_, '_> {
     // =====================================================
 
     fn pack_and_store(&mut self, tree: &PieceTree, sub: &TreeRoot, apparent: u64) -> Flow<Stored> {
+        let placed = self.pack_and_place(tree, sub, apparent)?;
+        self.record_placed(placed)
+    }
+
+    /// Steps 2 to 4: the verified package and its listing are in the store,
+    /// and no metadata names them yet.
+    pub(super) fn pack_and_place(
+        &mut self,
+        tree: &PieceTree,
+        sub: &TreeRoot,
+        apparent: u64,
+    ) -> Flow<Placed> {
         let cx = self.cx;
         let (id, created) = match self.known {
             Some(id) => (id, None),
@@ -514,8 +567,30 @@ impl Piece<'_, '_> {
         if outcome.is_err() {
             remove_quietly(&tmp);
         }
-        let (payload_name, listing_name, placed, matched) = outcome?;
+        let (payload_name, listing_name, files, matched) = outcome?;
+        Ok(Placed {
+            id,
+            created,
+            packed,
+            payload_name,
+            listing_name,
+            files,
+            matched,
+        })
+    }
 
+    /// Step 5: the metadata names what `placed` holds.
+    pub(super) fn record_placed(&mut self, placed: Placed) -> Flow<Stored> {
+        let cx = self.cx;
+        let Placed {
+            id,
+            created,
+            packed,
+            payload_name,
+            listing_name,
+            files: placed,
+            matched,
+        } = placed;
         let name = piece_name(self.path)?;
         let basis = match (&created, self.store().current(id)) {
             (Some(found), _) => Basis::New {
@@ -550,7 +625,15 @@ impl Piece<'_, '_> {
             encoder: None,
             extra: serde_json::Map::new(),
         };
-        let metadata = archived_metadata(id, self.path, name, basis, payload.clone(), cx);
+        let metadata = archived_metadata(
+            id,
+            self.path,
+            name,
+            basis,
+            payload.clone(),
+            self.history,
+            cx,
+        );
         self.record(&metadata, &placed)?;
         Ok(Stored {
             id,
@@ -724,7 +807,7 @@ impl Piece<'_, '_> {
     // Steps 6 and 7: the tracking entry
     // =====================================================
 
-    fn write_entry(&self, stored: &Stored) -> Flow<TrackingEntry> {
+    pub(super) fn write_entry(&self, stored: &Stored) -> Flow<TrackingEntry> {
         let cx = self.cx;
         self.at(Step::WriteEntry)?;
         let local = LocalPayload {
@@ -749,6 +832,7 @@ impl Piece<'_, '_> {
             Source::Committed(number) => VersionTakenOut::Committed(number),
         };
         entry.local_payloads.push(local);
+        entry.resolve_decision(DecisionKind::ReplacingWithLoss);
         tracking::write(cx.collection, cx.lock, cx.clock, &mut entry)
             .map_err(|error| Stop::from_error(&error))?;
         Ok(entry)
@@ -820,10 +904,11 @@ fn archived_metadata(
     name: Name,
     basis: Basis,
     payload: Payload,
+    action: HistoryAction,
     cx: &Context<'_>,
 ) -> Metadata {
     let now = whole_seconds(cx.clock.now());
-    let history = HistoryEntry::new(now, cx.machine.clone(), HistoryAction::Archive);
+    let history = HistoryEntry::new(now, cx.machine.clone(), action);
     match basis {
         Basis::New { created, source } => Metadata {
             format: crate::meta::FORMAT,
@@ -1221,6 +1306,7 @@ mod tests {
                 clock: &clock(),
                 ids: &ids,
                 pool: shared_pool(),
+                interaction: crate::ops::archive::nobody(),
                 workers: 1,
                 dry_run: false,
             },
@@ -2354,6 +2440,7 @@ mod tests {
             clock,
             ids,
             pool,
+            interaction: crate::ops::archive::nobody(),
             workers: 1,
             dry_run,
         }

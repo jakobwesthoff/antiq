@@ -142,6 +142,8 @@ fn an_idle_piece_is_archived_and_its_folder_removed() {
     assert_eq!(json["skipped"], json!([]));
     assert_eq!(json["kept"], json!([]));
     assert_eq!(json["unfinished"], json!([]));
+    assert_eq!(json["forked"], json!([]));
+    assert_eq!(json["needs_decision"], json!([]));
     assert_eq!(json["warnings"], json!([]));
     let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
     assert_eq!(
@@ -154,6 +156,8 @@ fn an_idle_piece_is_archived_and_its_folder_removed() {
             "skipped",
             "kept",
             "unfinished",
+            "forked",
+            "needs_decision",
             "warnings"
         ]
     );

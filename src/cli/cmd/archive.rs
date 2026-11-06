@@ -16,6 +16,7 @@ use antiq::report::CommandReport;
 use anyhow::Context as _;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::thread;
 use unicode_width::UnicodeWidthStr;
 
@@ -32,11 +33,13 @@ pub fn run(ctx: &Context, args: &DryRunArgs, out: &mut Output) -> anyhow::Result
         let pool = Pool::for_machine(collection.config().collection.memory_percent())
             .map_err(antiq::Error::from)
             .context("size the compression pool")?;
+        let asker = Mutex::new(ctx.interaction());
         let request = ArchiveRequest {
             collection: &collection,
             clock: &SystemClock,
             ids: &RandomIds,
             pool: &pool,
+            interaction: &asker,
             workers: thread::available_parallelism().map_or(1, NonZeroUsize::get),
             dry_run: false,
         };
@@ -97,6 +100,9 @@ pub(super) enum Word {
     Kept,
     Skipped,
     Unfinished,
+    Forked,
+    /// Waiting for a decision.
+    Pending,
 }
 
 impl Word {
@@ -106,13 +112,16 @@ impl Word {
             Word::Kept => "kept",
             Word::Skipped => "skipped",
             Word::Unfinished => "stuck",
+            Word::Forked => "forked",
+            Word::Pending => "pending",
         }
     }
 
     fn color(self) -> Color {
         match self {
             Word::Removed => Color::Green,
-            Word::Kept => Color::Yellow,
+            Word::Kept | Word::Pending => Color::Yellow,
+            Word::Forked => Color::Cyan,
             Word::Skipped | Word::Unfinished => Color::Red,
         }
     }
@@ -189,6 +198,30 @@ fn rows(report: &ArchiveReport) -> Vec<Row> {
             detail: sanitize(&row.message),
         });
     }
+    for row in report.forked.iter().flatten() {
+        rows.push(Row {
+            path: sanitize(&row.path.to_string()),
+            size: None,
+            word: Word::Forked,
+            detail: format!("the folder stays, new ID {}", row.id),
+        });
+    }
+    for row in report.needs_decision.iter().flatten() {
+        let noun = if row.lost_count == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        rows.push(Row {
+            path: sanitize(&row.path.to_string()),
+            size: None,
+            word: Word::Pending,
+            detail: format!(
+                "replacing the archive would lose {} {noun}, `antiq resolve` decides",
+                row.lost_count
+            ),
+        });
+    }
     // The report lists each outcome in path order; the console lists the
     // pieces in path order.
     rows.sort_by(|a, b| a.path.cmp(&b.path));
@@ -239,6 +272,14 @@ fn header(report: &ArchiveReport) -> String {
     let unfinished = report.unfinished.as_deref().map_or(0, <[_]>::len);
     if unfinished > 0 {
         header.push_str(&format!(", {unfinished} unfinished"));
+    }
+    let forked = report.forked.as_deref().map_or(0, <[_]>::len);
+    if forked > 0 {
+        header.push_str(&format!(", {forked} forked"));
+    }
+    let pending = report.needs_decision.as_deref().map_or(0, <[_]>::len);
+    if pending > 0 {
+        header.push_str(&format!(", {pending} pending"));
     }
     header
 }
@@ -335,12 +376,13 @@ mod tests {
     use super::*;
     use antiq::id::ObjectId;
     use antiq::ops::archive::{
-        ArchiveAction, Archived, Kept, KeptHow, Reclaimed, SkipReason, Skipped, Unfinished,
-        UnfinishedWhere,
+        ArchiveAction, Archived, Forked, Kept, KeptHow, Lost, NeedsDecision, Reclaimed, SkipReason,
+        Skipped, Unfinished, UnfinishedWhere,
     };
     use antiq::plan::Plan;
     use antiq::relpath::RelPath;
     use antiq::report::Warning;
+    use antiq::tracking::{Answer, DecisionKind};
 
     fn narrow() -> Style {
         Style {
@@ -382,6 +424,8 @@ mod tests {
             skipped: None,
             kept: None,
             unfinished: None,
+            forked: None,
+            needs_decision: None,
             warnings: vec![Warning::new("the collection is on an NFS mount")],
         };
         let lines = render(&report, narrow());
@@ -409,6 +453,8 @@ mod tests {
             skipped: None,
             kept: None,
             unfinished: None,
+            forked: None,
+            needs_decision: None,
             warnings: Vec::new(),
         };
         assert_eq!(render(&report, narrow()).stdout, ["Nothing to do."]);
@@ -470,6 +516,8 @@ mod tests {
             skipped: Some(skipped),
             kept: Some(kept),
             unfinished: Some(Vec::new()),
+            forked: Some(Vec::new()),
+            needs_decision: Some(Vec::new()),
             warnings: Vec::new(),
         }
     }
@@ -710,6 +758,110 @@ mod tests {
           b                                                                            -
             kept     changed after it was verified, unearthed again
           zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz  1 B  removed  1 B archive, verified
+        ");
+    }
+
+    // =========================================================
+    // Replacing and asking
+    // =========================================================
+
+    fn forked(text: &str) -> Forked {
+        Forked {
+            id: id(6),
+            from: id(5),
+            path: path(text),
+        }
+    }
+
+    fn undecided(text: &str, lost_count: usize) -> NeedsDecision {
+        NeedsDecision {
+            id: id(7),
+            path: path(text),
+            decision: DecisionKind::ReplacingWithLoss,
+            options: vec![Answer::Replace, Answer::Fork, Answer::Skip],
+            lost_count,
+            lost: vec![Lost {
+                path: path("notes.txt"),
+                change: "removed",
+            }],
+        }
+    }
+
+    #[test]
+    fn a_forked_piece_has_a_row_and_a_count_in_the_header() {
+        let mut report = run_report(
+            vec![archived("projects/a", 412_000_000, 88_000_000)],
+            Vec::new(),
+            Vec::new(),
+        );
+        report.forked = Some(vec![forked("projects/b")]);
+        insta::assert_snapshot!(render(&report, wide()).stdout.join("\n"), @"
+        archived 1 piece · 412 MB, 1 forked
+
+          projects/a  412 MB  removed  88 MB archive, verified
+          projects/b       -  forked   the folder stays, new ID 01EJ3PX0000000000000000006
+        ");
+        assert_eq!(exit_code(&report), 0, "a fork is no failure");
+    }
+
+    #[test]
+    fn a_piece_that_needs_a_decision_has_a_row_and_makes_the_run_partial() {
+        let mut report = run_report(Vec::new(), Vec::new(), Vec::new());
+        report.needs_decision = Some(vec![undecided("projects/c", 1), undecided("projects/d", 3)]);
+        insta::assert_snapshot!(render(&report, wide()).stdout.join("\n"), @"
+        archived 0 pieces · 0 B, 2 pending
+
+          projects/c  -  pending  replacing the archive would lose 1 entry, `antiq resolve` decides
+          projects/d  -  pending  replacing the archive would lose 3 entries, `antiq resolve` decides
+        ");
+        assert_eq!(exit_code(&report), 3);
+    }
+
+    #[test]
+    fn a_declined_replacement_is_a_skipped_row() {
+        let report = run_report(
+            Vec::new(),
+            Vec::new(),
+            vec![skipped(
+                "projects/e",
+                SkipReason::Declined,
+                "the archive stays as it is, the folder is kept",
+            )],
+        );
+        insta::assert_snapshot!(render(&report, wide()).stdout.join("\n"), @"
+        archived 0 pieces · 0 B, 1 skipped
+
+          projects/e  -  skipped  the archive stays as it is, the folder is kept
+        ");
+    }
+
+    #[test]
+    fn a_dry_run_lists_a_replacement_and_a_question() {
+        let mut plan = Plan::new();
+        plan.push(ArchiveAction::Replace {
+            path: path("projects/a"),
+            id: id(5),
+            size: 412_000_000,
+        });
+        plan.push(ArchiveAction::Ask {
+            path: path("projects/b"),
+            id: id(5),
+            size: 7_000,
+            lost_count: 2,
+        });
+        plan.push(ArchiveAction::Ask {
+            path: path("projects/c"),
+            id: id(5),
+            size: 7_000,
+            lost_count: 1,
+        });
+        let mut report = run_report(Vec::new(), Vec::new(), Vec::new());
+        report.dry_run = true;
+        report.plan = Some(plan);
+        insta::assert_snapshot!(render(&report, narrow()).stdout.join("\n"), @"
+        Would replace the archive of projects/a (412 MB)
+        Would ask whether to replace the archive of projects/b, which would lose 2 entries
+        Would ask whether to replace the archive of projects/c, which would lose 1 entry
         ");
     }
 }

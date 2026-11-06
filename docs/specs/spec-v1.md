@@ -1529,15 +1529,33 @@ either, the piece is skipped with reason `pending_remote` and nothing
 changes.
 
 A changed one replaces its
-archive with a new payload. A replacement that loses nothing happens
+archive with a new payload, which gets the history action `archive`; the
+old payload stays. The loss is worked out against the listing of the
+payload the piece was unearthed from, chosen as for a reclaim; of several
+payloads of that version, the one the folder differs from least is the
+basis. A replacement that loses nothing happens
 without asking. Content is lost when a path was removed or when an
 entry's type, size, content, mode or link target, or a file's modification
 time, changed; the mode of a directory counts, its modification time does
 not. Then antiq
-shows what would be lost and asks: replace, fork or skip; without a
-terminal it skips and lists the piece as needing a decision. A skip
-answered on a terminal leaves nothing pending, and the run exits 3. A
-collection can allow replacing without asking. (ADR 0036) A diverged
+shows what would be lost, the first ten entries and the number of the
+rest, and asks: replace, fork or skip. Skip is the default. A file that
+changed while the comparison read it refuses the piece with reason
+`error`.
+
+Replace walks the folder again after the answer and packs it. When the
+package loses an entry the question did not show, nothing is stored and
+the question is asked again with the loss as it is now; a piece that
+still changes after the third question is skipped with reason `differs`.
+Fork gives the folder a new ID the way `fork` does, and the run lists
+the piece as forked. Skip leaves the folder and the archive as they are,
+removes a decision an earlier run left pending, lists the piece as skipped
+with reason `declined` and makes the run exit 3. Without a terminal
+nobody answers: the entry gets a pending decision `replacing_with_loss`,
+written once, and the run lists the piece as needing a decision and exits
+3. Replacing, forking and reclaiming a piece remove its pending decision.
+A collection can allow replacing without asking, which replaces a loss
+too. (ADR 0036) A diverged
 piece is refused. Archiving warns about names that would not survive on
 macOS or Linux and archives the piece anyway. (ADR 0054)
 
@@ -2220,20 +2238,26 @@ given, and exits 3. Under `--json` nothing goes to stderr.
 `archive --dry-run` has `dry_run` (true), `actions` and `warnings`, in
 that order. An action is `{action: "archive", path, id, size}` for each
 idle piece the next `archive` archives, and `{action: "reclaim", path, id,
-size}` for each unearthed piece it reclaims, in path order. `id` is null
+size}` for each unearthed piece it reclaims, `{action: "replace", path, id,
+size}` for each unearthed piece that changed without losing content (or
+whose loss the collection replaces without asking) and `{action: "ask",
+path, id, size, lost_count}` for each one whose replacement would lose
+`lost_count` entries and so raises the question, in path order. `id` is null
 for a new piece and `size` is the piece's apparent size in bytes (a file
 with several names counts once). A piece the run would skip has no action
 and a warning.
 
-`archive` has `archived`, `reclaimed`, `skipped`, `kept`, `unfinished` and
-`warnings`, in that order, each list in path order. `archived` has `{id,
+`archive` has `archived`, `reclaimed`, `skipped`, `kept`, `unfinished`,
+`forked`, `needs_decision` and `warnings`, in that order, each list in
+path order. `archived` has `{id,
 path, size, archive_size, payload_version}` for each piece whose folder was
 removed: `size` is the apparent size in bytes and `archive_size` the bytes
 of the stored archive. `reclaimed` has `{id, path, size}` for each unearthed
 piece whose folder was removed without a new archive. `skipped` has `{id, path, reason, message}` for each piece
 left alone; `id` is present only for a piece that had an ID before the
 run. `reason` is `unreadable`, `mount_point`, `excluded`,
-`nested_collection`, `differs`, `no_space`, `pending_remote` or `error`.
+`nested_collection`, `differs`, `no_space`, `pending_remote`, `declined` or
+`error`.
 `kept` has `{id,
 path, how, recovered_as}` for each piece that was archived and whose folder
 was not removed because it differs from the archive: `how` is `unearthed`
@@ -2243,9 +2267,17 @@ when the folder is back at its path and `recovered` when it is below
 archived and whose removal stopped with the entry still `removing`: `id` is
 the piece's ID, minted in this run for a new piece, and `where` is
 `trash`, `recovered` or `in_place`, naming where the tree is. `message`
-says what failed and what the repair of the next run does. The run exits 3
-when `skipped` or `unfinished` is not empty; a `kept` row alone does not
-make it partial.
+says what failed and what the repair of the next run does. `forked` has
+`{id, from, path}` for each piece whose replacement was answered with fork:
+`id` is the new ID and `from` the ID the piece had. `needs_decision` has
+`{id, path, decision, options, lost_count, lost}` for each piece whose
+replacement would lose content and that nobody could be asked about:
+`decision` is `replacing_with_loss`, `options` are `replace`, `fork` and
+`skip`, `lost_count` counts the entries a replacement would lose, and
+`lost` lists the first ten as `{path, change}` with `path` relative to the
+piece and `change` either `removed` or `changed`. The run exits 3 when
+`skipped`, `unfinished` or `needs_decision` is not empty; a `kept` or
+`forked` row alone does not make it partial.
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before
 and for a piece that was skipped), `id` (the new ID for a fork; for a

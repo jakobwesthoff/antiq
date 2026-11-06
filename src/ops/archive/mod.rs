@@ -21,6 +21,7 @@ use crate::fsx::space::{SpaceLedger, available_space};
 use crate::fsx::tree::TreeRoot;
 use crate::id::{IdSource, ObjectId};
 use crate::index;
+use crate::interact::Interaction;
 use crate::machine::MachineError;
 use crate::ops::status::{self, Flag, PieceKind, StatusError, StatusRequest};
 use crate::pack::pool::Pool;
@@ -33,7 +34,7 @@ use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
 use crate::store::StoreError;
-use crate::tracking::TrackingError;
+use crate::tracking::{Answer, DecisionKind, TrackingError};
 use crate::tree::{EntryKind, PieceTree};
 use crate::walk;
 use jiff::Timestamp;
@@ -42,6 +43,7 @@ use std::collections::HashSet;
 use std::io;
 use std::panic::resume_unwind;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
@@ -204,6 +206,23 @@ pub enum ArchiveAction {
         /// Apparent size in bytes.
         size: u64,
     },
+    /// An unearthed piece that changed without losing anything: a new
+    /// archive replaces the old one without asking.
+    Replace {
+        path: RelPath,
+        id: ObjectId,
+        /// Apparent size in bytes.
+        size: u64,
+    },
+    /// An unearthed piece whose replacement would lose `lost_count`
+    /// entries: the run asks what to do.
+    Ask {
+        path: RelPath,
+        id: ObjectId,
+        /// Apparent size in bytes.
+        size: u64,
+        lost_count: usize,
+    },
 }
 
 impl PlanAction for ArchiveAction {
@@ -214,6 +233,17 @@ impl PlanAction for ArchiveAction {
             }
             ArchiveAction::Reclaim { path, size, .. } => {
                 format!("reclaim {path} ({})", size_text(*size))
+            }
+            ArchiveAction::Replace { path, size, .. } => {
+                format!("replace the archive of {path} ({})", size_text(*size))
+            }
+            ArchiveAction::Ask {
+                path, lost_count, ..
+            } => {
+                format!(
+                    "ask whether to replace the archive of {path}, which would lose {lost_count} {}",
+                    if *lost_count == 1 { "entry" } else { "entries" }
+                )
             }
         }
     }
@@ -241,6 +271,39 @@ pub struct Reclaimed {
     pub size: u64,
 }
 
+/// A piece that was forked instead of archived: the answer to a
+/// replacement that would lose content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Forked {
+    /// The new ID.
+    pub id: ObjectId,
+    /// The ID the piece had.
+    pub from: ObjectId,
+    pub path: RelPath,
+}
+
+/// One entry the archive holds that a replacement would lose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Lost {
+    pub path: RelPath,
+    /// `removed` or `changed`.
+    pub change: &'static str,
+}
+
+/// A piece waiting for a decision that nobody could give: nothing was
+/// written for it but the pending decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NeedsDecision {
+    pub id: ObjectId,
+    pub path: RelPath,
+    pub decision: DecisionKind,
+    pub options: Vec<Answer>,
+    /// How many entries a replacement would lose.
+    pub lost_count: usize,
+    /// The first of them, in path order.
+    pub lost: Vec<Lost>,
+}
+
 /// Why a piece was not archived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -255,6 +318,8 @@ pub enum SkipReason {
     /// The archive is not proven good: the local payload fails its check
     /// and no check of the remote copy is recorded.
     PendingRemote,
+    /// The answer to the question about a replacement was to skip.
+    Declined,
     Error,
 }
 
@@ -336,6 +401,12 @@ pub struct ArchiveReport {
     /// Real runs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unfinished: Option<Vec<Unfinished>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked: Option<Vec<Forked>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_decision: Option<Vec<NeedsDecision>>,
     pub warnings: Vec<Warning>,
 }
 
@@ -350,7 +421,8 @@ impl CommandReport for ArchiveReport {
     fn partial(&self) -> bool {
         let skipped = self.skipped.as_deref().unwrap_or_default();
         let unfinished = self.unfinished.as_deref().unwrap_or_default();
-        !skipped.is_empty() || !unfinished.is_empty()
+        let undecided = self.needs_decision.as_deref().unwrap_or_default();
+        !skipped.is_empty() || !unfinished.is_empty() || !undecided.is_empty()
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -483,6 +555,8 @@ pub(crate) fn plan_with(
         skipped: None,
         kept: None,
         unfinished: None,
+        forked: None,
+        needs_decision: None,
         warnings,
     })
 }
@@ -491,12 +565,29 @@ pub(crate) fn plan_with(
 // The run
 // =========================================================
 
+/// Whoever answers the questions of a run, shared by its workers: the lock
+/// is held only while one question is asked, so the answerer sees one
+/// question at a time.
+pub type Asker = Mutex<Box<dyn Interaction>>;
+
+/// An answerer that answers nothing, as a run without a terminal has.
+#[cfg(test)]
+pub(crate) fn nobody() -> &'static Asker {
+    static NOBODY: std::sync::LazyLock<Asker> =
+        std::sync::LazyLock::new(|| Mutex::new(Box::new(crate::interact::NonInteractive)));
+    &NOBODY
+}
+
 /// What a run of `archive` needs.
 pub struct ArchiveRequest<'a> {
     pub collection: &'a Collection,
     pub clock: &'a dyn Clock,
     pub ids: &'a dyn IdSource,
     pub pool: &'a Pool,
+    /// Whoever answers the question about a replacement that would lose
+    /// content. Workers take turns: the lock is held only while a question
+    /// is asked.
+    pub interaction: &'a Asker,
     /// How many pieces are archived at the same time; at least one.
     pub workers: usize,
     pub dry_run: bool,
@@ -525,6 +616,8 @@ pub(crate) fn archive_with(
     let mut skipped = Vec::new();
     let mut kept = Vec::new();
     let mut unfinished = Vec::new();
+    let mut forked = Vec::new();
+    let mut needs_decision = Vec::new();
     if !candidates.is_empty() {
         let config = &collection.config().collection;
         let root = open_root(collection)?;
@@ -537,6 +630,7 @@ pub(crate) fn archive_with(
             clock: request.clock,
             ids: request.ids,
             pool: request.pool,
+            interaction: request.interaction,
             seams,
             junk,
             rules,
@@ -572,6 +666,8 @@ pub(crate) fn archive_with(
                         new::PieceOutcome::Reclaimed(row) => reclaimed.push(row),
                         new::PieceOutcome::Kept(row) => kept.push(row),
                         new::PieceOutcome::Unfinished(row) => unfinished.push(row),
+                        new::PieceOutcome::Forked(row) => forked.push(row),
+                        new::PieceOutcome::NeedsDecision(row) => needs_decision.push(row),
                     }
                     continue;
                 }
@@ -609,6 +705,8 @@ pub(crate) fn archive_with(
         skipped: Some(skipped),
         kept: Some(kept),
         unfinished: Some(unfinished),
+        forked: Some(forked),
+        needs_decision: Some(needs_decision),
         warnings,
     })
 }
@@ -731,9 +829,10 @@ mod tests {
                 .actions
                 .iter()
                 .map(|action| match action {
-                    ArchiveAction::Archive { path, .. } | ArchiveAction::Reclaim { path, .. } => {
-                        path.to_string()
-                    }
+                    ArchiveAction::Archive { path, .. }
+                    | ArchiveAction::Reclaim { path, .. }
+                    | ArchiveAction::Replace { path, .. }
+                    | ArchiveAction::Ask { path, .. } => path.to_string(),
                 })
                 .collect()
         }
@@ -846,7 +945,9 @@ mod tests {
     pub(super) fn parts(action: &ArchiveAction) -> (String, Option<ObjectId>) {
         match action {
             ArchiveAction::Archive { path, id, .. } => (path.to_string(), *id),
-            ArchiveAction::Reclaim { path, id, .. } => (path.to_string(), Some(*id)),
+            ArchiveAction::Reclaim { path, id, .. }
+            | ArchiveAction::Replace { path, id, .. }
+            | ArchiveAction::Ask { path, id, .. } => (path.to_string(), Some(*id)),
         }
     }
 
@@ -898,9 +999,10 @@ mod tests {
             .actions
             .iter()
             .map(|action| match action {
-                ArchiveAction::Archive { path, .. } | ArchiveAction::Reclaim { path, .. } => {
-                    path.to_string()
-                }
+                ArchiveAction::Archive { path, .. }
+                | ArchiveAction::Reclaim { path, .. }
+                | ArchiveAction::Replace { path, .. }
+                | ArchiveAction::Ask { path, .. } => path.to_string(),
             })
             .collect();
         assert_eq!(planned, ["sibling"]);

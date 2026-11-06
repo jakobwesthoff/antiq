@@ -7,7 +7,9 @@
 //! An unearthed piece is compared with the archive it was unearthed from.
 //! One that equals it is reclaimed: its folder is removed the way `archive`
 //! removes any folder, and no new archive is made (spec "archive",
-//! ADR 0035). The steps leave a state the start-of-run repairs finish:
+//! ADR 0035). One that differs gets a new archive, asking first when the
+//! new archive would lose content (ADR 0036). A reclaim's steps leave a
+//! state the start-of-run repairs finish:
 //!
 //! 1. record the metadata change: lifecycle `archived`, live payload
 //!    removed, a `reclaim` history entry;
@@ -16,26 +18,31 @@
 //!    difference;
 //! 4. remove the folder (see `finish`).
 
+use super::apparent_size;
 use super::durable::{self, Matched};
 use super::new::finish::Finished;
 use super::new::{Flow, Piece, PieceOutcome, Stop, chain};
-use super::{ArchiveAction, Candidate, Reclaimed, SkipReason, Step};
+use super::{ArchiveAction, Candidate, Forked, Lost, NeedsDecision, Reclaimed, SkipReason, Step};
 use crate::clock::whole_seconds;
 use crate::collection::Collection;
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
+use crate::interact::{Choice, Question};
 use crate::listing::{self, ListingEntry};
 use crate::meta::{HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload, PayloadKind};
+use crate::ops::fork::{self, ForkRequest, RealSteps};
 use crate::pack::WalkRules;
 use crate::pack::live::check_stream;
-use crate::pack::verify::{Compared, compare_with_listing};
-use crate::relpath::Name;
+use crate::pack::verify::{Compared, Difference, changes, compare_with_listing};
+use crate::relpath::{Name, RelPath};
 use crate::repair::unearthed_candidates;
 use crate::report::Warning;
 use crate::store::{Source, Store};
-use crate::tracking::{self, DecisionKind, EntryState, TrackingEntry, VersionTakenOut};
+use crate::tracking::{self, Answer, DecisionKind, EntryState, TrackingEntry, VersionTakenOut};
+use crate::tree::PieceTree;
 use jiff::Timestamp;
 use std::fs::File;
+use std::sync::PoisonError;
 
 /// Why an unearthed piece is left alone.
 pub(super) struct Refusal {
@@ -65,8 +72,11 @@ impl From<Refusal> for Stop {
 pub(super) enum Verdict {
     /// The folder equals the archive.
     Reclaim,
-    /// The folder differs from the archive.
-    Changed,
+    /// The folder differs and a new archive may replace the old one without
+    /// asking: nothing is lost, or the collection allows replacing.
+    Replace,
+    /// The folder differs and a new archive would lose content.
+    Ask,
 }
 
 /// An unearthed piece compared with its archive.
@@ -80,6 +90,24 @@ pub(super) struct Classified {
     listing: Vec<ListingEntry>,
     compared: Compared,
     pub(super) verdict: Verdict,
+    /// What a new archive would lose, in path order.
+    pub(super) loss: Vec<Difference>,
+}
+
+/// Whether a replacement loses the entry that `difference` names: a path
+/// that was removed or an entry whose type, size, content, mode, link
+/// target or (for a file) modification time changed. A path that was added
+/// loses nothing, and the comparison leaves out what does not count: the
+/// modification time of a directory, the mode of a symlink and junk.
+fn loses(difference: &Difference) -> bool {
+    matches!(
+        difference,
+        Difference::Removed(_) | Difference::Changed { .. }
+    )
+}
+
+fn loss_of(differences: &[Difference]) -> Vec<Difference> {
+    differences.iter().filter(|d| loses(d)).cloned().collect()
 }
 
 /// Compares the folder `sub` of the piece `id` with the archive it was
@@ -127,7 +155,7 @@ pub(super) fn classify(
         staged: false,
     };
     let mut unreadable = None;
-    let mut found: Option<(Payload, Vec<ListingEntry>, Compared)> = None;
+    let mut found: Option<(Payload, Vec<ListingEntry>, Compared, Vec<Difference>)> = None;
     for payload in candidates {
         let listing = match read_listing(&store, id, payload) {
             Ok(listing) => listing,
@@ -139,23 +167,33 @@ pub(super) fn classify(
         let compared = compare_with_listing(&listing, sub, &rules)
             .map_err(|error| Refusal::error(chain(&error)))?;
         let equal = compared.differences().is_empty();
-        if found.is_none() || equal {
-            found = Some((payload.clone(), listing, compared));
+        let loss = loss_of(compared.differences());
+        // The archive the folder equals is the one it came from. Of
+        // several that it differs from, the one it differs from least is
+        // the one that shows the user the smallest loss.
+        let closer = found
+            .as_ref()
+            .is_none_or(|(_, _, _, shown)| loss.len() < shown.len());
+        if closer || equal {
+            found = Some((payload.clone(), listing, compared, loss));
         }
         if equal {
             break;
         }
     }
-    let Some((basis, listing, compared)) = found else {
+    let Some((basis, listing, compared, loss)) = found else {
         return Err(Refusal::error(format!(
             "no listing of the archive can be read: {}",
             unreadable.unwrap_or_else(|| "the object has no archive".to_string())
         )));
     };
+    stable(compared.differences())?;
     let verdict = if compared.differences().is_empty() {
         Verdict::Reclaim
+    } else if loss.is_empty() || collection.config().collection.replace_without_asking {
+        Verdict::Replace
     } else {
-        Verdict::Changed
+        Verdict::Ask
     };
     Ok(Classified {
         entry,
@@ -165,7 +203,23 @@ pub(super) fn classify(
         listing,
         compared,
         verdict,
+        loss,
     })
+}
+
+/// A file that was replaced, resized or touched while the comparison read
+/// it says nothing reliable about the folder.
+fn stable(differences: &[Difference]) -> Result<(), Refusal> {
+    match differences
+        .iter()
+        .find(|difference| matches!(difference, Difference::ChangedWhileRead(_)))
+    {
+        Some(unstable) => Err(Refusal::error(format!(
+            "`{}` changed while it was read",
+            unstable.path()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The newest archive that is not superseded, for an entry that records no
@@ -257,46 +311,307 @@ pub(super) fn plan_action(
         .sub(&candidate.path)
         .map_err(|error| Refusal::error(chain(&error)))?;
     let classified = classify(collection, junk, &sub, id)?;
-    match classified.verdict {
+    let (path, size) = (candidate.path.clone(), size);
+    Ok(match classified.verdict {
         Verdict::Reclaim => {
             let warning = gate(collection, &classified.entry, &classified.basis)?;
-            Ok((
-                ArchiveAction::Reclaim {
-                    path: candidate.path.clone(),
-                    id,
-                    size,
-                },
+            (
+                ArchiveAction::Reclaim { path, id, size },
                 warning.map(Warning::new),
-            ))
+            )
         }
-        Verdict::Changed => Err(differs(&classified)),
-    }
-}
-
-fn differs(classified: &Classified) -> Refusal {
-    Refusal {
-        reason: SkipReason::Differs,
-        message: format!(
-            "the folder differs from the archive version {} it was unearthed from",
-            classified.basis.version
+        Verdict::Replace => (ArchiveAction::Replace { path, id, size }, None),
+        Verdict::Ask => (
+            ArchiveAction::Ask {
+                path,
+                id,
+                size,
+                lost_count: classified.loss.len(),
+            },
+            None,
         ),
-    }
+    })
 }
 
 // =========================================================
 // Reclaiming
 // =========================================================
 
+/// How many times the folder may change between the question and the
+/// package before the piece is left for the next run.
+const MAX_CHANGES: usize = 3;
+
+/// What the loss of a replacement may be for it to go ahead.
+enum Bound {
+    /// Nothing: the replacement was not asked about.
+    Nothing,
+    /// Anything: the collection replaces without asking.
+    Any,
+    /// What the user was shown.
+    Within(Vec<Difference>),
+}
+
+impl Bound {
+    fn allows(&self, found: &[Difference]) -> bool {
+        match self {
+            Bound::Nothing => found.is_empty(),
+            Bound::Any => true,
+            Bound::Within(shown) => found
+                .iter()
+                .all(|difference| shown.iter().any(|seen| covers(seen, difference))),
+        }
+    }
+}
+
+/// Whether the user, shown `seen`, was told of everything `found` loses.
+fn covers(seen: &Difference, found: &Difference) -> bool {
+    match (seen, found) {
+        (Difference::Removed(shown), Difference::Removed(now)) => shown == now,
+        (
+            Difference::Changed {
+                path: shown,
+                fields: shown_fields,
+            },
+            Difference::Changed { path, fields },
+        ) => shown == path && fields.iter().all(|field| shown_fields.contains(field)),
+        _ => false,
+    }
+}
+
+/// What came of packing the folder.
+enum Replaced {
+    Done(PieceOutcome),
+    /// The folder lost more than was allowed when it was packed.
+    Outside,
+}
+
+/// The answers a question about a replacement offers, with what the user
+/// reads. `skip` is the one a question defaults to.
+const CHOICES: [(Answer, &str, &str); 3] = [
+    (
+        Answer::Replace,
+        "replace",
+        "replace: archive the folder as it is now",
+    ),
+    (
+        Answer::Fork,
+        "fork",
+        "fork: keep the folder as a new piece with a new ID",
+    ),
+    (
+        Answer::Skip,
+        "skip",
+        "skip: leave the folder and its archive as they are",
+    ),
+];
+const SKIP: usize = 2;
+
+/// At most this many lost entries are listed in a question or a report.
+const LISTED: usize = 10;
+
+/// One line of a question for an entry in the loss: a removed path, or a
+/// changed one with the fields that differ.
+fn describe_loss(difference: &Difference) -> String {
+    let path = difference.path();
+    match difference {
+        Difference::Changed { fields, .. } => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|field| format!("{field:?}").to_lowercase())
+                .collect();
+            format!("changed ({}): {path}", fields.join(", "))
+        }
+        _ => format!("removed: {path}"),
+    }
+}
+
+fn is_pending(entry: &TrackingEntry) -> bool {
+    entry
+        .pending_decisions
+        .iter()
+        .any(|decision| decision.kind == DecisionKind::ReplacingWithLoss)
+}
+
+fn question(path: &RelPath, loss: &[Difference]) -> Question {
+    let mut details: Vec<String> = loss.iter().take(LISTED).map(describe_loss).collect();
+    if loss.len() > LISTED {
+        details.push(format!("and {} more", loss.len() - LISTED));
+    }
+    Question {
+        title: format!("Replace the archive of {path}?"),
+        details,
+        choices: CHOICES
+            .iter()
+            .map(|(_, id, label)| Choice::new(*id, *label))
+            .collect(),
+        default: SKIP,
+    }
+}
+
+fn lost_rows(loss: &[Difference]) -> Vec<Lost> {
+    loss.iter()
+        .take(LISTED)
+        .map(|difference| match difference {
+            Difference::Removed(path) => Lost {
+                path: path.clone(),
+                change: "removed",
+            },
+            other => Lost {
+                path: other.path().clone(),
+                change: "changed",
+            },
+        })
+        .collect()
+}
+
 impl Piece<'_, '_> {
-    /// An unearthed piece: reclaimed when it equals its archive.
-    pub(super) fn rearchive(&mut self, sub: &TreeRoot, size: u64) -> Flow<PieceOutcome> {
+    /// An unearthed piece: reclaimed when it equals its archive, otherwise
+    /// archived again. `tree` is the walk that found it idle.
+    pub(super) fn rearchive(
+        &mut self,
+        mut tree: PieceTree,
+        sub: &TreeRoot,
+        mut size: u64,
+    ) -> Flow<PieceOutcome> {
         let id = self.known.expect("an unearthed piece has an ID");
         let cx = self.cx;
-        let classified = classify(cx.collection, &cx.junk, sub, id)?;
-        match classified.verdict {
-            Verdict::Reclaim => self.reclaim(classified, size),
-            Verdict::Changed => Err(differs(&classified).into()),
+        let mut outside = 0;
+        loop {
+            let classified = classify(cx.collection, &cx.junk, sub, id)?;
+            let bound = match classified.verdict {
+                Verdict::Reclaim => return self.reclaim(classified, size),
+                Verdict::Replace if classified.loss.is_empty() => Bound::Nothing,
+                Verdict::Replace => Bound::Any,
+                Verdict::Ask => match self.ask(&classified) {
+                    Some(Answer::Replace) => {
+                        // The folder may have changed while the user
+                        // thought, and the package is made from a walk.
+                        tree = self.walk_and_judge()?;
+                        size = apparent_size(&tree);
+                        Bound::Within(classified.loss.clone())
+                    }
+                    Some(Answer::Fork) => return self.fork(),
+                    Some(_) => return self.decline(classified),
+                    None => return self.leave_undecided(classified),
+                },
+            };
+            match self.replace(&classified, &tree, sub, size, &bound)? {
+                Replaced::Done(outcome) => return Ok(outcome),
+                Replaced::Outside => {
+                    outside += 1;
+                    if outside == MAX_CHANGES {
+                        return Err(Stop::Skip {
+                            reason: SkipReason::Differs,
+                            message: "the folder kept changing while it was packed".to_string(),
+                        });
+                    }
+                    tree = self.walk_and_judge()?;
+                    size = apparent_size(&tree);
+                }
+            }
         }
+    }
+
+    /// Asks what to do with the loss; `None` when nobody answers.
+    fn ask(&self, classified: &Classified) -> Option<Answer> {
+        let question = question(self.path, &classified.loss);
+        let choice = self
+            .cx
+            .interaction
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choose(&question)?;
+        CHOICES
+            .iter()
+            .find(|(_, id, _)| *id == choice.id)
+            .map(|(answer, _, _)| *answer)
+    }
+
+    /// Packs the folder as the next archive of the piece, when what it
+    /// loses against `classified.basis` stays within `bound`.
+    fn replace(
+        &mut self,
+        classified: &Classified,
+        tree: &PieceTree,
+        sub: &TreeRoot,
+        size: u64,
+        bound: &Bound,
+    ) -> Flow<Replaced> {
+        let placed = self.pack_and_place(tree, sub, size)?;
+        // The folder may have changed since it was compared, so what the
+        // package loses is worked out from the package.
+        let found = loss_of(&changes(
+            &classified.listing,
+            placed.listing(),
+            &self.cx.junk,
+        ));
+        if !bound.allows(&found) {
+            placed.discard();
+            return Ok(Replaced::Outside);
+        }
+        let stored = self.record_placed(placed)?;
+        Ok(Replaced::Done(self.remove_stored(stored, size)?))
+    }
+
+    /// The answer was to fork: the folder stays and gets a new ID.
+    fn fork(&mut self) -> Flow<PieceOutcome> {
+        let cx = self.cx;
+        let id = self.known.expect("an unearthed piece has an ID");
+        let report = fork::plan(cx.collection, &ForkRequest { id, name: None })
+            .and_then(|planned| {
+                fork::apply_with(
+                    cx.collection,
+                    &planned,
+                    cx.lock,
+                    cx.clock,
+                    cx.ids,
+                    &RealSteps,
+                    Vec::new(),
+                )
+            })
+            .map_err(|error| Stop::error(chain(&error)))?;
+        self.warnings.extend(report.warnings);
+        Ok(PieceOutcome::Forked(Forked {
+            id: report.id,
+            from: report.from,
+            path: report.path,
+        }))
+    }
+
+    /// The answer was to skip: nothing stays pending.
+    fn decline(&self, classified: Classified) -> Flow<PieceOutcome> {
+        let mut entry = classified.entry;
+        if is_pending(&entry) {
+            entry.resolve_decision(DecisionKind::ReplacingWithLoss);
+            self.write_entry_of(&mut entry)?;
+        }
+        Err(Stop::Skip {
+            reason: SkipReason::Declined,
+            message: "the archive stays as it is, the folder is kept".to_string(),
+        })
+    }
+
+    /// Nobody could answer: the decision is left for `resolve`.
+    fn leave_undecided(&self, classified: Classified) -> Flow<PieceOutcome> {
+        let mut entry = classified.entry;
+        if !is_pending(&entry) {
+            entry.decide(DecisionKind::ReplacingWithLoss);
+            self.write_entry_of(&mut entry)?;
+        }
+        Ok(PieceOutcome::NeedsDecision(NeedsDecision {
+            id: entry.id,
+            path: self.path.clone(),
+            decision: DecisionKind::ReplacingWithLoss,
+            options: DecisionKind::ReplacingWithLoss.options().to_vec(),
+            lost_count: classified.loss.len(),
+            lost: lost_rows(&classified.loss),
+        }))
+    }
+
+    fn write_entry_of(&self, entry: &mut TrackingEntry) -> Flow<()> {
+        let cx = self.cx;
+        tracking::write(cx.collection, cx.lock, cx.clock, entry)
+            .map_err(|error| Stop::from_error(&error))
     }
 
     fn reclaim(&mut self, classified: Classified, size: u64) -> Flow<PieceOutcome> {
@@ -394,22 +709,28 @@ fn is_reclaim_recorded(metadata: &Metadata, machine: &str, since: Timestamp) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FixedClock;
-    use crate::id::SeqIds;
+    use crate::clock::{Clock, FixedClock};
+    use crate::id::{IdSource, SeqIds};
+    use crate::interact::{Choice, Interaction, Question, ScriptedInteraction};
     use crate::meta::PayloadKind;
     use crate::ops::archive::{
-        ArchiveAction, ArchiveReport, ArchiveRequest, RealSeams, Seams, archive_with, plan_with,
+        ArchiveAction, ArchiveReport, ArchiveRequest, Asker, RealSeams, Seams, archive_with,
+        plan_with,
     };
+    use crate::ops::archive::{Forked, Lost, NeedsDecision};
     use crate::ops::status;
     use crate::ops::unearth::tests::{FILES, Fixture, ID, id, path, time};
+    use crate::pack::verify::Field;
     use crate::relpath::RelPath;
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
+    use crate::tracking::{Answer, PendingDecision};
     use serde_json::{Value, json};
     use std::fs;
     use std::io;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const PIECE: &str = "projects/work";
@@ -427,12 +748,25 @@ mod tests {
     /// A piece archived with `archived` and unearthed again with
     /// `restored`; the same files make the folder equal its archive.
     fn scene_of(archived: &[(&str, &str)], restored: &[(&str, &str)]) -> Scene {
-        let mut fx = Fixture::new();
-        fx.archived(ID, PIECE, archived);
+        scene_built(|_| {}, archived, &|_| {}, restored)
+    }
+
+    /// [`scene_of`] with more in the piece than plain files: `prepare`
+    /// adds it to the archived piece and again to the restored folder. The
+    /// collection is configured by `configure`.
+    fn scene_built(
+        configure: impl FnOnce(&mut crate::config::Config),
+        archived: &[(&str, &str)],
+        prepare: &dyn Fn(&mut crate::testing::tree::Tree),
+        restored: &[(&str, &str)],
+    ) -> Scene {
+        let mut fx = Fixture::configured(configure);
+        fx.archived_with(ID, PIECE, archived, |tree| prepare(tree));
         for (name, content) in restored {
             fx.tree()
                 .file_with(&format!("{PIECE}/{name}"), content, 0o644, FILE_TIME);
         }
+        prepare(fx.tree());
         let mut entry = fx.entry(ID);
         entry.state = EntryState::Live;
         entry.unearthed = Some(time("2026-10-05T12:00:00Z"));
@@ -468,13 +802,22 @@ mod tests {
 
     impl Scene {
         fn run(&self, seams: &dyn Seams) -> ArchiveReport {
+            self.run_asking(seams, crate::ops::archive::nobody())
+        }
+
+        fn run_asking(&self, seams: &dyn Seams, asker: &Asker) -> ArchiveReport {
+            self.run_at(seams, asker, &self.clock)
+        }
+
+        fn run_at(&self, seams: &dyn Seams, asker: &Asker, clock: &FixedClock) -> ArchiveReport {
             let ids = SeqIds::new(1);
             archive_with(
                 &ArchiveRequest {
                     collection: &self.collection,
-                    clock: &self.clock,
+                    clock,
                     ids: &ids,
                     pool: shared_pool(),
+                    interaction: asker,
                     workers: 1,
                     dry_run: false,
                 },
@@ -664,19 +1007,6 @@ mod tests {
                 .all(|payload| payload.kind == PayloadKind::Archive)
         );
         assert_eq!(reclaim_entries(&metadata), 1);
-    }
-
-    #[test]
-    fn a_changed_unearthed_piece_is_left_alone() {
-        let scene = scene_of(FILES, &[("notes.txt", "edited"), FILES[1]]);
-        let report = scene.run(&RealSeams);
-
-        assert_eq!(reclaimed(&report), 0);
-        let rows = skipped(&report);
-        assert_eq!(rows.len(), 1, "{report:?}");
-        assert_eq!(rows[0].reason, SkipReason::Differs);
-        assert!(scene.folder().exists());
-        assert_eq!(scene.metadata().lifecycle, Lifecycle::Live);
     }
 
     #[test]
@@ -1170,23 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_warns_of_a_changed_piece() {
-        let scene = scene_of(FILES, &[("notes.txt", "edited"), FILES[1]]);
-
-        let plan =
-            plan_with(&scene.collection, &scene.clock, &RealSeams).expect("the plan is made");
-
-        assert!(plan.plan.expect("a plan").actions.is_empty());
-        assert!(
-            plan.warnings
-                .iter()
-                .any(|warning| warning.message.contains("differs from the archive")),
-            "{:?}",
-            plan.warnings
-        );
-    }
-
-    #[test]
     fn a_dry_run_warns_when_the_remote_copy_carries_the_gate() {
         let scene = scene();
         damage_payload(&scene);
@@ -1201,5 +1514,808 @@ mod tests {
                 .iter()
                 .any(|warning| warning.message.contains("remote copy is the good one"))
         );
+    }
+
+    // =========================================================
+    // Replacing and asking
+    // =========================================================
+
+    const TITLE: &str = "Replace the archive of projects/work?";
+
+    fn archived_rows(report: &ArchiveReport) -> &[crate::ops::archive::Archived] {
+        report.archived.as_deref().expect("a real run lists them")
+    }
+
+    fn undecided(report: &ArchiveReport) -> &[NeedsDecision] {
+        report
+            .needs_decision
+            .as_deref()
+            .expect("a real run lists them")
+    }
+
+    fn forked(report: &ArchiveReport) -> &[Forked] {
+        report.forked.as_deref().expect("a real run lists them")
+    }
+
+    fn lost(path: &str, change: &'static str) -> Lost {
+        Lost {
+            path: self::path(path),
+            change,
+        }
+    }
+
+    fn history_actions(metadata: &Metadata) -> Vec<String> {
+        metadata
+            .history
+            .iter()
+            .map(|entry| entry.action.clone())
+            .collect()
+    }
+
+    fn pending(entry: &TrackingEntry) -> Vec<PendingDecision> {
+        entry.pending_decisions.clone()
+    }
+
+    fn replacing() -> Vec<PendingDecision> {
+        vec![PendingDecision {
+            kind: DecisionKind::ReplacingWithLoss,
+        }]
+    }
+
+    fn asker(interaction: impl Interaction + 'static) -> Asker {
+        Mutex::new(Box::new(interaction))
+    }
+
+    /// Answers by the position of the question, records every question,
+    /// and runs `before` with the position first so a test can change the
+    /// folder while the user thinks.
+    struct Hook {
+        asked: Arc<Mutex<Vec<Question>>>,
+        answers: Vec<Option<&'static str>>,
+        before: Box<dyn FnMut(usize) + Send>,
+    }
+
+    impl Hook {
+        fn new(
+            answers: Vec<Option<&'static str>>,
+            before: impl FnMut(usize) + Send + 'static,
+        ) -> (Hook, Arc<Mutex<Vec<Question>>>) {
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let hook = Hook {
+                asked: Arc::clone(&asked),
+                answers,
+                before: Box::new(before),
+            };
+            (hook, asked)
+        }
+    }
+
+    impl Interaction for Hook {
+        fn choose(&mut self, question: &Question) -> Option<Choice> {
+            let position = {
+                let mut asked = self.asked.lock().expect("the list is not poisoned");
+                asked.push(question.clone());
+                asked.len() - 1
+            };
+            (self.before)(position);
+            let answer = self.answers.get(position).copied().flatten()?;
+            question
+                .choices
+                .iter()
+                .find(|choice| choice.id == answer)
+                .cloned()
+        }
+    }
+
+    /// Puts the old time back on the folder and its `src` directory, which
+    /// removing a file below them has touched: a piece with a recent
+    /// directory time is not idle.
+    fn settle(folder: &std::path::Path) {
+        for directory in [folder.to_path_buf(), folder.join("src")] {
+            if directory.exists() {
+                filetime::set_file_mtime(
+                    directory,
+                    filetime::FileTime::from_unix_time(FILE_TIME, 0),
+                )
+                .expect("the time is set");
+            }
+        }
+    }
+
+    fn replace_without_asking(config: &mut crate::config::Config) {
+        config.collection.replace_without_asking = true;
+    }
+
+    impl Scene {
+        /// Writes a file with an old modification time, so the piece stays
+        /// idle.
+        fn write_in_folder(&self, relative: &str, content: &str) {
+            fs::write(self.folder().join(relative), content).expect("a file is written");
+            self.set_time(relative, FILE_TIME);
+        }
+
+        fn set_time(&self, relative: &str, seconds: i64) {
+            filetime::set_file_mtime(
+                self.folder().join(relative),
+                filetime::FileTime::from_unix_time(seconds, 0),
+            )
+            .expect("the time is set");
+        }
+
+        fn set_mode(&self, relative: &str, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                self.folder().join(relative),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .expect("the mode is set");
+        }
+
+        /// The state of the piece as a run that leaves it alone keeps it.
+        fn untouched(&self) -> (Metadata, bool) {
+            (self.metadata(), self.folder().exists())
+        }
+    }
+
+    #[test]
+    fn a_file_added_to_an_unearthed_piece_is_archived_without_asking() {
+        let scene = scene();
+        scene.write_in_folder("added.txt", "new");
+
+        let report = scene.run(&RealSeams);
+
+        let rows = archived_rows(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!((rows[0].id, rows[0].payload_version), (id(ID), 2));
+        assert_eq!(reclaimed(&report), 0);
+        assert!(undecided(&report).is_empty());
+        assert!(!scene.folder().exists());
+        assert_eq!(scene.entry().state, EntryState::Gone);
+        let metadata = scene.metadata();
+        let archives: Vec<_> = metadata
+            .payloads
+            .iter()
+            .filter(|payload| payload.kind == PayloadKind::Archive)
+            .map(|payload| (payload.version, payload.superseded))
+            .collect();
+        assert_eq!(archives, [(1, false), (2, false)], "the old payload stays");
+        assert_eq!(
+            history_actions(&metadata).last().map(String::as_str),
+            Some("archive")
+        );
+        assert!(!report.partial_for_test());
+    }
+
+    /// The report of a run that asked nobody about the loss `change` made.
+    fn nobody_answers(scene: &Scene, lost_rows: &[Lost]) {
+        let before = scene.untouched();
+        let report = scene.run(&RealSeams);
+
+        let rows = undecided(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(
+            (rows[0].id, rows[0].path.to_string()),
+            (id(ID), PIECE.into())
+        );
+        assert_eq!(rows[0].decision, DecisionKind::ReplacingWithLoss);
+        assert_eq!(
+            rows[0].options,
+            [Answer::Replace, Answer::Fork, Answer::Skip]
+        );
+        assert_eq!(rows[0].lost_count, lost_rows.len());
+        assert_eq!(rows[0].lost, lost_rows);
+        assert!(archived_rows(&report).is_empty());
+        assert!(skipped(&report).is_empty(), "{report:?}");
+        assert!(report.partial_for_test());
+        assert_eq!(scene.untouched(), before, "nothing but the entry changed");
+        assert_eq!(pending(&scene.entry()), replacing());
+        assert_eq!(scene.entry().state, EntryState::Live);
+    }
+
+    #[test]
+    fn a_removed_file_is_a_loss_nobody_answered() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        nobody_answers(&scene, &[lost("notes.txt", "removed")]);
+    }
+
+    #[test]
+    fn changed_content_is_a_loss() {
+        let scene = scene();
+        scene.write_in_folder("notes.txt", "HELLO");
+        scene.set_time("notes.txt", FILE_TIME);
+        nobody_answers(&scene, &[lost("notes.txt", "changed")]);
+    }
+
+    #[test]
+    fn a_changed_mode_is_a_loss() {
+        let scene = scene();
+        scene.set_mode("notes.txt", 0o600);
+        nobody_answers(&scene, &[lost("notes.txt", "changed")]);
+    }
+
+    #[test]
+    fn a_changed_directory_mode_is_a_loss() {
+        let scene = scene();
+        scene.set_mode("src", 0o700);
+        nobody_answers(&scene, &[lost("src", "changed")]);
+    }
+
+    #[test]
+    fn a_changed_modification_time_of_a_file_is_a_loss() {
+        let scene = scene();
+        scene.set_time("notes.txt", FILE_TIME + 5);
+        nobody_answers(&scene, &[lost("notes.txt", "changed")]);
+    }
+
+    #[test]
+    fn a_changed_link_target_is_a_loss() {
+        let scene = scene_built(
+            |_| {},
+            FILES,
+            &|tree| {
+                tree.symlink("projects/work/link", "notes.txt");
+            },
+            FILES,
+        );
+        fs::remove_file(scene.folder().join("link")).expect("removed");
+        std::os::unix::fs::symlink("src/main.rs", scene.folder().join("link")).expect("a link");
+        nobody_answers(&scene, &[lost("link", "changed")]);
+    }
+
+    #[test]
+    fn a_changed_directory_time_and_a_new_junk_file_lose_nothing() {
+        let scene = scene();
+        scene.set_time("src", FILE_TIME + 500);
+        scene.write_in_folder(".DS_Store", "junk");
+
+        let report = scene.run(&RealSeams);
+
+        assert!(undecided(&report).is_empty(), "{report:?}");
+        assert_eq!(archived_rows(&report).len() + reclaimed(&report), 1);
+    }
+
+    #[test]
+    fn a_collection_that_replaces_without_asking_replaces_a_loss() {
+        let scene = scene_built(replace_without_asking, FILES, &|_| {}, FILES);
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+
+        let report = scene.run(&RealSeams);
+
+        assert_eq!(archived_rows(&report).len(), 1, "{report:?}");
+        assert!(undecided(&report).is_empty());
+        assert!(!scene.folder().exists());
+        assert_eq!(scene.metadata().payloads.len(), 2);
+    }
+
+    #[test]
+    fn the_question_names_the_piece_and_what_would_be_lost() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        scene.set_mode("src", 0o700);
+        let (hook, asked) = Hook::new(vec![Some("skip")], |_| {});
+
+        scene.run_asking(&RealSeams, &asker(hook));
+
+        let asked = asked.lock().expect("the list");
+        assert_eq!(asked.len(), 1);
+        let question = &asked[0];
+        assert_eq!(question.title, TITLE);
+        assert_eq!(
+            question.details,
+            [
+                "removed: notes.txt".to_string(),
+                "changed (mode): src".to_string()
+            ]
+        );
+        let ids: Vec<&str> = question.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["replace", "fork", "skip"]);
+        assert_eq!(question.default_choice().id, "skip");
+    }
+
+    #[test]
+    fn a_question_lists_ten_losses_and_counts_the_rest() {
+        let files: Vec<(String, String)> = (0..13)
+            .map(|number| (format!("f{number:02}.txt"), "x".to_string()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, content)| (name.as_str(), content.as_str()))
+            .collect();
+        let scene = scene_of(&borrowed, &borrowed);
+        for (name, _) in &files {
+            fs::remove_file(scene.folder().join(name)).expect("removed");
+        }
+        scene.write_in_folder("keep.txt", "k");
+        let (hook, asked) = Hook::new(vec![None], |_| {});
+
+        let report = scene.run_asking(&RealSeams, &asker(hook));
+
+        let details = asked.lock().expect("the list")[0].details.clone();
+        assert_eq!(details.len(), 11, "{details:?}");
+        assert_eq!(details[0], "removed: f00.txt");
+        assert_eq!(details[10], "and 3 more");
+        let row = &undecided(&report)[0];
+        assert_eq!((row.lost_count, row.lost.len()), (13, 10));
+    }
+
+    #[test]
+    fn replace_archives_the_piece_with_the_loss() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "replace");
+
+        let report = scene.run_asking(&RealSeams, &asker(script));
+
+        assert_eq!(archived_rows(&report).len(), 1, "{report:?}");
+        assert_eq!(archived_rows(&report)[0].payload_version, 2);
+        assert!(!scene.folder().exists());
+        assert!(undecided(&report).is_empty());
+        assert!(pending(&scene.entry()).is_empty());
+        assert!(!report.partial_for_test());
+    }
+
+    #[test]
+    fn fork_gives_the_folder_a_new_id() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "fork");
+
+        let report = scene.run_asking(&RealSeams, &asker(script));
+
+        let rows = forked(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(
+            (rows[0].from, rows[0].path.to_string()),
+            (id(ID), PIECE.into())
+        );
+        assert_ne!(rows[0].id, id(ID));
+        assert!(scene.folder().exists(), "the folder stays");
+        assert_eq!(scene.entry().state, EntryState::Gone);
+        assert!(pending(&scene.entry()).is_empty());
+        let new_entry = tracking::read(&scene.collection, rows[0].id)
+            .expect("reads")
+            .expect("the fork has an entry");
+        assert_eq!(new_entry.state, EntryState::Live);
+        assert_eq!(scene.metadata().payloads.len(), 1, "no new archive");
+        assert!(!report.partial_for_test());
+    }
+
+    #[test]
+    fn skip_leaves_the_piece_and_exits_partial() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        let before = scene.untouched();
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "skip");
+
+        let report = scene.run_asking(&RealSeams, &asker(script));
+
+        let rows = skipped(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(rows[0].reason, SkipReason::Declined);
+        assert!(undecided(&report).is_empty());
+        assert!(report.partial_for_test());
+        assert_eq!(scene.untouched(), before);
+        assert!(
+            pending(&scene.entry()).is_empty(),
+            "nothing is left pending"
+        );
+    }
+
+    #[test]
+    fn a_skip_answer_clears_a_decision_an_earlier_run_left() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        scene.run(&RealSeams);
+        assert_eq!(pending(&scene.entry()), replacing());
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "skip");
+
+        scene.run_asking(&RealSeams, &asker(script));
+
+        assert!(pending(&scene.entry()).is_empty());
+    }
+
+    #[test]
+    fn a_decision_that_is_pending_is_not_written_again() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        scene.run(&RealSeams);
+        let written = scene.entry().written;
+        let later = FixedClock::new(Clock::now(&scene.clock) + jiff::SignedDuration::from_hours(1));
+
+        let report = scene.run_at(&RealSeams, crate::ops::archive::nobody(), &later);
+
+        assert_eq!(undecided(&report).len(), 1, "it is listed again");
+        assert_eq!(scene.entry().written, written, "the entry is not rewritten");
+    }
+
+    #[test]
+    fn a_folder_changed_back_is_reclaimed_and_its_decision_is_gone() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        scene.run(&RealSeams);
+        assert_eq!(pending(&scene.entry()), replacing());
+        scene.write_in_folder("notes.txt", "hello");
+        scene.set_time("notes.txt", FILE_TIME);
+
+        let report = scene.run(&RealSeams);
+
+        assert_eq!(reclaimed(&report), 1, "{report:?}");
+        assert!(pending(&scene.entry()).is_empty());
+    }
+
+    #[test]
+    fn a_change_after_the_answer_is_not_replaced_unasked_and_asks_again() {
+        let kept = [FILES[0], FILES[1], ("keep.txt", "k")];
+        let scene = scene_of(&kept, &kept);
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        let folder = scene.folder();
+        let (hook, asked) = Hook::new(vec![Some("replace"), Some("replace")], move |position| {
+            if position == 0 {
+                fs::remove_file(folder.join("src/main.rs")).expect("removed while the user thinks");
+                settle(&folder);
+            }
+        });
+
+        let report = scene.run_asking(&RealSeams, &asker(hook));
+
+        let asked = asked.lock().expect("the list");
+        assert_eq!(asked.len(), 2, "asked again");
+        assert_eq!(asked[0].details, ["removed: notes.txt"]);
+        assert_eq!(
+            asked[1].details,
+            ["removed: notes.txt", "removed: src/main.rs"]
+        );
+        assert_eq!(archived_rows(&report).len(), 1, "{report:?}");
+        assert_eq!(
+            object_names(&scene)
+                .iter()
+                .filter(|name| name.ends_with(".tar.zst"))
+                .count(),
+            2,
+            "the package of the first try is gone"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_keeps_changing_is_skipped_after_three_questions() {
+        let files = [
+            ("a.txt", "a"),
+            ("b.txt", "b"),
+            ("c.txt", "c"),
+            ("d.txt", "d"),
+            ("e.txt", "e"),
+        ];
+        let scene = scene_of(&files, &files);
+        fs::remove_file(scene.folder().join("a.txt")).expect("removed");
+        let folder = scene.folder();
+        let (hook, asked) = Hook::new(vec![Some("replace"); 4], move |position| {
+            let name = ["b.txt", "c.txt", "d.txt"][position];
+            fs::remove_file(folder.join(name)).expect("removed while the user thinks");
+            settle(&folder);
+        });
+
+        let report = scene.run_asking(&RealSeams, &asker(hook));
+
+        assert_eq!(asked.lock().expect("the list").len(), 3);
+        let rows = skipped(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(rows[0].reason, SkipReason::Differs);
+        assert!(
+            rows[0].message.contains("kept changing"),
+            "{}",
+            rows[0].message
+        );
+        assert!(scene.folder().exists());
+        assert_eq!(scene.metadata().payloads.len(), 1);
+    }
+
+    #[test]
+    fn the_candidate_with_the_smallest_loss_is_the_basis() {
+        let scene = scene();
+        // A second payload of the version, listing only `notes.txt`.
+        let listing: Vec<ListingEntry> = scene
+            .listing()
+            .into_iter()
+            .filter(|line| line.path.to_string() != "src" && line.path.to_string() != "src/main.rs")
+            .collect();
+        scene.add_payload(1, &listing);
+        scene.edit_entry(|entry| entry.local_payloads.clear());
+        fs::remove_dir_all(scene.folder().join("src")).expect("removed");
+        scene.write_in_folder("notes.txt", "HELLO");
+        scene.set_time("notes.txt", FILE_TIME);
+
+        let report = scene.run(&RealSeams);
+
+        let rows = undecided(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(rows[0].lost, [lost("notes.txt", "changed")]);
+    }
+
+    fn object_names(scene: &Scene) -> Vec<String> {
+        fs::read_dir(scene.collection.object_dir(id(ID)))
+            .expect("the object directory reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    fn removed(text: &str) -> Difference {
+        Difference::Removed(path(text))
+    }
+
+    fn changed(text: &str, fields: &[crate::pack::verify::Field]) -> Difference {
+        Difference::Changed {
+            path: path(text),
+            fields: fields.to_vec(),
+        }
+    }
+
+    #[test]
+    fn nothing_allows_no_loss() {
+        assert!(Bound::Nothing.allows(&[]));
+        assert!(!Bound::Nothing.allows(&[removed("a")]));
+    }
+
+    #[test]
+    fn any_allows_every_loss() {
+        assert!(Bound::Any.allows(&[removed("a"), changed("b", &[Field::Mode])]));
+    }
+
+    #[test]
+    fn a_loss_within_what_was_shown_is_allowed() {
+        let shown = Bound::Within(vec![
+            removed("a"),
+            changed("b", &[Field::Mode, Field::Content]),
+        ]);
+        assert!(shown.allows(&[removed("a")]));
+        assert!(shown.allows(&[changed("b", &[Field::Content])]));
+        assert!(shown.allows(&[]));
+    }
+
+    #[test]
+    fn a_loss_beyond_what_was_shown_is_not_allowed() {
+        let shown = Bound::Within(vec![removed("a"), changed("b", &[Field::Mode])]);
+        assert!(!shown.allows(&[removed("c")]), "another path");
+        assert!(!shown.allows(&[removed("a"), removed("c")]), "one more");
+        assert!(
+            !shown.allows(&[changed("b", &[Field::Mode, Field::Size])]),
+            "another field"
+        );
+        assert!(
+            !shown.allows(&[changed("a", &[Field::Mode])]),
+            "removed, not changed"
+        );
+        assert!(!shown.allows(&[removed("b")]), "changed, not removed");
+    }
+
+    #[test]
+    fn a_file_that_changed_while_it_was_read_refuses_the_piece() {
+        let refusal = stable(&[removed("a"), Difference::ChangedWhileRead(path("b"))])
+            .expect_err("the piece is refused");
+
+        assert_eq!(refusal.reason, SkipReason::Error);
+        assert!(refusal.message.contains("`b` changed while it was read"));
+        assert!(stable(&[removed("a")]).is_ok());
+    }
+
+    #[test]
+    fn a_fork_that_fails_skips_the_piece_and_names_the_cause() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        // The ID the fork would mint is taken.
+        let taken = SeqIds::new(1).mint(Clock::now(&scene.clock));
+        fs::create_dir_all(scene.collection.object_dir(taken)).expect("an object directory");
+        let before = scene.untouched();
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "fork");
+
+        let report = scene.run_asking(&RealSeams, &asker(script));
+
+        let rows = skipped(&report);
+        assert_eq!(rows.len(), 1, "{report:?}");
+        assert_eq!(rows[0].reason, SkipReason::Error);
+        assert!(
+            rows[0].message.contains(&taken.to_string()),
+            "{}",
+            rows[0].message
+        );
+        assert!(forked(&report).is_empty());
+        assert_eq!(scene.untouched(), before);
+        assert_eq!(scene.entry().state, EntryState::Live);
+    }
+
+    /// Answers by the path in the title and counts how many questions are
+    /// open at the same time.
+    struct Counting {
+        open: Arc<std::sync::atomic::AtomicUsize>,
+        most: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Interaction for Counting {
+        fn choose(&mut self, question: &Question) -> Option<Choice> {
+            let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..50 {
+                std::thread::yield_now();
+            }
+            self.open.fetch_sub(1, Ordering::SeqCst);
+            let answer = if question.title.contains("/p0?") {
+                "replace"
+            } else if question.title.contains("/p1?") {
+                "skip"
+            } else if question.title.contains("/p2?") {
+                "fork"
+            } else {
+                return None;
+            };
+            question
+                .choices
+                .iter()
+                .find(|choice| choice.id == answer)
+                .cloned()
+        }
+    }
+
+    /// Four unearthed pieces `projects/p0` to `p3`, each missing `notes.txt`.
+    fn four_pieces() -> Scene {
+        let ids = [
+            ID,
+            "01D39ZY06FGSCTVN4T2V9PKHFZ",
+            "01EJ3PX0000000000000000005",
+            "01EJ3PX0000000000000000006",
+        ];
+        let mut fx = Fixture::new();
+        for (number, object) in ids.iter().enumerate() {
+            let piece = format!("projects/p{number}");
+            fx.archived(object, &piece, FILES);
+            for (name, content) in FILES {
+                fx.tree()
+                    .file_with(&format!("{piece}/{name}"), content, 0o644, FILE_TIME);
+            }
+            let mut entry = fx.entry(object);
+            entry.state = EntryState::Live;
+            entry.unearthed = Some(time("2026-10-05T12:00:00Z"));
+            entry.unearthed_payload_version = Some(1);
+            fx.write_entry(&mut entry);
+            fx.edit_meta(object, |document| document["lifecycle"] = json!("live"));
+            fs::remove_file(fx.at(&format!("{piece}/notes.txt"))).expect("removed");
+        }
+        let Fixture {
+            temp,
+            collection,
+            clock,
+            lock,
+        } = fx;
+        drop(lock);
+        Scene {
+            temp,
+            collection,
+            clock,
+        }
+    }
+
+    #[test]
+    fn workers_ask_one_question_at_a_time_and_each_piece_gets_its_own_answer() {
+        for round in 0..50 {
+            let scene = four_pieces();
+            let (open, most) = Default::default();
+            let counting = Counting {
+                open: Arc::clone(&open),
+                most: Arc::clone(&most),
+            };
+            let ids = SeqIds::new(1);
+            let asker = asker(counting);
+
+            let report = archive_with(
+                &ArchiveRequest {
+                    collection: &scene.collection,
+                    clock: &scene.clock,
+                    ids: &ids,
+                    pool: shared_pool(),
+                    interaction: &asker,
+                    workers: 4,
+                    dry_run: false,
+                },
+                &RealSeams,
+            )
+            .expect("the run finishes");
+
+            assert_eq!(most.load(Ordering::SeqCst), 1, "round {round}");
+            let archived: Vec<String> = archived_rows(&report)
+                .iter()
+                .map(|row| row.path.to_string())
+                .collect();
+            assert_eq!(archived, ["projects/p0"], "round {round}: {report:?}");
+            let declined: Vec<String> = skipped(&report)
+                .iter()
+                .map(|row| row.path.to_string())
+                .collect();
+            assert_eq!(declined, ["projects/p1"], "round {round}");
+            let forks: Vec<String> = forked(&report)
+                .iter()
+                .map(|row| row.path.to_string())
+                .collect();
+            assert_eq!(forks, ["projects/p2"], "round {round}");
+            let waiting: Vec<String> = undecided(&report)
+                .iter()
+                .map(|row| row.path.to_string())
+                .collect();
+            assert_eq!(waiting, ["projects/p3"], "round {round}");
+        }
+    }
+
+    // =========================================================
+    // The dry run of a changed piece
+    // =========================================================
+
+    fn plan_of(scene: &Scene) -> ArchiveReport {
+        plan_with(&scene.collection, &scene.clock, &RealSeams).expect("the plan is made")
+    }
+
+    #[test]
+    fn a_dry_run_lists_a_replacement_without_loss() {
+        let scene = scene();
+        scene.write_in_folder("added.txt", "new");
+        let before = (scene.entry(), scene.metadata());
+
+        let plan = plan_of(&scene);
+
+        assert_eq!(
+            plan.plan.expect("a plan").actions,
+            [ArchiveAction::Replace {
+                path: path(PIECE),
+                id: id(ID),
+                size: 20,
+            }]
+        );
+        assert_eq!((scene.entry(), scene.metadata()), before);
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_question_a_loss_would_raise() {
+        let scene = scene();
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+        let before = (scene.entry(), scene.metadata());
+
+        let plan = plan_of(&scene);
+
+        let actions = plan.plan.expect("a plan").actions;
+        assert_eq!(
+            actions,
+            [ArchiveAction::Ask {
+                path: path(PIECE),
+                id: id(ID),
+                size: 12,
+                lost_count: 1,
+            }]
+        );
+        assert_eq!((scene.entry(), scene.metadata()), before);
+        assert!(
+            pending(&scene.entry()).is_empty(),
+            "a dry run decides nothing"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_replaces_a_loss_where_the_collection_allows_it() {
+        let scene = scene_built(replace_without_asking, FILES, &|_| {}, FILES);
+        fs::remove_file(scene.folder().join("notes.txt")).expect("removed");
+
+        let plan = plan_of(&scene);
+
+        assert!(matches!(
+            plan.plan.expect("a plan").actions[..],
+            [ArchiveAction::Replace { .. }]
+        ));
     }
 }
