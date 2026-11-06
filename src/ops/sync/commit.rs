@@ -11,17 +11,19 @@
 
 use super::upload::{self, UploadFile, Uploaded};
 use super::{
-    CommittedVersion, SkipReason, SyncContext, SyncError, SyncReport, UploadedFile, conflict,
-    ends_run, pull, run_bounded, skip,
+    CommittedVersion, SkipReason, SyncAction, SyncContext, SyncError, SyncReport, UploadedFile,
+    conflict, ends_run, pull, run_bounded, skip,
 };
+use crate::collection::Collection;
 use crate::id::ObjectId;
 use crate::meta::{self, Metadata};
 use crate::pack::hashing::hex;
+use crate::plan::Plan;
 use crate::remote::commit::{self as protocol, Outcome, Request, Settings};
 use crate::store::Store;
 use crate::tracking::{self, DecisionKind, VersionTakenOut};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::num::NonZeroU32;
 
@@ -56,11 +58,11 @@ fn io(action: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Erro
 }
 
 /// The objects that have a recorded change.
-pub(super) fn pending_objects(ctx: &SyncContext<'_>) -> Result<Vec<ObjectId>, SyncError> {
-    Ok(Store::new(ctx.collection)
+pub(super) fn pending_objects(collection: &Collection) -> Result<Vec<ObjectId>, SyncError> {
+    Ok(Store::new(collection)
         .objects()?
         .into_iter()
-        .filter(|id| ctx.collection.meta_pending_path(*id).is_file())
+        .filter(|id| collection.meta_pending_path(*id).is_file())
         .collect())
 }
 
@@ -69,12 +71,13 @@ pub(super) fn pending_objects(ctx: &SyncContext<'_>) -> Result<Vec<ObjectId>, Sy
 /// run did with it, since a later run continues them. An object whose
 /// metadata cannot be read keeps nothing.
 pub(super) fn pending_temp_names(
-    ctx: &SyncContext<'_>,
+    collection: &Collection,
+    machine: &str,
 ) -> Result<BTreeSet<(ObjectId, String)>, SyncError> {
-    let store = Store::new(ctx.collection);
+    let store = Store::new(collection);
     let mut keep = BTreeSet::new();
-    for id in pending_objects(ctx)? {
-        let pending_path = ctx.collection.meta_pending_path(id);
+    for id in pending_objects(collection)? {
+        let pending_path = collection.meta_pending_path(id);
         let Ok(pending) = fs::read(&pending_path)
             .map_err(|_| ())
             .and_then(|bytes| meta::parse(&bytes).map_err(|_| ()))
@@ -87,38 +90,44 @@ pub(super) fn pending_temp_names(
                 .and_then(|bytes| meta::parse(&bytes).ok()),
             None => None,
         };
-        for file in
-            upload::files_to_upload(ctx.collection, ctx.machine, id, &pending, base.as_ref())?
-        {
+        for file in upload::files_to_upload(collection, machine, id, &pending, base.as_ref())? {
             keep.insert((id, file.temp));
         }
     }
     Ok(keep)
 }
 
-/// Says which of the three an object's recorded change is.
-pub(super) fn classify(ctx: &SyncContext<'_>, id: ObjectId) -> Result<Class, SyncError> {
-    let store = Store::new(ctx.collection);
-    let pending_path = ctx.collection.meta_pending_path(id);
+/// Metadata versions that are not stored here yet, by number. A dry run
+/// judges the changes against the versions it would pull.
+pub(super) type Versions = BTreeMap<u32, Vec<u8>>;
+
+/// Says which of the three an object's recorded change is, judged against
+/// the versions stored here and `extra`.
+pub(super) fn classify(
+    collection: &Collection,
+    id: ObjectId,
+    extra: &Versions,
+) -> Result<Class, SyncError> {
+    let store = Store::new(collection);
+    let pending_path = collection.meta_pending_path(id);
     let pending_bytes = fs::read(&pending_path).map_err(io("read", &pending_path))?;
     let pending = meta::parse(&pending_bytes)?;
 
-    let versions = store.committed_versions(id)?;
-    let top = match versions.last() {
-        Some(&number) => {
-            let path = store.meta_path(id, number);
-            let bytes = fs::read(&path).map_err(io("read", &path))?;
-            Some((number, meta::parse(&bytes)?))
-        }
+    let mut versions: Versions = extra.clone();
+    for number in store.committed_versions(id)? {
+        let path = store.meta_path(id, number);
+        versions.insert(number, fs::read(&path).map_err(io("read", &path))?);
+    }
+    let top = match versions.iter().next_back() {
+        Some((&number, bytes)) => Some((number, meta::parse(bytes)?)),
         None => None,
     };
 
     // A pending change that equals a committed version was committed by an
     // earlier run that ended before the local record. It is settled when
     // everything above it builds on it.
-    for &number in versions.iter().rev() {
-        let path = store.meta_path(id, number);
-        if fs::read(&path).map_err(io("read", &path))? != pending_bytes {
+    for (&number, bytes) in versions.iter().rev() {
+        if *bytes != pending_bytes {
             continue;
         }
         let (highest, newest) = top.as_ref().expect("a version exists");
@@ -130,7 +139,7 @@ pub(super) fn classify(ctx: &SyncContext<'_>, id: ObjectId) -> Result<Class, Syn
         });
     }
 
-    let decided = tracking::read(ctx.collection, id)?.is_some_and(|entry| {
+    let decided = tracking::read(collection, id)?.is_some_and(|entry| {
         entry
             .pending_decisions
             .iter()
@@ -297,7 +306,7 @@ pub(super) fn skip_all(
     reason: SkipReason,
     message: &str,
 ) -> Result<(), SyncError> {
-    for id in pending_objects(ctx)? {
+    for id in pending_objects(ctx.collection)? {
         skip(ctx.collection, report, id, reason, message.to_string());
     }
     Ok(())
@@ -339,16 +348,51 @@ fn settle_reported(
     Ok(())
 }
 
+/// What a run would do with the recorded changes, judged against the
+/// versions it would pull. Nothing is written and the remote is not asked
+/// for anything.
+pub(super) fn plan_changes(
+    collection: &Collection,
+    machine: &str,
+    would_pull: &BTreeMap<ObjectId, Versions>,
+    plan: &mut Plan<SyncAction>,
+) -> Result<(), SyncError> {
+    let nothing = Versions::new();
+    for id in pending_objects(collection)? {
+        let extra = would_pull.get(&id).unwrap_or(&nothing);
+        match classify(collection, id, extra) {
+            Ok(Class::Settle(version)) => plan.push(SyncAction::Settle { id, version }),
+            Ok(Class::Conflict { .. }) => plan.push(SyncAction::Conflict { id }),
+            Ok(Class::Commit { pending, base, .. }) => {
+                let files =
+                    upload::files_to_upload(collection, machine, id, &pending, base.as_deref())?;
+                for file in files {
+                    plan.push(SyncAction::Upload {
+                        id,
+                        file: file.name.as_str().to_string(),
+                        size: file.size,
+                    });
+                }
+                plan.push(SyncAction::Commit { id });
+            }
+            // A change that cannot be read is reported by the real run; the
+            // plan has nothing to say about it.
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Settles, uploads and commits every recorded change.
 pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
     let mut ready = Vec::new();
-    for id in pending_objects(ctx)? {
+    for id in pending_objects(ctx.collection)? {
         // An object the pull left alone is not committed on top of what
         // could not be taken from the remote.
         if report.skipped.iter().any(|skipped| skipped.id == id) {
             continue;
         }
-        match classify(ctx, id) {
+        match classify(ctx.collection, id, &Versions::new()) {
             Ok(Class::Settle(number)) => settle_reported(ctx, report, id, number)?,
             Ok(Class::Conflict { lower }) => record_conflict(ctx, report, id, lower)?,
             Ok(Class::Commit {
@@ -437,9 +481,11 @@ fn settle_landed(
         return Ok(());
     }
     for id in landed {
-        match classify(ctx, id) {
+        match classify(ctx.collection, id, &Versions::new()) {
             Ok(Class::Settle(number)) => settle_reported(ctx, report, id, number)?,
             Ok(Class::Conflict { lower }) => record_conflict(ctx, report, id, lower)?,
+            // The second pull stored the version that was committed, so the
+            // change equals a committed version and is never `Commit`.
             Ok(Class::Commit { .. }) => skip(
                 ctx.collection,
                 report,
@@ -900,6 +946,38 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_that_finds_a_higher_version_that_does_not_build_on_it_is_a_conflict() {
+        let (shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        let pending_path = anna.collection.meta_pending_path(id);
+        let clock_now = anna.clock.now();
+        let shared_dir = shared.objects();
+        // Before the commit looks at the remote, an earlier attempt's version
+        // and a version built on it are there.
+        remote.before(Op::ListDir, 1, move |inner| {
+            use crate::remote::Remote;
+            let mut document =
+                crate::meta::parse(&fs::read(&pending_path).expect("pending")).expect("parses");
+            document.stamp_committed(0, clock_now);
+            let ours = crate::meta::to_bytes(&document).expect("serialises");
+            document.history[0].machine = "ben".to_string();
+            let theirs = crate::meta::to_bytes(&document).expect("serialises");
+            let _ = &shared_dir;
+            commit_as_ben(inner, id, 1, &ours);
+            commit_as_ben(inner, id, 2, &theirs);
+            let _ = inner.flush();
+        });
+
+        let report = anna.sync_with(&remote);
+
+        assert!(report.committed.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Conflict);
+        assert!(has_pending(&anna, id));
+    }
+
+    #[test]
     fn a_retry_that_finds_a_higher_version_is_left_alone_when_the_second_pull_fails() {
         let (shared, anna, _) = anna_and_ben();
         let id = anna.import_piece("notes", "hello");
@@ -927,15 +1005,15 @@ mod tests {
             let _ = inner.flush();
         });
 
+        remote.fail(Op::PullMetadata, 2, Fault::Io);
+        remote.fail(Op::PullMetadata, 3, Fault::Io);
+
         let report = anna.sync_with(&remote);
 
-        assert_eq!(report.committed, [CommittedVersion { id, version: 1 }]);
-        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-        assert!(!has_pending(&anna, id));
-        assert!(
-            anna.store().meta_path(id, 2).exists(),
-            "the second pull stored version 2"
-        );
+        assert!(report.committed.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Pull);
+        assert!(has_pending(&anna, id));
     }
 
     #[test]
@@ -1246,5 +1324,132 @@ mod tests {
             "{:?}",
             report.skipped
         );
+    }
+
+    #[test]
+    fn an_object_of_another_collection_without_a_recorded_change_is_not_touched() {
+        let (shared, anna, ben) = anna_and_ben();
+        let foreign = anna.import_piece("notes", "hello");
+        anna.sync();
+        ben.sync();
+        assert!(
+            ben.store().meta_path(foreign, 1).exists(),
+            "the object is in ben's store"
+        );
+        let own = ben.import_piece("mine", "two");
+        let tracking_before = fs::read_dir(
+            ben.collection
+                .tracking_path(foreign)
+                .parent()
+                .expect("a directory"),
+        )
+        .expect("lists")
+        .count();
+        let remote = ben.remote();
+
+        let report = ben.sync_with(&remote);
+
+        assert_eq!(
+            report.committed,
+            [CommittedVersion {
+                id: own,
+                version: 1
+            }]
+        );
+        assert!(
+            report.uploaded.iter().all(|file| file.id == own),
+            "{:?}",
+            report.uploaded
+        );
+        assert!(report.skipped.is_empty());
+        let touched: Vec<_> = remote
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call.op,
+                    Op::PutPayload | Op::CreateExclusive | Op::WriteTemp | Op::RenameIntoPlace
+                )
+            })
+            .collect();
+        assert_eq!(
+            touched.len(),
+            5,
+            "two puts, a claim, a temp, a rename for the own object: {touched:?}"
+        );
+        assert!(!ben.collection.tracking_path(foreign).exists());
+        assert_eq!(
+            fs::read_dir(
+                ben.collection
+                    .tracking_path(foreign)
+                    .parent()
+                    .expect("a directory")
+            )
+            .expect("lists")
+            .count(),
+            tracking_before
+        );
+        assert_eq!(
+            shared
+                .names(foreign)
+                .iter()
+                .filter(|n| n.starts_with("meta."))
+                .count(),
+            2,
+            "version 1 and its claim"
+        );
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_recorded_as_committed_skips_its_object() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        anna.sync();
+        let committed = fs::read(anna.store().meta_path(id, 1)).expect("version 1");
+        fs::write(anna.collection.meta_pending_path(id), committed).expect("pending equals it");
+        let dir = anna.collection.object_dir(id);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::write(dir.join("probe"), b"x").is_err(),
+            "the test runs as a user the permissions bind"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("restored");
+
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Error);
+        assert!(has_pending(&anna, id));
+    }
+
+    #[test]
+    fn a_conflict_that_cannot_be_recorded_skips_its_object_as_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let mut entry = anna.entry(id);
+        entry.decide(DecisionKind::VersionConflict);
+        let lock =
+            crate::lock::acquire(&anna.collection.lock_path(), "anna", &anna.clock).expect("free");
+        tracking::write(&anna.collection, &lock, &anna.clock, &mut entry).expect("written");
+        drop(lock);
+        let tracking_dir = anna
+            .collection
+            .tracking_path(id)
+            .parent()
+            .expect("a directory")
+            .to_path_buf();
+        fs::set_permissions(&tracking_dir, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::write(tracking_dir.join("probe"), b"x").is_err(),
+            "the test runs as a user the permissions bind"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&tracking_dir, fs::Permissions::from_mode(0o755)).expect("restored");
+
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Error);
     }
 }

@@ -267,3 +267,130 @@ fn the_json_of_a_sync_lists_uploads_and_commits() {
     assert_eq!(json["cleanup"]["removed"], 0);
     assert_eq!(json["skipped"], serde_json::json!([]));
 }
+
+// =========================================================
+// An away remote
+// =========================================================
+
+/// A collection attached to a remote whose root is gone, with `gap_days`
+/// since the remote was last reachable and a change waiting to be
+/// uploaded.
+fn away_with_pending_work(gap_days: i64) -> TempCollection {
+    let missing = tempfile::tempdir().expect("a temp dir");
+    let root = missing.path().join("gone");
+    let mut collection = attached_as(&root, "anna", COLLECTION_ID);
+    import_piece(&mut collection, "notes");
+    let last = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * gap_days);
+    fs::write(
+        collection.root().join(".antiq/remote-state.json"),
+        format!("{{\"last_reachable\": \"{last}\"}}"),
+    )
+    .expect("the state is written");
+    collection
+}
+
+#[test]
+fn an_away_remote_after_a_day_is_not_a_failure_under_if_reachable() {
+    let collection = away_with_pending_work(1);
+
+    for args in [
+        ["sync", "--if-reachable"].as_slice(),
+        ["sync", "--if-reachable", "--dry-run"].as_slice(),
+    ] {
+        let run = antiq_in(&collection, args);
+        assert_eq!(run.code(), 0, "{args:?}: {}{}", run.stdout, run.stderr);
+    }
+}
+
+#[test]
+fn an_away_remote_after_eight_days_with_pending_work_exits_4_even_under_if_reachable() {
+    let collection = away_with_pending_work(8);
+
+    for args in [
+        ["sync", "--if-reachable"].as_slice(),
+        ["sync", "--if-reachable", "--dry-run"].as_slice(),
+        ["sync"].as_slice(),
+    ] {
+        let run = antiq_in(&collection, args);
+        assert_eq!(run.code(), 4, "{args:?}: {}{}", run.stdout, run.stderr);
+    }
+}
+
+#[test]
+fn an_away_remote_after_eight_days_without_pending_work_is_not_overdue() {
+    let missing = tempfile::tempdir().expect("a temp dir");
+    let collection = attached_as(&missing.path().join("gone"), "anna", COLLECTION_ID);
+    let last = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 8);
+    fs::write(
+        collection.root().join(".antiq/remote-state.json"),
+        format!("{{\"last_reachable\": \"{last}\"}}"),
+    )
+    .expect("the state is written");
+
+    let run = antiq_in(&collection, &["sync", "--if-reachable"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+}
+
+#[test]
+fn a_dry_run_leaves_no_probe_file_on_the_remote() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    import_piece(&mut anna, "notes");
+    let before: Vec<String> = fs::read_dir(remote.path())
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let run = antiq_in(&anna, &["sync", "--dry-run"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    let after: Vec<String> = fs::read_dir(remote.path())
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(before, after);
+    assert!(run.stdout.contains("Would upload "), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("Would commit the change to "),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn sync_reports_the_leftovers_it_removes_from_the_remote() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    import_piece(&mut anna, "notes");
+    let json = antiq_in(&anna, &["--json", "sync"]).json();
+    let id = json["committed"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    // The machine's own temp file in a directory it owns goes at once.
+    let leftover = remote
+        .path()
+        .join("objects")
+        .join(&id)
+        .join(".0123456789abcdef-x.tar.zst.anna.part");
+    fs::write(&leftover, b"partial").expect("planted");
+
+    let run = antiq_in(&anna, &["sync"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.stdout, "Removed 1 leftover files from the remote\n");
+    assert!(!leftover.exists());
+}

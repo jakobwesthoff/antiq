@@ -1548,6 +1548,11 @@ the outcome leaves behind:
 | landed | stays until a second pull; then judged like an overtaken version: committed if the newer version builds on it, else a conflict | as for that outcome | 0 or 3 |
 | refused, or a failed upload or commit | stays | unchanged | 3 |
 
+A change that a newer version builds on is committed even when an earlier
+run recorded a `version_conflict` decision for it; recording the change
+as committed removes that decision, since the newer version leaves
+nothing to decide.
+
 `sync` drops no local archive when it commits. An upload stays pending
 (`pending_upload`) until the tier phase confirms the remote copy.
 
@@ -1567,7 +1572,11 @@ exit 3. A run that reaches its end writes `last_sync`.
 does, and commits their metadata without a live payload. After a fork,
 the old ID's live package is deleted once the fork's change is
 committed. A dry run reads the remote and writes nothing, locally or on
-the remote.
+the remote. It lists what the run would do against the versions it would
+pull: the versions to pull, the listings to fetch, the changes to record
+as committed, the conflicts, the files to upload, the commits and the
+removals of cleanup. Removals that depend on a file's age are marked as
+such, since a dry run does not read the remote's clock.
 
 The archive tier starts from a piece's activity; the remote-only tier
 is measured from the archive's commit. (ADR 0042) A local archive moves
@@ -2035,6 +2044,9 @@ interactively; without a terminal it lists them and exits 3.
 
 An answer that does not fit the pending decision is a usage error.
 
+A version conflict that `sync` recorded goes away without an answer when a
+later `sync` finds that the newest version builds on the change.
+
 ### Dry runs, scheduling, exit codes
 
 Every state-changing command takes `--dry-run`, which prints the plan
@@ -2230,7 +2242,9 @@ each file written to the remote), `committed` (`{id, version}`), `cleanup`
 reason, message}`, `path` null where the piece's metadata cannot be read,
 `reason` one of `pull`, `error`, `conflict`, `contested` and `refused`)
 and `warnings`. The plan of a `--dry-run` has `pull_metadata` actions
-(`id`, `version`) and `fetch_listing` actions (`id`, `file`).
+(`id`, `version`), `fetch_listing` (`id`, `file`), `settle` (`id`,
+`version`), `conflict` (`id`), `upload` (`id`, `file`, `size`), `commit`
+(`id`) and `remove_leftover` (`id`, `name`, `what`, `age_unknown`).
 
 `resolve` has no payload defined yet. Without a piece and without a
 terminal, or with `--json`, it lists the pending decisions and exits 3

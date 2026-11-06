@@ -4,6 +4,7 @@
 
 //! Pulling metadata and the listings it names.
 
+use super::commit::Versions;
 use super::{
     PulledVersion, SkipReason, SyncAction, SyncContext, SyncError, SyncReport, ends_run, skip,
 };
@@ -181,9 +182,16 @@ pub(super) fn plan_pull(
     collection: &Collection,
     remote: &dyn Remote,
     plan: &mut Plan<SyncAction>,
-) -> Result<(), SyncError> {
+) -> Result<BTreeMap<ObjectId, Versions>, SyncError> {
     let store = Store::new(collection);
     let files = remote.pull_metadata(&known_versions(&store)?)?;
+    let mut would_pull: BTreeMap<ObjectId, Versions> = BTreeMap::new();
+    for file in &files {
+        would_pull
+            .entry(file.id)
+            .or_default()
+            .insert(file.number.get(), file.bytes.clone());
+    }
     let mut highest: BTreeMap<ObjectId, &MetaFile> = BTreeMap::new();
     for file in &files {
         plan.push(SyncAction::PullMetadata {
@@ -220,7 +228,7 @@ pub(super) fn plan_pull(
             });
         }
     }
-    Ok(())
+    Ok(would_pull)
 }
 
 #[cfg(test)]

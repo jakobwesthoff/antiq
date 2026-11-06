@@ -173,8 +173,40 @@ impl CommandReport for SyncReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum SyncAction {
-    PullMetadata { id: ObjectId, version: u32 },
-    FetchListing { id: ObjectId, file: String },
+    PullMetadata {
+        id: ObjectId,
+        version: u32,
+    },
+    FetchListing {
+        id: ObjectId,
+        file: String,
+    },
+    /// The recorded change is the committed version `version`.
+    Settle {
+        id: ObjectId,
+        version: u32,
+    },
+    /// The recorded change conflicts with the newest version.
+    Conflict {
+        id: ObjectId,
+    },
+    Upload {
+        id: ObjectId,
+        file: String,
+        size: u64,
+    },
+    Commit {
+        id: ObjectId,
+    },
+    /// A removal on the remote that cleanup would make; `age_unknown` is
+    /// set where the file's age decides and a dry run does not read the
+    /// remote's clock.
+    RemoveLeftover {
+        id: ObjectId,
+        name: String,
+        what: cleanup::What,
+        age_unknown: bool,
+    },
 }
 
 impl PlanAction for SyncAction {
@@ -184,6 +216,27 @@ impl PlanAction for SyncAction {
                 format!("pull version {version} of {id}")
             }
             SyncAction::FetchListing { id, file } => format!("fetch {file} of {id}"),
+            SyncAction::Settle { id, version } => {
+                format!("record version {version} of {id} as committed")
+            }
+            SyncAction::Conflict { id } => {
+                format!("skip {id}, its change conflicts with the newest version")
+            }
+            SyncAction::Upload { id, file, .. } => format!("upload {file} of {id}"),
+            SyncAction::Commit { id } => format!("commit the change to {id}"),
+            SyncAction::RemoveLeftover {
+                id,
+                name,
+                what,
+                age_unknown,
+            } => {
+                let suffix = if *age_unknown {
+                    " (age unknown in a dry run)"
+                } else {
+                    ""
+                };
+                format!("remove {what} {name} of {id}{suffix}")
+            }
         }
     }
 }
@@ -280,7 +333,9 @@ pub fn sync_with(
             }
             Started::DryRun { holder } => {
                 let mut plan = Plan::new();
-                pull::plan_pull(collection, remote, &mut plan)?;
+                let would_pull = pull::plan_pull(collection, remote, &mut plan)?;
+                commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
+                plan_cleanup(collection, remote, &machine, &mut plan)?;
                 Ok(Synced::Planned {
                     plan,
                     notes: report::setting_notes(collection),
@@ -291,6 +346,36 @@ pub fn sync_with(
     })();
     remote.finish();
     outcome.map_err(public)
+}
+
+/// The removals cleanup would make. A dry run reads no clock, so the
+/// removals that depend on an age are named as such.
+fn plan_cleanup(
+    collection: &Collection,
+    remote: &dyn Remote,
+    machine: &str,
+    plan: &mut Plan<SyncAction>,
+) -> Result<(), SyncError> {
+    let keep = commit::pending_temp_names(collection, machine)?;
+    let settings = cleanup::Settings {
+        machine,
+        collection: collection.id(),
+        grace: SignedDuration::from_hours(i64::from(collection.config().collection.grace_hours)),
+        keep: &keep,
+    };
+    for step in cleanup::plan(remote, &settings, &cleanup::Mode::DryRun)?.steps {
+        let (id, name, what, age_unknown) = match step {
+            cleanup::Step::Remove { id, name, what } => (id, name, what, false),
+            cleanup::Step::AgeUnknown { id, name, what } => (id, name, what, true),
+        };
+        plan.push(SyncAction::RemoveLeftover {
+            id,
+            name,
+            what,
+            age_unknown,
+        });
+    }
+    Ok(())
 }
 
 /// The phases of a real run, in the order of the spec.
@@ -319,7 +404,7 @@ fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncEr
 /// continues them. A cleanup that fails for another reason than the
 /// remote's being gone is a warning and makes the run partial.
 fn cleanup(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
-    let keep = match commit::pending_temp_names(ctx) {
+    let keep = match commit::pending_temp_names(ctx.collection, ctx.machine) {
         Ok(keep) => keep,
         Err(error) => {
             report.cleanup.failed = true;
@@ -440,6 +525,7 @@ pub(super) fn skip(
 mod tests {
     use super::fixture::{Machine, Shared};
     use super::*;
+    use crate::meta::HistoryAction;
     use crate::remote::testing::{Fault, Op};
     use serde_json::Value;
     use std::fs;
@@ -732,7 +818,14 @@ mod tests {
         assert!(ben.store().objects().expect("lists").is_empty());
         assert!(!ben.collection.remote_state_path().exists());
         assert_eq!(remote.count(Op::Clock), 0);
-        assert_eq!(remote.count(Op::ReadFile), 0);
+        // Only the cleanup's look at the metadata reads files.
+        assert!(
+            remote
+                .calls()
+                .iter()
+                .filter(|call| call.op == Op::ReadFile)
+                .all(|call| call.name.starts_with("meta.")),
+        );
     }
 
     #[test]
@@ -982,5 +1075,151 @@ mod tests {
             Vec::<u8>::new()
         );
         assert_eq!(run_bounded(0, vec![7], |item| item), vec![7]);
+    }
+
+    /// Every file below `root` with its content, by path.
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+        fn walk(
+            base: &std::path::Path,
+            dir: &std::path::Path,
+            found: &mut std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        ) {
+            for entry in fs::read_dir(dir).expect("lists") {
+                let path = entry.expect("entry").path();
+                let name = path
+                    .strip_prefix(base)
+                    .expect("below")
+                    .display()
+                    .to_string();
+                if path.is_dir() {
+                    found.insert(name, None);
+                    walk(base, &path, found);
+                } else {
+                    found.insert(name, Some(fs::read(&path).expect("reads")));
+                }
+            }
+        }
+        let mut found = std::collections::BTreeMap::new();
+        walk(root, root, &mut found);
+        found
+    }
+
+    fn planned(synced: Result<Synced, Error>) -> Vec<String> {
+        match synced.expect("plans") {
+            Synced::Planned { plan, .. } => plan.actions.iter().map(PlanAction::describe).collect(),
+            other => panic!("expected a plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dry_run_of_a_pending_archive_plans_the_uploads_the_commit_and_the_leftovers_and_writes_nothing()
+     {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let kept = anna.import_piece("kept", "one");
+        anna.sync();
+        let id = anna.import_piece("notes", "hello");
+        let dir = shared.objects().join(kept.to_string());
+        fs::write(
+            dir.join(".0123456789abcdef-x.tar.zst.anna.part"),
+            b"partial",
+        )
+        .expect("planted");
+        let local_before = snapshot(anna.collection.root());
+        let remote_before = snapshot(shared.root.path());
+        let remote = anna.remote();
+
+        let described = planned(sync_with(&anna.collection, &anna.clock, &remote, true));
+
+        assert_eq!(described.len(), 4, "{described:?}");
+        assert!(described[0].starts_with("upload "), "{described:?}");
+        assert!(described[0].ends_with(&format!("of {id}")), "{described:?}");
+        assert!(described[1].starts_with("upload "), "{described:?}");
+        assert_eq!(described[2], format!("commit the change to {id}"));
+        // The machine's own temp file without a claim of its own goes at once.
+        assert_eq!(
+            described[3],
+            format!("remove temp file .0123456789abcdef-x.tar.zst.anna.part of {kept}")
+        );
+        assert_eq!(snapshot(anna.collection.root()), local_before);
+        assert_eq!(snapshot(shared.root.path()), remote_before);
+        for op in [
+            Op::Clock,
+            Op::PutPayload,
+            Op::WriteTemp,
+            Op::CreateExclusive,
+            Op::RenameIntoPlace,
+            Op::Delete,
+            Op::DeletePartial,
+            Op::Flush,
+        ] {
+            assert_eq!(remote.count(op), 0, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_names_a_change_that_is_a_committed_version_and_a_conflict() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let ben = Machine::new(&shared, "ben");
+        let id = anna.import_piece("notes", "hello");
+        anna.sync();
+        ben.sync();
+        ben.record_history(id, HistoryAction::Unearth);
+        fs::write(shared.objects().join(id.to_string()).join("meta.2"), {
+            let mut document = crate::meta::parse(&shared.read(id, "meta.1")).expect("parses");
+            document.history.push(crate::meta::HistoryEntry::new(
+                anna.clock.now(),
+                "anna",
+                HistoryAction::Sync,
+            ));
+            crate::meta::to_bytes(&document).expect("serialises")
+        })
+        .expect("a version from another machine");
+
+        let conflict = planned(sync_with(&ben.collection, &ben.clock, &ben.remote(), true));
+
+        assert_eq!(conflict[0], format!("pull version 2 of {id}"));
+        assert_eq!(
+            conflict[1],
+            format!("skip {id}, its change conflicts with the newest version")
+        );
+        assert!(
+            !conflict.iter().any(|action| action.starts_with("upload ")),
+            "no upload for a conflict: {conflict:?}"
+        );
+        assert!(
+            conflict
+                .iter()
+                .any(|action| action.ends_with("(age unknown in a dry run)")),
+            "{conflict:?}"
+        );
+
+        // A change that is the committed version 1 needs only recording.
+        let settled = {
+            let bytes = fs::read(ben.store().meta_path(id, 1)).expect("version 1");
+            fs::write(ben.collection.meta_pending_path(id), bytes)
+                .expect("pending equals version 1");
+            fs::remove_file(shared.objects().join(id.to_string()).join("meta.2")).expect("removed");
+            planned(sync_with(&ben.collection, &ben.clock, &ben.remote(), true))
+        };
+        assert_eq!(settled[0], format!("record version 1 of {id} as committed"));
+    }
+
+    #[test]
+    fn a_dry_run_has_nothing_to_say_about_a_change_that_cannot_be_read() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let id = anna.import_piece("notes", "hello");
+        fs::write(anna.collection.meta_pending_path(id), b"not metadata").expect("damaged");
+
+        let described = planned(sync_with(
+            &anna.collection,
+            &anna.clock,
+            &anna.remote(),
+            true,
+        ));
+
+        assert!(described.is_empty(), "{described:?}");
     }
 }
