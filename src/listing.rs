@@ -1486,12 +1486,14 @@ mod tests {
     #[test]
     fn read_head_refuses_a_head_that_runs_past_the_limit() {
         let mut content = b"# antiq listing 1\n".to_vec();
-        for _ in 0..200 {
+        // More than the 8 KiB the line reader fills at a time, so the limit is
+        // met inside the head and not while the first line is read.
+        for _ in 0..1000 {
             content.extend_from_slice(b"# piece         a\n");
         }
         assert_too_large(
-            read_head_within(&compressed(&content)[..], 1000).expect_err("a head of 4 KiB"),
-            1000,
+            read_head_within(&compressed(&content)[..], 10_000).expect_err("a head of 20 KB"),
+            10_000,
         );
     }
 
@@ -1545,6 +1547,7 @@ mod tests {
         let error = reader
             .read_until(b'\n', &mut Vec::new())
             .expect_err("a line that never ends");
+        assert_eq!(error.to_string(), "more than 1000 decoded bytes");
         assert_too_large(io_error(error), 1000);
         assert_eq!(reader.get_ref().inner.asked, 1001);
     }
