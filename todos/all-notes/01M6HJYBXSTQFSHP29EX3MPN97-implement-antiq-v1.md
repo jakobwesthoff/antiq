@@ -2021,6 +2021,53 @@ its finishing commit. Acceptance lines in an entry add to this.
   a terminal only finished lines.
 - Size: M.
 
+#### I42 Decisions of 2026-11-04 on find, re-archiving, prune and status
+
+- Goal: apply what the user decided in the asqr rounds of 2026-11-04.
+- Content, from todo `01M6JV59RPTP6QXMXST6WXHVHH`: `find --print`
+  closes the picker after Enter (ADR 0057 corrected in place); a
+  changed directory mode is no content loss when an unearthed piece is
+  archived again; `reconcile --prune` spares a gone piece while its live
+  package is on the remote; the unused error kind `not_implemented` is
+  removed. Also the bug of todo `01M6JNH5VD0MD4MVP0M9A97MA7`: `status`
+  reads only NotFound and NotADirectory of a folder lookup as missing.
+- Depends on: I26, I35, I40 (all merged).
+- Docs: spec "Command line", "archive", "reconcile", "States", the
+  error-kind table, ADR 0057.
+- Size: S.
+
+#### I43 Shell integration that changes into the piece folder
+
+- Content: todo `01M6JV59GRDMJ7A79J03TFX5PV` (`antiq shell <shell>`
+  with function and completions, embedded from `shell/`;
+  `ANTIQ_CD_FILE` written by `find`, `unearth`, `fork`, `init`; a
+  copy-friendly `cd` line without the integration).
+- Depends on: I42 (both touch `find`), I20, I22, I34.
+- Docs: spec "Command line", README, a new ADR for the protocol.
+- Size: M.
+
+#### I44 Forget a piece for good
+
+- Content: todo `01M6JV59PAVVWYAMB9PTRV9KG0`. The lead first drafts
+  the spec section and an ADR and puts the open points to the user;
+  the item is planned on the answers.
+- Depends on: I32, I35.
+- Size: M.
+
+#### I45 Fast contents search in the picker
+
+- Content: the remedies the picker search investigation
+  (`docs/research/picker-search.md`) measures, chosen with the user;
+  responses in the low milliseconds while typing.
+- Depends on: I40 and the investigation.
+- Size: M to L.
+
+#### I46 One integration test binary
+
+- Content: todo `01M6JR4THG5RRC5JEB6CRNBY0Y`. Touches every test file,
+  so it runs when no other item branch is open, before I39.
+- Size: M.
+
 ## 6. Dependency graph and waves
 
 The added dependency edges (I04 for I08, I09 and I17; I03 for I10; I28
@@ -2062,6 +2109,11 @@ I01 lands in two merges; wave 2 starts after part B.
 | I39 | all others | 11 |
 | I40 | I15, I36 | 8 |
 | I41 | I19, I20, I30, I34 | 9 |
+| I42 | I26, I35, I40 | 9 |
+| I43 | I20, I22, I34, I42 | 10 |
+| I44 | I32, I35 | 10 |
+| I45 | I40 and the search investigation | 10 |
+| I46 | all items but I39 merged | 11, before I39 |
 
 Waves and the files that keep them apart:
 
@@ -2076,8 +2128,8 @@ Waves and the files that keep them apart:
 | 7 | I26 to I29, I36 | I26 edits I19's `ops/archive/mod.rs` routing and `cli/cmd/archive.rs`; I28 edits I23's `remote/mod.rs` arm, `ops/remote.rs` and `cli/cmd/remote.rs`; I36 edits I18's `cli/cmd/find.rs` and is the only `Cargo.toml` editor |
 | 8 | I30, I34, I35, I40 | I40 only in `src/cli/picker/`; `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
 | 9 | I31, I32, I33, I41 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs`; I41 adds progress parameters to the pack, verify, extract and transfer calls and threads them through their callers, rebased after the others |
-| 10 | I37, I38 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs` |
-| 11 | I39 | |
+| 10 | I37, I38, I43, I44, I45 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs`; I43 in `shell/`, `cli/cmd/shell.rs` and the cd hooks of four commands; I44 in its own command and `ops` module; I45 in `src/cli/picker/` and `src/index.rs` |
+| 11 | I46, then I39 | I46 alone, since it moves every test file |
 
 The longest chain is I01, I03, I08, I17, I23, I27, I30, I31, I37,
 I39; with I23 placed in wave 6 it gives the 11 waves. I24 and I25
