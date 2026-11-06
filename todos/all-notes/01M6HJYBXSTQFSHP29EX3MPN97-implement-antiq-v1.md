@@ -2627,8 +2627,10 @@ the same commit; the lead checks that at acceptance.
   pool; the Linux container run relies on `RUST_TEST_THREADS=4`, since
   `sysconf` sees the host's memory, not a container limit (R5 holds
   only with that).
-- Open, assigned: the bytes per worker of a level-3 lease is decided in
-  I14's plan.
+- 2026-11-04 (I14, measured): a level-3 live lease is charged 4 MiB
+  fixed plus 2 MiB per worker (baseline subtracted; I14 writes it into
+  spec "Packaging" and `docs/research/compression.md`). zstd keeps a
+  job at 512 KiB or more, so 512 KiB is the smallest job size.
 - 2026-11-04: listing compression takes no pool lease at all. A listing
   is compressed by one single-threaded level-3 encoder of a few MiB,
   next to whatever payload lease the thread holds, so the
