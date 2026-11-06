@@ -2851,6 +2851,27 @@ the same commit; the lead checks that at acceptance.
   `remote-state.json` (`last_reachable`, `away_first_seen`); ask for a
   `pub(crate)` setter of `away.rs`'s read-modify-write helper.
 
+### I27
+
+- 2026-11-04 (merged, plan review 14 and opus diff review 4, all
+  fixed): `remote::commit::commit` returns one of `Committed`,
+  `Overtaken` (a higher committed version appeared during the attempt),
+  `Contested` (a claim above ours appeared; our version is committed
+  and may stay current if that claim is released), `Landed` (a retry
+  found our version committed earlier and the highest version names
+  every payload and listing ours names) or a `Refusal`. I30 drops a
+  local archive only on `Committed` or `Landed`; `Overtaken` is a
+  conflict for I31; `Contested` keeps the local archive and reads the
+  remote again at the next sync. Every `Err` keeps the local archive.
+  I30 calls `cleanup::apply` after its uploads and commits and puts the
+  temp names of uploads that stay pending, with their partial files,
+  into `cleanup::Settings::keep`. `collection.grace_hours` is at least
+  1. Known limits in spec "Committing a version": a crash between the
+  claim and the temp blocks the ID for one grace period; copied
+  collections with one machine name can skip a live claim (the other
+  writer gets a conflict, never a silent loss). `FaultRemote` in
+  `src/remote/testing.rs` scripts faults and callbacks per operation.
+
 ### I24
 
 - 2026-11-04 (merged): for I23 and I28, `Session::new(SessionSettings)`
