@@ -1774,6 +1774,21 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
 - `forget --force` conflicts with `<version>` in clap (a `requires` on a
   bool flag is not enforced); the usage errors of 4.1 hold and are
   pinned case by case in `tests/cli.rs`.
+- Tests that need external tools fail with a message naming the tool
+  when it is missing, never skip: rsync 3.2.4 or later (P1's real-rsync
+  tests) and GNU `sha256sum` (F3's listing tests; uutils and Apple's
+  `sha256sum` are refused, PO10). Z documents these developer
+  requirements in the repository (README section for contributors),
+  together with how to run `scripts/check.sh` and the coverage step.
+- From F2: C4 keeps the staging tree when a move into the store ends in
+  `PartlyMoved` or `StoredNotDurable`; the spec's "Spelling" section
+  gets a sentence that on a case-folding volume a new store folder below
+  an existing parent takes the parent's stored spelling (F8, which owns
+  the lookup by spelling).
+- For P2: every `pub` item of `src/target/` has a caller once P2 lands
+  (being `pub` hides dead code from Z's sweep); a collection root that
+  is not UTF-8 is refused, since the marker stores strings; refusals of
+  a url name the `[target] url` key.
 
 ### 8.5 User decisions after the plan review (2026-11-04)
 
