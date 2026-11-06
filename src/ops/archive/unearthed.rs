@@ -1959,6 +1959,17 @@ mod tests {
                 fs::remove_file(folder.join("src/main.rs")).expect("removed while the user thinks");
                 settle(&folder);
             }
+            if position == 1 {
+                // Gaining a file loses nothing, and makes the package of
+                // this try differ from the one of the first.
+                fs::write(folder.join("extra.txt"), "x").expect("added while the user thinks");
+                filetime::set_file_mtime(
+                    folder.join("extra.txt"),
+                    filetime::FileTime::from_unix_time(FILE_TIME, 0),
+                )
+                .expect("the time is set");
+                settle(&folder);
+            }
         });
 
         let report = scene.run_asking(&RealSeams, &asker(hook));
