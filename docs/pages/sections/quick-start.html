@@ -4,10 +4,44 @@
 
     <div class="tabs">
       <div class="tab-buttons">
-        <button class="tab-button active" data-tab="source">From Source</button>
+        <button class="tab-button active" data-tab="cargo">Cargo (Recommended)</button>
+        <button class="tab-button" data-tab="homebrew">Homebrew</button>
+        <button class="tab-button" data-tab="binary">Binary Releases</button>
+        <button class="tab-button" data-tab="source">From Source</button>
       </div>
       <div class="tab-panels">
-        <div class="tab-panel active" data-tab="source">
+        <div class="tab-panel active" data-tab="cargo">
+          <div class="code-block">
+            <pre><code class="language-bash">cargo install antiq</code></pre>
+          </div>
+          <div style="padding: var(--space-md) var(--space-lg); border-top: 1px solid var(--color-border);">
+            <p style="margin: 0; color: var(--color-text-muted);">
+              Available on <a href="https://crates.io/crates/antiq" style="color: var(--color-primary);">crates.io</a>.
+              <code>antiq push</code> needs rsync 3.2.4 or newer.
+            </p>
+          </div>
+        </div>
+        <div class="tab-panel" data-tab="homebrew">
+          <div class="code-block">
+            <pre><code class="language-bash">brew install jakobwesthoff/tap/antiq</code></pre>
+          </div>
+          <div style="padding: var(--space-md) var(--space-lg); border-top: 1px solid var(--color-border);">
+            <p style="margin: 0; color: var(--color-text-muted);">
+              Available from <a href="https://github.com/jakobwesthoff/homebrew-tap" style="color: var(--color-primary);">jakobwesthoff/homebrew-tap</a>.
+              <code>antiq push</code> needs rsync 3.2.4 or newer.
+            </p>
+          </div>
+        </div>
+        <div class="tab-panel" data-tab="binary">
+          <div style="padding: var(--space-lg); background-color: var(--color-bg-code);">
+            <p style="margin: 0 0 1rem 0;">Download pre-built binaries for macOS and Linux from GitHub Releases:</p>
+            <a href="https://github.com/jakobwesthoff/antiq/releases" class="btn btn-primary">
+              <i data-icon="download"></i>
+              View Releases
+            </a>
+          </div>
+        </div>
+        <div class="tab-panel" data-tab="source">
           <div class="code-block">
             <pre><code class="language-bash">git clone https://github.com/jakobwesthoff/antiq
 cd antiq
@@ -24,22 +58,23 @@ cargo install --path .</code></pre>
 
     <h3>Basic Usage</h3>
     <div class="code-block">
-      <pre><code class="language-bash"># Make the current directory a collection; every folder directly inside it is a piece
+      <pre><code class="language-bash"># Make this directory a collection;
+# each folder in it is a piece
 antiq init --pattern '*'
 
-# Show what is idle, what would be archived, then archive it
+# See what is idle, preview, archive
 antiq status
 antiq archive -n
 antiq archive
 
-# Find a version by piece name or by the files it holds
+# Find a version by name or by a file
 antiq list scan
 antiq grep 'main\.rs'
 
-# Bring a version back as a folder, keeping the version
+# Extract a working copy of a version
 antiq fork scanner
 
-# Mirror the collection to the target set in .antiq/config.toml
+# Mirror to the target in the config
 antiq push --init</code></pre>
     </div>
   </div>

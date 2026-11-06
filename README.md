@@ -42,7 +42,23 @@ archives are `tar.zst` files, and a listing is a checksum list that
 
 ## Installation
 
-Build from source with a Rust toolchain of version 1.97 or newer:
+With Cargo, from [crates.io](https://crates.io/crates/antiq):
+
+```bash
+cargo install antiq
+```
+
+With Homebrew, from
+[jakobwesthoff/homebrew-tap](https://github.com/jakobwesthoff/homebrew-tap):
+
+```bash
+brew install jakobwesthoff/tap/antiq
+```
+
+Pre-built binaries for macOS and Linux are on the
+[releases page](https://github.com/jakobwesthoff/antiq/releases).
+
+To build from source, you need a Rust toolchain of version 1.97 or newer:
 
 ```bash
 git clone https://github.com/jakobwesthoff/antiq
