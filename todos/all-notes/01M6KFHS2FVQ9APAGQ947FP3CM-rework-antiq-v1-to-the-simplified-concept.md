@@ -1797,6 +1797,10 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   (being `pub` hides dead code from Z's sweep); a collection root that
   is not UTF-8 is refused, since the marker stores strings; refusals of
   a url name the `[target] url` key.
+- For P2 (spec gap found by E0): the spec does not give the JSON shape of
+  `push --if-reachable` when the target is unreachable (exit 0, the
+  reason printed "in text and `--json` every time"). P2 defines it in the
+  spec's Push and JSON output sections; the scenario test asserts it.
 
 ### 8.5 User decisions after the plan review (2026-11-04)
 
