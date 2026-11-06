@@ -222,6 +222,7 @@ mod tests {
         Logs::at(root).open(
             "push",
             std::path::Path::new("/nonexistent/c"),
+            "01JB000000000000000000000A".parse().expect("a valid ID"),
             "2026-11-06T20:14:03Z".parse().expect("a timestamp"),
         )
     }

@@ -7,15 +7,15 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
+
+use crate::id::ObjectId;
 use jiff::tz::TimeZone;
-use sha2::{Digest, Sha256};
 use zstd::stream::write::Encoder;
 
 /// How many logs of one collection are kept.
@@ -29,13 +29,16 @@ pub const SUFFIX: &str = ".log.zst";
 /// one of these beyond the [`KEPT`] newest logs.
 const FAILED_SUFFIX: &str = "-failed.log.zst";
 
+/// How many names `mark_failed` tries before it leaves the log as it is.
+const MARK_ATTEMPTS: u32 = 1000;
+
 /// How long a line of stdout may wait in the compressor before the next line
 /// flushes it. Stderr lines and the starts and ends of calls are flushed at
 /// once.
 const FLUSH_AFTER: Duration = Duration::from_secs(1);
 
-/// How many characters of the collection's folder name go into the name of
-/// its log directory.
+/// How many bytes of the collection's folder name go into the name of its
+/// log directory.
 const NAME_LIMIT: usize = 64;
 
 /// Where the logs live: `~/Library/Logs/antiq` on macOS, where Console.app
@@ -82,13 +85,21 @@ impl Logs {
     }
 
     /// The log of one run of `command` on the collection at
-    /// `collection_root`. No file exists before the first external program
-    /// starts.
-    pub fn open(&self, command: &str, collection_root: &Path, now: Timestamp) -> RunLog {
+    /// `collection_root` with the ID `id`. No file exists before the first
+    /// external program starts.
+    pub fn open(
+        &self,
+        command: &str,
+        collection_root: &Path,
+        id: ObjectId,
+        now: Timestamp,
+    ) -> RunLog {
         let state = match &self.root {
             Ok(root) => State {
                 target: Some(Target {
-                    directory: root.join(directory_name(collection_root)),
+                    root: root.clone(),
+                    folder: folder_name(collection_root),
+                    id: id.to_string(),
                     command: command.to_string(),
                     now,
                 }),
@@ -105,37 +116,48 @@ impl Logs {
     }
 }
 
-/// `<folder name>-<8 hex digits of the hash of the canonical path>`, so that
-/// a person recognises the collection and two collections that share a
-/// folder name do not share a directory.
-fn directory_name(collection_root: &Path) -> String {
+/// The name of the collection's folder, for people to recognise its
+/// directory by: control characters become `_`, a leading dot too (it would
+/// hide the directory), and the name is cut to [`NAME_LIMIT`] bytes at a
+/// character boundary.
+fn folder_name(collection_root: &Path) -> String {
     let canonical =
         fs::canonicalize(collection_root).unwrap_or_else(|_| collection_root.to_path_buf());
     let folder = canonical
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "root".to_string());
-    let mut name: String = folder
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '_'
-            } else {
-                character
-            }
-        })
-        .take(NAME_LIMIT)
-        .collect();
-    // A leading dot would hide the directory.
+    let mut name = String::new();
+    for character in folder.chars() {
+        if name.len() + character.len_utf8() > NAME_LIMIT {
+            break;
+        }
+        name.push(if character.is_control() {
+            '_'
+        } else {
+            character
+        });
+    }
     if name.starts_with('.') {
         name.replace_range(0..1, "_");
     }
-    let digest = Sha256::digest(canonical.as_os_str().as_bytes());
-    let hash: String = digest[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("{name}-{hash}")
+    name
+}
+
+/// The directory of the collection with the ID `id` below `root`: the one
+/// whose name ends with `-<id>`, as it is, so that a collection that moved or
+/// was renamed keeps its logs together; else `<folder>-<id>`.
+fn directory_of(root: &Path, folder: &str, id: &str) -> PathBuf {
+    let ending = format!("-{id}");
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let named = entry.file_name().to_string_lossy().ends_with(&ending);
+            if named && entry.path().is_dir() {
+                return entry.path();
+            }
+        }
+    }
+    root.join(format!("{folder}{ending}"))
 }
 
 /// The log of one antiq run.
@@ -164,7 +186,12 @@ struct State {
 
 #[derive(Debug)]
 struct Target {
-    directory: PathBuf,
+    /// The directory of the logs of every collection.
+    root: PathBuf,
+    /// The name of the collection's folder, as the name of a new directory.
+    folder: String,
+    /// The ID of the collection.
+    id: String,
     command: String,
     now: Timestamp,
 }
@@ -200,7 +227,7 @@ impl State {
             Err(error) => {
                 self.warning = Some(format!(
                     "no log was written to {}: {error}",
-                    target.directory.display()
+                    target.root.display()
                 ));
             }
         }
@@ -273,17 +300,25 @@ impl RunLog {
         if name.ends_with(FAILED_SUFFIX) {
             return;
         }
-        // Another run of the same second may have been marked already.
-        let mut failed = path.with_file_name(format!("{stem}{FAILED_SUFFIX}"));
-        let mut attempt = 2;
-        while failed.exists() {
-            failed = path.with_file_name(format!("{stem}-{attempt}{FAILED_SUFFIX}"));
-            attempt += 1;
-        }
-        // The open file follows its rename. If the rename fails the log is
-        // an ordinary one.
-        if fs::rename(&path, &failed).is_ok() {
-            state.path = Some(failed);
+        // A hard link fails where the name is taken, as another run of the
+        // same second may have marked its log with it. The open file stays
+        // the same through the link and the removal of the old name. If no
+        // name can be had the log stays an ordinary one.
+        for attempt in 1..=MARK_ATTEMPTS {
+            let failed = if attempt == 1 {
+                path.with_file_name(format!("{stem}{FAILED_SUFFIX}"))
+            } else {
+                path.with_file_name(format!("{stem}-{attempt}{FAILED_SUFFIX}"))
+            };
+            match fs::hard_link(&path, &failed) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&path);
+                    state.path = Some(failed);
+                    return;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return,
+            }
         }
     }
 
@@ -371,7 +406,12 @@ fn create(target: &Target) -> io::Result<(File, PathBuf)> {
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&target.directory)?;
+        .create(&target.root)?;
+    let directory = directory_of(&target.root, &target.folder, &target.id);
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)?;
     let stamp = target
         .now
         .to_zoned(TimeZone::system())
@@ -384,7 +424,7 @@ fn create(target: &Target) -> io::Result<(File, PathBuf)> {
         } else {
             format!("{}-{stamp}-{attempt}{SUFFIX}", target.command)
         };
-        let path = target.directory.join(name);
+        let path = directory.join(name);
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -396,20 +436,22 @@ fn create(target: &Target) -> io::Result<(File, PathBuf)> {
             Err(error) => return Err(error),
         }
     };
-    prune(&target.directory);
+    prune(&directory, &path);
     Ok((file, path))
 }
 
 /// Deletes all but the [`KEPT`] newest logs of the directory and the newest
-/// log of a failed run. Newest means
-/// the modification time, with the name as tie-break: a name carries local
-/// time and the command, neither of which orders runs across a time zone
-/// change or two commands. A failure to delete leaves the file.
-fn prune(directory: &Path) {
+/// log of a failed run, but never `current`, the file of the run that is
+/// starting: a clock that stepped back would rank it last. Newest means the
+/// modification time, then the number of the log within its second, then the
+/// name: a name carries local time and the command, neither of which orders
+/// runs across a time zone change or two commands. A failure to delete
+/// leaves the file.
+fn prune(directory: &Path, current: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
-    let mut logs: Vec<(std::time::SystemTime, String, PathBuf)> = entries
+    let mut logs: Vec<(std::time::SystemTime, u32, String, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -421,24 +463,60 @@ fn prune(directory: &Path) {
             metadata
                 .is_file()
                 .then(|| (metadata.modified().ok(), name, path))
-                .and_then(|(modified, name, path)| Some((modified?, name, path)))
+                .and_then(|(modified, name, path)| {
+                    Some((modified?, number_in_second(&name), name, path))
+                })
         })
         .collect();
-    logs.sort_by(|left, right| (&right.0, &right.1).cmp(&(&left.0, &left.1)));
+    logs.sort_by(|left, right| (&right.0, right.1, &right.2).cmp(&(&left.0, left.1, &left.2)));
     let newest_failure = logs
         .iter()
-        .position(|(_, name, _)| name.ends_with(FAILED_SUFFIX));
-    for (index, (_, _, path)) in logs.into_iter().enumerate() {
-        if index >= KEPT && Some(index) != newest_failure {
+        .position(|(_, _, name, _)| name.ends_with(FAILED_SUFFIX));
+    for (index, (_, _, _, path)) in logs.into_iter().enumerate() {
+        if index >= KEPT && Some(index) != newest_failure && path != current {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+/// The number of a log among those of its second: 1 for `push-<time>.log.zst`
+/// and N for `push-<time>-N.log.zst`, also where the log is marked as
+/// failed. A time has 5 dashes after the command, so a name with a 7th part
+/// carries the number.
+fn number_in_second(name: &str) -> u32 {
+    let stem = name
+        .strip_suffix(FAILED_SUFFIX)
+        .or_else(|| name.strip_suffix(SUFFIX))
+        .unwrap_or(name);
+    let parts: Vec<&str> = stem.split('-').collect();
+    match parts.as_slice() {
+        [_, _, _, _, _, _, number] => number.parse().unwrap_or(1),
+        _ => 1,
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::id::ObjectId;
     use std::os::unix::fs::PermissionsExt;
+
+    /// The ID of the collection a test path stands for: two for the folders
+    /// named `other`, one for every other.
+    fn id_of(collection: &Path) -> ObjectId {
+        let letter = if collection.ends_with("other") {
+            'B'
+        } else {
+            'A'
+        };
+        id(letter)
+    }
+
+    fn id(letter: char) -> ObjectId {
+        format!("01JB000000000000000000000{letter}")
+            .parse()
+            .expect("a valid ID")
+    }
 
     fn now() -> Timestamp {
         "2026-11-06T20:14:03Z".parse().expect("a valid timestamp")
@@ -468,8 +546,14 @@ pub(crate) mod tests {
         root.join(names.remove(0))
     }
 
+    fn write_once_with(logs: &Logs, collection: &Path, id: ObjectId) -> PathBuf {
+        let log = logs.open("push", collection, id, now());
+        log.start_call("rsync --version");
+        log.path().expect("the log was created")
+    }
+
     fn write_once(logs: &Logs, collection: &Path) -> PathBuf {
-        let log = logs.open("push", collection, now());
+        let log = logs.open("push", collection, id_of(collection), now());
         log.start_call("rsync --version");
         log.path().expect("the log was created")
     }
@@ -496,30 +580,74 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_collection_directory_has_the_folder_name_and_a_hash_of_the_path() {
-        let first = directory_name(Path::new("/nonexistent/one/Photos"));
-        let second = directory_name(Path::new("/nonexistent/two/Photos"));
-        assert!(first.starts_with("Photos-"), "{first}");
-        assert!(second.starts_with("Photos-"), "{second}");
-        assert_ne!(first, second);
-        assert_eq!(first.len(), "Photos-".len() + 8);
+    fn a_collection_directory_has_the_folder_name_and_the_id() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let path = write_once_with(&logs, Path::new("/nonexistent/one/Photos"), id('A'));
+        let directory = path.parent().expect("a directory");
+        assert_eq!(
+            directory.file_name().expect("a name").to_string_lossy(),
+            format!("Photos-{}", id('A'))
+        );
+    }
+
+    #[test]
+    fn two_collections_with_the_same_folder_name_and_other_ids_have_two_directories() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let first = write_once_with(&logs, Path::new("/nonexistent/one/Photos"), id('A'));
+        let second = write_once_with(&logs, Path::new("/nonexistent/two/Photos"), id('B'));
+        assert_ne!(first.parent(), second.parent());
+    }
+
+    #[test]
+    fn a_collection_that_moved_writes_into_the_same_directory_and_retention_counts_both() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let mut before = Vec::new();
+        for index in 0..KEPT {
+            let path = write_once_with(&logs, Path::new("/nonexistent/one/Photos"), id('A'));
+            age(&path, 1_600_000_000 + index as i64);
+            before.push(path);
+        }
+
+        let moved = write_once_with(&logs, Path::new("/nonexistent/two/Pictures"), id('A'));
+
+        assert_eq!(moved.parent(), before[0].parent());
+        assert!(!before[0].exists(), "the oldest of the old place goes");
+        assert!(before[1..].iter().all(|path| path.exists()));
+        assert_eq!(files(root.path()).len(), 1, "one directory");
+    }
+
+    #[test]
+    fn a_directory_of_an_earlier_name_is_reused_as_it_is() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let old = root.path().join(format!("Old name-{}", id('A')));
+        fs::create_dir_all(&old).expect("creatable");
+        let logs = Logs::at(root.path());
+
+        let path = write_once_with(&logs, Path::new("/nonexistent/New name"), id('A'));
+
+        assert_eq!(path.parent(), Some(old.as_path()));
+        assert_eq!(files(root.path()).len(), 1, "nothing is renamed or added");
     }
 
     #[test]
     fn a_folder_name_is_kept_but_for_control_characters_a_leading_dot_and_its_length() {
-        assert!(directory_name(Path::new("/x/Bücher")).starts_with("Bücher-"));
-        assert!(directory_name(Path::new("/x/.hidden")).starts_with("_hidden-"));
-        assert!(directory_name(Path::new("/x/a\nb")).starts_with("a_b-"));
+        assert_eq!(folder_name(Path::new("/x/Bücher")), "Bücher");
+        assert_eq!(folder_name(Path::new("/x/.hidden")), "_hidden");
+        assert_eq!(folder_name(Path::new("/x/a\nb")), "a_b");
         let long = format!("/x/{}", "é".repeat(200));
-        assert_eq!(directory_name(Path::new(&long)).chars().count(), 64 + 1 + 8);
-        assert!(directory_name(Path::new("/")).starts_with("root-"));
+        // Two bytes each, so 32 of them fit the limit of 64 bytes.
+        assert_eq!(folder_name(Path::new(&long)).chars().count(), 32);
+        assert_eq!(folder_name(Path::new("/")), "root");
     }
 
     #[test]
     fn nothing_is_created_before_a_program_starts() {
         let root = tempfile::tempdir().expect("a temp dir");
         let logs = Logs::at(root.path().join("logs"));
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         assert_eq!(log.path(), None);
         assert!(!root.path().join("logs").exists());
     }
@@ -581,7 +709,7 @@ pub(crate) mod tests {
 
     /// A log of `collection` written and, when `failed`, marked as failed.
     fn write_marked(logs: &Logs, collection: &Path, failed: bool) -> PathBuf {
-        let log = logs.open("push", collection, now());
+        let log = logs.open("push", collection, id_of(collection), now());
         log.start_call("rsync --version");
         if failed {
             log.mark_failed();
@@ -598,7 +726,7 @@ pub(crate) mod tests {
     fn the_log_of_a_failed_run_is_renamed_and_still_the_file_of_the_run() {
         let root = tempfile::tempdir().expect("a temp dir");
         let logs = Logs::at(root.path());
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         let call = log.start_call("rsync --version");
         let before = log.path().expect("a path");
 
@@ -646,12 +774,77 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_log_of_the_run_survives_a_clock_that_stepped_back() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let collection = Path::new("/nonexistent/ours");
+        for index in 0..KEPT {
+            let path = write_marked(&logs, collection, false);
+            // Modified in the future of the new log, as after a clock that
+            // stepped back.
+            age(&path, 2_000_000_000 + index as i64);
+        }
+
+        let newest = write_marked(&logs, collection, false);
+
+        assert!(newest.exists(), "the file of the run is never pruned");
+    }
+
+    #[test]
+    fn logs_of_the_same_second_and_time_are_ordered_by_their_number() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let collection = Path::new("/nonexistent/ours");
+        let mut paths = Vec::new();
+        for _ in 0..KEPT {
+            let path = write_marked(&logs, collection, false);
+            age(&path, 1_600_000_000);
+            paths.push(path);
+        }
+
+        let latest = write_marked(&logs, collection, false);
+
+        assert!(!paths[0].exists(), "the first of the second is the oldest");
+        assert!(paths[1..].iter().all(|path| path.exists()));
+        assert!(latest.exists());
+    }
+
+    #[test]
+    fn two_failed_runs_of_the_same_second_keep_both_logs() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let collection = Path::new("/nonexistent/ours");
+        let first = logs.open("push", collection, id_of(collection), now());
+        let second = logs.open("push", collection, id_of(collection), now());
+        first.start_call("first");
+        second.start_call("second");
+        first.mark_failed();
+        second.mark_failed();
+        let (first_path, second_path) = (
+            first.path().expect("a path"),
+            second.path().expect("a path"),
+        );
+        drop((first, second));
+
+        assert_ne!(first_path, second_path);
+        assert!(read_log(&first_path).contains("# command: first"));
+        assert!(read_log(&second_path).contains("# command: second"));
+    }
+
+    #[test]
+    fn a_folder_name_of_wide_characters_is_cut_to_the_bytes_of_the_limit() {
+        let name = folder_name(Path::new(&format!("/x/{}", "\u{10348}".repeat(100))));
+        assert!(name.len() <= NAME_LIMIT, "{} bytes", name.len());
+        assert!(name.starts_with("\u{10348}"));
+    }
+
+    #[test]
     fn a_log_that_cannot_be_created_is_a_warning_and_nothing_else() {
         let root = tempfile::tempdir().expect("a temp dir");
         let blocker = root.path().join("blocker");
         fs::write(&blocker, "a file where the directory should go").expect("writable");
         let logs = Logs::at(blocker.join("logs"));
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
 
         let call = log.start_call("rsync --version");
         call.stdout(Instant::now(), b"text");
@@ -667,7 +860,7 @@ pub(crate) mod tests {
         let logs = Logs {
             root: Err("there is no home".into()),
         };
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         log.start_call("rsync --version");
         assert_eq!(log.path(), None);
         assert_eq!(
@@ -685,7 +878,7 @@ pub(crate) mod tests {
     fn a_call_that_ended_without_code_or_signal_says_so_and_a_log_shows_its_path_when_printed() {
         let root = tempfile::tempdir().expect("a temp dir");
         let logs = Logs::at(root.path());
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         log.start_call("x").end(None, None, Duration::ZERO);
         let path = log.path().expect("a path");
         assert!(format!("{log:?}").contains(&path.display().to_string()));
@@ -713,7 +906,7 @@ pub(crate) mod tests {
     fn a_run_that_is_killed_leaves_its_flushed_lines_readable() {
         let root = tempfile::tempdir().expect("a temp dir");
         let logs = Logs::at(root.path());
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         let call = log.start_call("rsync -a");
         call.stderr(Instant::now(), b"rsync: before the kill\n");
 
@@ -731,7 +924,7 @@ pub(crate) mod tests {
     fn a_call_is_recorded_with_its_command_lines_streams_and_end() {
         let root = tempfile::tempdir().expect("a temp dir");
         let logs = Logs::at(root.path());
-        let log = logs.open("push", Path::new("/c"), now());
+        let log = logs.open("push", Path::new("/c"), id_of(Path::new("/c")), now());
         let call = log.start_call("rsync -a 'a b'");
         call.stdout(Instant::now(), b"\rprogress\n");
         call.stderr(Instant::now(), b"rsync: oops\n");

@@ -56,9 +56,11 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
             block = block.candidate(stamp);
         }
     }
+    // Without a line there is nothing rsync said.
     let said = description
         .library_error
-        .and_then(|error| find_said(error.wrapped()));
+        .and_then(|error| find_said(error.wrapped()))
+        .filter(|said| !said.groups.is_empty());
     if let Some(said) = said {
         for group in said.shown() {
             let counted = format!("{}\u{d7} {}", group.count, group.line);
@@ -79,20 +81,16 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
     }
     if let Some(note) = &description.log {
         let mut paragraphs = Vec::new();
-        match &note.path {
-            Some(path) => {
-                let path = path.display().to_string();
-                paragraphs.push(Para::Pre(format!("Full output: {path}")));
-                paragraphs.push(Para::Pre(format!(
-                    "Read it with: zstd -dc {} | less",
-                    shell_quote(&path)
-                )));
-            }
-            None => {
-                if let Some(warning) = &note.warning {
-                    paragraphs.push(Para::Text(Rich::new().text(warning).capitalised()));
-                }
-            }
+        if let Some(path) = &note.path {
+            let path = path.display().to_string();
+            paragraphs.push(Para::Pre(format!("Full output: {path}")));
+            paragraphs.push(Para::Pre(format!(
+                "Read it with: zstd -dc {} | less",
+                shell_quote(&path)
+            )));
+        }
+        if let Some(warning) = &note.warning {
+            paragraphs.push(Para::Text(Rich::new().text(warning).capitalised()));
         }
         for paragraph in paragraphs {
             block = match said {
@@ -555,6 +553,45 @@ mod tests {
             lines.contains(
                 &"       Read it with: zstd -dc '/my logs/push 1.log.zst' | less".to_string()
             ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_that_stopped_partway_names_the_file_and_says_why() {
+        let error = PushError::Target {
+            problem: "x".into(),
+        };
+        let error = with_log(
+            error,
+            Some("/logs/a.log.zst"),
+            Some("the log stopped at /logs/a.log.zst: disk full"),
+        );
+        let lines = block_for(&describe(&error), None).render_plain();
+        assert!(
+            lines.contains(&"  log: Full output: /logs/a.log.zst".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"       The log stopped at /logs/a.log.zst: disk full".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_failure_in_which_rsync_said_nothing_has_the_run_log_section() {
+        let error = PushError::Mirror {
+            title: "rsync ended with exit 1".into(),
+            said: Said::of("rsync", b""),
+        };
+        let error = with_log(error, Some("/logs/a.log.zst"), None);
+        let lines = block_for(&describe(&error), None).render_plain();
+        assert!(
+            lines.contains(&"  log: Full output: /logs/a.log.zst".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("rsync said")),
             "{lines:?}"
         );
     }

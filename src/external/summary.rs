@@ -4,6 +4,8 @@
 
 //! The lines a program printed to stderr, grouped by kind.
 
+use std::collections::HashMap;
+
 /// How many groups a terminal or a pipe shows. The JSON error carries all.
 pub const GROUPS_SHOWN: usize = 5;
 
@@ -45,19 +47,23 @@ impl Said {
 /// The groups of a stderr text, in order of first appearance.
 pub fn group_lines(stderr: &str) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
     for raw in stderr.lines() {
         let raw = raw.trim_end();
         if raw.trim().is_empty() {
             continue;
         }
         let (line, example) = normalise(raw);
-        match groups.iter_mut().find(|group| group.line == line) {
-            Some(group) => group.count += 1,
-            None => groups.push(Group {
-                count: 1,
-                line,
-                example,
-            }),
+        match index_of.get(&line) {
+            Some(&index) => groups[index].count += 1,
+            None => {
+                index_of.insert(line.clone(), groups.len());
+                groups.push(Group {
+                    count: 1,
+                    line,
+                    example,
+                });
+            }
         }
     }
     groups

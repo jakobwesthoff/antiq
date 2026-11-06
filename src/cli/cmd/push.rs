@@ -66,7 +66,12 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };
-    let log = Logs::platform().open("push", collection.root(), SystemClock.now());
+    let log = Logs::platform().open(
+        "push",
+        collection.root(),
+        collection.id(),
+        SystemClock.now(),
+    );
     // On a terminal that moves the cursor the whole mirror shows as one
     // card, and the table of the pieces replaces the report's lines.
     let mut description = Description::new(COUNTS);
