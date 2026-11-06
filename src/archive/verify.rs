@@ -4,7 +4,7 @@
 
 //! Verifying a package against a folder or a listing.
 
-use super::hashing::HashingReader;
+use super::hashing::{HashingReader, hex};
 use super::read::{Package, read_package_observing};
 use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
@@ -17,7 +17,7 @@ use crate::tree::{EntryKind, Problem, TreeEntry};
 use crate::walk::{Hooks, KeptFolder, MAX_DEPTH, RealFs, only_blocks_removal, walk_piece_with};
 use rustix::io::Errno;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, Metadata};
 use std::io;
@@ -245,21 +245,23 @@ fn verify_strict_observed(
             }
         };
         let mut directories = DirectoryStack::new(root);
-        let mut reads: HashMap<RelPath, Read> = HashMap::new();
-        let package = {
-            let files: HashMap<&RelPath, &TreeEntry> = entries
-                .iter()
-                .filter(|entry| entry.kind == EntryKind::File)
-                .map(|entry| (&entry.path, entry))
-                .collect();
-            read_archive(package, archive, &mut |path| {
-                if let Some(entry) = files.get(path) {
-                    let read = read_file(&mut directories, entry, meter, observe)?;
-                    reads.insert(path.clone(), read);
-                }
-                Ok(())
-            })?
-        };
+        let mut reads: Vec<Option<Read>> = entries.iter().map(|_| None).collect();
+        let wanted = read_by_fold(&entries);
+        let package = read_archive(package, archive, &mut |path| {
+            // The entries are in path order.
+            let found = entries.binary_search_by(|entry| entry.path.cmp(path));
+            if let Ok(index) = found
+                && wanted[index]
+            {
+                reads[index] = Some(read_file(
+                    &mut directories,
+                    &entries[index],
+                    meter,
+                    observe,
+                )?);
+            }
+            Ok(())
+        })?;
         let folder = fold_folder(entries, reads, &mut directories, meter, observe)?;
         Ok((folder, package))
     })?;
@@ -561,7 +563,7 @@ fn compare_with_listing_with(
     let (folder, moved, ()) = read_folder_granted(root, rules, |modes| {
         let entries = walk_entries(root, rules, &RealFs, modes)?;
         let mut directories = DirectoryStack::new(root);
-        let folder = fold_folder(entries, HashMap::new(), &mut directories, meter, observe)?;
+        let folder = fold_folder(entries, Vec::new(), &mut directories, meter, observe)?;
         Ok((folder, ()))
     })?;
     let mut differences = differences_from(listing, &folder, rules.staged);
@@ -634,12 +636,27 @@ fn walk_entries(
         .collect())
 }
 
+/// Whether [`fold_folder`] reads the content of each of `entries`: the files
+/// with one name, and the first name of the files with several. The other
+/// names are links in the package and have no content of their own.
+fn read_by_fold(entries: &[TreeEntry]) -> Vec<bool> {
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    entries
+        .iter()
+        .map(|entry| {
+            entry.kind == EntryKind::File
+                && (entry.nlink <= 1 || seen.insert((entry.device, entry.inode)))
+        })
+        .collect()
+}
+
 /// Describes the walked `entries` as the package of them would, reading
-/// every file that is not in `reads` yet. `reads` holds the files that were
-/// read already, by path.
+/// every file that is not in `reads` yet. `reads` holds, at the position of
+/// an entry, the read of that file if it was read already; it is empty when
+/// nothing was.
 fn fold_folder(
     entries: Vec<TreeEntry>,
-    mut reads: HashMap<RelPath, Read>,
+    mut reads: Vec<Option<Read>>,
     directories: &mut DirectoryStack<'_>,
     meter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
@@ -649,8 +666,8 @@ fn fold_folder(
     let mut record = Vec::new();
     // The first path of each file with several names, and its hash when it
     // was read without changing.
-    let mut first_link: HashMap<(u64, u64), (RelPath, Option<String>)> = HashMap::new();
-    for entry in &entries {
+    let mut first_link: HashMap<(u64, u64), (RelPath, Digest)> = HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
         record.push(LstatRecord::of(entry));
         match entry.kind {
             EntryKind::Directory if entry.path.is_root() => {}
@@ -679,29 +696,29 @@ fn fold_folder(
                             continue;
                         };
                         let link = Some(LinkTarget::from_bytes(first.as_bytes().to_vec()));
-                        let sha256 = Some(sha256.clone());
+                        let sha256 = Some(hex(sha256));
                         lines.push(listing_line(entry, ListingType::Hardlink, 0, link, sha256));
                         continue;
                     }
                 }
-                let read = match reads.remove(&entry.path) {
+                let read = match reads.get_mut(index).and_then(Option::take) {
                     Some(read) => read,
                     None => read_file(directories, entry, meter, observe)?,
                 };
                 if entry.nlink > 1 {
                     let hash = match &read {
-                        Read::Hashed(sha256) => Some(sha256.clone()),
+                        Read::Hashed(digest) => Some(*digest),
                         Read::Changed => None,
                     };
                     first_link.insert((entry.device, entry.inode), (entry.path.clone(), hash));
                 }
                 match read {
-                    Read::Hashed(sha256) => lines.push(listing_line(
+                    Read::Hashed(digest) => lines.push(listing_line(
                         entry,
                         ListingType::File,
                         entry.size,
                         None,
-                        Some(sha256),
+                        Some(hex(&digest)),
                     )),
                     Read::Changed => changed.push(entry.path.clone()),
                 }
@@ -721,9 +738,12 @@ fn fold_folder(
     })
 }
 
+/// The SHA-256 of a file read without change, `None` when it changed.
+type Digest = Option<[u8; 32]>;
+
 /// How reading a file went.
 enum Read {
-    Hashed(String),
+    Hashed([u8; 32]),
     /// The file is no longer the one the walk recorded.
     Changed,
 }
@@ -753,12 +773,12 @@ fn read_file(
     }
     let mut reader = HashingReader::new(Metered::new(&mut file, meter));
     io::copy(&mut reader, &mut io::sink()).map_err(read)?;
-    let (length, sha256) = (reader.bytes_read(), reader.sha256());
+    let (length, digest) = (reader.bytes_read(), reader.digest());
     observe(Stage::AfterRead, &entry.path);
     if length != entry.size || !is_recorded(&file.metadata().map_err(read)?, entry) {
         return Ok(Read::Changed);
     }
-    Ok(Read::Hashed(sha256))
+    Ok(Read::Hashed(digest))
 }
 
 /// Whether opening failed because the entry is not what the walk saw:
@@ -1452,6 +1472,34 @@ mod tests {
             matches!(&error, PackError::ArchiveDiffers { .. }),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_later_name_of_a_hard_link_is_not_read_again_and_not_counted() {
+        let (_dir, archive, package, mut tree) = archived();
+        // The new first name of the file takes the place of the stored one,
+        // which becomes a link to it, so the folder differs.
+        tree.hard_link("proj/notes.txt", "proj/a.txt");
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let counter = Counter::new();
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+
+        let error = verify_strict_counted(
+            &archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            &counter,
+            &expected,
+        )
+        .expect_err("the link structure changed");
+
+        assert!(matches!(&error, PackError::Differs(_)), "{error:?}");
+        let contents = content_bytes(&package.packed.listing);
+        assert_eq!(counter.done(), contents);
     }
 
     #[test]

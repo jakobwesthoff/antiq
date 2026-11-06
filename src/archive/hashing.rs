@@ -79,9 +79,14 @@ impl<R: Read> HashingReader<R> {
         self.read
     }
 
-    /// The SHA-256 of the bytes read so far, as lower-case hex.
+    /// The SHA-256 of the bytes read so far.
+    pub fn digest(&self) -> [u8; 32] {
+        self.hasher.clone().finalize().into()
+    }
+
+    /// [`digest`](Self::digest) as lower-case hex.
     pub fn sha256(&self) -> String {
-        hex(&self.hasher.clone().finalize())
+        hex(&self.digest())
     }
 }
 
