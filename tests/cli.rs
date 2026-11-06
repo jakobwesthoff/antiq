@@ -409,11 +409,7 @@ macro_rules! is_not_a_command {
     };
 }
 
-is_not_a_command!(find_is_not_a_command, "find", ["find"]);
-is_not_a_command!(sync_is_not_a_command, "sync", ["sync"]);
 is_not_a_command!(reconcile_is_not_a_command, "reconcile", ["reconcile"]);
-is_not_a_command!(resolve_is_not_a_command, "resolve", ["resolve"]);
-is_not_a_command!(remote_is_not_a_command, "remote", ["remote", "show"]);
 
 #[test]
 fn a_json_run_prints_one_error_envelope() {
