@@ -36,7 +36,12 @@ pub(super) enum Class {
     /// The change does not build on the newest version of the remote, or a
     /// decision about it is open. `lower` is the version of this machine's
     /// own change that reached the remote below the newest one.
-    Conflict { lower: Option<u32> },
+    /// `in_history_of` is the newest version when it builds on the change
+    /// but the number the change was committed as is not known here.
+    Conflict {
+        lower: Option<u32>,
+        in_history_of: Option<u32>,
+    },
     Commit {
         /// The highest committed version the change was made on; 0 for a
         /// new object.
@@ -136,6 +141,40 @@ pub(super) fn classify(
         }
         return Ok(Class::Conflict {
             lower: Some(number),
+            in_history_of: None,
+        });
+    }
+
+    // The remote's cleanup removes the versions below the newest, so the
+    // version this machine committed can be gone while the newest builds on
+    // it. Its number is then known only from `committed_versions`, and only
+    // if the commit was recorded: it lies between the highest version the
+    // change builds on and the newest.
+    if let Some((highest, newest)) = &top
+        && newest.history_added_over(&pending).is_some()
+    {
+        let built_on = versions
+            .iter()
+            .rev()
+            .filter(|(number, _)| *number != highest)
+            .find_map(|(&number, bytes)| {
+                let version = meta::parse(bytes).ok()?;
+                pending.history_added_over(&version).map(|_| number)
+            })
+            .unwrap_or(0);
+        let landed = tracking::read(collection, id)?.and_then(|entry| {
+            entry
+                .committed_versions
+                .into_iter()
+                .filter(|number| built_on < *number && number < highest)
+                .max()
+        });
+        return Ok(match landed {
+            Some(number) => Class::Settle(number),
+            None => Class::Conflict {
+                lower: None,
+                in_history_of: Some(*highest),
+            },
         });
     }
 
@@ -146,7 +185,10 @@ pub(super) fn classify(
             .any(|decision| decision.kind == DecisionKind::VersionConflict)
     });
     if decided {
-        return Ok(Class::Conflict { lower: None });
+        return Ok(Class::Conflict {
+            lower: None,
+            in_history_of: None,
+        });
     }
     Ok(match top {
         None => Class::Commit {
@@ -162,7 +204,10 @@ pub(super) fn classify(
                 pending: Box::new(pending),
                 base: Some(Box::new(base)),
             },
-            None => Class::Conflict { lower: None },
+            None => Class::Conflict {
+                lower: None,
+                in_history_of: None,
+            },
         },
     })
 }
@@ -198,8 +243,20 @@ pub(super) fn settle(ctx: &SyncContext<'_>, id: ObjectId, number: u32) -> Result
             tracking::write(ctx.collection, ctx.lock, ctx.clock, &mut entry)?;
         }
     }
+    let store = Store::new(ctx.collection);
+    // A version below the highest one stored here cannot be stored any
+    // more. The version that builds on the change holds it.
+    if store
+        .committed_versions(id)?
+        .last()
+        .is_some_and(|&highest| number < highest)
+        && !store.meta_path(id, number).exists()
+    {
+        store.discard_pending(ctx.lock, id, &sha256)?;
+        return Ok(());
+    }
     let number = NonZeroU32::new(number).expect("a version number is above zero");
-    Store::new(ctx.collection).promote_pending(ctx.lock, id, number, &sha256)?;
+    store.promote_pending(ctx.lock, id, number, &sha256)?;
     Ok(())
 }
 
@@ -317,6 +374,7 @@ fn record_conflict(
     report: &mut SyncReport,
     id: ObjectId,
     lower: Option<u32>,
+    in_history_of: Option<u32>,
 ) -> Result<(), SyncError> {
     match conflict::record(ctx, id, lower) {
         Ok(()) => skip(
@@ -324,8 +382,15 @@ fn record_conflict(
             report,
             id,
             SkipReason::Conflict,
-            "its change conflicts with a newer version on the remote and waits for a decision"
-                .to_string(),
+            match in_history_of {
+                Some(version) => format!(
+                    "the change is in the history of version {version}, whose number it was \
+                     committed as is not known here; it waits for a decision"
+                ),
+                None => "its change conflicts with a newer version on the remote and waits for \
+                         a decision"
+                    .to_string(),
+            },
         ),
         Err(error) => fail(ctx, report, id, error)?,
     }
@@ -394,7 +459,10 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), 
         }
         match classify(ctx.collection, id, &Versions::new()) {
             Ok(Class::Settle(number)) => settle_reported(ctx, report, id, number)?,
-            Ok(Class::Conflict { lower }) => record_conflict(ctx, report, id, lower)?,
+            Ok(Class::Conflict {
+                lower,
+                in_history_of,
+            }) => record_conflict(ctx, report, id, lower, in_history_of)?,
             Ok(Class::Commit {
                 based_on,
                 first_new,
@@ -483,7 +551,10 @@ fn settle_landed(
     for id in landed {
         match classify(ctx.collection, id, &Versions::new()) {
             Ok(Class::Settle(number)) => settle_reported(ctx, report, id, number)?,
-            Ok(Class::Conflict { lower }) => record_conflict(ctx, report, id, lower)?,
+            Ok(Class::Conflict {
+                lower,
+                in_history_of,
+            }) => record_conflict(ctx, report, id, lower, in_history_of)?,
             // The second pull stored the version that was committed, so the
             // change equals a committed version and is never `Commit`.
             Ok(Class::Commit { .. }) => skip(
@@ -876,6 +947,72 @@ mod tests {
             entry.pending_decisions
         );
         assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+    }
+
+    /// The bytes `ben` commits on top of the recorded change of `id`.
+    fn built_on_pending(anna: &Machine, ben: &Machine, id: ObjectId) -> Vec<u8> {
+        let mut document =
+            crate::meta::parse(&fs::read(anna.collection.meta_pending_path(id)).expect("pending"))
+                .expect("parses");
+        document.history.push(crate::meta::HistoryEntry::new(
+            ben.clock.now(),
+            "ben",
+            HistoryAction::Sync,
+        ));
+        crate::meta::to_bytes(&document).expect("serialises")
+    }
+
+    #[test]
+    fn an_own_version_that_cleanup_removed_is_settled_when_the_newest_builds_on_it() {
+        let (shared, anna, ben) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        let other = built_on_pending(&anna, &ben, id);
+        remote.after(Op::RenameIntoPlace, 1, move |inner| {
+            commit_as_ben(inner, id, 2, &other);
+        });
+        let first = anna.sync_with(&remote);
+        assert_eq!(first.skipped[0].reason, SkipReason::Conflict);
+        fs::remove_file(shared.objects().join(id.to_string()).join("meta.1"))
+            .expect("cleanup removed the version");
+
+        let again = anna.sync();
+
+        assert_eq!(again.committed, [CommittedVersion { id, version: 1 }]);
+        assert!(again.skipped.is_empty(), "{:?}", again.skipped);
+        assert!(!has_pending(&anna, id));
+        let entry = anna.entry(id);
+        assert!(entry.pending_decisions.is_empty());
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+    }
+
+    #[test]
+    fn a_change_in_a_version_whose_number_is_unknown_stays_a_conflict_with_its_reason() {
+        let (shared, anna, ben) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        anna.sync();
+        anna.record_history(id, HistoryAction::Sync);
+        // The commit of the change went through on the remote, but this
+        // machine never learned its number; `committed_versions` holds only
+        // the older version 1. Version 2 is gone, version 3 builds on it.
+        let other = built_on_pending(&anna, &ben, id);
+        fs::write(shared.objects().join(id.to_string()).join("meta.3"), other)
+            .expect("ben's version");
+
+        let report = anna.sync();
+
+        assert!(report.committed.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Conflict);
+        assert!(
+            report.skipped[0]
+                .message
+                .contains("the change is in the history of version 3"),
+            "{}",
+            report.skipped[0].message
+        );
+        assert!(has_pending(&anna, id));
+        assert_eq!(anna.entry(id).committed_versions, [1]);
     }
 
     #[test]

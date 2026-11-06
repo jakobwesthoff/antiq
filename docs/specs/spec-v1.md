@@ -1530,8 +1530,14 @@ repeated once; when it fails again the run warns and pulls nothing.
 
 After the pull, each object with a recorded change is classified once. A
 change that equals a committed version is recorded as committed when no
-newer version exists or the newest one builds on it. A change that does
-not build on the newest version, and a change with an open
+newer version exists or the newest one builds on it. A change that the
+newest version builds on without equalling any stored version, because
+the version it was committed as is not on the remote any more, is
+recorded as committed as the highest number in `committed_versions` above
+the highest version the change builds on and below the newest, and the
+recorded change is removed. When no such number is listed, it is a
+conflict that names the newest version as the one holding the change. A
+change that does not build on the newest version, and a change with an open
 `version_conflict` decision, is a conflict: nothing of it is uploaded or
 committed, the piece is skipped and the run exits 3. Any other change is
 committed: the payloads and listings it names that the previous version

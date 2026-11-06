@@ -408,6 +408,28 @@ impl<'c> Store<'c> {
         Ok(Promoted::Renamed)
     }
 
+    /// Removes the recorded change because a committed version above every
+    /// version stored here holds its history, which makes the change a part
+    /// of that version. The file is removed only while it still has the
+    /// bytes that were committed.
+    pub fn discard_pending(
+        &self,
+        _lock: &RunLock,
+        id: ObjectId,
+        committed_sha256: &str,
+    ) -> Result<(), StoreError> {
+        let pending_path = self.collection.meta_pending_path(id);
+        let Some(pending) = read_if_present(&pending_path)? else {
+            return Err(StoreError::NoPending);
+        };
+        if sha256(&pending) != committed_sha256 {
+            return Err(StoreError::PendingChanged);
+        }
+        fs::remove_file(&pending_path).map_err(io_error("remove", &pending_path))?;
+        flush_dir(&self.collection.object_dir(id))?;
+        Ok(())
+    }
+
     // =========================================================
     // Payloads and listings
     // =========================================================
@@ -1191,6 +1213,41 @@ mod tests {
             .promote_pending(&fx.lock, id(ID), one(), &sha256(b"x"))
             .expect_err("nothing to promote");
         assert!(matches!(error, StoreError::NoPending), "{error:?}");
+    }
+
+    #[test]
+    fn discarding_removes_the_recorded_change_that_was_committed() {
+        let fx = Fixture::new();
+        let bytes = pending_bytes(&fx, 1);
+        fx.store()
+            .discard_pending(&fx.lock, id(ID), &sha256(&bytes))
+            .expect("discards");
+        assert!(!fx.collection.meta_pending_path(id(ID)).exists());
+    }
+
+    #[test]
+    fn nothing_is_discarded_when_nothing_is_recorded() {
+        let fx = Fixture::new();
+        let error = fx
+            .store()
+            .discard_pending(&fx.lock, id(ID), &sha256(b"x"))
+            .expect_err("nothing to discard");
+        assert!(matches!(error, StoreError::NoPending), "{error:?}");
+    }
+
+    #[test]
+    fn a_recorded_change_that_is_not_what_was_committed_is_not_discarded() {
+        let fx = Fixture::new();
+        let bytes = pending_bytes(&fx, 1);
+        let error = fx
+            .store()
+            .discard_pending(&fx.lock, id(ID), &sha256(b"something else"))
+            .expect_err("refused");
+        assert!(matches!(error, StoreError::PendingChanged), "{error:?}");
+        assert_eq!(
+            fs::read(fx.collection.meta_pending_path(id(ID))).expect("a file"),
+            bytes
+        );
     }
 
     #[test]
