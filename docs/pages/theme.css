@@ -148,10 +148,6 @@
   color: var(--color-text-muted);
 }
 
-/* A term where the chapters define it. */
-.docs p strong {
-  color: var(--color-primary);
-}
 
 .use-cases h2 {
   margin-bottom: var(--space-lg);
@@ -216,3 +212,10 @@
 /* antiq commands named in the documentation, in the blue of the console's
    hints. */
 .docs code.command { color: #65aef7; }
+
+/* A term where the documentation defines it, in amber, apart from
+   the violet of links. */
+.docs p strong,
+.docs .callout-box strong {
+  color: #f0b232;
+}
