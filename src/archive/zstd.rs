@@ -124,7 +124,7 @@ fn compressor_error(code: usize) -> io::Error {
 
 /// How many input bytes the compressor takes in between two reads of its
 /// progress. The read locks the compressor's job table, so it is not made
-/// per write.
+/// per write. A call that takes no input and moves output reads it too.
 const POLL_EVERY_BYTES: u64 = 256 * 1024;
 
 /// A zstd stream encoder that reports how much input the compressor has
@@ -190,13 +190,19 @@ impl Operation for Counting {
         input: &mut InBuffer<'_>,
         output: &mut OutBuffer<'_, C>,
     ) -> io::Result<usize> {
-        let before = input.pos();
+        let (input_before, output_before) = (input.pos(), output.pos());
         let hint = self
             .context
             .compress_stream(output, input)
             .map_err(compressor_error)?;
-        self.fed += (input.pos() - before) as u64;
-        if self.fed >= POLL_EVERY_BYTES {
+        let taken = input.pos() - input_before;
+        self.fed += taken as u64;
+        // Once the job buffers are full, a call takes no input and only
+        // moves compressed output out. That is the one sign that jobs are
+        // finishing, so it reports too, or the bar would stand still for a
+        // whole job.
+        let only_output = taken == 0 && output.pos() > output_before;
+        if self.fed >= POLL_EVERY_BYTES || only_output {
             self.report();
         }
         Ok(hint)
@@ -329,6 +335,9 @@ mod tests {
             "the fast preset has no 128 MiB window"
         );
     }
+    /// The size of the writes of the tar writer to its encoder.
+    const WRITE_CHUNK: usize = 8 * 1024;
+
     /// The encoder every archive used before the progress encoder: the
     /// stock stream encoder, configured call by call, plus `extras`.
     fn stock_frame(settings: &ZstdSettings, extras: &[CParameter], input: &[u8]) -> Vec<u8> {
@@ -347,15 +356,23 @@ mod tests {
         for extra in extras {
             encoder.set_parameter(*extra).expect("valid");
         }
-        encoder.write_all(input).expect("a vec accepts the stream");
+        for chunk in input.chunks(WRITE_CHUNK) {
+            encoder.write_all(chunk).expect("a vec accepts the stream");
+        }
         encoder.finish().expect("the frame ends")
     }
 
     fn progress_frame(settings: &ZstdSettings, extras: &[CParameter], input: &[u8]) -> Vec<u8> {
         let mut parameters = parameters(settings);
         parameters.extend_from_slice(extras);
-        let mut encoder = encoder_with(Vec::new(), &parameters, None).expect("an encoder starts");
-        encoder.write_all(input).expect("a vec accepts the stream");
+        // Production always counts, and the counter changes when the
+        // progression is read, which the bytes must not depend on.
+        let counter = Counter::new();
+        let mut encoder =
+            encoder_with(Vec::new(), &parameters, Some(&counter)).expect("an encoder starts");
+        for chunk in input.chunks(WRITE_CHUNK) {
+            encoder.write_all(chunk).expect("a vec accepts the stream");
+        }
         encoder.finish().expect("the frame ends")
     }
 
@@ -394,6 +411,16 @@ mod tests {
             progress_frame(&jobs, &extras, &input),
             stock_frame(&jobs, &extras, &input),
             "three workers, jobs of 1 MiB"
+        );
+        // The archive preset with several jobs: long-distance matching and
+        // the 128 MiB window across the job boundaries.
+        let archive_jobs = ZstdSettings::archive(2);
+        let extras = [CParameter::JobSize(1 << 20)];
+        let input = sample(3 << 20);
+        assert_eq!(
+            progress_frame(&archive_jobs, &extras, &input),
+            stock_frame(&archive_jobs, &extras, &input),
+            "archive preset, two workers, jobs of 1 MiB"
         );
     }
 
@@ -444,6 +471,40 @@ mod tests {
         );
         assert!(sink.seen.iter().all(|&done| done <= input.len() as u64));
         assert_eq!(counter.done(), input.len() as u64);
+    }
+
+    #[test]
+    fn the_counter_moves_while_a_full_input_buffer_waits_for_a_job() {
+        // Two workers on jobs of 1 MiB hold a few MiB of input. One write of
+        // 32 MiB therefore spends most of its time with a full buffer, in
+        // calls that take no input and only move output out.
+        const JOB: u64 = 1 << 20;
+        let settings = ZstdSettings {
+            preset: Preset::Fast,
+            workers: 2,
+        };
+        let mut parameters = parameters(&settings);
+        parameters.push(CParameter::JobSize(JOB as u32));
+        parameters.push(CParameter::CompressionLevel(9));
+        let counter = Counter::new();
+        let sink = Recording {
+            counter: counter.clone(),
+            seen: Vec::new(),
+        };
+        let mut encoder = encoder_with(sink, &parameters, Some(&counter)).expect("an encoder");
+        encoder
+            .write_all(&sample(32 << 20))
+            .expect("the sink accepts");
+
+        // The counter is read each time compressed output arrives, before
+        // the frame ends. Without a read in the calls that take no input, it
+        // stands still for two jobs or more and then jumps.
+        let seen = &encoder.writer.writer().seen;
+        let widest_jump = seen.windows(2).map(|pair| pair[1] - pair[0]).max();
+        assert!(
+            widest_jump.is_some_and(|jump| jump <= JOB),
+            "{widest_jump:?}"
+        );
     }
 
     #[test]
