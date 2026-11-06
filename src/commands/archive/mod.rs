@@ -20,7 +20,7 @@ use crate::archive::zstd::ZstdSettings;
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::commands::survey::Refusal;
-use crate::error::{ErrorKind, HasKind};
+use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::FilesystemError;
 use crate::filesystem::space::SpaceLedger;
 use crate::filesystem::tree::TreeRoot;
@@ -397,23 +397,6 @@ fn skipped(piece: &RelPath, reason: SkipReason, message: String) -> Done {
     }))
 }
 
-/// The error and the causes below it, as one line. A cause that the text
-/// already ends with is not said twice: a message that quotes its source
-/// has said it.
-fn chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut text = error.to_string();
-    let mut link = error.source();
-    while let Some(cause) = link {
-        let cause_text = cause.to_string();
-        if !text.ends_with(&cause_text) {
-            text.push_str(": ");
-            text.push_str(&cause_text);
-        }
-        link = cause.source();
-    }
-    text
-}
-
 /// Steps 1 to 7 for one piece: walk and judge it again, store its version,
 /// remove its folder.
 fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
@@ -425,8 +408,8 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
     let tree = match setup.walk(piece, env.seams.walk_hooks()) {
         Ok(tree) => tree,
         Err(error) => {
-            let mut done = skipped(piece, SkipReason::Error, chain(&error));
-            done.exhausted = Some(chain(&error));
+            let mut done = skipped(piece, SkipReason::Error, chain_text(&error));
+            done.exhausted = Some(chain_text(&error));
             return done;
         }
     };
@@ -438,7 +421,7 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
 
     let stored_path = match stored_spelling_of(shared.collection, piece) {
         Ok(path) => path,
-        Err(error) => return skipped(piece, SkipReason::Error, chain(&error)),
+        Err(error) => return skipped(piece, SkipReason::Error, chain_text(&error)),
     };
 
     // =========================================================
@@ -464,18 +447,18 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
     let stored = match store_version(&store_context, &request) {
         Ok(stored) => stored,
         Err(StoreFailure::NoRoom(error)) => {
-            return skipped(piece, SkipReason::NoRoom, chain(error.as_ref()));
+            return skipped(piece, SkipReason::NoRoom, chain_text(error.as_ref()));
         }
         Err(StoreFailure::Changed(error)) => {
-            return skipped(piece, SkipReason::Differs, chain(error.as_ref()));
+            return skipped(piece, SkipReason::Differs, chain_text(error.as_ref()));
         }
         Err(StoreFailure::OutOfDescriptors(error)) => {
-            let mut done = skipped(piece, SkipReason::Error, chain(error.as_ref()));
-            done.exhausted = Some(chain(error.as_ref()));
+            let mut done = skipped(piece, SkipReason::Error, chain_text(error.as_ref()));
+            done.exhausted = Some(chain_text(error.as_ref()));
             return done;
         }
         Err(StoreFailure::NotDurable(error) | StoreFailure::Failed(error)) => {
-            return skipped(piece, SkipReason::Error, chain(error.as_ref()));
+            return skipped(piece, SkipReason::Error, chain_text(error.as_ref()));
         }
     };
 
@@ -528,7 +511,7 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
             done.exhausted = Some(cause);
             done
         }
-        Removed::Kept(error) => skipped(piece, SkipReason::Error, chain(error.as_ref())),
+        Removed::Kept(error) => skipped(piece, SkipReason::Error, chain_text(error.as_ref())),
     };
     done.warnings = stored.notes;
     done.warnings.extend(removal.warnings);
@@ -1195,7 +1178,7 @@ mod tests {
         };
 
         assert_eq!(
-            chain(&error),
+            chain_text(&error),
             "cannot delete doomed/2026-11-04T090211/piece: cannot remove doomed: Permission denied (os error 13)"
         );
     }

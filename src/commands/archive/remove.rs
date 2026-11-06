@@ -6,7 +6,7 @@
 
 use super::seams::Seams;
 use super::store::{remove_staging, staging_chain};
-use super::{ArchiveError, chain, went};
+use super::{ArchiveError, chain_text, went};
 use crate::archive::Verified;
 use crate::archive::verify::LstatRecord;
 use crate::collection::Collection;
@@ -324,7 +324,7 @@ fn take_version_back(
         Outcome::Kept(Box::new(ArchiveError::Rollback {
             piece: piece.clone(),
             stamp: stamp_text.clone(),
-            cause: chain(&cause),
+            cause: chain_text(&cause),
             source,
         }))
     };

@@ -14,7 +14,7 @@ use crate::archive::check::{
 use crate::archive::read;
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
-use crate::error::{ErrorKind, HasKind};
+use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::{self, Header, ListingEntry, ListingError};
 use crate::plan::LockHeld;
@@ -514,7 +514,7 @@ fn write_missing(
         refusal => RebuildError::Refused {
             piece: piece.clone(),
             stamp: stamp.clone(),
-            reason: chain(&refusal),
+            reason: chain_text(&refusal),
         },
     };
 
@@ -644,18 +644,6 @@ fn remove_staging(collection: &Collection, files: &[(String, Vec<u8>)]) {
     let _ = tmp.remove_dir(&folder);
 }
 
-/// The error and its sources in one line.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut link = error.source();
-    while let Some(source) = link {
-        text.push_str(": ");
-        text.push_str(&source.to_string());
-        link = source.source();
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,7 +690,7 @@ mod tests {
     fn a_refusal_names_the_causes_below_the_error() {
         let error = PackError::Archive(io::Error::other("unexpected end of file"));
         assert_eq!(
-            chain(&error),
+            chain_text(&error),
             "cannot read the package: unexpected end of file"
         );
     }
