@@ -96,22 +96,39 @@ pub enum Step<A> {
     Command(A),
 }
 
+/// A repair as every command's JSON lists it: `{"kind": "repair",
+/// "repair": ...}`.
+#[derive(Serialize)]
+struct Tagged<'a> {
+    kind: &'static str,
+    #[serde(flatten)]
+    repair: &'a Repair,
+}
+
+impl<'a> Tagged<'a> {
+    fn new(repair: &'a Repair) -> Self {
+        Tagged {
+            kind: "repair",
+            repair,
+        }
+    }
+}
+
+/// Serialises a list of repairs that a real run did, for the reports whose
+/// `repairs` field holds bare [`Repair`]s.
+pub fn serialize_repairs<S: Serializer>(
+    repairs: &[Repair],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(repairs.iter().map(Tagged::new))
+}
+
 impl<A: Serialize> Serialize for Step<A> {
     /// A repair is `{"kind": "repair", "repair": ...}`; a command action
     /// serialises as it is.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Tagged<'a> {
-            kind: &'static str,
-            #[serde(flatten)]
-            repair: &'a Repair,
-        }
         match self {
-            Step::Repair(repair) => Tagged {
-                kind: "repair",
-                repair,
-            }
-            .serialize(serializer),
+            Step::Repair(repair) => Tagged::new(repair).serialize(serializer),
             Step::Command(action) => action.serialize(serializer),
         }
     }

@@ -13,7 +13,7 @@ use crate::commands::restore::{
 use crate::commands::unearth::{complete_stamps, concerns, gives_back_to};
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
-use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep};
+use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
 use crate::reference::{self, ReferenceError};
 use crate::relpath::RelPath;
 use crate::repair::Repair;
@@ -72,7 +72,7 @@ pub struct ForkRequest {
 /// What a dry run would do for the fork itself.
 #[derive(Debug, Serialize)]
 pub struct ForkAction {
-    pub action: &'static str,
+    pub kind: &'static str,
     pub piece: String,
     pub stamp: String,
     pub version: Timestamp,
@@ -139,6 +139,7 @@ pub struct ForkReport {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<SkippedNote>,
+    #[serde(serialize_with = "serialize_repairs")]
     pub repairs: Vec<Repair>,
     pub warnings: Vec<Warning>,
     /// Set when the folder is in place but not known to be durable.
@@ -367,7 +368,7 @@ impl Run<'_> {
             checks.push("extracted_tree");
         }
         plan.push_command(ForkAction {
-            action: "fork",
+            kind: "fork",
             piece: picked.piece.to_string(),
             stamp: picked.stamp.to_string(),
             version: picked.stamp.time(),
@@ -936,7 +937,7 @@ mod tests {
         let PlanStep::Command(action) = &plan.actions[0] else {
             panic!("expected the fork action");
         };
-        assert_eq!(action.action, "fork");
+        assert_eq!(action.kind, "fork");
         assert_eq!(action.stamp, NEW);
         assert_eq!(action.path, "tools/copy");
         assert_eq!(

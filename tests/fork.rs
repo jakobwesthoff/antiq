@@ -454,7 +454,7 @@ fn a_dry_run_names_the_version_the_destination_and_the_checks_and_changes_nothin
             })
             .json_only(|json| {
                 let action = &json["actions"][0];
-                assert_eq!(action["action"], "fork");
+                assert_eq!(action["kind"], "fork");
                 assert_eq!(action["stamp"], NEW);
                 assert_eq!(action["path"], "tools/copy");
                 assert_eq!(
@@ -490,6 +490,7 @@ fn the_repairs_run_first_and_a_real_fork_reports_them() {
         run.json_only(|json| {
             let repairs = json["repairs"].as_array().expect("a list of repairs");
             assert_eq!(repairs.len(), 1, "{json}");
+            assert_eq!(repairs[0]["kind"], "repair");
             assert_eq!(repairs[0]["repair"], "delete_temporary");
             assert_eq!(repairs[0]["entry"], "leftover");
         });

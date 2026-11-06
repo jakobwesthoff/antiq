@@ -1794,7 +1794,9 @@ where `message` is the text of the error without the context lines a
 console shows. Some kinds add keys to the error object. A `--dry-run` plan
 carries `"dry_run": true` and an `actions` list after it (`lock_held`
 stands between the two while another run holds the lock); repairs come
-first in it, as actions of kind `repair`. Paths are in the escaped
+first in it, as actions of kind `repair`. A real run has neither
+`dry_run` nor `actions`. Every action has a `kind`, and the repairs a real
+run lists under `repairs` are `{"kind": "repair", ...}` as in a plan. Paths are in the escaped
 form.
 
 A repair action is `{"kind": "repair", "repair": "<name>", ...}` and the
@@ -1950,22 +1952,22 @@ holder.
 `unearth` has `unearthed` (false when the version did not fit), `piece`,
 `stamp`, `version` (the time of the stamp in UTC, RFC 3339), `path`,
 `bytes` (the unpacked size), `repairs` (the repairs done at the start of
-the run, as in a dry run), `warnings`, and, only when no room was found,
+the run, each as `{"kind": "repair", "repair": ...}`), `warnings`, and, only when no room was found,
 `skipped` as `{"reason": "no_space", "needed", "available"}` in bytes.
 A dry run has `dry_run`, `actions` and `warnings`; after the repairs it
-lists one action `{"action": "unearth", "piece", "stamp", "version",
+lists one action `{"kind": "unearth", "piece", "stamp", "version",
 "path", "bytes", "checks"}` with `checks` in the order `version`,
 `destination`, `free_space`, `member_names`, `extracted_tree`. Without room
 for the version the action has `skipped` as above and the exit status is 3.
 
 `fork` has `forked` (false when the version did not fit), `piece`, `stamp`,
 `version` (the time of the stamp in UTC, RFC 3339), `path` (the destination),
-`bytes` (the unpacked size; null without a usable listing), `repairs`,
-`warnings`, and, only when no room was found, `skipped` as `{"reason":
+`bytes` (the unpacked size; null without a usable listing), `repairs`
+(each as `{"kind": "repair", "repair": ...}`), `warnings`, and, only when no room was found, `skipped` as `{"reason":
 "no_space", "needed", "available"}` in bytes, with `needed` null when the
 volume ran full during the extraction of a version without a usable listing.
 A dry run has `dry_run`, `actions` and `warnings`; after the repairs it
-lists one action `{"action": "fork", "piece", "stamp", "version", "path",
+lists one action `{"kind": "fork", "piece", "stamp", "version", "path",
 "bytes", "checks"}` with `checks` in the order `version`, `destination`,
 `free_space`, `member_names`, `extracted_tree`, each left out where the
 section "fork" says so, and `damage` (a list of texts) for a damaged

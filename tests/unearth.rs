@@ -133,7 +133,7 @@ fn a_dry_run_names_the_version_the_destination_and_the_checks_and_changes_nothin
             })
             .json_only(|json| {
                 let action = &json["actions"][0];
-                assert_eq!(action["action"], "unearth");
+                assert_eq!(action["kind"], "unearth");
                 assert_eq!(action["stamp"], NEW);
                 assert_eq!(action["path"], "projects/scanner");
                 assert_eq!(

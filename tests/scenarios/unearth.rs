@@ -386,10 +386,10 @@ fn unearth_by_name_gives_the_folder_back_as_it_was() {
                 assert_eq!(
                     keys,
                     [
-                        "action", "piece", "stamp", "version", "path", "bytes", "checks"
+                        "kind", "piece", "stamp", "version", "path", "bytes", "checks"
                     ]
                 );
-                assert_eq!(actions[0]["action"], "unearth");
+                assert_eq!(actions[0]["kind"], "unearth");
                 assert_eq!(actions[0]["piece"], SCANNER);
                 assert_eq!(actions[0]["path"], SCANNER);
                 assert_eq!(actions[0]["stamp"], stamp.as_str());

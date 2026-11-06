@@ -13,7 +13,7 @@ use crate::commands::restore::{
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::markers::{self, RESTORED_FILE, Restored};
-use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep};
+use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
 use crate::relpath::RelPath;
 use crate::repair::{Destination, Repair};
 use crate::report::{CommandReport, Warning, setting_notes};
@@ -78,7 +78,7 @@ pub const CHECKS: [&str; 5] = [
 /// What a dry run would do for the unearth itself.
 #[derive(Debug, Serialize)]
 pub struct UnearthAction {
-    pub action: &'static str,
+    pub kind: &'static str,
     pub piece: String,
     pub stamp: String,
     pub version: Timestamp,
@@ -136,6 +136,7 @@ pub struct UnearthReport {
     pub bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<SkippedNote>,
+    #[serde(serialize_with = "serialize_repairs")]
     pub repairs: Vec<Repair>,
     pub warnings: Vec<Warning>,
     /// Set when the folder is in place but the version or the marker could
@@ -340,7 +341,7 @@ impl Run<'_> {
             .available_space(&self.collection.tmp_dir())
             .map_err(RestoreError::from)?;
         plan.push_command(UnearthAction {
-            action: "unearth",
+            kind: "unearth",
             piece: chosen.piece.to_string(),
             stamp: chosen.stamp.to_string(),
             version: chosen.stamp.time(),
@@ -1140,7 +1141,7 @@ mod tests {
                 let PlanStep::Command(action) = &plan.actions[0] else {
                     panic!("expected the unearth");
                 };
-                assert_eq!(action.action, "unearth");
+                assert_eq!(action.kind, "unearth");
                 assert_eq!(action.stamp, NEW);
                 assert_eq!(action.path, "projects/scanner");
                 assert_eq!(action.checks, CHECKS);
@@ -1381,7 +1382,7 @@ mod tests {
     #[test]
     fn the_action_and_the_report_describe_themselves() {
         let action = UnearthAction {
-            action: "unearth",
+            kind: "unearth",
             piece: "projects/scanner".to_string(),
             stamp: NEW.to_string(),
             version: Timestamp::UNIX_EPOCH,

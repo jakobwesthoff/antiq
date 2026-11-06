@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn a_check_this_command_does_not_know_is_shown_by_its_name() {
         let action = ForkAction {
-            action: "fork",
+            kind: "fork",
             piece: "projects/scanner".to_string(),
             stamp: "2026-11-04T090211".to_string(),
             version: Timestamp::UNIX_EPOCH,
