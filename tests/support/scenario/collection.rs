@@ -418,23 +418,25 @@ impl Collection {
     /// Gives every directory below the root, and the root, the clock's
     /// directory time again.
     pub fn settle(&self) {
-        fn walk(dir: &Path, time: FileTime) {
-            for item in fs::read_dir(dir).expect("the directory lists") {
-                let path = item.expect("an entry").path();
-                let is_dir = fs::symlink_metadata(&path)
-                    .expect("the entry has metadata")
-                    .is_dir();
-                if is_dir {
-                    walk(&path, time);
-                }
-            }
-            filetime::set_file_mtime(dir, time).expect("the time can be set");
-        }
-        walk(
-            self.tree.root(),
-            FileTime::from_unix_time(self.clock.dir_time(), 0),
-        );
+        settle_directories(self.tree.root(), &self.clock);
     }
+}
+
+/// Gives `root` and every directory below it the clock's directory time.
+pub(super) fn settle_directories(root: &Path, clock: &Clock) {
+    fn walk(dir: &Path, time: FileTime) {
+        for item in fs::read_dir(dir).expect("the directory lists") {
+            let path = item.expect("an entry").path();
+            let is_dir = fs::symlink_metadata(&path)
+                .expect("the entry has metadata")
+                .is_dir();
+            if is_dir {
+                walk(&path, time);
+            }
+        }
+        filetime::set_file_mtime(dir, time).expect("the time can be set");
+    }
+    walk(root, FileTime::from_unix_time(clock.dir_time(), 0));
 }
 
 impl Collection {

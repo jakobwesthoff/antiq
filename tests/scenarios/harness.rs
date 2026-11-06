@@ -1469,6 +1469,21 @@ fn a_source_is_a_folder_outside_the_collection_with_aged_files() {
     assert_eq!(mtime(&file), clock.days_ago(40));
 }
 
+#[test]
+fn the_directories_of_a_source_carry_the_clocks_directory_time() {
+    let clock = Clock::now();
+    let source = Source::new(&clock, |piece| {
+        piece.age_days(40).file("notes/deep/a.txt", "x");
+    });
+    for dir in ["", "notes", "notes/deep"] {
+        assert_eq!(
+            mtime(&source.path().join(dir)),
+            clock.dir_time(),
+            "directory {dir:?}"
+        );
+    }
+}
+
 // =========================================================
 // Checks without antiq
 // =========================================================

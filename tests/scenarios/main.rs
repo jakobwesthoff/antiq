@@ -13,6 +13,7 @@ mod find;
 mod forget;
 mod grep;
 mod harness;
+mod import;
 mod init;
 mod list;
 mod pin;

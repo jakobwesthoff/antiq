@@ -11,7 +11,9 @@
 //! a scenario that reads such a version checks antiq against the spec and
 //! not against itself.
 
-use super::collection::{Clock, Collection, PieceBuilder, StoredFiles, restored_line};
+use super::collection::{
+    Clock, Collection, PieceBuilder, StoredFiles, restored_line, settle_directories,
+};
 use crate::support::tree::Tree;
 use filetime::FileTime;
 use sha2::{Digest, Sha256};
@@ -34,7 +36,9 @@ pub struct VersionFiles {
 }
 
 /// A folder outside any collection, for `import`. Its content is built like
-/// a piece's.
+/// a piece's, and each of its directories carries the clock's `dir_time`, as
+/// a collection's do, so that the archive an import packs does not depend on
+/// the second the source was built in.
 pub struct Source {
     tree: Tree,
 }
@@ -45,6 +49,7 @@ impl Source {
         let mut piece = PieceBuilder::default();
         build(&mut piece);
         piece.write(clock, &mut tree, "source");
+        settle_directories(tree.root(), clock);
         Source { tree }
     }
 
