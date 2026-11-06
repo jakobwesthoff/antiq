@@ -41,6 +41,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
             "Pushing to {}",
             paint(&out.stdout_env(), theme::BOLD, &sanitize(&target))
         );
+        let cursor = out.stdout_env().cursor;
         let setup = progress::setup(
             Kind::Push,
             ctx,
@@ -51,7 +52,16 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         let run = observed(
             out,
             setup,
-            |observer| push_observed(&collection, &request, &SystemClock, observer),
+            |observer| {
+                // The pre-pass that sizes the cards costs one more scan and
+                // one more connection. Without cursor movement nothing
+                // would draw them, so the pieces get their lines at the end.
+                if cursor {
+                    push_observed(&collection, &request, &SystemClock, observer)
+                } else {
+                    push(&collection, &request, &SystemClock)
+                }
+            },
             |result| match result {
                 Ok(PushOutcome::Report(report)) => progress::push_pieces(report),
                 _ => Vec::new(),

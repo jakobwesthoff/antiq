@@ -2207,9 +2207,11 @@ end without size and time. A `push` prints `Pushing to <target>` and an empty
 line above its cards once it has pieces to send; a claim that sends no piece
 keeps the headline, the sentence and the table of what was sent.
 
-On a terminal the mirror of a `push` first runs once as a dry run, to learn
-the files and bytes of each piece. When that dry run lists nothing it can
-read, the pieces appear as finished lines only.
+On a terminal that moves the cursor, the mirror of a `push` first runs once
+as a dry run, to learn the files and bytes of each piece. When that dry run
+lists nothing it can read, the pieces appear as finished lines only. A
+`TERM` that is unset or `dumb` makes no dry run: the finished lines of the
+pieces are printed at the end, from the report of the push.
 
 The region is redrawn in place at most every 100 ms, with the carriage
 return, cursor up and erase to the end of the screen. antiq sets no

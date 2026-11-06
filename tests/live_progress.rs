@@ -9,6 +9,7 @@
 mod support;
 
 use support::cmd::hold_lock;
+use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
 use support::scenario::world::{Mode, Setup, World};
 use support::screen::Screen;
@@ -399,6 +400,49 @@ fn a_second_push_shows_the_pieces_that_changed() {
             .expect("a last line")
             .starts_with("✔ 1 piece pushed · 1 file changed")
     );
+}
+
+#[test]
+fn push_on_a_dumb_terminal_makes_no_dry_run_to_forecast_and_lists_its_pieces_at_the_end() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .patterns(&["*/*"])
+        .piece("notes/daily", |piece| {
+            piece.age_days(5).file("today.md", "fresh\n");
+        })
+        .finish();
+    let target = support::scenario::target::Target::new();
+    target.marker(&collection);
+    let fake = FakeRsync::new("rsync  version 3.2.4  protocol version 31\n");
+    fake.answer_all(">f+++++++++ notes/daily/today.md\n", "", 0);
+    collection.use_target(&target.path());
+    let config = collection.path(".antiq/config.toml");
+    let text = std::fs::read_to_string(&config).expect("the config exists");
+    let rsync = serde_json::to_string(fake.path().to_str().expect("a UTF-8 path")).expect("quotes");
+    std::fs::write(
+        &config,
+        text.replacen("[target]\n", &format!("[target]\nrsync = {rsync}\n"), 1),
+    )
+    .expect("the config can be written");
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty_sized(&["push"], 100, 24, &[("TERM", "dumb")]);
+
+    run.expect_code(0);
+    let listings = fake
+        .calls()
+        .into_iter()
+        .filter(|call| call.iter().any(|arg| arg == "--out-format=%i %l %n%L"))
+        .count();
+    assert_eq!(listings, 0, "{:?}", fake.calls());
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("  ✔ notes/daily ")),
+        "{lines:#?}"
+    );
+    assert!(!run.stdout.contains('\x1b') && !run.stdout.contains('\r'));
 }
 
 // =========================================================

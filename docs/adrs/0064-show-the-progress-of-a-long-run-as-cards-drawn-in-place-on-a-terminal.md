@@ -33,14 +33,15 @@ line when its piece ends and no cards.
 A pipe, `--json` and a dry run keep their output unchanged. Warnings and
 notes still follow the result.
 
-`push` on a terminal runs the mirror once as a dry run before the real
-run, to learn the files and bytes of each piece. The extra scan is
-accepted.
+`push` on a terminal that moves the cursor runs the mirror once as a dry
+run before the real run, to learn the files and bytes of each piece. The
+extra scan is accepted. A terminal whose `TERM` is unset or `dumb` gets no
+dry run, and `push` lists its pieces at the end.
 
 ## Consequences
 
-`push` on a terminal scans the source twice, and connects twice to an ssh
-target.
+`push` on a terminal that moves the cursor scans the source twice and
+makes one more ssh connection to an ssh target.
 
 The size of the terminal is read at each redraw. A resize during a run
 can leave fragments of old cards on the screen. A finished line is never
