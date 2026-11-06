@@ -1432,12 +1432,31 @@ kinds add keys to the error object. A `--dry-run` plan carries
 `--help` and `--version` print text and exit 0, also under `--json`.
 
 `status` adds `collection` (`id`, `path`), `remote` (`state`: `none`,
-`reachable`, `away`, `broken`) and `pieces`, a list of objects with
-`id` (null for new pieces), `path`, `name`, `state` and `flags`, a list
-of the conditions `status` shows, such as `pinned`, `stale_backup`,
-`diverged`, `needs_decision`, `superseded`, `pending_upload`,
-`missing_on_remote`, `unreadable`, `mount_point`, `future_mtime`, and
-`remote_only_in_days` where it applies.
+`reachable`, `away`, `broken`; `url`, when a remote is attached) and
+`pieces`, a list of objects with `id` (null for new pieces), `path`,
+`name`, `state` and `flags`, a list of the conditions `status` shows, such
+as `pinned`, `stale_backup`, `diverged`, `needs_decision`, `superseded`,
+`pending_upload`, `missing_on_remote`, `unreadable`, `mount_point`,
+`future_mtime`, and `remote_only_in_days` where it applies. `state` is one
+of the states under "States" (`new`, `live`, `unearthed`, `gone`,
+`archived`, `remote-only`, `live-on-another-machine`) or `error`, the
+state of a piece whose entry, metadata or object cannot be used; the
+piece then carries the flag `error`. A piece's `detail` object holds what
+a state or flag needs to say and leaves out the keys that do not apply:
+`error` (the message), `removal_unfinished` (a `removing` entry whose
+folder is still in place), `below_unreadable` (the directory above a
+piece that selection could not read, which is neither walked nor judged)
+and `machine` (the machine that backs up a live piece of another
+collection). `status` also adds `recovered`, the names below
+`.antiq/recovered/`; `damaged`, a list of `{id, path, error}` for tracking
+files and objects that cannot be used, with the path relative to the
+collection root; `unreadable_directories`, the directories selection could
+not read; `skipped` (`symlinks`, `dot_entries`); `counts` (`live`,
+`archived`, `remote_only`, `pinned`, `empty`) and `warnings`. `live` counts
+the pieces in state `live`, `unearthed` or `new`, `archived` those in state
+`archived` or `remote-only`; pieces in state `gone`,
+`live-on-another-machine` or `error` are in no count. Pieces are sorted by
+path, a new piece before an object at the same path.
 
 `find` adds `query` and `matches`, a list of objects with `id`, `path`,
 `abs_path`, `name`, `state`, `created` and `size`. `size` is the size in
