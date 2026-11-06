@@ -109,13 +109,16 @@ pub(super) struct Uploaded {
     pub id: ObjectId,
     /// The files that were written, not the ones the remote had already.
     pub written: Vec<(String, u64)>,
+    /// Whether a file was put, written or found, which a flush has to make
+    /// durable before a commit names it.
+    pub put: bool,
     pub error: Option<SyncError>,
 }
 
 /// Uploads the files of the objects, one job per object, on at most
 /// `ctx.jobs` threads, and flushes the remote once afterwards, which makes
 /// the files durable before any commit names them. A flush that fails
-/// leaves every object that wrote something with that error.
+/// leaves every object that put something with that error.
 pub(super) fn run(
     ctx: &SyncContext<'_>,
     work: Vec<(ObjectId, Vec<UploadFile>)>,
@@ -124,11 +127,13 @@ pub(super) fn run(
         let mut outcome = Uploaded {
             id,
             written: Vec::new(),
+            put: false,
             error: None,
         };
         for file in &files {
             match ctx.remote.put_payload(&file.as_upload(id)) {
                 Ok(transfer) => {
+                    outcome.put = true;
                     if !transfer.already_present {
                         outcome
                             .written
@@ -143,14 +148,16 @@ pub(super) fn run(
         }
         outcome
     });
-    if outcomes.iter().any(|outcome| !outcome.written.is_empty())
+    // A file found in place is not known to be durable, which the commit
+    // that names it needs.
+    if outcomes.iter().any(|outcome| outcome.put)
         && let Err(error) = ctx.remote.flush()
     {
         if ends_run(ctx.remote, &error) {
             return Err(error.into());
         }
         let message = error.to_string();
-        for outcome in outcomes.iter_mut().filter(|o| !o.written.is_empty()) {
+        for outcome in outcomes.iter_mut().filter(|o| o.put) {
             outcome.error = Some(SyncError::Failed(format!(
                 "the uploaded files could not be made durable on the remote: {message}"
             )));

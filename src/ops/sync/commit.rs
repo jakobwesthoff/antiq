@@ -503,7 +503,10 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), 
         .map(|(id, _, _, files)| (*id, files.clone()))
         .collect();
     let mut failed = Vec::new();
-    for Uploaded { id, written, error } in upload::run(ctx, work)? {
+    for Uploaded {
+        id, written, error, ..
+    } in upload::run(ctx, work)?
+    {
         for (file, size) in written {
             report.uploaded.push(UploadedFile { id, file, size });
         }
@@ -1143,6 +1146,35 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&cache).contains(listing.as_str()),
             "the cache names the new listing"
+        );
+    }
+
+    #[test]
+    fn files_the_remote_has_already_are_flushed_before_a_claim_names_them() {
+        let (shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        // An interrupted run left both files, complete, on the remote.
+        let dir = shared.objects().join(id.to_string());
+        fs::create_dir_all(&dir).expect("the object directory");
+        for entry in fs::read_dir(anna.collection.object_dir(id)).expect("lists") {
+            let entry = entry.expect("entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("meta.") {
+                fs::copy(entry.path(), dir.join(&name)).expect("copied");
+            }
+        }
+        let remote = anna.remote();
+
+        let report = anna.sync_with(&remote);
+
+        assert_eq!(report.committed, [CommittedVersion { id, version: 1 }]);
+        assert!(report.uploaded.is_empty(), "{:?}", report.uploaded);
+        let ops: Vec<Op> = remote.calls().iter().map(|call| call.op).collect();
+        let flush = ops.iter().position(|op| *op == Op::Flush);
+        let claim = ops.iter().position(|op| *op == Op::CreateExclusive);
+        assert!(
+            flush < claim,
+            "the files are durable before the claim: {ops:?}"
         );
     }
 

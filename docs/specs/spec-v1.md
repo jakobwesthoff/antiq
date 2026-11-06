@@ -1545,7 +1545,8 @@ a change with an open `version_conflict` decision, is a conflict:
 nothing of it is uploaded or committed, the piece is skipped and the run exits 3. Any other change is
 committed: the payloads and listings it names that the previous version
 did not are uploaded, at most `remote_jobs` objects at a time, the remote
-is flushed once after all uploads, and each object's metadata is then
+is flushed once after all uploads, also when the remote had every file
+already, and each object's metadata is then
 committed with the protocol above, at most `remote_jobs` at a time. What
 the outcome leaves behind:
 
