@@ -15,3 +15,4 @@ mod init;
 mod list;
 mod status;
 mod unearth;
+mod verify;

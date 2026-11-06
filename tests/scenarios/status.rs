@@ -28,6 +28,12 @@ fn status_shows_every_state_and_notes_what_needs_a_look() {
                 .piece("tools/scan-old", |piece| {
                     piece.age_days(28).file("scan.sh", "#!/bin/sh\n");
                 })
+                .piece("projects/antiq", |piece| {
+                    piece
+                        .age_days(120)
+                        .file("src/main.rs", "fn main() {}\n")
+                        .pinned();
+                })
                 .piece("media/camera-import", |piece| {
                     piece
                         .age_days(52)
@@ -73,12 +79,13 @@ fn status_shows_every_state_and_notes_what_needs_a_look() {
                     // size, as it records none.
                     let expected = format!(
                         "\
-5 folders \u{b7} 2 versions ({sound_bytes} B) \u{b7} archive after 30 days idle
+6 folders \u{b7} 2 versions ({sound_bytes} B) \u{b7} archive after 30 days idle
 
 STATE    PIECE                 IDLE  WHAT
 due      experiments/rust-gpu   33d  archives next run
 refused  media/camera-import    52d  exclude entry: media/camera-import/card
 due      old/client-site       141d  archives next run
+pinned   projects/antiq        120d  kept by .antiq-pin
 soon     tools/scan-old         28d  archives in 2 days
 
 ! 1 file with a time in the future: notes/daily/plan.md ({future})
@@ -110,7 +117,7 @@ soon     tools/scan-old         28d  archives in 2 days
                         "warnings",
                         "store_error",
                     ]);
-                    assert_eq!(json["folders"], 5);
+                    assert_eq!(json["folders"], 6);
                     assert_eq!(json["versions"], 2);
                     assert_eq!(json["archive_bytes"], sound_bytes);
                     assert_eq!(json["idle_days"], 30);
@@ -132,6 +139,7 @@ soon     tools/scan-old         28d  archives in 2 days
                             ("experiments/rust-gpu", "due"),
                             ("media/camera-import", "refused"),
                             ("old/client-site", "due"),
+                            ("projects/antiq", "pinned"),
                             ("tools/scan-old", "soon"),
                         ]
                     );
@@ -139,8 +147,10 @@ soon     tools/scan-old         28d  archives in 2 days
                         .iter()
                         .map(|piece| piece["idle_for_days"].as_u64().expect("whole days"))
                         .collect();
-                    assert_eq!(idle, [33, 52, 141, 28]);
-                    assert_eq!(pieces[3]["due_in_days"], 2);
+                    assert_eq!(idle, [33, 52, 141, 120, 28]);
+                    assert_eq!(pieces[4]["due_in_days"], 2);
+                    assert_eq!(pieces[3]["reasons"], json!([]));
+                    assert!(pieces[3].get("due_in_days").is_none());
                     assert_eq!(
                         pieces[1]["reasons"],
                         json!([{
