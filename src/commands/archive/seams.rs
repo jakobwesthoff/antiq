@@ -35,11 +35,8 @@ pub(crate) trait Seams: Send + Sync {
     }
 
     /// Runs after the files of the version are written and flushed, before
-    /// the archive is read back for its hash. `staging` is the directory that holds them.
-    fn before_read_back(&self, _staging: &Path) {}
-
-    /// Runs after the hash of the archive was read back, before the
-    /// folder is compared with the archive.
+    /// the archive is read back and the folder is compared with it.
+    /// `staging` is the directory that holds them.
     fn before_verify(&self, _staging: &Path) {}
 
     /// Runs after the folder was renamed into `trash/`, before it is

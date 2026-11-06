@@ -7,13 +7,13 @@
 
 use super::ArchiveError;
 use super::seams::Seams;
-use crate::archive::check::{ChecksumFile, file_sha256_counted};
+use crate::archive::check::ChecksumFile;
 use crate::archive::names::{MemberKind, MemberName, portability_warnings};
 use crate::archive::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Lease, Pool, workers_for_piece,
 };
 use crate::archive::tar_write::sparse_warning;
-use crate::archive::verify::{content_bytes, verify_strict_counted};
+use crate::archive::verify::{ArchiveHash, content_bytes, verify_strict_counted};
 use crate::archive::zstd::ZstdSettings;
 use crate::archive::{PackError, PackNote, PackSettings, Packager, TarZstd, Verified, WalkRules};
 use crate::clock::Clock;
@@ -380,24 +380,10 @@ fn stage_and_store(
     };
     let archive_path = staging_path.join(&names.archive);
     let verifying = context.tracker.operation(Operation::Verifying);
-    // The bar covers the whole read-back from its first frame: the archive
-    // is read twice, once for its hash and once for its members, and then
-    // the files of the folder are read once. `packed.listing` is what the
-    // read-back is compared with a few lines below.
-    verifying.set_total(2 * packed.size + content_bytes(&packed.listing));
-    context.seams.before_read_back(&staging_path);
-    let read_back = file_sha256_counted(&archive_path, &verifying)
-        .map_err(|source| Abort::of(verify_error(source)))?;
-    if read_back != packed.sha256 {
-        return Err(Abort::of(verify_error(PackError::ArchiveDiffers {
-            file: names.archive.clone(),
-            what: format!(
-                "it reads back with the hash {read_back}, and {} was computed while writing it",
-                packed.sha256
-            ),
-        })));
-    }
-
+    // The archive is read once and each file of the folder is compared as
+    // its member comes, so the bar counts the content bytes compared out of
+    // the size of the piece, from its first frame.
+    verifying.set_total(content_bytes(&packed.listing));
     context.seams.before_verify(&staging_path);
     let rules = WalkRules {
         rules: request.rules.clone(),
@@ -410,6 +396,10 @@ fn stage_and_store(
         &rules,
         context.seams.walk_hooks(),
         &verifying,
+        &ArchiveHash {
+            file: &names.archive,
+            sha256: &packed.sha256,
+        },
     )
     .map_err(|source| verify_abort(verify_error(source)))?;
     if verified.listing() != packed.listing.as_slice() {
@@ -608,7 +598,6 @@ mod tests {
         recording: Option<Recording>,
         free: Option<u64>,
         full_disk: bool,
-        before_read_back: Option<Change>,
         before_verify: Option<Change>,
         /// The folder the verify walks reports that it is a mount root.
         top_is_mount: bool,
@@ -661,12 +650,6 @@ mod tests {
 
         fn walk_hooks(&self) -> &dyn Hooks {
             self
-        }
-
-        fn before_read_back(&self, staging: &Path) {
-            if let Some(change) = &self.before_read_back {
-                change(staging);
-            }
         }
 
         fn before_verify(&self, staging: &Path) {
@@ -758,19 +741,11 @@ mod tests {
     }
 
     #[test]
-    fn the_read_back_has_its_total_before_the_first_byte_and_counts_the_archive_first() {
+    fn the_verify_has_its_total_before_the_first_byte_and_ends_at_it() {
         let world = world();
         let recorder = Arc::new(Recorder::new());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let probe = Probe {
-            before_read_back: Some(Box::new({
-                let (recorder, seen) = (Arc::clone(&recorder), Arc::clone(&seen));
-                move |_| {
-                    seen.lock()
-                        .expect("no panic")
-                        .push(newest_counter(&recorder))
-                }
-            })),
             before_verify: Some(Box::new({
                 let (recorder, seen) = (Arc::clone(&recorder), Arc::clone(&seen));
                 move |_| {
@@ -783,18 +758,29 @@ mod tests {
         };
 
         let tracker = Tracker::new(&*recorder, "piece");
-        let stored = store_tracked(&world, &probe, &world.ledger, shared_pool(), tracker)
+        store_tracked(&world, &probe, &world.ledger, shared_pool(), tracker)
             .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
 
-        // 9 bytes of content are read once, the archive twice.
-        let total = 2 * stored.archive_bytes + 9;
-        let seen = seen.lock().expect("no panic").clone();
+        // The 9 bytes of content are compared once, however often the
+        // archive and the folder are read for it.
         assert_eq!(
-            seen,
-            [(0, total), (stored.archive_bytes, total)],
-            "the total is known before the hash starts, and the hash pass reads the archive"
+            *seen.lock().expect("no panic"),
+            [(0, 9)],
+            "the total is known before the first byte"
         );
-        assert_eq!(newest_counter(&recorder).0, newest_counter(&recorder).1);
+        let verifying: Vec<(u64, u64)> = recorder
+            .seen()
+            .into_iter()
+            .filter_map(|seen| match seen {
+                Seen::Operation {
+                    operation: Operation::Verifying,
+                    counter,
+                    ..
+                } => Some((counter.done(), counter.total())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verifying, [(9, 9)]);
     }
 
     fn stored(world: &World, probe: &dyn Seams) -> Stored {
@@ -1303,7 +1289,7 @@ mod tests {
     fn an_archive_that_reads_back_with_another_hash_fails_and_leaves_nothing() {
         let world = world();
         let probe = Probe {
-            before_read_back: Some(Box::new(|staging| {
+            before_verify: Some(Box::new(|staging| {
                 let archive = entries_of(staging)
                     .into_iter()
                     .find(|name| name.ends_with(".tar.zst"))

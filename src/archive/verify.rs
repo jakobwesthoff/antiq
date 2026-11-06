@@ -5,7 +5,7 @@
 //! Verifying a package against a folder or a listing.
 
 use super::hashing::HashingReader;
-use super::read::{read_package, read_package_counted};
+use super::read::{Package, damaged, read_package_observing};
 use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
 use crate::filesystem::tree::{TreeError, TreeRoot};
@@ -18,7 +18,7 @@ use crate::walk::{Hooks, KeptFolder, MAX_DEPTH, RealFs, only_blocks_removal, wal
 use rustix::io::Errno;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::fs::Metadata;
+use std::fs::{File, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -184,37 +184,73 @@ pub(crate) fn verify_strict(
     rules: &WalkRules,
     hooks: &dyn Hooks,
 ) -> Result<Verified, PackError> {
-    verify_strict_observed(package, root, rules, hooks, None, &mut |_, _| {})
+    verify_strict_observed(package, root, rules, hooks, None, None, &mut |_, _| {})
 }
 
-/// [`verify_strict`], adding the bytes it reads to `counter`: the archive
-/// once, then the files of the folder. The caller sets the total, since it
-/// knows the size of the archive and the listing before the read starts.
+/// What the archive file must hash to, and the name to report when it does
+/// not.
+pub(crate) struct ArchiveHash<'a> {
+    pub file: &'a str,
+    pub sha256: &'a str,
+}
+
+/// [`verify_strict`] that also checks the archive against `archive` and
+/// adds the content bytes of the files it compares to `counter`. The caller
+/// sets the total, since it knows the sum of the file sizes before the read
+/// starts.
 pub(crate) fn verify_strict_counted(
     package: &Path,
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
     counter: &Counter,
+    archive: &ArchiveHash<'_>,
 ) -> Result<Verified, PackError> {
-    verify_strict_observed(package, root, rules, hooks, Some(counter), &mut |_, _| {})
+    verify_strict_observed(
+        package,
+        root,
+        rules,
+        hooks,
+        Some(counter),
+        Some(archive),
+        &mut |_, _| {},
+    )
 }
 
+/// The folder is walked first. The archive file is then read once, through
+/// a hash that is checked against `archive` before anything else is judged,
+/// and each file of the folder is read and hashed as soon as the stream has
+/// delivered the member of that name.
 fn verify_strict_observed(
     package: &Path,
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
-    counter: Option<&Counter>,
+    meter: Option<&Counter>,
+    archive: Option<&ArchiveHash<'_>>,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Verified, PackError> {
-    // The stream is read to its end first, so a damaged package never
-    // reaches the folder.
-    let package = match counter {
-        Some(counter) => read_package_counted(package, counter)?,
-        None => read_package(package)?,
-    };
-    let (folder, moved) = read_folder_granted(root, rules, hooks, counter, observe)?;
+    let (folder, moved, package) = read_folder_granted(root, rules, |modes| {
+        let entries = walk_entries(root, rules, hooks, modes)?;
+        let mut directories = DirectoryStack::new(root);
+        let mut reads: HashMap<RelPath, Read> = HashMap::new();
+        let package = {
+            let files: HashMap<&RelPath, &TreeEntry> = entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::File)
+                .map(|entry| (&entry.path, entry))
+                .collect();
+            read_archive(package, archive, &mut |path| {
+                if let Some(entry) = files.get(path) {
+                    let read = read_file(&mut directories, entry, meter, observe)?;
+                    reads.insert(path.clone(), read);
+                }
+                Ok(())
+            })?
+        };
+        let folder = fold_folder(entries, reads, &mut directories, meter, observe)?;
+        Ok((folder, package))
+    })?;
     let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
@@ -243,22 +279,52 @@ fn verify_strict_observed(
     }
 }
 
+/// Reads the archive file once. The stream stops at the end of its frame,
+/// so the rest of the file is read into the hash before it is compared with
+/// `archive`: a file that is not what was written is reported as that, ahead
+/// of whatever the stream or `on_file` found.
+fn read_archive(
+    package: &Path,
+    archive: Option<&ArchiveHash<'_>>,
+    on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
+) -> Result<Package, PackError> {
+    let file = File::open(package).map_err(PackError::OpenPackage)?;
+    let mut hashed = HashingReader::new(file);
+    let read = read_package_observing(&mut hashed, on_file);
+    let Some(archive) = archive else {
+        return read;
+    };
+    let drained = io::copy(&mut hashed, &mut io::sink());
+    let actual = hashed.sha256();
+    if actual != archive.sha256 {
+        return Err(PackError::ArchiveDiffers {
+            file: archive.file.to_string(),
+            what: format!(
+                "it reads back with the hash {actual}, and {} was computed while writing it",
+                archive.sha256
+            ),
+        });
+    }
+    drained.map_err(damaged)?;
+    read
+}
+
 /// Reads the folder; in a staging tree the directories whose mode keeps
 /// the owner out are opened for the read and get their mode back. Returns
 /// the folder and the directories that were not the same after their mode
-/// came back.
-fn read_folder_granted(
+/// came back. `read` does the reading while the modes are granted and gets
+/// the modes the granted directories had; it returns the folder and
+/// whatever else it read along.
+fn read_folder_granted<T>(
     root: &TreeRoot,
     rules: &WalkRules,
-    hooks: &dyn Hooks,
-    meter: Option<&Counter>,
-    observe: &mut dyn FnMut(Stage, &RelPath),
-) -> Result<(Folder, Vec<RelPath>), PackError> {
+    read: impl FnOnce(&HashMap<RelPath, u32>) -> Result<(Folder, T), PackError>,
+) -> Result<(Folder, Vec<RelPath>, T), PackError> {
     let mut granted = Granted::new(root);
     if rules.staged {
         granted.grant();
     }
-    let mut folder = read_folder(root, rules, hooks, meter, observe, &granted.modes())?;
+    let (mut folder, other) = read(&granted.modes())?;
     let restored = granted.restore()?;
     // Restoring a mode changes the directory's ctime, so the record takes
     // the ctime from the directory as it is left. Anything else that
@@ -275,7 +341,7 @@ fn read_folder_granted(
             _ => moved.push(path),
         }
     }
-    Ok((folder, moved))
+    Ok((folder, moved, other))
 }
 
 /// Directories of a staging tree that were given owner read and search for
@@ -432,7 +498,12 @@ fn compare_with_listing_with(
     meter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Compared, PackError> {
-    let (folder, moved) = read_folder_granted(root, rules, &RealFs, meter, observe)?;
+    let (folder, moved, ()) = read_folder_granted(root, rules, |modes| {
+        let entries = walk_entries(root, rules, &RealFs, modes)?;
+        let mut directories = DirectoryStack::new(root);
+        let folder = fold_folder(entries, HashMap::new(), &mut directories, meter, observe)?;
+        Ok((folder, ()))
+    })?;
     let mut differences = differences_from(listing, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     differences.sort_by(|a, b| a.path().cmp(b.path()));
@@ -473,16 +544,14 @@ struct Folder {
     record: Vec<LstatRecord>,
 }
 
-/// Walks the folder the way packing does and reads every file it would
-/// pack.
-fn read_folder(
+/// Walks the folder the way packing does: the entries it would pack, with
+/// the mode a directory had before it was granted access.
+fn walk_entries(
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
-    meter: Option<&Counter>,
-    observe: &mut dyn FnMut(Stage, &RelPath),
     modes: &HashMap<RelPath, u32>,
-) -> Result<Folder, PackError> {
+) -> Result<Vec<TreeEntry>, PackError> {
     let no_rules = Rules::new(&[], &[]).expect("no patterns are valid");
     let kept = KeptFolder(hooks);
     let hooks: &dyn Hooks = if rules.kept { &kept } else { hooks };
@@ -493,16 +562,7 @@ fn read_folder(
     if let Some(problem) = walked.problems().iter().find(blocking) {
         return Err(PackError::TreeHasProblems(problem.clone()));
     }
-    let mut lines = Vec::new();
-    let mut changed = Vec::new();
-    let mut record = Vec::new();
-    // The first path of each file with several names, and its hash when it
-    // was read without changing.
-    let mut first_link: HashMap<(u64, u64), (RelPath, Option<String>)> = HashMap::new();
-    let mut directories = DirectoryStack::new(root);
-    // Directories that were granted access are described by the mode they
-    // had before.
-    let entries: Vec<TreeEntry> = walked
+    Ok(walked
         .packed_entries()
         .cloned()
         .map(|mut entry| {
@@ -511,7 +571,25 @@ fn read_folder(
             }
             entry
         })
-        .collect();
+        .collect())
+}
+
+/// Describes the walked `entries` as the package of them would, reading
+/// every file that is not in `reads` yet. `reads` holds the files that were
+/// read already, by path.
+fn fold_folder(
+    entries: Vec<TreeEntry>,
+    mut reads: HashMap<RelPath, Read>,
+    directories: &mut DirectoryStack<'_>,
+    meter: Option<&Counter>,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Folder, PackError> {
+    let mut lines = Vec::new();
+    let mut changed = Vec::new();
+    let mut record = Vec::new();
+    // The first path of each file with several names, and its hash when it
+    // was read without changing.
+    let mut first_link: HashMap<(u64, u64), (RelPath, Option<String>)> = HashMap::new();
     for entry in &entries {
         record.push(LstatRecord::of(entry));
         match entry.kind {
@@ -546,7 +624,10 @@ fn read_folder(
                         continue;
                     }
                 }
-                let read = read_file(&mut directories, entry, meter, observe)?;
+                let read = match reads.remove(&entry.path) {
+                    Some(read) => read,
+                    None => read_file(directories, entry, meter, observe)?,
+                };
                 if entry.nlink > 1 {
                     let hash = match &read {
                         Read::Hashed(sha256) => Some(sha256.clone()),
@@ -1072,23 +1153,121 @@ mod tests {
         assert_eq!((counter.done(), counter.total()), (0, 0));
     }
 
-    #[test]
-    fn the_strict_verify_adds_the_archive_once_and_the_files_once() {
+    /// An archive of `mixed()` with a hard link, in a temp dir, and the
+    /// folder it was made from.
+    fn archived() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::testing::package::Packaged,
+        Tree,
+    ) {
         let mut tree = mixed();
         tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
         let package = pack_piece(&tree, "proj");
         let dir = tempfile::tempdir().expect("a temp dir");
         let archive = dir.path().join("proj.tar.zst");
         std::fs::write(&archive, &package.bytes).expect("the archive is written");
+        (dir, archive, package, tree)
+    }
+
+    #[test]
+    fn the_strict_verify_counts_the_content_bytes_of_the_files_once() {
+        let (_dir, archive, package, tree) = archived();
         let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
         let counter = Counter::new();
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
 
-        verify_strict_counted(&archive, &root, &WalkRules::default(), &RealFs, &counter)
-            .expect("the folder equals the archive");
+        verify_strict_counted(
+            &archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            &counter,
+            &expected,
+        )
+        .expect("the folder equals the archive");
 
+        // The archive and the folder are both read, and the bytes of a file
+        // count once, the hard link not at all.
         let contents = content_bytes(&package.packed.listing);
         assert!(contents > 0, "the fixture has content");
-        assert_eq!(counter.done(), package.bytes.len() as u64 + contents);
+        assert_eq!(counter.done(), contents);
+    }
+
+    fn verify_against(archive: &Path, tree: &Tree, sha256: &str) -> Result<Verified, PackError> {
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256,
+        };
+        verify_strict_counted(
+            archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            &Counter::new(),
+            &expected,
+        )
+    }
+
+    #[test]
+    fn an_archive_with_another_hash_is_reported_as_different_before_the_folder_is_judged() {
+        let (_dir, archive, package, tree) = archived();
+        // The folder differs too; the archive is what is reported.
+        std::fs::write(tree.path("proj/notes.txt"), "changed").expect("the file changes");
+
+        let error =
+            verify_against(&archive, &tree, &"0".repeat(64)).expect_err("the hash does not match");
+
+        assert!(
+            matches!(&error, PackError::ArchiveDiffers { file, what }
+                if file == "proj.tar.zst" && what.contains(&package.packed.sha256)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_damaged_archive_with_another_hash_is_reported_as_different_and_with_its_hash_as_damaged() {
+        let (_dir, archive, package, tree) = archived();
+        let mut bytes = package.bytes.clone();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        std::fs::write(&archive, &bytes).expect("the archive is damaged");
+
+        let different = verify_against(&archive, &tree, &package.packed.sha256)
+            .expect_err("the archive is damaged");
+        assert!(
+            matches!(&different, PackError::ArchiveDiffers { .. }),
+            "the file is not what was written: {different:?}"
+        );
+
+        let mut hasher = HashingReader::new(&bytes[..]);
+        io::copy(&mut hasher, &mut io::sink()).expect("hashes");
+        let damaged =
+            verify_against(&archive, &tree, &hasher.sha256()).expect_err("the archive is damaged");
+        assert!(
+            matches!(&damaged, PackError::Damaged(_)),
+            "the hash is the file's own: {damaged:?}"
+        );
+    }
+
+    #[test]
+    fn bytes_after_the_frame_of_the_archive_are_in_its_hash() {
+        let (_dir, archive, package, tree) = archived();
+        let mut bytes = package.bytes.clone();
+        bytes.extend_from_slice(&[0; 7]);
+        std::fs::write(&archive, &bytes).expect("the archive grows");
+
+        let error = verify_against(&archive, &tree, &package.packed.sha256)
+            .expect_err("the hash covers the trailing bytes");
+
+        assert!(
+            matches!(&error, PackError::ArchiveDiffers { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -1473,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_stream_fails_the_integrity_check_before_the_folder_is_read() {
+    fn a_truncated_stream_fails_the_integrity_check() {
         let tree = mixed();
         let packaged = pack_piece(&tree, "proj");
         let cut = &packaged.bytes[..packaged.bytes.len() - 4];
@@ -2016,8 +2195,9 @@ mod tests {
                 std::fs::write(directory.join("g"), "new").expect("written");
             }
         };
-        let error = verify_strict_observed(&file, &root, &staged(), &RealFs, None, &mut observe)
-            .expect_err("the directory changed");
+        let error =
+            verify_strict_observed(&file, &root, &staged(), &RealFs, None, None, &mut observe)
+                .expect_err("the directory changed");
         assert!(
             matches!(&error, PackError::Differs(found)
                 if found == &[Difference::ChangedWhileRead(path("a"))]),

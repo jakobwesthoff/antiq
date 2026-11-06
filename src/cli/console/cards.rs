@@ -66,13 +66,6 @@ pub(crate) fn sizes(done: u64, total: Option<u64>) -> String {
     })
 }
 
-/// The bar and the percentage alone, for an operation whose numbers are not
-/// in units that match the card: bytes that no size on the card equals.
-pub(crate) const BAR_ONLY: Count = Count {
-    text: |_, _| String::new(),
-    percent: true,
-};
-
 /// The count of an operation that its command does not list.
 const FILES: Count = Count {
     text: |done, total| items(done, total, "files"),

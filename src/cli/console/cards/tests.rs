@@ -596,17 +596,6 @@ fn the_sizes_text_reads_done_over_total_in_decimal_units_and_is_empty_without_a_
     assert_eq!(sizes(5, None), "");
 }
 
-#[test]
-fn a_bar_only_count_shows_the_percentage_and_no_text() {
-    const BYTES: Counts = &[(Operation::Packing, BAR_ONLY)];
-    let mut cards = cards(BYTES);
-    cards.apply(started("a", 10), secs(0));
-    let (msg, _k) = operation("a", Operation::Packing, 700_000_000, 1_000_000_000);
-    cards.apply(msg, secs(0));
-    let line = cards.region(secs(0), MOCKUP, 24)[1].clone();
-    assert!(line.ends_with("70%"), "{line:?}");
-}
-
 // =========================================================
 // What an event for an unknown piece does
 // =========================================================

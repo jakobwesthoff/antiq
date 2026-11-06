@@ -25,10 +25,11 @@ use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 
-/// The verifying of an unearth follows the bytes of the files it compares and
-/// shows them as sizes. Every other count is a count of files, which is what
-/// the cards show for an operation without an entry here. `fork` brings a
-/// version back the same way and uses the same list.
+/// The verifying of an unearth counts the content bytes of the files it
+/// compares, as the size on the card does. Every other count is a
+/// count of files, which is what the cards show for an operation without an
+/// entry here. `fork` brings a version back the same way and uses the same
+/// list.
 pub(super) const COUNTS: &[(Operation, Count)] = &[(
     Operation::Verifying,
     Count {

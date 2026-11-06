@@ -1072,10 +1072,8 @@ mod tests {
         failing_delete: bool,
         /// Runs after the folder was renamed into `trash/`.
         after_trash_rename: Option<Change>,
-        /// Runs after the archive is written, before it is read back.
-        before_read_back: Option<Change>,
-        /// Runs after the archive is read back, before it is compared with
-        /// the folder.
+        /// Runs after the archive is written, before it is read back and
+        /// compared with the folder.
         before_verify: Option<Change>,
     }
 
@@ -1109,12 +1107,6 @@ mod tests {
             self.trashed.store(true, Ordering::SeqCst);
             if let Some(change) = &self.after_trash_rename {
                 change(tree);
-            }
-        }
-
-        fn before_read_back(&self, staging: &Path) {
-            if let Some(change) = &self.before_read_back {
-                change(staging);
             }
         }
 
@@ -2087,7 +2079,7 @@ mod tests {
         let mut world = world("");
         add(&mut world, "piece", 40);
         let seams = Probe {
-            before_read_back: Some(Box::new(|staging| {
+            before_verify: Some(Box::new(|staging| {
                 let archive = find_archive(staging).expect("the archive is staged");
                 let mut file = fs::OpenOptions::new()
                     .append(true)
@@ -2489,18 +2481,16 @@ mod tests {
         add(&mut world, "piece", 40);
         let recorder = Recorder::new();
 
-        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
-        // The read-back reads the archive twice and the 9 bytes of content
-        // once.
-        let read = 2 * report.archived[0].archive_bytes + 9;
+        // The 9 bytes of content are compared once.
         assert_eq!(
             recorder.lines(),
             [
                 "started piece 9",
                 "piece Packing 9/9",
-                &format!("piece Verifying {read}/{read}"),
+                "piece Verifying 9/9",
                 "piece Storing 0/0",
                 "piece Removing 4/4",
                 "finished piece 9 Files(2)",
@@ -2533,17 +2523,16 @@ mod tests {
         world.tree().hard_link("piece/a.txt", "piece/link.txt");
         let recorder = Recorder::new();
 
-        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
         // The link is a member that neither the packing nor the verify reads
         // again, so the 9 bytes of content count once.
-        let read = 2 * report.archived[0].archive_bytes + 9;
         assert_eq!(
             recorder.lines_of("piece")[1..3],
             [
                 "piece Packing 9/9".to_string(),
-                format!("piece Verifying {read}/{read}")
+                "piece Verifying 9/9".to_string()
             ]
         );
     }

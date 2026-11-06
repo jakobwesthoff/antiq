@@ -30,13 +30,11 @@ One formatter writes the card and the finished line, so the lines on the
 screen during the run and the lines that remain after it look alike.
 
 The bar of an operation follows the work in bytes where bytes are what
-takes time: packing follows the content bytes of the files among the bytes
-the compressor has consumed, verifying in `archive` the bytes read from the
-archive and the folder, and verifying in `unearth` the bytes of the files
-compared. A count under the bar shows numbers only in units that match the
-card (its size, files, entries). The bytes of verifying in `archive` are
-more than the piece holds, so the cards of verifying, and of verifying in
-`unearth`, show the bar and the percentage alone. The compressor works
+takes time, and counts the content bytes of the piece's files, the unit of
+the size on the card: packing counts the content bytes among those the
+compressor has consumed, and verifying the content bytes of the files
+compared with the archive. A count under the bar shows numbers only in
+units that match the card (its size, files, entries). The compressor works
 behind the writer, so the bytes handed to it reach the total long before it
 has compressed them; the bytes it has consumed are what the bar follows.
 

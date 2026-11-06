@@ -623,6 +623,13 @@ link that does not name a file listed before it, a member that is neither
 file, directory, symlink nor hard link and a modification time beyond 63
 bits make the package damaged.
 
+The verify walks the folder first. It then reads the archive file once:
+the bytes of the file feed its SHA-256 and the decompressor together, and
+each regular file of the folder is read and hashed as soon as the stream
+has delivered the member of that name. When the file is read to its end,
+its hash is checked against the hash computed while writing it, before any
+difference is judged.
+
 Then it compares every member with the tree on disk (type, size, content
 hash, modification time in whole seconds with the same clamp, mode, link
 target) and requires equal path sets under the same walk rules. The walk
@@ -2176,20 +2183,19 @@ turns, the piece in bold, its size and the operation: `packing`,
 `removing` for `push`, `extracting`, `verifying` and `removing` for
 `unearth`. The second has a bar, the percentage and a count: `N/M files`,
 `N/M created` and `N/M deleted` for the storing and removing of `push`,
-`N/M entries` for the removing of `archive`. A count shows numbers only in
-units that match the card (its size, files, entries); an operation whose
-numbers do not match shows the bar and the percentage alone. That holds for
-the `verifying` of `archive` and `unearth`; the `packing` of `archive` shows
-the content bytes done and the size of the files, such as `412 MB/1.2 GB`.
-The bar of `packing` follows the content bytes of the files among the bytes
-of the tar stream that the compressor has consumed, against the size of the
-files; the headers and the padding of the stream count for nothing. The bar of `verifying` in
-`archive` follows the bytes read: the archive twice (its checksum, then its
-members) and the files of the folder, which are more than the piece holds.
-In `unearth` it follows the bytes of the files compared. An operation whose total is not known yet, and the `verifying` of
-an `unearth` whose files hold no bytes, has a bar with a moving lit part and
-no percentage or count. The percentage is rounded and
-stays at 99 until the operation is done.
+`N/M entries` for the removing of `archive`, and sizes such as
+`412 MB/1.2 GB` for the operations whose count is the content bytes of the
+piece: the `packing` and `verifying` of `archive` and the `verifying` of
+`unearth`. A count shows numbers only in units that match the card (its
+size, files, entries). The bar of `packing` follows the content bytes of
+the files among the bytes of the tar stream that the compressor has
+consumed, against the size of the files; the headers and the padding of the
+stream count for nothing. The bar of `verifying` follows the content bytes
+of the files compared with the archive, against the same size. An operation
+whose total is not known yet, and the `verifying` of an `unearth` whose
+files hold no bytes, has a bar with a moving lit part and no percentage or
+count. The percentage is rounded and stays at 99 until the operation is
+done.
 
 A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
 refused or unfinished piece, `⚠` yellow for a skipped one), the piece in

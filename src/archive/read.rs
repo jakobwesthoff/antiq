@@ -51,7 +51,7 @@ pub(super) fn list_with(
     read_package_with(package, counter).map(|read| read.entries)
 }
 
-fn damaged(error: io::Error) -> PackError {
+pub(super) fn damaged(error: io::Error) -> PackError {
     PackError::Damaged(error.to_string())
 }
 
@@ -110,16 +110,6 @@ pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
     read_package_with(package, None)
 }
 
-/// [`read_package`], adding the bytes of the file read to `counter`. The
-/// file is metered below the decoder, so the count is the compressed size
-/// of what was read.
-pub(crate) fn read_package_counted(
-    package: &Path,
-    counter: &Counter,
-) -> Result<Package, PackError> {
-    read_package_with(package, Some(counter))
-}
-
 fn read_package_with(package: &Path, counter: Option<&Counter>) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
     read_package_from(Metered::new(file, counter))
@@ -134,6 +124,16 @@ fn read_package_with(package: &Path, counter: Option<&Counter>) -> Result<Packag
 ///
 /// The precondition of [`read_package`] holds here too.
 pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackError> {
+    read_package_observing(source, &mut |_| Ok(()))
+}
+
+/// [`read_package_from`], calling `on_file` with the path of every regular
+/// member that is not a hard link as soon as its content has been read. An
+/// error of `on_file` ends the read.
+pub(crate) fn read_package_observing<R: io::Read>(
+    source: R,
+    on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
+) -> Result<Package, PackError> {
     let decoder = zstd::decoder(source).map_err(damaged)?;
     let count = Rc::new(Cell::new(0));
     let mut archive = tar::Archive::new(Counted {
@@ -193,6 +193,7 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
                 let mut reader = HashingReader::new(&mut member);
                 io::copy(&mut reader, &mut io::sink()).map_err(damaged)?;
                 let sha256 = reader.sha256();
+                on_file(&path)?;
                 hashes.insert(path.clone(), sha256.clone());
                 (ListingType::File, None, Some(sha256))
             }
@@ -586,12 +587,9 @@ mod tests {
     }
 
     #[test]
-    fn reading_a_package_counts_the_compressed_bytes_of_the_file() {
+    fn listing_a_package_counts_the_compressed_bytes_of_the_file() {
         let packaged = pack_piece(&mixed_piece(), "proj");
         let (_dir, path) = on_disk(&packaged.bytes);
-        let counter = Counter::new();
-        read_package_counted(&path, &counter).expect("the package reads");
-        assert_eq!(counter.done(), packaged.bytes.len() as u64);
         let listed = Counter::new();
         list_counted(&path, &listed).expect("the package lists");
         assert_eq!(listed.done(), packaged.bytes.len() as u64);
