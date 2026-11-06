@@ -1217,12 +1217,12 @@ fn place(
         .map_err(io_at("start the flush in", &extract))?;
     let extracting = placement.tracker.operation(Operation::Extracting);
     if let Some(listing) = source.listing {
-        let items = listing
+        let files = listing
             .entries
             .iter()
-            .filter(|entry| entry.kind != ListingType::Dir)
+            .filter(|entry| entry.kind == ListingType::File)
             .count();
-        extracting.set_total(items as u64);
+        extracting.set_total(files as u64);
     }
     let unpacked = unpack_counted(&archive, &staging, &volume, &flush, &extracting)?;
     placed.files = unpacked.files;
@@ -2743,6 +2743,14 @@ mod bring_tests {
         }
 
         fn run(&self, hooks: &dyn Hooks) -> Result<Brought, RestoreError> {
+            self.run_reporting(hooks, Tracker::silent())
+        }
+
+        fn run_reporting(
+            &self,
+            hooks: &dyn Hooks,
+            tracker: Tracker<'_>,
+        ) -> Result<Brought, RestoreError> {
             let collection = Collection::find(self.root()).expect("collection");
             let places = self.store.places();
             let chosen = choose_version(
@@ -2759,12 +2767,16 @@ mod bring_tests {
                 .clone()
                 .bind(&TreeRoot::open(self.root()).expect("root"))
                 .expect("bound");
-            bring_back(
+            bring_back_to(
                 &collection,
                 &places,
                 &rules,
-                &chosen,
-                Some(chosen.stamp),
+                &Source::sound(&chosen),
+                &Placement {
+                    destination: &chosen.piece,
+                    marker_version: Some(chosen.stamp),
+                    tracker,
+                },
                 self.now,
                 hooks,
             )
@@ -2783,6 +2795,22 @@ mod bring_tests {
             Brought::Skipped { reason, .. } => reason,
             other => panic!("expected Skipped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_extraction_counts_the_regular_files_and_not_the_links() {
+        use crate::testing::recording::Recorder;
+        let world = World::new();
+        let recorder = Recorder::new();
+
+        done(world.run_reporting(&world.spy(), Tracker::new(&recorder, "projects/scanner")));
+
+        // main.rs and src/lib.rs; the symlink and the hard link are members
+        // of the archive but not files, as in the `files` of a listing.
+        assert_eq!(
+            recorder.lines().first().map(String::as_str),
+            Some("projects/scanner Extracting 2/2")
+        );
     }
 
     #[test]

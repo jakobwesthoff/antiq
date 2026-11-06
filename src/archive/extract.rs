@@ -427,7 +427,6 @@ impl<'a> Extraction<'a> {
             self.top = Some((mode, mtime));
             return Ok(());
         }
-        let counted = !matches!(kind, Kind::Directory);
         let at = failed_at(&path);
         let (parent_path, leaf) = split(&path);
         let parent = parent_of(self.staging, &mut self.parent, &parent_path).map_err(at)?;
@@ -460,6 +459,9 @@ impl<'a> Extraction<'a> {
                 self.flush.file(&file, &path).map_err(at)?;
                 drop(file);
                 self.files += 1;
+                if let Some(counter) = self.counter {
+                    counter.add(1);
+                }
             }
             Kind::Symlink(target) => {
                 parent.create_symlink(&leaf, &target).map_err(at)?;
@@ -471,11 +473,6 @@ impl<'a> Extraction<'a> {
             }
         }
         self.members += 1;
-        if let Some(counter) = self.counter
-            && counted
-        {
-            counter.add(1);
-        }
         Ok(())
     }
 
@@ -555,8 +552,9 @@ pub fn unpack_flushed(
     unpack_with(package, staging, rules, flush, None)
 }
 
-/// [`unpack_flushed`], adding one to `counter` for every member that is not
-/// a directory once it is extracted.
+/// [`unpack_flushed`], adding one to `counter` for every regular file once
+/// it is extracted. A symlink and a hard link are no files, as in the
+/// `files` of a listing.
 pub fn unpack_counted(
     package: &Path,
     staging: &TreeRoot,
