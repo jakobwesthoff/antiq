@@ -14,11 +14,9 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// A piece a reference could mean: its full ULID and its path in the
-/// escaped form.
+/// A piece a reference could mean, by its path in the escaped form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Candidate {
-    pub id: String,
     pub path: String,
 }
 

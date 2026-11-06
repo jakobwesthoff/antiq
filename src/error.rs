@@ -35,7 +35,7 @@ use crate::ops::unearth::UnearthError;
 use crate::pack::PackError;
 use crate::pin::PinError;
 use crate::query::QueryError;
-use crate::reference::ReferenceError;
+use crate::reference::{Candidate, ReferenceError};
 use crate::relpath::RelPathError;
 use crate::repair::RepairError;
 use crate::rules::RulesError;
@@ -248,20 +248,21 @@ impl Error {
     /// `message` for this error. Empty for errors without details.
     pub fn details(&self) -> Map<String, Value> {
         let mut details = Map::new();
-        if let Error::Reference(ReferenceError::Ambiguous { candidates, .. }) = self {
+        // `Reference`, `Lock` and `Run` are transparent, so the walks start
+        // at what they wrap.
+        let (candidates, held) = match self {
+            Error::Reference(inner) => (find_candidates(inner), find_held_lock(inner)),
+            Error::Lock(inner) => (find_candidates(inner), find_held_lock(inner)),
+            Error::Run(inner) => (find_candidates(inner), find_held_lock(inner)),
+            other => (find_candidates(other), find_held_lock(other)),
+        };
+        if let Some(candidates) = candidates {
             details.insert(
                 "candidates".into(),
                 serde_json::to_value(candidates)
                     .expect("candidates are plain strings and always serialise"),
             );
         }
-        // `Lock` and `Run` are transparent, so the walk starts at what they
-        // wrap.
-        let held = match self {
-            Error::Lock(inner) => find_held_lock(inner),
-            Error::Run(inner) => find_held_lock(inner),
-            other => find_held_lock(other),
-        };
         if let Some((pid, started)) = held {
             details.insert("pid".into(), Value::from(pid));
             details.insert(
@@ -271,6 +272,23 @@ impl Error {
         }
         details
     }
+}
+
+/// The candidates of the ambiguous reference that `error` or one of its
+/// sources is.
+///
+/// The same rule as for [`find_held_lock`] holds: a command error that wraps
+/// a [`ReferenceError`] names it as its source and is not
+/// `#[error(transparent)]`.
+fn find_candidates<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a [Candidate]> {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if let Some(ReferenceError::Ambiguous { candidates, .. }) = current.downcast_ref() {
+            return Some(candidates);
+        }
+        link = current.source();
+    }
+    None
 }
 
 /// The pid and start of the held lock that `error` or one of its sources
@@ -301,14 +319,12 @@ mod tests {
     use crate::collection::CollectionError;
     use crate::listing::ListingError;
     use crate::lock::LockError;
-    use crate::reference::{Candidate, ReferenceError};
     use crate::run::RunError;
     use jiff::Timestamp;
     use serde_json::json;
 
-    fn candidate(id: &str, path: &str) -> Candidate {
+    fn candidate(path: &str) -> Candidate {
         Candidate {
-            id: id.to_string(),
             path: path.to_string(),
         }
     }
@@ -411,17 +427,14 @@ mod tests {
     fn ambiguous_reference_lists_candidates() {
         let error: Error = ReferenceError::Ambiguous {
             reference: "01ABCD".into(),
-            candidates: vec![
-                candidate("01ABCDXXXXXXXXXXXXXXXXXXXX", "projects/a"),
-                candidate("01ABCDYYYYYYYYYYYYYYYYYYYY", "projects/b"),
-            ],
+            candidates: vec![candidate("projects/a"), candidate("projects/b")],
         }
         .into();
         assert_eq!(
             serde_json::Value::Object(error.details()),
             json!({"candidates": [
-                {"id": "01ABCDXXXXXXXXXXXXXXXXXXXX", "path": "projects/a"},
-                {"id": "01ABCDYYYYYYYYYYYYYYYYYYYY", "path": "projects/b"},
+                {"path": "projects/a"},
+                {"path": "projects/b"},
             ]})
         );
     }
@@ -457,6 +470,50 @@ mod tests {
     enum Hiding {
         #[error(transparent)]
         Lock(#[from] LockError),
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum WrappingReference {
+        #[error("cannot unearth")]
+        Reference(#[from] ReferenceError),
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum HidingReference {
+        #[error(transparent)]
+        Reference(#[from] ReferenceError),
+    }
+
+    fn ambiguous() -> ReferenceError {
+        ReferenceError::Ambiguous {
+            reference: "alpha".into(),
+            candidates: vec![candidate("projects/a"), candidate("projects/b")],
+        }
+    }
+
+    #[test]
+    fn the_chain_walker_finds_candidates_below_a_wrapping_error() {
+        let wrapped = WrappingReference::Reference(ambiguous());
+        assert_eq!(
+            find_candidates(&wrapped),
+            Some(&[candidate("projects/a"), candidate("projects/b")][..])
+        );
+    }
+
+    #[test]
+    fn the_chain_walker_ignores_references_that_are_not_ambiguous() {
+        let wrapped = WrappingReference::Reference(ReferenceError::Unknown {
+            reference: "alpha".into(),
+        });
+        assert_eq!(find_candidates(&wrapped), None);
+    }
+
+    #[test]
+    fn the_chain_walker_does_not_see_candidates_through_a_transparent_wrapper() {
+        assert_eq!(
+            find_candidates(&HidingReference::Reference(ambiguous())),
+            None
+        );
     }
 
     fn held() -> LockError {
