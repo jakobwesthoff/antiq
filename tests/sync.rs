@@ -415,6 +415,47 @@ fn the_json_of_a_sync_names_the_live_package_it_deletes_after_the_archive_is_com
     );
 }
 
+#[test]
+fn a_sync_says_which_live_package_it_deleted_and_a_dry_run_says_what_it_would_do() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree()
+        .file_with("proj/a.txt", "hello", 0o644, days_ago(40));
+    assert_eq!(antiq_in(&anna, &["sync"]).code(), 0);
+    anna.tree()
+        .file_with("proj/a.txt", "hello again", 0o644, days_ago(40));
+    let dry = antiq_in(&anna, &["sync", "--dry-run"]);
+    assert_eq!(dry.code(), 0, "{}{}", dry.stdout, dry.stderr);
+    assert!(
+        dry.stdout
+            .lines()
+            .any(|line| line.starts_with("Would pack proj (")),
+        "{}",
+        dry.stdout
+    );
+    assert_eq!(antiq_in(&anna, &["sync"]).code(), 0);
+    assert_eq!(antiq_in(&anna, &["archive"]).code(), 0);
+
+    let dry = antiq_in(&anna, &["sync", "--dry-run"]);
+    let run = antiq_in(&anna, &["sync"]);
+
+    assert!(
+        dry.stdout
+            .lines()
+            .any(|line| line.starts_with("Would delete the live package ")),
+        "{}",
+        dry.stdout
+    );
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stdout
+            .lines()
+            .any(|line| line.starts_with("Deleted the live package ")),
+        "{}",
+        run.stdout
+    );
+}
+
 // =========================================================
 // An away remote
 // =========================================================

@@ -774,10 +774,7 @@ fn plan_removals(
         let Some(&highest) = store.committed_versions(id).unwrap_or_default().last() else {
             continue;
         };
-        let Ok(bytes) = fs::read(store.meta_path(id, highest)) else {
-            continue;
-        };
-        let Ok(base) = meta::parse(&bytes) else {
+        let Some(base) = read_version(&store, id, highest) else {
             continue;
         };
         let files = live_files(&base, machine);
@@ -910,11 +907,7 @@ fn capture(ctx: &SyncContext<'_>) -> Result<Captured, SyncError> {
         let Some(&highest) = store.committed_versions(id)?.last() else {
             continue;
         };
-        let path = store.meta_path(id, highest);
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(base) = meta::parse(&bytes) else {
+        let Some(base) = read_version(&store, id, highest) else {
             continue;
         };
         let files = live_files(&base, ctx.machine);
@@ -978,24 +971,20 @@ pub(super) fn delete_committed(
 /// above `built_on` name no live package.
 fn names_no_live_above(store: &Store<'_>, id: ObjectId, built_on: u32) -> Result<bool, SyncError> {
     let versions = store.committed_versions(id)?;
-    let Some(&newest) = versions.last() else {
-        return Ok(false);
-    };
-    for number in versions
+    let newest = versions.last().copied().unwrap_or(0);
+    // A version that cannot be read may name a package, so it keeps
+    // the package.
+    let names_one = versions
         .into_iter()
         .filter(|number| *number > built_on || *number == newest)
-    {
-        let path = store.meta_path(id, number);
-        let bytes = fs::read(&path).map_err(|source| SyncError::Io {
-            action: "read",
-            path: path.display().to_string(),
-            source,
-        })?;
-        if names_live(&meta::parse(&bytes)?) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+        .any(|number| read_version(store, id, number).is_none_or(|version| names_live(&version)));
+    Ok(!names_one)
+}
+
+/// The committed version `number` of `id`, when it reads.
+fn read_version(store: &Store<'_>, id: ObjectId, number: u32) -> Option<Metadata> {
+    let bytes = fs::read(store.meta_path(id, number)).ok()?;
+    meta::parse(&bytes).ok()
 }
 
 #[cfg(test)]
@@ -2682,5 +2671,243 @@ mod tests {
         let error = anna.sync_request(&remote, false).expect_err("the run ends");
 
         assert_eq!(error.kind(), crate::error::ErrorKind::RemoteAway, "{error}");
+    }
+
+    // =====================================================
+    // Branches the other tests do not reach
+    // =====================================================
+
+    fn write_entry(machine: &Machine, entry: &mut crate::tracking::TrackingEntry) {
+        let lock = crate::lock::acquire(
+            &machine.collection.lock_path(),
+            machine.name,
+            &machine.clock,
+        )
+        .expect("free");
+        crate::tracking::write(&machine.collection, &lock, &machine.clock, entry).expect("written");
+    }
+
+    #[test]
+    fn a_piece_with_a_decision_open_or_a_diverged_folder_is_not_packed() {
+        for kind in [
+            crate::tracking::DecisionKind::VersionConflict,
+            crate::tracking::DecisionKind::DivergedFolder,
+        ] {
+            let shared = Shared::new();
+            let anna = Machine::new(&shared, "anna");
+            let folder = anna.folder("proj", "a.txt", "hello");
+            anna.sync();
+            let id = only_object(&anna);
+            let mut entry = anna.entry(id);
+            entry.decide(kind);
+            write_entry(&anna, &mut entry);
+            change(&folder, "a.txt", "hello again");
+
+            let mut report = crate::ops::sync::SyncReport::default();
+            refresh_under_lock(&anna, false, &super::NoHooks, &mut report);
+
+            assert!(!anna.collection.meta_pending_path(id).exists(), "{kind:?}");
+            assert_eq!(anna.plan().len(), 0, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_stale_mark_that_cannot_be_written_fails_the_piece() {
+        let shared = Shared::new();
+        let mut anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        anna.set_setting("backup_live = false");
+        let tracking = anna.collection.tracking_dir();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::File::create(tracking.join("probe")).is_err(),
+            "the precondition: the tracking directory refuses writes"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o755)).expect("writable");
+
+        assert!(
+            report
+                .unbacked
+                .iter()
+                .any(|piece| piece.reason == UnbackedReason::Error),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_mark_that_cannot_be_removed_fails_the_piece() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let mut entry = anna.entry(id);
+        entry.stale_backup_since = Some(anna.clock.now());
+        write_entry(&anna, &mut entry);
+        let tracking = anna.collection.tracking_dir();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::File::create(tracking.join("probe")).is_err(),
+            "the precondition: the tracking directory refuses writes"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o755)).expect("writable");
+
+        assert!(
+            report
+                .unbacked
+                .iter()
+                .any(|piece| piece.reason == UnbackedReason::Error),
+            "{report:?}"
+        );
+        assert!(anna.entry(id).stale_backup_since.is_some());
+    }
+
+    #[test]
+    fn a_package_that_is_in_the_store_already_is_not_stored_again() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        change(&folder, "a.txt", "hello again");
+        let failing = anna.remote();
+        failing.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&failing);
+        let second = live_payloads(&anna, id).remove(0);
+        // A run that ended after it stored the package and before it
+        // recorded it leaves the package without a name.
+        fs::remove_file(anna.collection.meta_pending_path(id)).expect("removed");
+
+        anna.sync();
+
+        assert_eq!(live_payloads(&anna, id)[0].file, second.file);
+        assert!(
+            !anna
+                .collection
+                .tmp_dir()
+                .join(format!("{id}.live.tar.zst"))
+                .exists(),
+            "the duplicate is not left in tmp"
+        );
+    }
+
+    #[test]
+    fn an_object_without_metadata_is_left_alone() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let empty = crate::remote::testing::object(9);
+        fs::create_dir(anna.collection.object_dir(empty)).expect("made");
+        let mut report = crate::ops::sync::SyncReport::default();
+
+        refresh_under_lock(&anna, false, &super::NoHooks, &mut report);
+        back_up_piece(&anna, empty, "proj");
+
+        assert!(report.unbacked.is_empty(), "{report:?}");
+        assert!(anna.plan().is_empty());
+    }
+
+    /// A committed archive that still names the package and whose entry
+    /// the edit changes.
+    fn committed_archive_with(
+        edit: impl FnOnce(&mut crate::tracking::TrackingEntry),
+    ) -> (Shared, Machine, ObjectId) {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        archive_by_hand(&anna, id);
+        anna.publish_by_hand(&shared, id, 2);
+        anna.sync();
+        let mut entry = anna.entry(id);
+        edit(&mut entry);
+        write_entry(&anna, &mut entry);
+        (shared, anna, id)
+    }
+
+    #[test]
+    fn a_committed_archive_without_an_entry_is_not_stripped() {
+        let (_shared, anna, id) = committed_archive_with(|_| {});
+        fs::remove_file(anna.collection.tracking_path(id)).expect("removed");
+
+        let report = anna.sync();
+
+        assert!(!anna.collection.meta_pending_path(id).exists());
+        assert!(report.committed.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_committed_archive_this_machine_did_not_take_out_is_not_stripped() {
+        let (_shared, anna, id) = committed_archive_with(|entry| {
+            entry.version_taken_out = VersionTakenOut::Pending;
+            entry.committed_versions.clear();
+        });
+
+        anna.sync();
+
+        assert!(!anna.collection.meta_pending_path(id).exists());
+    }
+
+    #[test]
+    fn an_archive_that_cannot_be_stripped_is_reported_with_its_path_and_keeps_its_package() {
+        let (shared, anna, id) = committed_archive_with(|_| {});
+        let dir = anna.collection.object_dir(id);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::File::create(dir.join("probe")).is_err(),
+            "the precondition: the object directory refuses writes"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("writable");
+
+        assert_eq!(report.unbacked.len(), 1, "{report:?}");
+        assert_eq!(report.unbacked[0].reason, UnbackedReason::Error);
+        assert_eq!(report.unbacked[0].path, path("proj"));
+        assert!(report.removed_live.is_empty());
+        assert!(shared.names(id).len() > 1);
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_keeps_the_package() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let store = anna.store();
+        assert!(
+            !super::names_no_live_above(&store, id, 1).expect("lists"),
+            "version 1 names the package"
+        );
+
+        fs::write(store.meta_path(id, 1), "junk").expect("damaged");
+
+        assert!(!super::names_no_live_above(&store, id, 0).expect("lists"));
+    }
+
+    #[test]
+    fn a_base_that_cannot_be_read_captures_and_plans_nothing() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        archive_by_hand(&anna, id);
+        fs::write(anna.store().meta_path(id, 1), "junk").expect("damaged");
+
+        let captured = under_lock(&anna, |ctx| super::capture(ctx).expect("captures"));
+        let mut plan = crate::plan::Plan::new();
+        super::plan_removals(&anna.collection, "anna", &mut plan).expect("plans");
+
+        assert!(captured.held.is_empty());
+        assert!(plan.actions.is_empty(), "{:?}", plan.actions);
     }
 }
