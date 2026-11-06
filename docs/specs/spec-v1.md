@@ -536,6 +536,13 @@ Remote layout:
 <root>/objects/<ulid>/.antiq-partial/
 ```
 
+The marker is one line of JSON with the keys `format`, `id` and `layout`
+in that order; `format` and `layout` are both 1 in version 1. A reader
+ignores other keys and refuses a marker with a higher `format` or
+`layout`. The marker is written under a temp name, flushed, and renamed
+into place without replacing an existing one, so the name never holds a
+partial file.
+
 Payload files are never overwritten. A put onto an existing payload name
 succeeds only when the full SHA-256 matches; for a listing, which the
 metadata records no checksum for, the SHA-256 of its bytes is compared.
@@ -685,7 +692,12 @@ or does not match. (ADR 0031)
 root has no marker; `remote add --init <url>` creates a new remote root.
 (ADR 0026) The URL is `ssh://[user@]host[:port]/<path>` for the SSH
 remote or an absolute local path for the path remote. The root path
-may contain only `[A-Za-z0-9._/-]`. `remote add` refuses while a remote
+may contain only `[A-Za-z0-9._/-]` and is made of components that are
+neither empty nor `.` or `..`; it does not end with `/` and is not `/`
+itself. The user and the host of an ssh URL may contain only
+`[A-Za-z0-9._-]`, and the port is a number from 1 to 65535. A URL that
+does not fit is a usage error. The config keeps the URL as given.
+`remote add` refuses while a remote
 is attached, and refuses with the reason when a probe fails: no rsync
 3.1 or later, openrsync, no SHA-256 tool on the NAS, a failing
 exclusive create, the remote unreachable. It writes nothing then.
@@ -1569,7 +1581,7 @@ brake would hold.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, or a `--pattern` of `init` is invalid | |
+| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, or the URL of `remote add` is invalid | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
 | `unknown_reference` | 1 | a piece reference matches no object | |
