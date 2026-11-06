@@ -1783,10 +1783,16 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   requirements in a "Development" section of the README,
   together with how to run `scripts/check.sh` and the coverage step.
 - From F2: C4 keeps the staging tree when a move into the store ends in
-  `PartlyMoved` or `StoredNotDurable`; the spec's "Spelling" section
+  `PartlyMoved`, and on `StoredNotDurable` the piece stops before step
+  5: its folder stays live and the run exits 3; the spec's "Spelling" section
   gets a sentence that on a case-folding volume a new store folder below
   an existing parent takes the parent's stored spelling (F8, which owns
   the lookup by spelling).
+- For F7: sidecars without their `.tar.zst` are an incomplete version
+  only when `versions::store::is_being_stored` finds no staged archive
+  for them in `tmp/pack/`; otherwise they are repair 1's and not
+  reported (spec "Repairs at the start of a run"). `status` and `list`
+  run without the lock and see this state during a running `archive`.
 - For P2: every `pub` item of `src/target/` has a caller once P2 lands
   (being `pub` hides dead code from Z's sweep); a collection root that
   is not UTF-8 is refused, since the marker stores strings; refusals of
