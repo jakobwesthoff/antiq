@@ -25,7 +25,7 @@ use tree::TreeRoot;
 
 /// Errors of the filesystem primitives.
 #[derive(Debug, thiserror::Error)]
-pub enum FsxError {
+pub enum FilesystemError {
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -49,12 +49,15 @@ pub enum FsxError {
     CrossesDevices { from: String, to: String },
 }
 
-impl crate::error::HasKind for FsxError {}
+impl crate::error::HasKind for FilesystemError {}
 
 /// Wraps an I/O failure of `action` on `path`.
-pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> FsxError {
+pub(crate) fn io_error(
+    action: &'static str,
+    path: &Path,
+) -> impl FnOnce(io::Error) -> FilesystemError {
     let path = path.display().to_string();
-    move |source| FsxError::Io {
+    move |source| FilesystemError::Io {
         action,
         path,
         source,
@@ -67,9 +70,9 @@ pub(crate) fn failure(
     action: &'static str,
     root: &TreeRoot,
     path: &RelPath,
-) -> impl FnOnce(io::Error) -> FsxError {
+) -> impl FnOnce(io::Error) -> FilesystemError {
     let path = shown(root, path);
-    move |source| FsxError::Io {
+    move |source| FilesystemError::Io {
         action,
         path,
         source,
@@ -106,12 +109,12 @@ mod tests {
     fn errors_name_what_failed_and_map_to_the_generic_kind() {
         let io = io_error("write", Path::new("/a/b"))(io::Error::from_raw_os_error(5));
         assert!(io.to_string().starts_with("cannot write /a/b: "), "{io}");
-        let foreign = FsxError::ForeignDevice { path: "mnt".into() };
+        let foreign = FilesystemError::ForeignDevice { path: "mnt".into() };
         assert_eq!(
             foreign.to_string(),
             "mnt is on another device than the tree being removed, or is the root of another mount"
         );
-        let crossing = FsxError::CrossesDevices {
+        let crossing = FilesystemError::CrossesDevices {
             from: "a".into(),
             to: "b".into(),
         };
@@ -119,7 +122,7 @@ mod tests {
             crossing.to_string(),
             "cannot move a to b: they are on different devices"
         );
-        let deep = FsxError::TooDeep {
+        let deep = FilesystemError::TooDeep {
             path: "t/d".into(),
             limit: 512,
         };
@@ -127,7 +130,7 @@ mod tests {
             deep.to_string(),
             "t/d is nested more than 512 levels below the tree being removed"
         );
-        let locked = FsxError::Locked { path: "t/f".into() };
+        let locked = FilesystemError::Locked { path: "t/f".into() };
         assert_eq!(locked.to_string(), "t/f is locked");
         for error in [io, foreign, crossing, deep, locked] {
             assert_eq!(error.kind(), ErrorKind::Other);

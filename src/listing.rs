@@ -5,9 +5,9 @@
 //! Archive listings: a SHA-256 checksum list with antiq's metadata in
 //! comment lines, zstd-compressed.
 
+use crate::archive::hashing::HashingWriter;
+use crate::archive::zstd::decoder;
 use crate::error::{ErrorKind, HasKind};
-use crate::pack::hashing::HashingWriter;
-use crate::pack::zstd::decoder;
 use crate::relpath::RelPath;
 use ::zstd::stream::read::Decoder;
 use ::zstd::stream::write::Encoder;
@@ -982,7 +982,7 @@ mod tests {
     }
 
     fn sha(content: &[u8]) -> String {
-        crate::pack::hashing::hex(&Sha256::digest(content))
+        crate::archive::hashing::hex(&Sha256::digest(content))
     }
 
     fn entry(kind: ListingType, name: &str) -> ListingEntry {

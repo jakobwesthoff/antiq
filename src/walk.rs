@@ -4,7 +4,7 @@
 
 //! The lstat walk of a piece.
 
-use crate::fsx::tree::{DirEntry, TreeRoot};
+use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::markers::RESTORED_FILE;
 use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
@@ -1327,7 +1327,7 @@ mod tests {
 
     /// Makes the directory read-only; the mode comes back when the guard
     /// drops.
-    fn close(tree: &Tree, relative: &str) -> crate::fsx::RestoreModes {
+    fn close(tree: &Tree, relative: &str) -> crate::filesystem::RestoreModes {
         let directory = tree.path(relative);
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o555))
             .expect("the mode is set");
@@ -1336,7 +1336,7 @@ mod tests {
             0,
             "root writes anywhere"
         );
-        crate::fsx::RestoreModes(vec![directory])
+        crate::filesystem::RestoreModes(vec![directory])
     }
 
     #[test]

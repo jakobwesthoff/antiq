@@ -8,31 +8,31 @@
 //! them all, and [`Error::kind`] names the JSON error kind and the exit
 //! code of whichever one it holds.
 
+use crate::archive::PackError;
 use crate::clock::whole_seconds;
 use crate::collection::CollectionError;
+use crate::commands::archive::ArchiveError;
+use crate::commands::forget::ForgetError;
+use crate::commands::fork::ForkError;
+use crate::commands::grep::GrepError;
+use crate::commands::import::ImportError;
+use crate::commands::init::InitError;
+use crate::commands::list::ListError;
+use crate::commands::pin::PinCommandError;
+use crate::commands::push::PushError;
+use crate::commands::rebuild::RebuildError;
+use crate::commands::restore::RestoreError;
+use crate::commands::status::StatusError;
+use crate::commands::survey::SurveyError;
+use crate::commands::unearth::UnearthError;
 use crate::config::ConfigError;
-use crate::fsx::FsxError;
+use crate::filesystem::FilesystemError;
 use crate::id::IdError;
 use crate::idle::IdleError;
 use crate::listing::ListingError;
 use crate::lock::LockError;
 use crate::machine::MachineError;
 use crate::markers::MarkerError;
-use crate::ops::archive::ArchiveError;
-use crate::ops::forget::ForgetError;
-use crate::ops::fork::ForkError;
-use crate::ops::grep::GrepError;
-use crate::ops::import::ImportError;
-use crate::ops::init::InitError;
-use crate::ops::list::ListError;
-use crate::ops::pin::PinCommandError;
-use crate::ops::push::PushError;
-use crate::ops::rebuild::RebuildError;
-use crate::ops::restore::RestoreError;
-use crate::ops::status::StatusError;
-use crate::ops::survey::SurveyError;
-use crate::ops::unearth::UnearthError;
-use crate::pack::PackError;
 use crate::pin::PinError;
 use crate::query::QueryError;
 use crate::reference::{Candidate, ReferenceError};
@@ -134,7 +134,7 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
-    Fsx(#[from] FsxError),
+    Filesystem(#[from] FilesystemError),
     #[error(transparent)]
     Id(#[from] IdError),
     #[error(transparent)]
@@ -208,7 +208,7 @@ impl Error {
             Error::NotImplemented { .. } => ErrorKind::NotImplemented,
             Error::Collection(e) => e.kind(),
             Error::Config(e) => e.kind(),
-            Error::Fsx(e) => e.kind(),
+            Error::Filesystem(e) => e.kind(),
             Error::Id(e) => e.kind(),
             Error::Idle(e) => e.kind(),
             Error::Init(e) => e.kind(),
@@ -567,19 +567,19 @@ mod tests {
         wraps::<crate::rules::RulesError>();
         wraps::<crate::markers::MarkerError>();
         wraps::<crate::query::QueryError>();
-        wraps::<crate::ops::archive::ArchiveError>();
-        wraps::<crate::ops::unearth::UnearthError>();
-        wraps::<crate::ops::fork::ForkError>();
-        wraps::<crate::ops::forget::ForgetError>();
-        wraps::<crate::ops::rebuild::RebuildError>();
-        wraps::<crate::ops::import::ImportError>();
-        wraps::<crate::ops::list::ListError>();
-        wraps::<crate::ops::grep::GrepError>();
-        wraps::<crate::ops::status::StatusError>();
-        wraps::<crate::ops::pin::PinCommandError>();
-        wraps::<crate::ops::push::PushError>();
-        wraps::<crate::ops::survey::SurveyError>();
-        wraps::<crate::ops::restore::RestoreError>();
+        wraps::<crate::commands::archive::ArchiveError>();
+        wraps::<crate::commands::unearth::UnearthError>();
+        wraps::<crate::commands::fork::ForkError>();
+        wraps::<crate::commands::forget::ForgetError>();
+        wraps::<crate::commands::rebuild::RebuildError>();
+        wraps::<crate::commands::import::ImportError>();
+        wraps::<crate::commands::list::ListError>();
+        wraps::<crate::commands::grep::GrepError>();
+        wraps::<crate::commands::status::StatusError>();
+        wraps::<crate::commands::pin::PinCommandError>();
+        wraps::<crate::commands::push::PushError>();
+        wraps::<crate::commands::survey::SurveyError>();
+        wraps::<crate::commands::restore::RestoreError>();
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::sync::LazyLock;
 
-use crate::pack::pool::Pool;
+use crate::archive::pool::Pool;
 
 /// The pool of this machine, sized as in production. Library tests that pack share it, so
 /// parallel tests do not each start level-19 encoders.

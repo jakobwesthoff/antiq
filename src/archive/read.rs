@@ -547,7 +547,7 @@ mod tests {
         use std::io::Read;
         let packaged = pack_piece(&mixed_piece(), "proj");
         let mut tar = Vec::new();
-        crate::pack::zstd::decoder(&packaged.bytes[..])
+        crate::archive::zstd::decoder(&packaged.bytes[..])
             .expect("a decoder")
             .read_to_end(&mut tar)
             .expect("decodes");

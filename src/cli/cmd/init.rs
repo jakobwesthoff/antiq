@@ -7,8 +7,8 @@
 use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
+use antiq::commands::init::{InitError, InitReport, InitRequest, init};
 use antiq::id::RandomIds;
-use antiq::ops::init::{InitError, InitReport, InitRequest, init};
 use antiq::report::CommandReport;
 use antiq::select::SelectError;
 use anyhow::Context as _;

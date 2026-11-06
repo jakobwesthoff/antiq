@@ -4,8 +4,8 @@
 
 //! Pin files.
 
-use crate::fsx::FsxError;
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::FilesystemError;
+use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
 use std::fs::File;
@@ -40,7 +40,7 @@ pub enum PinError {
     Flush {
         path: RelPath,
         #[source]
-        source: FsxError,
+        source: FilesystemError,
     },
     #[error("{path} is a directory, not a pin file")]
     NotAFile { path: RelPath },
@@ -78,7 +78,7 @@ pub fn is_pinned(collection: &TreeRoot, piece: &RelPath) -> Result<bool, PinErro
 
 /// How the pin and its directory are made durable. A parameter so that tests
 /// can see the calls and make them fail.
-pub(crate) type Flush<'a> = &'a dyn Fn(&File, &Path) -> Result<(), FsxError>;
+pub(crate) type Flush<'a> = &'a dyn Fn(&File, &Path) -> Result<(), FilesystemError>;
 
 /// Pins the piece at `piece` by creating its empty pin file. A piece that
 /// is pinned already stays so. The marker has no content, so creating it
@@ -86,7 +86,7 @@ pub(crate) type Flush<'a> = &'a dyn Fn(&File, &Path) -> Result<(), FsxError>;
 /// this returns: the file and the entry in the piece's directory are
 /// flushed.
 pub fn create(collection: &TreeRoot, piece: &RelPath) -> Result<(), PinError> {
-    create_with(collection, piece, &crate::fsx::atomic::flush_file)
+    create_with(collection, piece, &crate::filesystem::atomic::flush_file)
 }
 
 pub(crate) fn create_with(
@@ -118,7 +118,7 @@ pub(crate) fn create_with(
 /// left as it is. A directory of the pin's name is refused and left
 /// untouched. The removal is durable when this returns.
 pub fn remove(collection: &TreeRoot, piece: &RelPath) -> Result<(), PinError> {
-    remove_with(collection, piece, &crate::fsx::atomic::flush_file)
+    remove_with(collection, piece, &crate::filesystem::atomic::flush_file)
 }
 
 pub(crate) fn remove_with(
@@ -148,7 +148,7 @@ fn flush_piece(collection: &TreeRoot, piece: &RelPath, flush: Flush<'_>) -> Resu
     let shown = piece.to_string();
     let flushed = collection
         .open_dir_file(piece)
-        .map_err(crate::fsx::io_error("open", Path::new(&shown)))
+        .map_err(crate::filesystem::io_error("open", Path::new(&shown)))
         .and_then(|directory| flush(&directory, Path::new(&shown)));
     flushed.map_err(|source| PinError::Flush {
         path: piece.clone(),
@@ -337,7 +337,7 @@ mod tests {
         tree.dir("a");
         let pin = tree.file("a/.antiq-pin", "");
         let piece = tree.path("a");
-        let _restore = crate::fsx::RestoreModes(vec![piece.clone()]);
+        let _restore = crate::filesystem::RestoreModes(vec![piece.clone()]);
         fs::set_permissions(&piece, std::os::unix::fs::PermissionsExt::from_mode(0o555))
             .expect("the piece becomes read-only");
         assert!(
@@ -362,12 +362,12 @@ mod tests {
     fn recording<'a>(
         calls: &'a RefCell<Vec<String>>,
         fail_on: Option<&'a str>,
-    ) -> impl Fn(&File, &Path) -> Result<(), FsxError> + 'a {
+    ) -> impl Fn(&File, &Path) -> Result<(), FilesystemError> + 'a {
         move |_file, path| {
             let shown = path.display().to_string();
             calls.borrow_mut().push(shown.clone());
             if fail_on == Some(shown.as_str()) {
-                return Err(FsxError::Io {
+                return Err(FilesystemError::Io {
                     action: "flush",
                     path: shown,
                     source: io::Error::from_raw_os_error(5),

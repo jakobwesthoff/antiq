@@ -4,9 +4,9 @@
 
 //! Packages for the tests of reading and verifying them.
 
-use crate::fsx::tree::TreeRoot;
-use crate::pack::zstd::{ZstdSettings, encoder};
-use crate::pack::{PackSettings, Packager, Packed, TarZstd};
+use crate::archive::zstd::{ZstdSettings, encoder};
+use crate::archive::{PackSettings, Packager, Packed, TarZstd};
+use crate::filesystem::tree::TreeRoot;
 use crate::relpath::RelPath;
 use crate::rules::PieceRules;
 use crate::select::Rules;

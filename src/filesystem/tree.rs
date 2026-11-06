@@ -1205,7 +1205,7 @@ mod tests {
         let directory = root_of(&tree)
             .open_dir_file(&path("a"))
             .expect("the directory opens");
-        crate::fsx::atomic::flush_file(&directory, Path::new("a"))
+        crate::filesystem::atomic::flush_file(&directory, Path::new("a"))
             .expect("the directory is flushed");
     }
 
@@ -1224,7 +1224,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.dir("a");
         let directory = tree.path("a");
-        let _restore = crate::fsx::RestoreModes(vec![directory.clone()]);
+        let _restore = crate::filesystem::RestoreModes(vec![directory.clone()]);
         fs::set_permissions(&directory, Permissions::from_mode(0o300))
             .expect("the directory loses read permission");
         assert!(
@@ -1877,7 +1877,7 @@ mod tests {
         tree.dir("open");
         let closed = tree.dir("closed");
         fs::set_permissions(&closed, Permissions::from_mode(0o555)).expect("the mode is set");
-        let _restore = crate::fsx::RestoreModes(vec![closed]);
+        let _restore = crate::filesystem::RestoreModes(vec![closed]);
         assert_ne!(
             rustix::process::geteuid().as_raw(),
             0,

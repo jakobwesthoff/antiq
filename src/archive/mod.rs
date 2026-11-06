@@ -14,7 +14,7 @@ pub mod tar_write;
 pub mod verify;
 pub mod zstd;
 
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::listing::ListingEntry;
 use crate::relpath::{Name, RelPath};
 use crate::rules::PieceRules;
@@ -148,7 +148,7 @@ pub struct TargetRules {
 /// ```compile_fail
 /// // The fields are private, so a value cannot be made without a
 /// // comparison that found no difference.
-/// let _ = antiq::pack::Verified { record: vec![], listing: vec![] };
+/// let _ = antiq::archive::Verified { record: vec![], listing: vec![] };
 /// ```
 #[derive(Debug)]
 pub struct Verified {

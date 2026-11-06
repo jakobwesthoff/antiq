@@ -8,7 +8,7 @@ use super::hashing::HashingReader;
 use super::read::read_package;
 use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
-use crate::fsx::tree::{TreeError, TreeRoot};
+use crate::filesystem::tree::{TreeError, TreeRoot};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::RelPath;
 use crate::select::Rules;
@@ -150,7 +150,7 @@ impl LstatRecord {
 /// ```compile_fail
 /// // The differences are only read: a caller that could edit them could
 /// // get a `Verified` for a folder that differs.
-/// fn forge(mut compared: antiq::pack::verify::Compared) {
+/// fn forge(mut compared: antiq::archive::verify::Compared) {
 ///     compared.differences.clear();
 /// }
 /// ```

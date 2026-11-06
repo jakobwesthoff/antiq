@@ -7,9 +7,9 @@
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::config::{ConfigDoc, ConfigError};
-use crate::fsx::atomic::{flush_dir, write_atomic};
-use crate::fsx::tree::TreeRoot;
-use crate::fsx::{FsxError, io_error};
+use crate::filesystem::atomic::{flush_dir, write_atomic};
+use crate::filesystem::tree::TreeRoot;
+use crate::filesystem::{FilesystemError, io_error};
 use crate::id::{IdSource, ObjectId};
 use crate::interact::{Choice, Interaction, Question};
 use crate::relpath::{Name, RelPath};
@@ -42,7 +42,7 @@ pub enum InitError {
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
-    Fsx(#[from] FsxError),
+    Filesystem(#[from] FilesystemError),
 }
 
 fn list(paths: &[PathBuf]) -> String {
@@ -641,7 +641,7 @@ mod tests {
         let tree = Tree::new();
         let error = plan(&tree.path("missing"), &[], MACHINE, true)
             .expect_err("the directory does not exist");
-        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(matches!(error, InitError::Filesystem(_)), "{error}");
     }
 
     #[test]
@@ -649,7 +649,7 @@ mod tests {
         let mut tree = Tree::new();
         let file = tree.file("f", "x");
         let error = plan(&file, &[], MACHINE, true).expect_err("a file is no directory");
-        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(matches!(error, InitError::Filesystem(_)), "{error}");
     }
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
         // would in a race.
         let file = tree.file(".antiq", "mine");
         let error = apply(&plan, &clock(), &SeqIds::new(1)).expect_err("the name is taken");
-        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(matches!(error, InitError::Filesystem(_)), "{error}");
         assert_eq!(fs::read_to_string(file).expect("still there"), "mine");
         let leftovers: Vec<_> = fs::read_dir(tree.root())
             .expect("the root can be listed")
@@ -834,7 +834,7 @@ mod tests {
     fn a_directory_that_cannot_be_written_is_an_error() {
         let mut tree = Tree::new();
         let directory = tree.dir("readonly");
-        let _guard = crate::fsx::RestoreModes(vec![directory.clone()]);
+        let _guard = crate::filesystem::RestoreModes(vec![directory.clone()]);
         fs::set_permissions(
             &directory,
             std::os::unix::fs::PermissionsExt::from_mode(0o500),
@@ -846,7 +846,7 @@ mod tests {
         );
         let plan = plan(&directory, &[], MACHINE, true).expect("planning only reads");
         let error = apply(&plan, &clock(), &SeqIds::new(1)).expect_err("nothing can be created");
-        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(matches!(error, InitError::Filesystem(_)), "{error}");
         assert_eq!(
             fs::read_dir(&directory).expect("listable").count(),
             0,
@@ -878,7 +878,7 @@ mod tests {
         }
         let error = apply(&plan_of(&tree, &[]), &clock(), &SeqIds::new(1))
             .expect_err("no free temporary name");
-        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(matches!(error, InitError::Filesystem(_)), "{error}");
         assert!(!tree.path(".antiq").exists());
     }
 

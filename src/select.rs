@@ -4,7 +4,7 @@
 
 //! Selecting pieces.
 
-use crate::fsx::tree::{DirEntry, TreeRoot};
+use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{RelPath, escape};
 use crate::tree::EntryKind;
 use crate::walk::{Call, Hooks, RealFs, is_out_of_descriptors};

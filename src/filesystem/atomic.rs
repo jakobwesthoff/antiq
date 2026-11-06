@@ -4,10 +4,10 @@
 
 //! Atomic file writes.
 //!
-//! Callers hold the run lock; see the module docs of [`crate::fsx`].
+//! Callers hold the run lock; see the module docs of [`crate::filesystem`].
 
 use super::tree::TreeRoot;
-use super::{FsxError, failure, io_error};
+use super::{FilesystemError, failure, io_error};
 use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
 use rustix::io::Errno;
@@ -44,16 +44,16 @@ fn real_fsync(file: &File) -> io::Result<()> {
 
 /// Makes the data of an open file durable. `path` names the file in the
 /// error.
-pub(crate) fn flush_file(file: &File, path: &Path) -> Result<(), FsxError> {
+pub(crate) fn flush_file(file: &File, path: &Path) -> Result<(), FilesystemError> {
     flush_with(file, &real_sync, &real_fsync).map_err(io_error("flush", path))
 }
 
 /// Makes the entries of a directory durable.
-pub(crate) fn flush_dir(dir: &Path) -> Result<(), FsxError> {
+pub(crate) fn flush_dir(dir: &Path) -> Result<(), FilesystemError> {
     flush_dir_with(dir, &real_sync, &real_fsync)
 }
 
-fn flush_dir_with(dir: &Path, sync: Flush<'_>, fsync: Flush<'_>) -> Result<(), FsxError> {
+fn flush_dir_with(dir: &Path, sync: Flush<'_>, fsync: Flush<'_>) -> Result<(), FilesystemError> {
     let handle = File::open(dir).map_err(io_error("flush directory", dir))?;
     flush_with(&handle, sync, fsync).map_err(io_error("flush directory", dir))
 }
@@ -68,20 +68,20 @@ fn flush_dir_with(dir: &Path, sync: Flush<'_>, fsync: Flush<'_>) -> Result<(), F
 /// error and in the record.
 pub(crate) trait Durable: Send + Sync {
     /// Makes the data of an open file durable.
-    fn file(&self, file: &File, path: &Path) -> Result<(), FsxError>;
+    fn file(&self, file: &File, path: &Path) -> Result<(), FilesystemError>;
     /// Makes the entries of an open directory durable.
-    fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError>;
+    fn dir(&self, dir: &File, path: &Path) -> Result<(), FilesystemError>;
 }
 
 /// The flushing of the platform ([`flush_file`]).
 pub(crate) struct RealDurable;
 
 impl Durable for RealDurable {
-    fn file(&self, file: &File, path: &Path) -> Result<(), FsxError> {
+    fn file(&self, file: &File, path: &Path) -> Result<(), FilesystemError> {
         flush_file(file, path)
     }
 
-    fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError> {
+    fn dir(&self, dir: &File, path: &Path) -> Result<(), FilesystemError> {
         flush_with(dir, &real_sync, &real_fsync).map_err(io_error("flush directory", path))
     }
 }
@@ -101,7 +101,7 @@ pub(crate) fn flush_dir_of(
     durable: &dyn Durable,
     root: &TreeRoot,
     dir: &RelPath,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     let handle = root
         .open_dir_file(dir)
         .map_err(failure("open directory", root, dir))?;
@@ -120,7 +120,7 @@ pub(crate) fn create_dir_chain(
     durable: &dyn Durable,
     base: &TreeRoot,
     chain: &RelPath,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     let mut parent = RelPath::root();
     for component in chain.components() {
         let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
@@ -143,7 +143,7 @@ fn ensure_dir(
     base: &TreeRoot,
     path: &RelPath,
     create: &dyn Fn(&RelPath) -> io::Result<()>,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     let not_a_directory = || {
         let source = io::Error::from(io::ErrorKind::NotADirectory);
         failure("create directory", base, path)(source)
@@ -175,7 +175,7 @@ fn ensure_dir(
 /// leaves the target as it was. When only the final directory flush
 /// fails, the target already holds the new bytes: the error then means
 /// "written, durability uncertain".
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FsxError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FilesystemError> {
     write_atomic_with(path, bytes, &real_sync, &real_fsync)
 }
 
@@ -184,7 +184,7 @@ pub(crate) fn write_atomic_with(
     bytes: &[u8],
     sync: Flush<'_>,
     fsync: Flush<'_>,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     let (dir, name) = split_target(path).map_err(io_error("write", path))?;
     let temp = dir.join(temp_name(name));
 
@@ -310,7 +310,7 @@ pub(crate) mod recording {
             handle: &File,
             fail: &Mutex<Option<std::ops::Range<usize>>>,
             same_kind: fn(&Flush) -> bool,
-        ) -> Result<(), FsxError> {
+        ) -> Result<(), FilesystemError> {
             if let Some(observer) = &*self.observer.lock().expect("no test panics holding it") {
                 observer(&flush, handle);
             }
@@ -322,7 +322,7 @@ pub(crate) mod recording {
             flushes.push(flush);
             let failing = fail.lock().expect("no test panics holding it").clone();
             if failing.is_some_and(|failing| failing.contains(&earlier)) {
-                return Err(FsxError::Io {
+                return Err(FilesystemError::Io {
                     action: "flush",
                     path: path.display().to_string(),
                     source: io::Error::from_raw_os_error(Errno::IO.raw_os_error()),
@@ -333,7 +333,7 @@ pub(crate) mod recording {
     }
 
     impl Durable for Recording {
-        fn file(&self, file: &File, path: &Path) -> Result<(), FsxError> {
+        fn file(&self, file: &File, path: &Path) -> Result<(), FilesystemError> {
             self.record(
                 Flush::File(path.to_path_buf()),
                 file,
@@ -342,7 +342,7 @@ pub(crate) mod recording {
             )
         }
 
-        fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError> {
+        fn dir(&self, dir: &File, path: &Path) -> Result<(), FilesystemError> {
             self.record(
                 Flush::Dir(path.to_path_buf()),
                 dir,
@@ -502,7 +502,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "flush",
                     ..
                 }
@@ -521,7 +521,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "flush",
                     ..
                 }
@@ -547,7 +547,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "flush directory",
                     ..
                 }
@@ -567,7 +567,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "create",
                     ..
                 }
@@ -582,7 +582,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "write",
                     ..
                 }
@@ -599,7 +599,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "replace",
                     ..
                 }
@@ -635,7 +635,7 @@ mod tests {
         let error = flush_dir(&tree.path("nope")).expect_err("a missing directory fails");
         assert!(matches!(
             error,
-            FsxError::Io {
+            FilesystemError::Io {
                 action: "flush directory",
                 ..
             }
@@ -745,7 +745,7 @@ mod tests {
         std::fs::remove_dir(tree.root()).expect("an empty root can go");
         let recording = Recording::new();
         let error = create_dir_chain(&recording, &base, &chain("a")).expect_err("no base");
-        assert!(matches!(error, FsxError::Io { .. }), "{error}");
+        assert!(matches!(error, FilesystemError::Io { .. }), "{error}");
     }
 
     #[test]
@@ -798,7 +798,7 @@ mod tests {
         };
         let error = ensure_dir(&base, &chain("a"), &racing).expect_err("a file");
         assert!(
-            matches!(&error, FsxError::Io { source, .. } if source.kind() == io::ErrorKind::NotADirectory),
+            matches!(&error, FilesystemError::Io { source, .. } if source.kind() == io::ErrorKind::NotADirectory),
             "{error}"
         );
     }
@@ -812,7 +812,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "create directory",
                     ..
                 }

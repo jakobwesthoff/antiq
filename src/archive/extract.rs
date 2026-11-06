@@ -11,7 +11,7 @@
 
 use super::names::{MemberKind, MemberName, check_members};
 use super::{PackError, TargetRules, Unpacked, zstd};
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{RelPath, escape};
 use crate::walk::MAX_DEPTH;
 use std::collections::HashMap;
@@ -664,9 +664,9 @@ fn gather<R: Read>(source: R) -> Result<Vec<MemberName>, PackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack::names;
-    use crate::pack::zstd::{ZstdSettings, encoder};
-    use crate::pack::{PackSettings, Packager, TarZstd};
+    use crate::archive::names;
+    use crate::archive::zstd::{ZstdSettings, encoder};
+    use crate::archive::{PackSettings, Packager, TarZstd};
     use crate::relpath::RelPath;
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;

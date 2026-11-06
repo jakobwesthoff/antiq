@@ -4,12 +4,12 @@
 
 //! Removing trees.
 //!
-//! Callers hold the run lock; see the module docs of [`crate::fsx`].
+//! Callers hold the run lock; see the module docs of [`crate::filesystem`].
 
 #![allow(dead_code, reason = "used again by F6")]
 
-use super::{FsxError, failure, io_error, shown};
-use crate::fsx::tree::{DirEntry, TreeRoot};
+use super::{FilesystemError, failure, io_error, shown};
+use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
 use crate::walk::MAX_DEPTH;
@@ -24,16 +24,16 @@ use std::path::Path;
 /// again, the top included; the directory holding the top is never
 /// changed. Nothing is followed across a device boundary: a top or a
 /// directory on another device than `root` fails with
-/// [`FsxError::ForeignDevice`], leaving what it holds untouched. So does the
+/// [`FilesystemError::ForeignDevice`], leaving what it holds untouched. So does the
 /// root of another mount on the same device, such as a bind mount, and so
 /// does a directory above the top that is a mount root. An entry that is
 /// gone already counts as removed. A directory more than
 /// [`MAX_DEPTH`] levels below the top is not entered: the removal fails
-/// with [`FsxError::TooDeep`] naming it, each level holding one directory
+/// with [`FilesystemError::TooDeep`] naming it, each level holding one directory
 /// open. The root path is refused as an
 /// `InvalidInput` failure, before anything is looked at: the tree cannot
 /// remove itself.
-pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
+pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
     remove_tree_with(
         root,
         path,
@@ -47,7 +47,7 @@ pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FsxErro
 /// Removes the entry at `path`, for a path short enough to open its
 /// parent. Entries below a piece in place go through [`remove_tree`] on
 /// the collection's root instead.
-pub(crate) fn remove_tree_at(path: &Path) -> Result<(), FsxError> {
+pub(crate) fn remove_tree_at(path: &Path) -> Result<(), FilesystemError> {
     let Some((parent, name)) = split_path(path) else {
         let source = io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -92,7 +92,7 @@ fn remove_tree_with(
     mount_root_of: MountRootOf<'_>,
     list: List<'_>,
     max_depth: usize,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     remove_tree_owned(
         root,
         path,
@@ -114,7 +114,7 @@ fn remove_tree_owned(
     list: List<'_>,
     max_depth: usize,
     owner_of: OwnerOf<'_>,
-) -> Result<(), FsxError> {
+) -> Result<(), FilesystemError> {
     // The root path names the tree itself, which has no directory above it
     // to take the last `remove_dir` from. Refusing here keeps the removal
     // from emptying the tree and failing only afterwards.
@@ -211,7 +211,7 @@ fn remove_tree_owned(
             return Err(foreign_device(directory, &name));
         }
         if frames.len() > max_depth {
-            return Err(FsxError::TooDeep {
+            return Err(FilesystemError::TooDeep {
                 path: shown(directory, &name),
                 limit: max_depth,
             });
@@ -227,9 +227,9 @@ fn remove_tree_owned(
 
 /// The refusal for the entry at `path`; the root of the original tree
 /// is named ".".
-fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
+fn locked(root: &TreeRoot, path: &RelPath) -> FilesystemError {
     let shown = shown(root, path);
-    FsxError::Locked {
+    FilesystemError::Locked {
         path: if shown.is_empty() { ".".into() } else { shown },
     }
 }
@@ -237,7 +237,7 @@ fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
 /// Refuses the removal when the directory that holds `path` carries a
 /// flag or cannot be written by the user, whoever owns it: the entry is
 /// removed from it, and antiq changes nothing outside the tree.
-fn refuse_locked_holder(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
+fn refuse_locked_holder(root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
     let mut holder = RelPath::root();
     let mut names: Vec<&[u8]> = path.components().collect();
     names.pop();
@@ -269,10 +269,10 @@ struct Scan<'a> {
 
 impl Scan<'_> {
     /// Reads the tree below the directory `path` of `root` without
-    /// changing it, and refuses it with [`FsxError::Locked`] when an entry
+    /// changing it, and refuses it with [`FilesystemError::Locked`] when an entry
     /// carries a flag, or is a directory that another user owns and this
-    /// one cannot write, with [`FsxError::ForeignDevice`] and
-    /// [`FsxError::TooDeep`] as the removal would. A directory that denies
+    /// one cannot write, with [`FilesystemError::ForeignDevice`] and
+    /// [`FilesystemError::TooDeep`] as the removal would. A directory that denies
     /// access is given owner access to be read; its recorded mode comes
     /// back when the scan leaves it, also on a refusal.
     fn refuse_locked(
@@ -280,7 +280,7 @@ impl Scan<'_> {
         root: &TreeRoot,
         path: &RelPath,
         top: &TreeEntry,
-    ) -> Result<(), FsxError> {
+    ) -> Result<(), FilesystemError> {
         let mut frames: Vec<Frame> = Vec::new();
         let result = self.descend(root, path, top, &mut frames);
         // Only a refusal leaves frames open, and its error is the one worth
@@ -298,7 +298,7 @@ impl Scan<'_> {
         path: &RelPath,
         top: &TreeEntry,
         frames: &mut Vec<Frame>,
-    ) -> Result<(), FsxError> {
+    ) -> Result<(), FilesystemError> {
         self.check_directory(root, path, top)?;
         frames.extend(open_frame(
             root,
@@ -327,7 +327,7 @@ impl Scan<'_> {
             }
             self.check_directory(directory, &name, &stat)?;
             if frames.len() > self.max_depth {
-                return Err(FsxError::TooDeep {
+                return Err(FilesystemError::TooDeep {
                     path: shown(directory, &name),
                     limit: self.max_depth,
                 });
@@ -346,7 +346,7 @@ impl Scan<'_> {
         holder: &TreeRoot,
         name: &RelPath,
         mode: u32,
-    ) -> Result<Option<Frame>, FsxError> {
+    ) -> Result<Option<Frame>, FilesystemError> {
         let opened = open_frame(holder, name, mode, self.mount_root_of, self.list);
         if opened.is_err() {
             let recorded = mode & 0o7777;
@@ -367,7 +367,7 @@ impl Scan<'_> {
         holder: &TreeRoot,
         name: &RelPath,
         stat: &TreeEntry,
-    ) -> Result<(), FsxError> {
+    ) -> Result<(), FilesystemError> {
         if (self.device_of)(stat) != self.reference || (self.mount_root_of)(stat) {
             return Err(foreign_device(holder, name));
         }
@@ -387,7 +387,7 @@ impl Scan<'_> {
 }
 
 /// Puts the mode `frame` recorded back, if the scan changed it.
-fn restore_mode(holder: &TreeRoot, frame: &Frame) -> Result<(), FsxError> {
+fn restore_mode(holder: &TreeRoot, frame: &Frame) -> Result<(), FilesystemError> {
     let recorded = frame.mode & 0o7777;
     let current = holder
         .lstat(&frame.name)
@@ -422,14 +422,14 @@ struct Frame {
 /// may have been a mount root whose flag the `lstat` could not read, as on
 /// macOS for a directory that cannot be searched. The flag is read again
 /// once the directory is open; a mount root gets its mode back and fails as
-/// [`FsxError::ForeignDevice`], with nothing inside it listed.
+/// [`FilesystemError::ForeignDevice`], with nothing inside it listed.
 fn open_frame(
     parent: &TreeRoot,
     name: &RelPath,
     mode: u32,
     mount_root_of: MountRootOf<'_>,
     list: List<'_>,
-) -> Result<Option<Frame>, FsxError> {
+) -> Result<Option<Frame>, FilesystemError> {
     let granted_to_open = std::cell::Cell::new(false);
     let grant = &mut || grant_owner(parent, name, mode);
     let grant_to_open = &mut || {
@@ -507,8 +507,8 @@ fn skip_if_missing<T>(result: io::Result<T>) -> io::Result<Option<T>> {
     }
 }
 
-fn foreign_device(root: &TreeRoot, path: &RelPath) -> FsxError {
-    FsxError::ForeignDevice {
+fn foreign_device(root: &TreeRoot, path: &RelPath) -> FilesystemError {
+    FilesystemError::ForeignDevice {
         path: shown(root, path),
     }
 }
@@ -516,8 +516,8 @@ fn foreign_device(root: &TreeRoot, path: &RelPath) -> FsxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsx::RestoreModes;
-    use crate::fsx::tree::TreeRoot;
+    use crate::filesystem::RestoreModes;
+    use crate::filesystem::tree::TreeRoot;
     use crate::relpath::Name;
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;
@@ -674,7 +674,7 @@ mod tests {
         )
         .expect_err("stops");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
         );
         assert!(tree.path("t/mnt/file").exists());
@@ -695,7 +695,7 @@ mod tests {
         )
         .expect_err("refused");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t"),
             "{error}"
         );
         assert!(tree.path("t/a").exists());
@@ -718,7 +718,7 @@ mod tests {
         )
         .expect_err("stops");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
         );
         assert!(tree.path("t/mnt/file").exists());
@@ -740,7 +740,7 @@ mod tests {
         )
         .expect_err("refused");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "a"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "a"),
             "{error}"
         );
         assert!(tree.path("a/b/t/f").exists());
@@ -762,7 +762,7 @@ mod tests {
         )
         .expect_err("refused");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t"),
             "{error}"
         );
         assert!(tree.path("t/a").exists());
@@ -799,7 +799,7 @@ mod tests {
         )
         .expect_err("refused");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t/locked"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t/locked"),
             "{error}"
         );
         assert_eq!(mode_of(&locked), 0o000);
@@ -921,7 +921,7 @@ mod tests {
         let error = remove_tree(&root, &path("t")).expect_err("too deep");
         let first_past = chain_path(513).to_string();
         assert!(
-            matches!(&error, FsxError::TooDeep { path, limit } if *path == first_past && *limit == 512),
+            matches!(&error, FilesystemError::TooDeep { path, limit } if *path == first_past && *limit == 512),
             "{error}"
         );
         assert!(
@@ -940,7 +940,7 @@ mod tests {
             .expect_err("deep");
         let first_past = chain_path(3).to_string();
         assert!(
-            matches!(&error, FsxError::TooDeep { path, limit } if *path == first_past && *limit == 2),
+            matches!(&error, FilesystemError::TooDeep { path, limit } if *path == first_past && *limit == 2),
             "{error}"
         );
         assert!(
@@ -970,7 +970,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                FsxError::Io {
+                FilesystemError::Io {
                     action: "remove",
                     ..
                 }
@@ -997,7 +997,7 @@ mod tests {
         )
         .expect_err("fails");
         assert!(
-            matches!(&error, FsxError::Io { action: "list", path, .. } if path == "t"),
+            matches!(&error, FilesystemError::Io { action: "list", path, .. } if path == "t"),
             "{error}"
         );
         assert!(tree.path("t/a").exists());
@@ -1168,9 +1168,9 @@ mod tests {
         out
     }
 
-    fn assert_locked(error: FsxError, expected: &str) {
+    fn assert_locked(error: FilesystemError, expected: &str) {
         assert!(
-            matches!(&error, FsxError::Locked { path } if path == expected),
+            matches!(&error, FilesystemError::Locked { path } if path == expected),
             "{error}"
         );
     }
@@ -1347,7 +1347,7 @@ mod tests {
         )
         .expect_err("stops");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
         );
         assert!(!tree.path("t/a").exists(), "the earlier sibling went");
@@ -1370,7 +1370,7 @@ mod tests {
         )
         .expect_err("stops");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
         );
         assert!(tree.path("t/mnt/file").exists());
@@ -1403,7 +1403,7 @@ mod tests {
         )
         .expect_err("stops");
         assert!(
-            matches!(&error, FsxError::TooDeep { path, limit: 1 } if path == "t/a/b"),
+            matches!(&error, FilesystemError::TooDeep { path, limit: 1 } if path == "t/a/b"),
             "{error}"
         );
         assert!(tree.path("t/a/b/f").exists());

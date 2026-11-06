@@ -4,7 +4,7 @@
 
 //! The idle verdict of a piece.
 
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::pin::{self, PinError};
 use crate::relpath::RelPath;
 use crate::tree::{Class, EntryKind, PieceTree};

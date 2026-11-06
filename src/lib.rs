@@ -10,11 +10,13 @@
 // paths in both crates.
 extern crate self as antiq;
 
+pub mod archive;
 pub mod clock;
 pub mod collection;
+pub mod commands;
 pub mod config;
 pub mod error;
-pub mod fsx;
+pub mod filesystem;
 pub mod id;
 pub mod idle;
 pub mod interact;
@@ -22,8 +24,6 @@ pub mod listing;
 pub mod lock;
 pub mod machine;
 pub mod markers;
-pub mod ops;
-pub mod pack;
 pub mod pin;
 pub mod plan;
 pub mod query;

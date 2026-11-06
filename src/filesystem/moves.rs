@@ -4,12 +4,12 @@
 
 //! Moving directories.
 //!
-//! Callers hold the run lock; see the module docs of [`crate::fsx`].
+//! Callers hold the run lock; see the module docs of [`crate::filesystem`].
 
 #![allow(dead_code, reason = "used again by F6")]
 
 use super::tree::TreeRoot;
-use super::{FsxError, failure, shown};
+use super::{FilesystemError, failure, shown};
 use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
 use std::io;
@@ -20,7 +20,7 @@ use std::io;
 pub(crate) struct Moved {
     /// Set when the directory arrived but its permissions could not be put
     /// back as they were. The move itself stands.
-    pub mode_restore_error: Option<FsxError>,
+    pub mode_restore_error: Option<FilesystemError>,
 }
 
 type Rename<'a> = &'a dyn Fn(&TreeRoot, &RelPath, &TreeRoot, &RelPath) -> io::Result<()>;
@@ -40,7 +40,7 @@ pub(crate) fn move_dir(
     from: &RelPath,
     to_root: &TreeRoot,
     to: &RelPath,
-) -> Result<Moved, FsxError> {
+) -> Result<Moved, FilesystemError> {
     move_dir_with(
         from_root,
         from,
@@ -58,7 +58,7 @@ fn move_dir_with(
     to: &RelPath,
     rename: Rename<'_>,
     restore: Restore<'_>,
-) -> Result<Moved, FsxError> {
+) -> Result<Moved, FilesystemError> {
     // A root path has no directory above it to be renamed in or out of;
     // refusing before the mode is touched leaves nothing to restore.
     for (root, path) in [(from_root, from), (to_root, to)] {
@@ -102,7 +102,7 @@ fn move_dir_with(
             let _ = restore(from_root, from, recorded);
         }
         return Err(if error.kind() == io::ErrorKind::CrossesDevices {
-            FsxError::CrossesDevices {
+            FilesystemError::CrossesDevices {
                 from: shown(from_root, from),
                 to: shown(to_root, to),
             }
@@ -123,9 +123,9 @@ fn move_dir_with(
 
 /// The refusal for the entry at `path`; the root of the original tree is
 /// named ".".
-fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
+fn locked(root: &TreeRoot, path: &RelPath) -> FilesystemError {
     let shown = shown(root, path);
-    FsxError::Locked {
+    FilesystemError::Locked {
         path: if shown.is_empty() { ".".into() } else { shown },
     }
 }
@@ -133,7 +133,7 @@ fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
 /// Refuses the move when the directory that holds `path` carries a flag or
 /// cannot be written by the user, whoever owns it: the entry is renamed
 /// in or out of it, and antiq changes nothing outside the moved tree.
-fn refuse_locked_parent(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
+fn refuse_locked_parent(root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
     let mut parent = RelPath::root();
     let mut names: Vec<&[u8]> = path.components().collect();
     names.pop();
@@ -159,7 +159,7 @@ fn refuse_locked_parent(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsx::RestoreModes;
+    use crate::filesystem::RestoreModes;
     use crate::relpath::Name;
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;
@@ -253,7 +253,7 @@ mod tests {
         let root = root_of(&tree);
         let error = move_dir(&root, &path("a/ro"), &root, &path("nowhere/ro")).expect_err("fails");
         assert!(
-            matches!(error, FsxError::Io { action: "move", .. }),
+            matches!(error, FilesystemError::Io { action: "move", .. }),
             "{error}"
         );
         assert!(error.to_string().contains("a/ro"), "{error}");
@@ -277,7 +277,7 @@ mod tests {
             let error =
                 move_dir(&root, &path("a/ro"), &root, &path("b/taken")).expect_err("refused");
             assert!(
-                matches!(error, FsxError::Io { action: "move", .. }),
+                matches!(error, FilesystemError::Io { action: "move", .. }),
                 "{error}"
             );
             assert_eq!(mode_of(&tree.path("a/ro")), 0o555);
@@ -301,7 +301,7 @@ mod tests {
         let error = move_dir_with(&root, &path("a/ro"), &root, &path("b/ro"), &across, &real)
             .expect_err("fails");
         assert!(
-            matches!(&error, FsxError::CrossesDevices { from, to } if from == "a/ro" && to == "b/ro"),
+            matches!(&error, FilesystemError::CrossesDevices { from, to } if from == "a/ro" && to == "b/ro"),
             "{error}"
         );
         assert_eq!(mode_of(&tree.path("a/ro")), 0o555);
@@ -337,7 +337,10 @@ mod tests {
         let root = root_of(&tree);
         for source in ["l", "f", "missing"] {
             let error = move_dir(&root, &path(source), &root, &path("b/x")).expect_err("refused");
-            assert!(matches!(error, FsxError::Io { .. }), "{source}: {error}");
+            assert!(
+                matches!(error, FilesystemError::Io { .. }),
+                "{source}: {error}"
+            );
         }
         assert!(tree.path("outside/keep").exists());
         assert!(!tree.path("b/x").exists());
@@ -351,7 +354,7 @@ mod tests {
         from: &RelPath,
         to_root: &TreeRoot,
         to: &RelPath,
-    ) -> (Result<Moved, FsxError>, usize) {
+    ) -> (Result<Moved, FilesystemError>, usize) {
         let restores = std::cell::Cell::new(0);
         let real_rename =
             |from_root: &TreeRoot, from: &RelPath, to_root: &TreeRoot, to: &RelPath| {
@@ -378,7 +381,7 @@ mod tests {
             restores_during(&from_root, &RelPath::root(), &to_root, &path("moved"));
         let error = result.expect_err("refused");
         assert!(
-            matches!(error, FsxError::Io { action: "move", .. }),
+            matches!(error, FilesystemError::Io { action: "move", .. }),
             "{error}"
         );
         assert_eq!(restores, 0, "the mode was changed before the refusal");
@@ -395,7 +398,7 @@ mod tests {
         let (result, restores) = restores_during(&root, &path("a/ro"), &root, &RelPath::root());
         let error = result.expect_err("refused");
         assert!(
-            matches!(error, FsxError::Io { action: "move", .. }),
+            matches!(error, FilesystemError::Io { action: "move", .. }),
             "{error}"
         );
         assert_eq!(restores, 0, "the mode was changed before the refusal");
@@ -422,9 +425,9 @@ mod tests {
         assert!(root.lstat(&piece).is_err());
     }
 
-    fn assert_locked(result: Result<Moved, FsxError>, expected: &str) {
+    fn assert_locked(result: Result<Moved, FilesystemError>, expected: &str) {
         match result {
-            Err(FsxError::Locked { path }) => assert_eq!(path, expected),
+            Err(FilesystemError::Locked { path }) => assert_eq!(path, expected),
             other => panic!("expected a locked refusal, got {other:?}"),
         }
     }

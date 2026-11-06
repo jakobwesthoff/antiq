@@ -75,7 +75,7 @@ struct State {
 /// ```compile_fail
 /// // `Lease` is not `Send`: it cannot be moved to another thread.
 /// fn is_send<T: Send>() {}
-/// is_send::<antiq::pack::pool::Lease<'static>>();
+/// is_send::<antiq::archive::pool::Lease<'static>>();
 /// ```
 #[derive(Debug)]
 pub struct Lease<'a> {

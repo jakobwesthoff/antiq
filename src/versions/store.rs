@@ -10,9 +10,9 @@
 use super::VersionsError;
 use super::names::{VersionFile, VersionFileNames, parse_file_name};
 use super::stamp::{MAX_COUNTER, Stamp};
-use crate::fsx::FsxError;
-use crate::fsx::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of, named};
-use crate::fsx::tree::{DirEntry, TreeRoot};
+use crate::filesystem::FilesystemError;
+use crate::filesystem::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of, named};
+use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
 use jiff::Timestamp;
@@ -634,7 +634,7 @@ enum Failure {
     /// Before the file was renamed: it is where it was.
     Before(VersionsError),
     /// After the rename: the file arrived, and making it durable failed.
-    After(FsxError),
+    After(FilesystemError),
 }
 
 /// Moves one file: flush it where it lies, rename it without replacing,
@@ -785,7 +785,7 @@ fn parent_of(path: &RelPath) -> RelPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsx::RestoreModes;
+    use crate::filesystem::RestoreModes;
     use crate::testing::tree::Tree;
     use crate::versions::names::file_name;
 
@@ -1259,7 +1259,7 @@ mod tests {
     // Operations
     // ---------------------------------------------------------
 
-    use crate::fsx::atomic::recording::{Flush, Recording};
+    use crate::filesystem::atomic::recording::{Flush, Recording};
     use std::sync::{Arc, Mutex};
 
     const STAMP: &str = "2026-11-04T090211";
@@ -1475,7 +1475,7 @@ mod tests {
     }
 
     fn undone(env: &Env, error: &VersionsError) {
-        assert!(matches!(error, VersionsError::Fsx(_)), "{error:?}");
+        assert!(matches!(error, VersionsError::Filesystem(_)), "{error:?}");
         assert!(env.stored("p").is_empty(), "{:?}", env.stored("p"));
         assert_eq!(env.staged(), all_three());
     }
@@ -1999,7 +1999,7 @@ mod tests {
         let recording = Recording::new();
         recording.fail_files_at(0);
         let error = env.move_back(&recording, "p").expect_err("fails");
-        assert!(matches!(error, VersionsError::Fsx(_)), "{error:?}");
+        assert!(matches!(error, VersionsError::Filesystem(_)), "{error:?}");
         assert_eq!(env.stored("p"), all_three());
     }
 
@@ -2191,7 +2191,7 @@ mod tests {
         recording.fail_dirs_at(0);
         let error =
             remove_empty_chain_with(&recording, &env.pieces(), &path("a")).expect_err("fails");
-        assert!(matches!(error, VersionsError::Fsx(_)), "{error:?}");
+        assert!(matches!(error, VersionsError::Filesystem(_)), "{error:?}");
     }
 
     // ---------------------------------------------------------

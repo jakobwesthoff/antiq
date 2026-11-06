@@ -10,7 +10,7 @@
 
 use super::hashing::HashingReader;
 use super::{PackError, PackNote};
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, PieceTree, TreeEntry};

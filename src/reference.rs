@@ -6,7 +6,7 @@
 
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::query::Query;
 use crate::relpath::{RelPath, RelPathError, below_root, escape};
 use crate::select::Selection;
@@ -510,7 +510,7 @@ mod tests {
     // Piece references
     // =====================================================
 
-    use crate::fsx::RestoreModes;
+    use crate::filesystem::RestoreModes;
     use crate::select::{Rules, select};
     use crate::versions::names::{VersionFile, file_name};
     use crate::versions::stamp::Stamp;

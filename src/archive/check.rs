@@ -210,8 +210,8 @@ pub fn check_members_against_listing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::verify::Field;
     use crate::listing::{LinkTarget, ListingType};
-    use crate::pack::verify::Field;
     use crate::relpath::RelPath;
     use crate::testing::package::pack_piece;
     use crate::testing::tree::Tree;

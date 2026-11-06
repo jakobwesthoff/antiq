@@ -40,10 +40,10 @@ pub enum VersionsError {
     StoredNotDurable {
         piece: String,
         stamp: String,
-        source: crate::fsx::FsxError,
+        source: crate::filesystem::FilesystemError,
     },
     #[error(transparent)]
-    Fsx(#[from] crate::fsx::FsxError),
+    Filesystem(#[from] crate::filesystem::FilesystemError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,

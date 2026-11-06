@@ -8,8 +8,8 @@
 // I23) are the callers; until they land the library has none.
 #![allow(dead_code)]
 
-use super::{FsxError, io_error};
-use crate::fsx::tree::TreeRoot;
+use super::{FilesystemError, io_error};
+use crate::filesystem::tree::TreeRoot;
 use crate::relpath::RelPath;
 use std::io;
 #[cfg(target_os = "macos")]
@@ -19,14 +19,14 @@ use std::time::SystemTime;
 
 /// The device a directory lives on, in the form `TreeEntry::device` has,
 /// so the two can be compared. `path` must be a readable directory.
-pub(crate) fn device_of(path: &Path) -> Result<u64, FsxError> {
+pub(crate) fn device_of(path: &Path) -> Result<u64, FilesystemError> {
     identity_of(path)
         .map(|(device, _)| device)
         .map_err(io_error("stat", path))
 }
 
 /// Whether another filesystem is mounted at `path`.
-pub(crate) fn is_mount_point(path: &Path) -> Result<bool, FsxError> {
+pub(crate) fn is_mount_point(path: &Path) -> Result<bool, FilesystemError> {
     is_mount_point_with(path, &identity_of, &named_by_platform)
 }
 
@@ -47,7 +47,7 @@ fn is_mount_point_with(
     path: &Path,
     identity: &dyn Fn(&Path) -> io::Result<Identity>,
     by_platform: &dyn Fn(&Path) -> io::Result<bool>,
-) -> Result<bool, FsxError> {
+) -> Result<bool, FilesystemError> {
     let own = identity(path).map_err(io_error("stat", path))?;
     let parent_path = path.join("..");
     let parent = identity(&parent_path).map_err(io_error("stat", &parent_path))?;
@@ -116,7 +116,7 @@ fn kind_from_magic(magic: u32) -> FsKind {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FsxError> {
+pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FilesystemError> {
     let stat = rustix::fs::statfs(path).map_err(|errno| io_error("stat", path)(errno.into()))?;
     let name: Vec<u8> = stat
         .f_fstypename
@@ -128,7 +128,7 @@ pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FsxError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FsxError> {
+pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FilesystemError> {
     let stat = rustix::fs::statfs(path).map_err(|errno| io_error("stat", path)(errno.into()))?;
     // Every magic number of `kind_from_magic` fits 32 bits, and the
     // field's own width differs between platforms.
@@ -137,7 +137,7 @@ pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FsxError> {
 
 /// The birth time of the entry itself in nanoseconds since the epoch
 /// (negative before it), or `None` where the filesystem keeps none.
-pub(crate) fn birth_time(path: &Path) -> Result<Option<i128>, FsxError> {
+pub(crate) fn birth_time(path: &Path) -> Result<Option<i128>, FilesystemError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error("stat", path))?;
     birth_from(metadata.created()).map_err(io_error("stat", path))
 }
@@ -323,7 +323,7 @@ mod tests {
         if !privileged() {
             return;
         }
-        use crate::fsx::{FsxError, remove::remove_tree};
+        use crate::filesystem::{FilesystemError, remove::remove_tree};
         let mut tree = Tree::new();
         tree.file("src/precious", "x");
         tree.file("p/before", "y");
@@ -333,7 +333,7 @@ mod tests {
         let root = TreeRoot::open(tree.root()).expect("opens");
         let error = remove_tree(&root, &RelPath::parse("p").expect("valid")).expect_err("stops");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "p/mnt"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "p/mnt"),
             "{error}"
         );
         assert!(tree.path("src/precious").exists(), "the source was emptied");
@@ -383,7 +383,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_piece_below_a_bind_mount_is_a_mount_point_and_is_not_removed() {
-        use crate::fsx::{FsxError, remove::remove_tree};
+        use crate::filesystem::{FilesystemError, remove::remove_tree};
         use crate::select::Rules;
         use crate::tree::Problem;
         use crate::walk::walk_piece;
@@ -408,7 +408,7 @@ mod tests {
         );
         let error = remove_tree(&root, &piece).expect_err("refused");
         assert!(
-            matches!(&error, FsxError::ForeignDevice { path } if path == "proj"),
+            matches!(&error, FilesystemError::ForeignDevice { path } if path == "proj"),
             "{error}"
         );
         assert!(

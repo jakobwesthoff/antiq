@@ -5,7 +5,7 @@
 //! Name checks for extraction.
 
 use super::TargetRules;
-use crate::fsx::tree::TreeRoot;
+use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
 use std::borrow::Cow;
 use std::collections::HashMap;

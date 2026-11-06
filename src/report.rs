@@ -5,8 +5,8 @@
 //! What every command reports back.
 
 use crate::collection::Collection;
-use crate::fsx::FsxError;
-use crate::fsx::device::{self, FsKind};
+use crate::filesystem::FilesystemError;
+use crate::filesystem::device::{self, FsKind};
 use crate::lock::{self, Holder};
 use serde::Serialize;
 
@@ -47,7 +47,7 @@ pub fn notes(collection: &Collection) -> Vec<Warning> {
 /// collection on a mount it cannot create.
 pub(crate) fn notes_with(
     collection: &Collection,
-    fs_kind: Result<FsKind, FsxError>,
+    fs_kind: Result<FsKind, FilesystemError>,
 ) -> Vec<Warning> {
     let mut warnings = setting_notes_with(collection, fs_kind);
     // The lock is only read: taking it would make the caller a run of its own.
@@ -69,7 +69,7 @@ pub fn setting_notes(collection: &Collection) -> Vec<Warning> {
 /// [`setting_notes`] with the filesystem kind given.
 pub(crate) fn setting_notes_with(
     collection: &Collection,
-    fs_kind: Result<FsKind, FsxError>,
+    fs_kind: Result<FsKind, FilesystemError>,
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let mut unknown_keys = collection.config().unknown_collection_keys.clone();
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn a_filesystem_that_cannot_be_told_is_a_note() {
         let (_temp, collection) = collection_with("");
-        let failed = Err(FsxError::Io {
+        let failed = Err(FilesystemError::Io {
             action: "stat",
             path: "/work".into(),
             source: std::io::Error::other("refused by the test"),

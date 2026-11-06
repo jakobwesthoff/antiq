@@ -6,7 +6,7 @@
 
 #![allow(dead_code, reason = "used again by C4 and C6")]
 
-use super::{FsxError, io_error};
+use super::{FilesystemError, io_error};
 use std::error::Error;
 use std::io;
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::sync::{Mutex, PoisonError};
 
 /// The bytes an unprivileged process can still write on the filesystem
 /// holding `path`.
-pub(crate) fn available_space(path: &Path) -> Result<u64, FsxError> {
+pub(crate) fn available_space(path: &Path) -> Result<u64, FilesystemError> {
     let stat = rustix::fs::statvfs(path).map_err(|errno| io_error("stat", path)(errno.into()))?;
     Ok(bytes_available(stat.f_bavail, stat.f_frsize))
 }
@@ -25,7 +25,7 @@ pub(crate) enum ReserveError {
     #[error("{needed} bytes are needed and {available} are free")]
     Short { needed: u64, available: u64 },
     #[error(transparent)]
-    Free(#[from] FsxError),
+    Free(#[from] FilesystemError),
 }
 
 /// A claim on free space that a piece holds until its output is gone.
@@ -65,7 +65,7 @@ impl SpaceLedger {
     pub(crate) fn try_reserve(
         &self,
         bytes: u64,
-        free: impl FnOnce() -> Result<u64, FsxError>,
+        free: impl FnOnce() -> Result<u64, FilesystemError>,
     ) -> Result<Reservation<'_>, ReserveError> {
         // The lock is held across the reading: a piece that reads while
         // another still holds its claim must not compare with a reading
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn enospc_below_a_wrapper_is_found() {
-        let error = Wrapper(Box::new(FsxError::Io {
+        let error = Wrapper(Box::new(FilesystemError::Io {
             action: "write",
             path: "x".to_string(),
             source: enospc(),
