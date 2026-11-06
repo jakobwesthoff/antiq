@@ -384,6 +384,13 @@ withdrawn. One user decision (AskUserQuestion in chat):
   the marker (never with `--if-reachable`). The marker also records
   the collection path.
 
+Adversarial review round 3 of the concept (2026-11-04; ledger in the
+logbook, round 3 section): 44 findings (S16-S18, H30-H36, O34-O45,
+F35-F47), all settled, none for the user. By the agreed rule (repeat
+until a round brings no question for the user) the concept is clean.
+Next: an opus agent writes the detailed rework plan, then an
+adversarial review of the plan, then conductor implementation.
+
 ## Presented
 
 - The grep study was presented in round 8

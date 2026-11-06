@@ -20,7 +20,7 @@ them back, and mirrors the whole collection to one backup target.
   inside versions; in the mirror of live folders they arrive as
   separate files.
 - Everything antiq writes can be understood and used without antiq:
-  archive files are `tar.zst`, and a listing is a checksum file that
+  archive files are `tar.zst`, and a listing is a checksum list that
   `shasum -c` reads once `zstd` has decompressed it. Inside an unpacked
   folder: `zstd -dc <listing> | shasum -a 256 -c -`.
 - There is no multi-machine support, no version conflicts, no claims,
@@ -45,6 +45,9 @@ them back, and mirrors the whole collection to one backup target.
   spelling). Stamp and piece path together name a version exactly.
 - **Archive file:** the `.tar.zst` of a version. The word appears only
   where the files on disk matter.
+- **Listing:** the `.sha256.zst` of a version (see "Listing format").
+- **Checksum file:** the `.tar.zst.sha256` of a version.
+- **Sidecars:** the listing and the checksum file together.
 - **Pinned:** a live piece with a `.antiq-pin` file at its top, never
   archived.
 - **Control files:** `.antiqignore` and `.antiq-timeless` (rule files,
@@ -83,6 +86,11 @@ where noted.
 - **Unreadable entries:** a piece with an entry the walk cannot read is
   never archived; `status` names the first such entry. The depth limit
   of 512 levels and the open-file rules of spec "Walks" apply.
+- **Locked entries:** a piece with an entry that carries an immutable or
+  append-only flag (macOS `st_flags` UF/SF_IMMUTABLE, UF/SF_APPEND;
+  Linux `statx` STATX_ATTR_IMMUTABLE/APPEND), or whose parent directory
+  is not writable, is never archived, since it could not be moved or
+  deleted; `status` names it ("locked: <path>").
 - **Ignored paths:** what the `ignore` lines of the config and the
   `.antiqignore` files match is not packed, not listed and does not
   count for the idle check; `archive` deletes it with the folder. The
@@ -105,7 +113,10 @@ where noted.
   limit, since `archive` deletes them with the folder. Only packing,
   the listing and the idle check leave them out.
 - **Control files** (at a piece's top for the markers) never count as
-  activity and never make a piece non-empty. The two rule files are
+  activity and never make a piece non-empty. At a piece's top a regular
+  file is a marker (for `.antiq-pin` also a symlink, as built); any
+  other entry with a marker's name makes the piece refused ("<name> is
+  not a file"); it is never packed silently and never deleted unpacked. The two rule files are
   packed; `.antiq-restored` is not packed and is deleted with the
   folder; `.antiq-pin` never reaches packing, since a pinned piece is
   not archived.
@@ -156,9 +167,14 @@ where noted.
   boundary) so the longest file name stays within 200 bytes.
 - Versions order by time, then by counter as a number; no counter
   counts as 1.
-- `.tar.zst.sha256` holds the SHA-256 of the archive file in
-  `shasum -c` format. `.sha256.zst` is the listing (below),
-  zstd-compressed.
+- The checksum file holds one line, `<hash>  <archive file name>`, with
+  the bare file name, so `shasum -a 256 -c <checksum file>` run in the
+  store folder checks the archive. The listing is described below.
+- Every directory antiq creates (store folders under `pieces/`, parents
+  above an unearth target, the `<stamp>/` chains in `trash/` and
+  `doomed/`) is flushed together with its parent before any step relies
+  on it, in particular before `archive` deletes a folder and before
+  `unearth` deletes a version.
 - **A version exists if and only if its `.tar.zst` exists.** The
   `.tar.zst` is moved in last and deleted first.
 - **Damage.** antiq's own crashes never leave the states below behind
@@ -170,13 +186,18 @@ where noted.
     `.tar.zst`. `list` marks it, `grep` skips it, `status` reports it,
     and `forget` removes it.
   - *Damaged version:* a `.tar.zst` whose listing or checksum file is
-    missing, or whose size differs from the `archive-bytes` its listing
-    records (archive files never change once stored). `list` and
-    `status` report it; `rebuild` repairs a missing sidecar; `fork` can
+    missing; or whose size differs from the `archive-bytes` its listing
+    records (archive files never change once stored); or whose listing
+    does not decode to its end (zstd checksum) or lacks a parsable
+    `piece`, `archived` or `archive-bytes` line; or whose checksum file
+    is not exactly one checksum line for the archive's name. `status`
+    reports it; `list` marks what it sees in the listing's head;
+    `rebuild` repairs a missing sidecar; `fork` can
     still extract it, with a warning and without the comparison against
     the listing; `unearth` refuses it.
   - `push` refuses while either kind exists, naming the exact `forget`
-    or `rebuild` command, since the mirror would otherwise delete or
+    or `rebuild` command (it decodes every listing in full for that, in
+    parallel like `grep`, and so does `status`), since the mirror would otherwise delete or
     overwrite the target's good copy. A scheduled push stops there
     until the user acts.
   - A change of an archive file that keeps its size is not detected
@@ -188,10 +209,11 @@ where noted.
 
 ## Listing format
 
-A listing is a SHA-256 checksum file with antiq's metadata in comment
-lines. `shasum -a 256 -c` and GNU `sha256sum -c` both skip lines that
-start with `#` (verified 2026-11-04, macOS shasum 6.04 and GNU coreutils
-9.12, also with `--strict`). A comment after the path on the same line
+A listing is a SHA-256 checksum list, zstd-compressed, with antiq's
+metadata in comment lines. `shasum -a 256 -c` and GNU `sha256sum -c`
+both skip lines that start with `#` (verified 2026-11-04 with
+`/usr/bin/shasum` 6.02, Homebrew shasum 6.04 and GNU coreutils 9.12,
+also with `--strict`). A comment after the path on the same line
 does not work: both tools read it as part of the file name.
 
 ```text
@@ -241,6 +263,10 @@ does not work: both tools read it as part of the file name.
   are written `\\`, `\n`, `\t` and `\r`.
 - A test listing with such names passes `shasum -a 256 --strict -c` and
   `sha256sum --strict -c` with exit 0.
+- An archive unpacks to one top-level directory named after the folder
+  when it was packed; the listing has no line for it, and its paths are
+  relative to it. The hand check therefore runs inside that directory,
+  for example after `tar --zstd -xf <archive file>`.
 
 ## Rules for every command
 
@@ -254,7 +280,9 @@ does not work: both tools read it as part of the file name.
   lock and changes nothing. It computes the repairs read-only and lists
   them first, as actions of kind `repair` (each naming the version or
   tree it would delete, rename back or move to `recovered/`); its other
-  actions assume the repairs were done. Each command's section says
+  actions assume the repairs were done. A dry run that finds the lock
+  held says so, names the holder and lists no repairs, since the
+  running command owns those directories. Each command's section says
   what else its dry run prints.
 - **Lock:** every command that changes the collection (`archive`,
   `unearth`, `fork`, `forget`, `rebuild`, `import`, `pin`, `unpin`) and
@@ -264,13 +292,25 @@ does not work: both tools read it as part of the file name.
   lock on `push`, rsync could scan a piece halfway through an `unearth`
   and leave the target with neither the folder nor the version.
 - **Repairs:** every locked run, `push` included, first runs the
-  repairs (see "Repairs at the start of a run").
+  repairs (see "Repairs at the start of a run"). A repair that fails is
+  a warning naming the path and does not fail the run.
 - **Markers** (`.antiq-restored`, `.antiq-pin`) are written in
   `.antiq/tmp/` and renamed over their place, then the piece's top is
-  flushed; a leftover stays in tmp, which the repairs empty.
+  flushed; a leftover stays in tmp, which the repairs empty. A top
+  without owner write gets it for the rename and its recorded mode back
+  right after.
+- **Free space:** the rules of spec "Operations" and spec "unearth"
+  apply unchanged: `archive` and `import` need room in `.antiq/` for a
+  piece's apparent size (parallel pieces reserve their sum), `unearth`
+  and `fork` room for the listing's `bytes`; a piece without room is
+  skipped before staging, and ENOSPC during a step removes that step's
+  staging and skips the piece (exit 3).
 - **Exit codes:** 0 success; 1 error, a held lock included; 2 usage;
-  3 partial (some pieces skipped); 4 target unreachable (only `push`,
-  and 0 instead under `--if-reachable`).
+  3 partial (a step failed for some pieces: packing, verifying, moving,
+  a difference in step 6, a refused rename, a failed deletion, no
+  room); 4 target unreachable (only `push`, and 0 instead under
+  `--if-reachable`). Pieces the walk refuses do not change the exit
+  code; `status` and the command's output name them.
 - **Naming a version:** an optional version is the flag
   `--version <version>` (`unearth`, `fork`; without it the newest
   version), a required one is positional (`forget`, `rebuild`). Text
@@ -332,20 +372,33 @@ it would archive and the ones it refuses, with the reason.
 5. Rename the folder to `.antiq/trash/<version stamp>/<piece path>/`,
    under its live spelling (one rename on the same device; a piece on
    another device counts as containing a mount point and never gets
-   here).
+   here). If the rename is refused anyway, step 4 is undone: the
+   `.tar.zst`, then the checksum file, then the listing go back to the
+   staging, flushed as in step 4 (repair 1 finishes this after a
+   crash); the folder stays, the piece is reported with the error, and
+   the run exits 3.
 6. Walk the trashed tree again and compare it with the record of the
    verify: per entry type, size, modification time, inode and change
    time, directories included; the top only by type, inode and
    modification time, since the rename changed its change time (spec
-   "archive", unchanged). On any difference rename it back, or to
-   `.antiq/recovered/<version stamp>/<piece path>/` if its path is
-   taken by then, and list it in `status`; the version stays. A write
+   "archive", unchanged). This walk enters ignored subtrees for the same
+   refusals as the walk before packing (any refusal counts as a
+   difference); ignored entries and `.antiq-restored` at the top are not
+   compared, since they go with the folder in any case. On any difference rename it back; when that is not possible for any
+   reason (the path is taken, a parent is missing or not a directory,
+   the rename is refused), move it to
+   `.antiq/recovered/<version stamp>/<piece path>/` instead (missing
+   parents are not created) and list it in `status`; the version
+   stays. A write
    after this walk is lost, as in spec "archive". Pieces that share
    hard-linked files can be kept instead of removed when archived in
    the same run, as spec "archive" states.
 7. Rename the tree to `.antiq/doomed/<version stamp>/<piece path>/`,
    flush, and delete it from there. A deletion that fails leaves it in
-   `doomed/`, where the repairs try again and `status` reports it.
+   `doomed/`, where the repairs try again and `status` reports it with
+   the first entry that could not be deleted and the error. Whenever a
+   tree leaves `trash/` or `doomed/`, the parents that became empty are
+   removed, up to and including `<stamp>/`.
 8. One output line per folder, a summary at the end.
 
 A crash between steps 4 and 5 leaves the live folder next to a complete
@@ -374,11 +427,17 @@ ordinary live folder again. Archiving it later creates a new version.
   are checked against the target volume as in spec "unearth" (ADR
   0054). Missing parents are created; a failure before the rename
   removes what was created.
+- A version whose top holds a non-file with a marker's name is
+  refused, as is a damaged version.
 - **Order:** extract into `.antiq/tmp/`; verify every entry against the
-  listing; write `.antiq-restored` at the staged top; check the target
-  path; rename into place; flush the parent; delete the version
+  listing; write `.antiq-restored` at the staged top; flush every
+  extracted file and directory; check the target path; rename into
+  place; flush the parent; delete the version
   (`.tar.zst` first, then the listing and the checksum file, flushing
-  between); rewrite `.antiq-restored` to the time alone.
+  between); rewrite `.antiq-restored` to the time alone. No version is
+  deleted before the folder replacing it is durable; how the tree is
+  flushed (per-file `sync_all` or `fsync` plus one full flush) is
+  measured in the rework plan.
 - **`.antiq-restored`** holds one line,
   `restored <UTC time>[ version <stamp>]`, and is read only as a
   regular file at the piece's top. The idle clock starts at its time.
@@ -408,7 +467,8 @@ is an identical version, once due or at once with `archive <piece>`.
 Deletes exactly one version: the `.tar.zst` first, then the listing and
 the checksum file. It also takes the stamp of an incomplete version and
 removes its sidecars, saying that the version was incomplete. Deleting
-every version of a piece takes `--all-versions --force`. A crash inside
+every version of a piece takes `--all-versions --force`, which also
+removes the piece's incomplete versions and says so for each. A crash inside
 `forget` can leave an incomplete version; running the same `forget`
 again removes it. The next `push` mirrors the deletion to the target.
 `-n` names the files it would delete.
@@ -421,7 +481,12 @@ user's request, never as a repair, since the user is to look at such a
 version first (and may prefer to copy the missing file back from the
 target).
 
-- Listing missing, `.tar.zst.sha256` present: hash the archive file and
+- A listing is regenerated by the rules `archive` uses, from the tar
+  members: mode and whole-second time from the header, size and hash
+  from reading each member, `hard` for tar link members with the first
+  path as target, no line for the top-level directory; `files`,
+  `bytes` and `archive-bytes` come from the same read.
+- Listing missing, checksum file present: hash the archive file and
   compare it with the checksum file. On a mismatch refuse (exit 1,
   naming both hashes); otherwise write the listing, with
   `# rebuilt <UTC time>`, and say that the archive is the one
@@ -435,6 +500,10 @@ target).
 - An archive file whose size differs from its listing's `archive-bytes`
   cannot be repaired by `rebuild`, since the hash against the surviving
   checksum file can only fail; `rebuild` refuses and says so.
+- A sidecar that is present but corrupt (see "Damage") is not
+  overwritten: `rebuild` refuses and names deleting that file (after
+  which it is missing and can be rebuilt) or copying it back from the
+  target.
 - Every refusal names `forget` and copying back from the target as the
   ways out. A version that is not damaged is refused. It takes the lock
   and has `-n`, which says what it would check and write.
@@ -467,15 +536,16 @@ the source folder is left in place.
 
 One row per version, newest first within a piece; the query matches
 piece paths fuzzily. Each row reads only the head of its listing.
-SIZE is the archive file's size on disk; `--json` also carries the
-unpacked size and the file count. Damaged and incomplete versions are
+SIZE is the archive file's size (`archive-bytes`) in decimal units
+(1 GB = 10^9 bytes); `--json` also carries the unpacked size and the
+file count. Damaged and incomplete versions are
 marked.
 
 ```text
 $ antiq list scan
 PIECE              VERSION               SIZE     FILES
-projects/scanner   2026-11-04 10:02:11   1.2 GB   48 211
-projects/scanner   2026-09-03 12:15:00   1.1 GB   47 980
+projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
+projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
 tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
 
@@ -504,6 +574,10 @@ tools/scan-old                         1 version, 2025-02-11
 3 files in 2 pieces · antiq unearth <piece> [--version <version>]
 ```
 
+The pattern is matched against the unescaped path bytes; text output
+shows the path with the comment-line escapes, the pipe form prints the
+raw path. A test covers a name with a tab and a backslash.
+
 A match wholly inside the piece path gives one row, "piece name
 matches", with the version and file counts and no file list. In a pipe
 every hit and version is one tab-separated line `piece  stamp  path`,
@@ -518,8 +592,8 @@ the pieces `archive` refuses, with their reason (mount point, nested
 collection, unreadable entry, exclude entry, unreadable marker). Plain
 live folders are only counted in the header. Below the table: files and
 markers with times in the future, damaged and incomplete versions,
-folders in `recovered/` and leftovers in `doomed/`, and live folders
-whose spelling differs from the stored one.
+folders in `recovered/`, trees left in `trash/` and leftovers in
+`doomed/`, and live folders whose spelling differs from the stored one.
 
 ```text
 13 folders · 214 versions (38.2 GB) · archive after 30 days idle
@@ -552,15 +626,20 @@ Mirrors the collection to the target. **Proposal for the flow:**
    piece paths or two store folders of the collection differ only in
    case or Unicode normalization, since a case-insensitive target would
    merge them. (The same clash between file names inside one live
-   folder is not checked; the user documentation covers it.)
+   folder is not checked; the user documentation covers it.) And it
+   refuses while `.antiq/trash/` still holds a tree after the repairs,
+   since the mirror would delete the target's copy of that folder.
 3. **Check rsync.** The local rsync's `--version` must name rsync 3.2.4
    or newer, the release that added `--fsync` (rsync NEWS.md, section
    3.2.4). openrsync, which macOS ships as `/usr/bin/rsync`, and older
    versions are refused with a message naming the binary and the
    config key `[target] rsync`. A target whose own rsync is openrsync
    (any macOS machine) works with `fsync = false`.
-4. **Pre-check the target.** A path target that is the collection root
-   or lies below it is exit 1, also with `--init`. Otherwise the checks
+4. **Pre-check the target.** The target path is canonicalized first. A
+   path target that is the collection root or lies below it (compared
+   by the volume's name equality, ADR 0054) is exit 1, also with
+   `--init`, and so is a path target that is a mount root ("use a
+   folder on the volume, not its root"). Otherwise the checks
    use the file system for a path target and `rsync --list-only
    <target>/` for an ssh target:
 
@@ -574,6 +653,15 @@ Mirrors the collection to the target. **Proposal for the flow:**
    | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
    | `.antiq-target` of another collection, or not readable | exit 1 |
    | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--take-over` pushes anyway and rewrites the marker |
+
+   When the listing shows `.antiq-target` on an ssh target, it is
+   fetched with one rsync run of `<target>/.antiq-target` into
+   `.antiq/tmp/`, with the same options as the marker run below; a
+   fetch that fails, or content that does not parse, is "not
+   readable". `--take-over` changes nothing in the other rows: no
+   marker still needs `--init`, another collection's marker is still
+   exit 1, and with a matching marker it is a plain push, noted in the
+   output.
 
    rsync runs with `LC_ALL=C`. Over ssh, exit 255 counts as "cannot
    connect" only when ssh's line starts with `ssh: connect to host` or
@@ -594,17 +682,24 @@ Mirrors the collection to the target. **Proposal for the flow:**
    on the mounted volume.
 5. **Marker.** `.antiq-target` sits at the target root, outside the
    collection. It is one line of JSON with a fixed key order,
-   `{"format":1,"id":"<collection ID>","host":"<host name>","path":"<collection path>"}`;
+   `{"format":1,"id":"<collection ID>","host":"<machine name>","path":"<collection path>"}`.
+   The machine name is the one `machine.rs` detects (the ComputerName
+   on macOS, the hostname elsewhere), never a network-dependent host
+   name; the path is the canonical collection root, compared byte for
+   byte. A renamed machine or a moved collection therefore needs one
+   `push --take-over`;
    unknown keys are ignored, a higher `format` is refused as written by
    a newer antiq. It is created only by `push --init` and rewritten
    only by `push --take-over`; both are refused together with
    `--if-reachable`. `--init` is the user's statement that this empty
    target is the right one, `--take-over` that the other host or path
    may overwrite the target after the user made sure. The marker is
-   sent by its own rsync run, as a local temp directory holding only
-   `.antiq-target` sent to `<target>/`, with the same `-e`,
-   `--rsync-path` and fsync setting as the mirror; for an ssh target
-   that creates the last missing directory level, and a deeper missing
+   sent by its own rsync run, as a temp directory in `.antiq/tmp/`
+   holding only `.antiq-target`, sent to `<target>/` with
+   `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so the
+   target root keeps its mode and time) plus the same `-e`,
+   `--rsync-path`, fsync setting and `rsync_args` as the mirror; for an
+   ssh target that creates the last missing directory level, and a deeper missing
    path is exit 1 with rsync's mkdir line. `push -n` never writes it.
 6. **Mirror.** One rsync run, antiq's options first, then the options
    of `[target] rsync_args` verbatim, then the two paths:
@@ -613,8 +708,12 @@ Mirrors the collection to the target. **Proposal for the flow:**
    rsync -a -x --delete --delete-delay --itemize-changes
          --exclude=/.antiq-target --exclude=/.antiq/tmp/
          --exclude=/.antiq/trash/ --exclude=/.antiq/doomed/
-         --exclude=/.antiq/lock
-         [--fsync] [--rsync-path=<rsync_path>] -e "ssh -o BatchMode=yes"
+         --exclude=/.antiq/lock --exclude=/.DS_Store
+         --exclude=/.Spotlight-V100/ --exclude=/.fseventsd/
+         --exclude=/.DocumentRevisions-V100/ --exclude=/.TemporaryItems/
+         --exclude=/.Trashes/
+         --timeout=300 [--fsync] [--rsync-path=<rsync_path>]
+         -e "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
          <rsync_args> <collection>/ <target>/
    ```
 
@@ -623,13 +722,20 @@ Mirrors the collection to the target. **Proposal for the flow:**
    antiq's ssh command, BatchMode included. The excludes are anchored
    at the collection root, so the same names inside a live piece are
    still copied; the exclude of the marker also protects the target's
-   marker from `--delete`. `-x` keeps rsync on the collection's device:
-   a mount point inside a live piece arrives as an empty directory.
+   marker from `--delete`. The macOS volume-root directories are left
+   out because rsync cannot read them and any unreadable directory stops
+   every deletion; `.DS_Store` at the root, because Finder visits would
+   otherwise count as changes. The ssh options and `--timeout` (seconds
+   without data, today's default) keep a sleeping NAS from holding the
+   lock for hours; rsync's exit 30 (timeout) is exit 1 with its line. `-x` keeps rsync on the collection's device: a mount point to
+   another device inside a live piece arrives as an empty directory
+   with the mounted directory's attributes; a bind mount of the same
+   device is mirrored like a folder.
    With `--delete-delay`, deletions happen only at the end, so an
    interrupted run removes nothing that was on the target before.
 7. **Second pass.** When the run's output has a line starting with
-   `*deleting`, `push` runs the same command with `-n` and, if it lists
-   transfers, the mirror once more. On a case-insensitive target a
+   `*deleting`, `push` runs the same command with `-n` and, if that
+   prints any itemized line, the mirror once more. On a case-insensitive target a
    folder renamed only in case (`Foo` to `foo`) is otherwise deleted at
    the end of the first run and copied again only by the next push.
 8. **Result.** rsync exit 0 is success; 24 (files vanished during the
@@ -667,9 +773,10 @@ the command is called `push` and not `backup`.
 
 `--if-reachable` makes `push` exit 0 when the target is unreachable as
 defined above, for scheduled runs. Scheduling runs the two commands one
-after the other, such as `antiq archive && antiq push --if-reachable`;
-there is no command that does both. A held lock is exit 1, also under
-`--if-reachable`.
+after the other, such as `antiq archive; antiq push --if-reachable`, so
+the push runs after a partial archive too (the scheduler then sees
+only the push's exit status); there is no command that does both. A
+held lock is exit 1, also under `--if-reachable`.
 
 ## Configuration
 
@@ -708,7 +815,9 @@ the keys named; old stores start fresh anyway.
 ## Repairs at the start of a run
 
 There is no `reconcile` command. Every locked run (`push` included)
-first runs these repairs, in this order; a dry run lists them instead:
+first runs these repairs, in this order; a dry run lists them instead.
+A repair that fails is a warning naming the path. Whenever a tree
+leaves `trash/` or `doomed/`, the parents that became empty go too.
 
 1. **Interrupted archive step 4:** for each
    `.antiq/tmp/pack/<stamp>/<piece path>/` whose sidecars already lie
@@ -716,10 +825,15 @@ first runs these repairs, in this order; a dry run lists them instead:
    sidecars. The folder is still live, since step 5 waits for step 4.
 2. **Temporary files:** delete what `.antiq/tmp/` holds.
 3. **`doomed/`:** delete every tree there without a comparison; it was
-   checked whole before any deletion began.
+   checked whole before any deletion began. Directory chains that hold
+   no non-directory entry are removed as they are.
 4. **`trash/`:** rename every tree there back to its live path without
-   a comparison, since no deletion has touched it, or to
-   `.antiq/recovered/<stamp>/<piece path>/` when that path is taken.
+   a comparison, since no deletion has touched it, or, when that is not
+   possible for any reason (path taken, a parent missing or not a
+   directory, the rename refused), to
+   `.antiq/recovered/<stamp>/<piece path>/`. Directory chains that hold
+   no non-directory entry are removed as they are (an archived piece
+   always held a countable file).
    The piece path is the shortest path below `<stamp>/` for which a
    version with that stamp exists, matched by the volume's name
    equality (ADR 0054); when no version has that stamp (deleted by
@@ -757,16 +871,16 @@ The modules below exist on main today (`src/`). How each fares,
 | `pack/` | kept, adapted | without `pack/live.rs`, `pack/manifest.rs` and the live-package constants in `pack/zstd.rs`; listing gains `hard` lines; the pool's memory budget becomes a constant, 25 % of physical memory (today's default of `memory_percent`) |
 | `sysmem.rs` | kept | physical memory for the pool budget |
 | `listing.rs` | rewritten | new format; its file-name helpers move out of `meta.rs` |
-| `fsx/` | kept | |
+| `fsx/` | kept, adapted | removal and moves also handle the immutable and append-only flags as refusals; `space.rs` stays for the free-space rules |
 | `lock.rs`, `run.rs` | kept | `run.rs` loses the parts tied to tracking and metadata |
 | `pin.rs`, `relpath.rs`, `id.rs`, `clock.rs`, `error.rs`, `report.rs`, `plan.rs` | kept, adapted | `plan.rs` loses the brake; `error.rs` its remote and conflict kinds |
 | `reference.rs` | rewritten | resolves piece paths and search words against live pieces and `pieces/` (today it goes through `index.rs` and object IDs) |
 | `interact.rs`, the question part of `cli/tty.rs` | removed | no command asks anything |
 | `collection.rs` | adapted | new local layout |
 | `config.rs` | rewritten | keys above |
-| `machine.rs` | kept | host name for the target marker |
+| `machine.rs` | kept, adapted | machine name for the target marker; keeps only `detect` (no configured name) |
 | `repair.rs` | rewritten | the repairs above only |
-| `remote/rsync.rs` | kept, adapted | resolves and runs rsync; `--ignore-times`, `--no-whole-file` and the stats options go; the command is the one in `push`; floor 3.2.4; `machine.rsync` becomes `[target] rsync` |
+| `remote/rsync.rs` | kept, adapted | resolves and runs rsync; `--ignore-times`, `--no-whole-file` and the stats options go; the command is the one in `push`; floor 3.2.4; `machine.rsync` becomes `[target] rsync`; the ssh options of `remote/ssh/` move here |
 | `remote/marker.rs` | kept, adapted | renamed to `.antiq-target`, `layout` dropped, `host` and `path` added, rewrite allowed (`--take-over`) |
 | `remote/url.rs` | rewritten | an absolute path (any characters) or `[user@]host:path` |
 | `cli/` (without `cli/picker/`), `main.rs`, `lib.rs` | adapted | new command set |
@@ -808,11 +922,17 @@ The user documentation, once written, must say:
   case-insensitive target, and that the target must be as strict about
   names as the collection's volume (file names inside one live folder
   that differ only in case are not checked);
-- that a directory which held files and later became a mount point
-  loses those files on the target;
+- that a directory which held files and later became a mount point of
+  another device loses those files on the target;
 - that an unreadable directory anywhere in the collection stops every
   deletion on the target until it is fixed;
 - that a damaged or incomplete version stops `push`, scheduled runs
   included, until the user runs `rebuild` or `forget` or copies the
   file back;
-- what `push --init` and `push --take-over` do and when to use them.
+- what `push --init` and `push --take-over` do and when to use them,
+  and that a renamed machine or a moved collection needs one
+  `push --take-over`;
+- that the scheduling line `antiq archive; antiq push --if-reachable`
+  reports only the push's exit status;
+- that a path target must be a folder on a volume, not the volume's
+  root.
