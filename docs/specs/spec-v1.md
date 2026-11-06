@@ -745,6 +745,20 @@ directory counts as that directory. A matching marker is reachable. The
 marker is checked before every operation, and an operation on a root
 that is not reachable fails without reading or writing.
 
+A put writes the file under its temp name in the object's directory,
+flushes it, renames it to the final name without replacing a file of that
+name, and flushes the directory. Where it makes `objects/<ulid>/` it
+flushes the root and `objects/` as well, and does so each time it writes
+there, so that a directory a killed run made is durable by the time
+anything depends on it. A final name that is taken accepts the put only
+when the file there has the SHA-256 of the upload; the directory is
+flushed then too. Claims are created exclusively. Deleting a file that is
+not there counts as deleted. Every file name given to the remote is one
+path component: an empty name, `.`, `..` and a name with `/` are refused.
+A checksum is computed from a read that bypasses the client's cache of
+the file (`F_NOCACHE` on macOS, `posix_fadvise` with `POSIX_FADV_DONTNEED`
+on Linux); on another system it fails.
+
 ### SSH remote
 
 antiq runs the system's `ssh` with a master connection per run, a short

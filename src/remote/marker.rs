@@ -328,7 +328,7 @@ mod tests {
     fn a_failing_root_flush_reports_an_error_with_the_marker_in_place() {
         let root = tempfile::tempdir().expect("temp dir");
         let durable = Recording::new();
-        durable.fail_dirs();
+        durable.fail_dirs_from(0);
         let error = write_marker(root.path(), id(), &durable).expect_err("the flush fails");
         assert!(matches!(error, MarkerError::Fsx(_)), "{error}");
         assert_eq!(durable.flushes().len(), 2, "the file, then the root");

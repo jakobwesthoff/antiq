@@ -20,6 +20,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, flush_file};
+use crate::id::ObjectId;
 use path::PathRemote;
 use serde::Serialize;
 use std::fs::File;
@@ -30,10 +31,6 @@ use url::{RemoteUrl, UrlError};
 /// with `sync_all` and falls back to plain `fsync` where a filesystem
 /// refuses that (`fsx::atomic`); tests put a recorder in its place to see
 /// in which order the flushes and the renames happen.
-#[allow(
-    dead_code,
-    reason = "the path remote, in the next commits, is the caller"
-)]
 pub(crate) trait Durable: Send + Sync {
     /// Makes the data of an open file durable. `path` names it in errors.
     fn file(&self, file: &File, path: &Path) -> Result<(), FsxError>;
@@ -41,10 +38,6 @@ pub(crate) trait Durable: Send + Sync {
     fn dir(&self, dir: &Path) -> Result<(), FsxError>;
 }
 
-#[allow(
-    dead_code,
-    reason = "the path remote, in the next commits, is the caller"
-)]
 pub(crate) struct RealDurable;
 
 impl Durable for RealDurable {
@@ -78,7 +71,8 @@ pub(crate) mod recording {
         flushes: Mutex<Vec<Flush>>,
         observer: Mutex<Option<Observer>>,
         fail_files: Mutex<bool>,
-        fail_dirs: Mutex<bool>,
+        /// Directory flushes from this one on (counted from 0) fail.
+        fail_dirs_from: Mutex<Option<usize>>,
     }
 
     impl Recording {
@@ -99,8 +93,14 @@ pub(crate) mod recording {
             *self.fail_files.lock().expect("no test panics holding it") = true;
         }
 
-        pub(crate) fn fail_dirs(&self) {
-            *self.fail_dirs.lock().expect("no test panics holding it") = true;
+        /// Makes the directory flushes fail from the `n`th one on, counted
+        /// from 0, so a test can let the flushes of the setup pass and fail
+        /// the one it is about.
+        pub(crate) fn fail_dirs_from(&self, n: usize) {
+            *self
+                .fail_dirs_from
+                .lock()
+                .expect("no test panics holding it") = Some(n);
         }
 
         pub(crate) fn flushes(&self) -> Vec<Flush> {
@@ -139,8 +139,17 @@ pub(crate) mod recording {
         }
 
         fn dir(&self, dir: &Path) -> Result<(), FsxError> {
+            let earlier = self
+                .flushes()
+                .iter()
+                .filter(|flush| matches!(flush, Flush::Dir(_)))
+                .count();
             self.record(Flush::Dir(dir.to_path_buf()), None);
-            if *self.fail_dirs.lock().expect("no test panics holding it") {
+            let from = *self
+                .fail_dirs_from
+                .lock()
+                .expect("no test panics holding it");
+            if from.is_some_and(|from| earlier >= from) {
                 return Err(eio(dir));
             }
             Ok(())
@@ -217,8 +226,115 @@ pub trait Remote: Send + Sync {
     /// Called at the start of each remote phase of a run.
     fn begin_phase(&self) -> Result<(), RemoteError>;
 
+    /// Creates the empty file `name` in the object's directory, and fails
+    /// to when it exists. The claim of a metadata version is made this
+    /// way (ADR 0030).
+    fn create_exclusive(&self, id: ObjectId, name: &str) -> Result<Created, RemoteError>;
+
+    /// Writes `bytes` under the temp name `temp` in the object's
+    /// directory and makes them durable. A file of that name is rewritten
+    /// from the start.
+    fn write_temp(&self, id: ObjectId, temp: &str, bytes: &[u8]) -> Result<(), RemoteError>;
+
+    /// Renames `temp` to `name` without replacing a file that has that
+    /// name, then makes the object's directory durable.
+    fn rename_into_place(
+        &self,
+        id: ObjectId,
+        temp: &str,
+        name: &str,
+    ) -> Result<Placement, RemoteError>;
+
+    /// Puts a payload or listing in place under its final name. A final
+    /// name that is taken accepts the put only when the file there has the
+    /// SHA-256 of the upload (spec "Storage").
+    fn put_payload(&self, upload: &Upload<'_>) -> Result<Transfer, RemoteError>;
+
+    /// Removes a file of the object's directory. A file that is not there
+    /// counts as removed.
+    fn delete(&self, id: ObjectId, name: &str) -> Result<(), RemoteError>;
+
+    /// Removes a file of the object's `.antiq-partial` directory, where an
+    /// interrupted upload leaves what it has. A file that is not there
+    /// counts as removed.
+    fn delete_partial(&self, id: ObjectId, name: &str) -> Result<(), RemoteError>;
+
+    /// The SHA-256 of a file as lower-case hex, computed from what the
+    /// remote holds and not from what this machine has cached of it
+    /// (ADR 0043).
+    fn checksum(&self, id: ObjectId, name: &str) -> Result<String, RemoteError>;
+
+    /// Makes everything the remote has written so far durable on its own
+    /// side. The path remote flushes every file as it writes it.
+    fn flush(&self) -> Result<(), RemoteError>;
+
     /// Called once when the run is done with the remote.
     fn finish(&self);
+}
+
+/// What [`Remote::create_exclusive`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Created {
+    Yes,
+    /// The file was there already.
+    AlreadyExists,
+}
+
+/// What [`Remote::rename_into_place`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Placed,
+    /// A file of the final name was there already and is untouched.
+    TargetExists,
+}
+
+/// A file to put on the remote.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Upload<'a> {
+    pub id: ObjectId,
+    /// The name it is written under until it is complete.
+    pub temp: &'a str,
+    /// The name it has once it is in place.
+    pub final_name: &'a str,
+    /// The local file.
+    pub source: &'a Path,
+    /// SHA-256 of the file as lower-case hex.
+    pub sha256: &'a str,
+    /// The name of the current live package, which a remote with delta
+    /// transfer starts the new one from. The path remote copies in full
+    /// and ignores it.
+    pub seed: Option<&'a str>,
+}
+
+impl<'a> Upload<'a> {
+    /// An upload without a seed.
+    pub fn new(
+        id: ObjectId,
+        temp: &'a str,
+        final_name: &'a str,
+        source: &'a Path,
+        sha256: &'a str,
+    ) -> Upload<'a> {
+        Upload {
+            id,
+            temp,
+            final_name,
+            source,
+            sha256,
+            seed: None,
+        }
+    }
+}
+
+/// What a put or a get moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Transfer {
+    /// Bytes written to the destination.
+    pub bytes: u64,
+    /// The final name held this very file already, so nothing was written.
+    pub already_present: bool,
 }
 
 /// Opens the remote the config of `collection` names.
@@ -436,12 +552,28 @@ pub enum RemoteError {
     Unsupported(String),
     #[error(transparent)]
     Url(#[from] UrlError),
+    #[error("cannot {action} {path}: {source}")]
+    Io {
+        action: &'static str,
+        path: String,
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Fsx(#[from] FsxError),
+    #[error("`{name}` is not a file name of an object's directory")]
+    InvalidName { name: String },
+    #[error("`{name}` exists on the remote with other content")]
+    PayloadConflict { name: String },
 }
 
 impl HasKind for RemoteError {
     fn kind(&self) -> ErrorKind {
         match self {
-            RemoteError::Url(_) => ErrorKind::Other,
+            RemoteError::Url(_)
+            | RemoteError::Io { .. }
+            | RemoteError::Fsx(_)
+            | RemoteError::InvalidName { .. }
+            | RemoteError::PayloadConflict { .. } => ErrorKind::Other,
             RemoteError::NoRemote => ErrorKind::NoRemote,
             RemoteError::Away { .. } => ErrorKind::RemoteAway,
             RemoteError::Broken(_) => ErrorKind::RemoteBroken,
