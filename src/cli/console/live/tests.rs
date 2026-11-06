@@ -550,21 +550,49 @@ fn an_error_of_the_run_leaves_no_region_behind() {
     assert!(watcher.sync().visible().is_empty());
 }
 
+/// The panic hook is global to the process, so the tests that replace it
+/// run one after the other, and each puts the hook back when it ends.
+static HOOK_TESTS: Mutex<()> = Mutex::new(());
+
+type Hook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+struct RestoredHook(Option<Hook>);
+
+impl RestoredHook {
+    /// Replaces the hook with `hook` until the guard is dropped.
+    fn replace(hook: impl Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static) -> RestoredHook {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(hook));
+        RestoredHook(Some(previous))
+    }
+}
+
+impl Drop for RestoredHook {
+    fn drop(&mut self) {
+        // A hook cannot be set while the thread panics: a failed assertion
+        // of the test leaves the hook of the test in place.
+        if !thread::panicking()
+            && let Some(previous) = self.0.take()
+        {
+            panic::set_hook(previous);
+            HOOK_INSTALLED.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Runs `run` with a panic in it on a terminal and returns how many rows
 /// the screen held when the panic text would have been written.
 fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
     let (capture, mut out) = terminal(100, 24, true);
     let sampled = Arc::new(Mutex::new(None));
     let drawn = Arc::new(Mutex::new(false));
-    let previous = panic::take_hook();
     let (sampler, sample, seen) = (capture.clone(), sampled.clone(), drawn.clone());
-    panic::set_hook(Box::new(move |info| {
+    let _restored = RestoredHook::replace(move |_| {
         let mut screen = Screen::new(100, 24);
         screen.feed(&sampler.stdout_bytes());
         *sample.lock().unwrap() = Some(screen.visible().len());
         *seen.lock().unwrap() = String::from_utf8_lossy(&sampler.stdout_bytes()).contains("10 B");
-        previous(info);
-    }));
+    });
     let mut setup = setup(100);
     setup.panic_hook = panic_hook;
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -592,7 +620,7 @@ fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
 
 #[test]
 fn a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_text() {
-    // One test, as the hook is global to the process.
+    let _serial = HOOK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
     let (rows, drawn) = rows_at_the_panic(false);
     assert!(drawn);
     assert_eq!(
@@ -602,4 +630,72 @@ fn a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_t
     let (rows, drawn) = rows_at_the_panic(true);
     assert!(drawn);
     assert_eq!(rows, 0, "the hook cleared the cards first");
+}
+
+#[test]
+fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling_thread_unwinds() {
+    let _serial = HOOK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let (capture, mut out) = terminal(100, 24, true);
+    // The hook that stands for the default one: its text goes to the same
+    // screen as the cards, the way the default hook writes to the terminal.
+    let terminal_text = capture.clone();
+    let _restored = RestoredHook::replace(move |info| {
+        let text = info
+            .payload_as_str()
+            .unwrap_or("a panic without text")
+            .to_string();
+        terminal_text
+            .output_with(env(100, true), env(100, true))
+            .line(&format!("panicked: {text}"))
+            .unwrap();
+    });
+    let mut setup = setup(100);
+    setup.panic_hook = true;
+    let drawn = capture.clone();
+
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let _ = observed(
+            &mut out,
+            setup,
+            |observer| {
+                observer.event(Event::Started {
+                    name: "a",
+                    bytes: 10,
+                    stamp: None,
+                    siblings: &[],
+                });
+                thread::sleep(Duration::from_millis(300));
+                assert!(
+                    String::from_utf8_lossy(&drawn.stdout_bytes()).contains("10 B"),
+                    "the card was on the screen before the panic"
+                );
+                // The worker panics while the renderer draws. The scope
+                // then panics on this thread, because a thread of it did.
+                thread::scope(|workers| {
+                    workers.spawn(|| panic!("the worker failed"));
+                });
+            },
+            |_: &()| Vec::new(),
+        );
+    }));
+
+    assert!(result.is_err(), "the panic reaches the calling thread");
+    let mut screen = Screen::new(100, 24);
+    screen.feed(&capture.stdout_bytes());
+    let lines = screen.lines();
+    assert!(
+        lines.contains(&"panicked: the worker failed".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("panicked: ") && line.contains("scoped thread panicked")),
+        "{lines:?}"
+    );
+    assert!(
+        screen.visible().iter().all(|line| !line.contains("10 B")),
+        "no card is left on the screen: {:?}",
+        screen.visible()
+    );
 }

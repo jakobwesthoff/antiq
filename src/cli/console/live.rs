@@ -14,8 +14,9 @@ use crate::cli::output::Output;
 use antiq::progress::{Event, Observer};
 use std::io;
 use std::panic;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Mutex, Once, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -311,7 +312,9 @@ pub(crate) struct Observed<T> {
 
 /// Where a panicking thread finds the renderer to halt.
 static RENDERER: Mutex<Option<(Sender<Packet>, ThreadId)>> = Mutex::new(None);
-static HOOK: Once = Once::new();
+/// The hook goes in once per process. A test that puts the hook it found
+/// back clears this too, so that the next test can install it again.
+static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 fn renderer_slot() -> std::sync::MutexGuard<'static, Option<(Sender<Packet>, ThreadId)>> {
     RENDERER.lock().unwrap_or_else(PoisonError::into_inner)
@@ -335,21 +338,22 @@ impl Drop for Release {
 }
 
 fn install_hook() {
-    HOOK.call_once(|| {
-        let previous = panic::take_hook();
-        panic::set_hook(Box::new(move |info| {
-            let target = renderer_slot()
-                .clone()
-                .filter(|(_, thread)| *thread != thread::current().id());
-            if let Some((sender, _)) = target {
-                let (acknowledge, acknowledged) = mpsc::channel();
-                if sender.send(Packet::Halt(acknowledge)).is_ok() {
-                    let _ = acknowledged.recv_timeout(HALT_WAIT);
-                }
+    if HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let target = renderer_slot()
+            .clone()
+            .filter(|(_, thread)| *thread != thread::current().id());
+        if let Some((sender, _)) = target {
+            let (acknowledge, acknowledged) = mpsc::channel();
+            if sender.send(Packet::Halt(acknowledge)).is_ok() {
+                let _ = acknowledged.recv_timeout(HALT_WAIT);
             }
-            previous(info);
-        }));
-    });
+        }
+        previous(info);
+    }));
 }
 
 /// Runs `run` with an observer whose events become cards on stdout.
