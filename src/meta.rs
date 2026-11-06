@@ -388,14 +388,20 @@ impl HistoryEntry {
 /// else in it, so that a document of a later format can still be told
 /// apart from a broken one.
 pub fn read_format(bytes: &[u8]) -> Result<u32, MetaError> {
-    #[derive(Deserialize)]
-    struct FormatOnly {
-        format: u32,
-    }
-    let FormatOnly { format } =
+    // Read into a map: a struct would also take a JSON array, which is no
+    // document.
+    let document: Map<String, Value> =
         serde_json::from_slice(bytes).map_err(|error| MetaError::Unreadable {
             format: None,
             reason: error.to_string(),
+        })?;
+    let format = document
+        .get("format")
+        .and_then(Value::as_u64)
+        .and_then(|format| u32::try_from(format).ok())
+        .ok_or_else(|| MetaError::Unreadable {
+            format: None,
+            reason: "`format` is missing or not a number".into(),
         })?;
     // Format 1 is the first one, so 0 names nothing a reader could rely on.
     if format == 0 {
@@ -442,10 +448,29 @@ pub fn to_bytes(metadata: &Metadata) -> Result<Vec<u8>, MetaError> {
     }
     let bytes =
         serde_json::to_vec(metadata).expect("plain data with string keys always serialises");
-    parse(&bytes).map_err(|error| MetaError::Unwritable {
+    let read_back = parse(&bytes).map_err(|error| MetaError::Unwritable {
         reason: error.to_string(),
     })?;
+    // A key in an `extra` map that has the name of a field is written once
+    // when the field is left out (it is `None` or `false`) and reads back
+    // as the field, which the reader cannot tell from the field itself.
+    if extra_maps(&read_back) != extra_maps(metadata) {
+        return Err(MetaError::Unwritable {
+            reason: "an unknown key has the name of a known field".into(),
+        });
+    }
     Ok(bytes)
+}
+
+/// Every map of unknown keys in the document, in a fixed order.
+fn extra_maps(metadata: &Metadata) -> Vec<&Map<String, Value>> {
+    let mut maps = vec![&metadata.extra];
+    for payload in &metadata.payloads {
+        maps.push(&payload.extra);
+        maps.push(&payload.checksum.extra);
+    }
+    maps.extend(metadata.history.iter().map(|entry| &entry.extra));
+    maps
 }
 
 impl Metadata {
@@ -1038,6 +1063,33 @@ mod tests {
         let mut metadata = parse(&live_document(""));
         metadata.format = 0;
         assert_unwritable(&metadata);
+    }
+
+    #[test]
+    fn an_extra_key_named_after_an_absent_payload_field_is_not_written() {
+        let mut metadata = parse(&live_document(""));
+        metadata.payloads[0]
+            .extra
+            .insert("superseded".into(), json!(true));
+        assert_unwritable(&metadata);
+    }
+
+    #[test]
+    fn an_extra_key_named_after_the_encoder_field_is_not_written() {
+        let mut metadata = parse(&live_document(""));
+        metadata.payloads[0]
+            .extra
+            .insert("encoder".into(), json!({}));
+        assert_unwritable(&metadata);
+    }
+
+    #[test]
+    fn a_json_array_is_not_a_document_whose_format_can_be_read() {
+        let error = read_format(b"[7]").expect_err("an array has no keys");
+        assert!(
+            matches!(error, MetaError::Unreadable { format: None, .. }),
+            "{error:?}"
+        );
     }
 
     fn with_history(actions: &[&str]) -> Metadata {
