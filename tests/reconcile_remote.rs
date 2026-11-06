@@ -1356,3 +1356,15 @@ fn the_console_lists_the_items_of_a_refused_drop() {
         assert!(run.stderr.contains(&line), "{}", run.stderr);
     }
 }
+
+#[test]
+fn an_object_directory_without_any_version_is_left_alone() {
+    let world = world();
+    fs::create_dir_all(world.local_dir(2)).expect("an empty object directory");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(run.json()["unreadable_versions"], json!([]));
+    assert_eq!(run.json()["warnings"], json!([]), "{}", run.stdout);
+}
