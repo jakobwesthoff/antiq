@@ -10,8 +10,38 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+// =========================================================
+// One fork at a time
+// =========================================================
+
+// A command with a `pre_exec` hook cannot use `posix_spawn`, so std forks.
+// In a test binary with many threads, the fork child can abort in the
+// atfork handler of libnotify ("os_once_t is corrupt") when another thread
+// is inside the system frameworks at that moment. The first use of those
+// frameworks in the process, such as the lookup of the machine name, has to
+// happen before any fork, and no thread may be inside them while another
+// forks. Both go through this lock.
+static FORK: Mutex<()> = Mutex::new(());
+static WARMED_UP: Once = Once::new();
+
+fn fork_lock() -> MutexGuard<'static, ()> {
+    // A test that panicked while it held the lock left nothing behind.
+    let guard = FORK.lock().unwrap_or_else(PoisonError::into_inner);
+    WARMED_UP.call_once(|| {
+        let _ = antiq::machine::detect();
+    });
+    guard
+}
+
+/// The machine name antiq detects, asked while no test forks.
+pub fn machine_name() -> String {
+    let _guard = fork_lock();
+    antiq::machine::detect().expect("the machine has a name")
+}
 
 /// A command that runs `program` in a session of its own.
 ///
@@ -105,6 +135,21 @@ impl Antiq {
         self
     }
 
+    /// Runs the command with the file mode creation mask `mask`, which
+    /// every program it starts inherits.
+    pub fn umask(mut self, mask: u32) -> Antiq {
+        // SAFETY: the closure calls only `umask`, which is async-signal-safe.
+        unsafe {
+            self.command.pre_exec(move || {
+                rustix::process::umask(rustix::fs::Mode::from_bits_truncate(
+                    mask as rustix::fs::RawMode,
+                ));
+                Ok(())
+            });
+        }
+        self
+    }
+
     pub fn stdout(mut self, stdout: impl Into<Stdio>) -> Antiq {
         self.command.stdout(stdout);
         self.stdout_set = true;
@@ -112,7 +157,16 @@ impl Antiq {
     }
 
     pub fn run(mut self) -> Run {
-        let output = self.command.output().expect("the antiq binary starts");
+        if !self.stdout_set {
+            self.command.stdout(Stdio::piped());
+        }
+        self.command.stderr(Stdio::piped());
+        // The lock is held for the fork only, the child runs on without it.
+        let child = {
+            let _guard = fork_lock();
+            self.command.spawn().expect("the antiq binary starts")
+        };
+        let output = child.wait_with_output().expect("the antiq binary ends");
         Run {
             status: output.status,
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
@@ -131,7 +185,10 @@ impl Antiq {
             self.command.stdout(Stdio::piped());
         }
         self.command.stderr(Stdio::piped());
-        let mut child = self.command.spawn().expect("the antiq binary starts");
+        let mut child = {
+            let _guard = fork_lock();
+            self.command.spawn().expect("the antiq binary starts")
+        };
         let drain = |stream: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();

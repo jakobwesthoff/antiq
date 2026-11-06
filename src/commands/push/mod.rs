@@ -13,13 +13,14 @@ use crate::relpath::RelPath;
 use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
-use crate::target::marker::{self, MarkerError};
+use crate::target::marker::{self, Marker, MarkerError};
 use crate::target::rsync::{Options, Rsync, RsyncError, quiet_option};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+mod mirror;
 mod precheck;
 mod store;
 
@@ -89,12 +90,14 @@ pub enum PushError {
     },
     #[error("cannot use the target's marker")]
     MarkerFormat(#[source] MarkerError),
-    #[error("cannot make a directory for the target's marker in {}", .path.display())]
+    #[error("cannot prepare the target's marker in {}", .path.display())]
     Scratch {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+    #[error("sending the marker to the target failed: {detail}")]
+    MarkerRun { detail: String },
     #[error("cannot name this machine")]
     Machine(#[source] MachineError),
     /// The steps after the ones built so far.
@@ -124,6 +127,7 @@ impl HasKind for PushError {
             | PushError::TrashNotEmpty { .. }
             | PushError::Target { .. }
             | PushError::Scratch { .. }
+            | PushError::MarkerRun { .. }
             | PushError::MarkerMismatch { .. }
             | PushError::MarkerFormat(MarkerError::Invalid { .. }) => ErrorKind::Other,
         }
@@ -219,10 +223,13 @@ pub fn push(
         .url
         .clone()
         .expect("the url parsed before");
-    let probe = match &url {
-        TargetUrl::Path { root } => precheck::inspect_path(root, collection.root())?.0,
+    let options = Options::from_config(&collection.config().target);
+    let (probe, call_url, directory) = match &url {
+        TargetUrl::Path { root } => {
+            let (probe, canonical, directory) = precheck::inspect_path(root, collection.root())?;
+            (probe, TargetUrl::Path { root: canonical }, directory)
+        }
         TargetUrl::Ssh { .. } => {
-            let options = Options::from_config(&collection.config().target);
             // A dry run changes nothing in the collection, so the fetched
             // marker goes to the system's temp directory.
             let scratch = if request.dry_run {
@@ -230,7 +237,7 @@ pub fn push(
             } else {
                 collection.tmp_dir()
             };
-            precheck::inspect_ssh(
+            let probe = precheck::inspect_ssh(
                 &precheck::Remote {
                     rsync: &rsync,
                     options: &options,
@@ -239,24 +246,57 @@ pub fn push(
                     scratch: &scratch,
                 },
                 &|call| call.run(),
-            )?
+            )?;
+            (probe, url.clone(), None)
         }
     };
     let ssh = matches!(url, TargetUrl::Ssh { .. });
-    match precheck::decide(probe, ssh, &identity, flags, &shown) {
+    let proceed = match precheck::decide(probe, ssh, &identity, flags, &shown) {
         precheck::Decision::Unreachable(reason) if request.if_reachable => {
-            Ok(PushOutcome::Unreachable(UnreachableReport {
+            return Ok(PushOutcome::Unreachable(UnreachableReport {
                 dry_run: request.dry_run,
                 result: "unreachable",
                 target: shown,
                 reason,
                 warnings,
-            }))
+            }));
         }
-        precheck::Decision::Unreachable(reason) => Err(PushError::Unreachable { reason }),
-        precheck::Decision::Refuse(error) => Err(error),
-        precheck::Decision::Proceed(_) => Err(PushError::Unfinished),
+        precheck::Decision::Unreachable(reason) => {
+            return Err(PushError::Unreachable { reason });
+        }
+        precheck::Decision::Refuse(error) => return Err(error),
+        precheck::Decision::Proceed(proceed) => proceed,
+    };
+
+    if proceed.write_marker && !request.dry_run {
+        let marker = Marker::new(identity.id, identity.host, identity.path);
+        mirror::send_marker(
+            &mirror::Sender {
+                rsync: &rsync,
+                options: &options,
+                url: &call_url,
+                scratch: &collection.tmp_dir(),
+                write: &|path, bytes| std::fs::write(path, bytes),
+                before: &|| recheck_directory(&call_url, directory),
+            },
+            &marker,
+            &|call| call.run(),
+        )?;
     }
+    Err(PushError::Unfinished)
+}
+
+/// Before anything is sent to a path target, checks that its directory is
+/// still the one that was inspected.
+fn recheck_directory(url: &TargetUrl, inspected: Option<(u64, u64)>) -> Result<(), PushError> {
+    use std::os::unix::fs::MetadataExt;
+    if let (TargetUrl::Path { root }, Some(inspected)) = (url, inspected) {
+        precheck::still_the_same(root, inspected, &|path| {
+            let meta = std::fs::metadata(path)?;
+            Ok((meta.dev(), meta.ino()))
+        })?;
+    }
+    Ok(())
 }
 
 /// What this run puts into a marker or compares a marker with.
@@ -303,6 +343,33 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn only_a_path_target_with_an_inspected_directory_is_rechecked() {
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let url = TargetUrl::Path {
+            root: temp.path().to_path_buf(),
+        };
+        let ssh = TargetUrl::parse("host:/srv/antiq").expect("a target");
+        assert!(recheck_directory(&url, None).is_ok());
+        assert!(recheck_directory(&ssh, Some((0, 0))).is_ok());
+        let error = recheck_directory(&url, Some((0, 0))).expect_err("another directory");
+        assert!(matches!(error, PushError::Target { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_machine_without_a_name_is_an_error_naming_it() {
+        let collection = Collection::for_tests();
+        let unavailable = MachineError::Unavailable {
+            reason: "no name".into(),
+        };
+        let error = identity(&collection, Err(unavailable)).expect_err("no name");
+        assert!(matches!(error, PushError::Machine(_)), "{error}");
+
+        let named = identity(&collection, Ok("Studio".into())).expect("named");
+        assert_eq!(named.host, "Studio");
+        assert_eq!(named.id, collection.id());
+    }
 
     #[test]
     fn a_root_that_is_not_utf8_is_refused_and_one_that_is_passes() {

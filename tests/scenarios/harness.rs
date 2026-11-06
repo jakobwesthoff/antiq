@@ -241,7 +241,7 @@ fn the_marker_is_the_line_the_spec_describes() {
         text,
         format!(
             "{{\"format\":1,\"id\":\"{COLLECTION_ID}\",\"host\":{},\"path\":{}}}\n",
-            serde_json::to_string(&antiq::machine::detect().expect("a name")).expect("json"),
+            serde_json::to_string(&crate::support::cmd::machine_name()).expect("json"),
             serde_json::to_string(collection.root().to_str().expect("UTF-8")).expect("json"),
         )
     );

@@ -54,8 +54,6 @@ pub(super) struct Flags {
 #[derive(Debug)]
 pub(super) enum Decision {
     Unreachable(String),
-    // TODO: the marker run (step 5) and the output notes read it.
-    #[allow(dead_code)]
     Proceed(Proceed),
     Refuse(PushError),
 }
@@ -65,6 +63,8 @@ pub(super) struct Proceed {
     /// The marker is to be sent before the mirror.
     pub write_marker: bool,
     /// What the output tells about the way the push was cleared.
+    // TODO: the report of the mirror (step 9) prints it.
+    #[allow(dead_code)]
     pub note: Option<String>,
 }
 
@@ -203,9 +203,38 @@ pub(super) struct Io<'a> {
     pub is_empty: &'a dyn Fn(&Path) -> io::Result<bool>,
 }
 
+/// What the inspection of a path target found: the probe, the canonical
+/// path every rsync call uses from here on, and the device and inode that
+/// path had, `None` when there was no directory to look at.
+pub(super) type Inspected = (Probe, PathBuf, Option<(u64, u64)>);
+
+/// Refuses a target directory that is no longer the one that was
+/// inspected. A mount point or a link swapped in between would send the
+/// run, which deletes, to another place; a small window remains between
+/// this check and rsync's own open.
+pub(super) fn still_the_same(
+    canonical: &Path,
+    inspected: (u64, u64),
+    identity: &dyn Fn(&Path) -> io::Result<(u64, u64)>,
+) -> Result<(), PushError> {
+    let now = identity(canonical).map_err(|error| PushError::Target {
+        problem: format!("the target {} cannot be read: {error}", canonical.display()),
+    })?;
+    if now == inspected {
+        Ok(())
+    } else {
+        Err(PushError::Target {
+            problem: format!(
+                "the target {} is another directory than the one that was inspected",
+                canonical.display()
+            ),
+        })
+    }
+}
+
 /// Looks at the path target `root` on this machine. Returns what was found
 /// and the canonical path, which the rsync calls use from here on.
-pub(super) fn inspect_path(root: &Path, collection: &Path) -> Result<(Probe, PathBuf), PushError> {
+pub(super) fn inspect_path(root: &Path, collection: &Path) -> Result<Inspected, PushError> {
     let identity = |path: &Path| {
         let meta = fs::metadata(path)?;
         Ok((meta.dev(), meta.ino()))
@@ -232,15 +261,17 @@ pub(super) fn inspect_path_with(
     root: &Path,
     collection: &Path,
     io: &Io,
-) -> Result<(Probe, PathBuf), PushError> {
+) -> Result<Inspected, PushError> {
     match inspect(root, collection, io) {
         Ok(found) => Ok(found),
-        Err(Stop::Unreachable(reason)) => Ok((Probe::Unreachable(reason), root.to_path_buf())),
+        Err(Stop::Unreachable(reason)) => {
+            Ok((Probe::Unreachable(reason), root.to_path_buf(), None))
+        }
         Err(Stop::Refuse(error)) => Err(error),
     }
 }
 
-fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<(Probe, PathBuf), Stop> {
+fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<Inspected, Stop> {
     let collection_identity =
         (io.identity)(collection).map_err(|error| failed(&error, collection))?;
 
@@ -253,12 +284,12 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<(Probe, PathBuf), 
             if let Some(existing) = existing {
                 not_inside(root, &existing, collection_identity, io)?;
             }
-            return Ok((Probe::Missing, root.to_path_buf()));
+            return Ok((Probe::Missing, root.to_path_buf(), None));
         }
         Err(error) => return Err(failed(&error, root)),
     };
     not_inside(root, &canonical, collection_identity, io)?;
-    not_holding(&canonical, collection, io)?;
+    let directory = not_holding(&canonical, collection, io)?;
 
     match (io.mount_root)(&canonical) {
         Ok(false) => {}
@@ -283,7 +314,7 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<(Probe, PathBuf), 
             None if empty => Probe::Empty,
             None => Probe::NotEmpty,
         };
-    Ok((probe, canonical))
+    Ok((probe, canonical, Some(directory)))
 }
 
 /// The first of the folders above `path`, nearest first, that exists, in
@@ -322,7 +353,7 @@ fn not_inside(
 }
 
 /// Refuses a target that holds the collection.
-fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(), Stop> {
+fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(u64, u64), Stop> {
     let target = (io.identity)(canonical).map_err(|error| failed(&error, canonical))?;
     for folder in collection.ancestors() {
         let identity = (io.identity)(folder).map_err(|error| failed(&error, folder))?;
@@ -335,7 +366,7 @@ fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(), Stop>
             }));
         }
     }
-    Ok(())
+    Ok(target)
 }
 
 /// The most of a marker file that is read; a real one is a line of JSON.
@@ -545,12 +576,12 @@ fn fetch_marker(remote: &Remote, run: Runner) -> Result<Probe, PushError> {
 static SCRATCH_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A directory that exists for one inspection and is removed after it.
-struct Scratch {
+pub(super) struct Scratch {
     path: PathBuf,
 }
 
 impl Scratch {
-    fn create(parent: &Path) -> Result<Scratch, PushError> {
+    pub(super) fn create(parent: &Path) -> Result<Scratch, PushError> {
         let scratch_error = |source| PushError::Scratch {
             path: parent.to_path_buf(),
             source,
@@ -569,7 +600,7 @@ impl Scratch {
         Ok(Scratch { path })
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -827,7 +858,8 @@ mod tests {
                 mount_root: &self.mount_root,
                 is_empty: &self.is_empty,
             };
-            inspect_path_with(Path::new(root), Path::new("/srv/coll"), &io).map(|(probe, _)| probe)
+            inspect_path_with(Path::new(root), Path::new("/srv/coll"), &io)
+                .map(|(probe, _, _)| probe)
         }
     }
 
@@ -955,6 +987,22 @@ mod tests {
                 refused(seen.inspect(root)).contains("inside the target"),
                 "{root}"
             );
+        }
+    }
+
+    #[test]
+    fn a_target_directory_that_changed_is_refused_and_the_same_one_passes() {
+        let canonical = Path::new("/mnt/nas/antiq");
+        still_the_same(canonical, (1, 5), &|_| Ok((1, 5))).expect("the same");
+        match still_the_same(canonical, (1, 5), &|_| Ok((2, 5))) {
+            Err(PushError::Target { problem }) => {
+                assert!(problem.contains("another directory"), "{problem}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        match still_the_same(canonical, (1, 5), &|_| Err(error(rustix::io::Errno::NOENT))) {
+            Err(PushError::Target { problem }) => assert!(problem.contains("cannot be read")),
+            other => panic!("expected a refusal, got {other:?}"),
         }
     }
 

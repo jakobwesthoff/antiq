@@ -1516,16 +1516,20 @@ target. `--init` and `--force` are each refused together with
    is the user's statement that this empty target is the right one;
    `--force` that this copy may overwrite the target once, after the user
    made sure the target holds nothing newer. A forced push leaves the
-   marker as it was, so the machine it names pushes on as before. The
+   marker as it was, so the machine it names pushes on as before.
+   `--init` is refused where a marker exists, whoever's it is. The
    marker is sent by its own rsync run, as a temp directory in
    `.antiq/tmp/` holding only `.antiq-target`, sent to `<target>/` with
-   `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so the
-   target root keeps its mode and time) plus the same `-e`,
+   `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so rsync
+   sets neither mode nor time of the target root from the temp directory)
+   plus the same `-e`,
    `--rsync-path`, `--timeout`, fsync setting and `rsync_args` as the mirror; the
    marker arrives with mode 0644 masked by the receiving side's umask. For
    an ssh target that creates the last missing directory level, and a
-   deeper missing path is exit 1 with rsync's mkdir line. `push -n` never
-   writes it. (ADR 0031)
+   deeper missing path is exit 1 with rsync's mkdir line. A failing marker
+   run is exit 1 with rsync's text. Just before it, a path target's
+   directory is checked to be the one that was inspected.
+   `push -n` never writes it. (ADR 0031)
 6. **Mirror.** One rsync run, antiq's options first, then the options of
    `[target] rsync_args` verbatim, then the two paths:
 

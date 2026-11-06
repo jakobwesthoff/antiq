@@ -40,7 +40,7 @@ impl Target {
     /// The name antiq gives this machine, which a marker made by this
     /// machine carries.
     pub fn machine_name(&self) -> String {
-        antiq::machine::detect().expect("the machine has a name")
+        crate::support::cmd::machine_name()
     }
 
     /// The marker `push --init` writes for `collection` from this machine.

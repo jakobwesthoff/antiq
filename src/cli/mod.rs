@@ -199,7 +199,7 @@ pub struct PieceArgs {
 
 #[derive(Debug, Args)]
 pub struct PushArgs {
-    /// Create the target's marker and directory
+    /// Write the target's marker on an empty directory (over ssh, also create its last missing level)
     #[arg(long, conflicts_with = "if_reachable")]
     pub init: bool,
     /// Push although the target's marker names another host or path

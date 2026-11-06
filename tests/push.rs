@@ -84,6 +84,19 @@ fn push(collection: &Collection, args: &[&str]) -> Run {
         .run()
 }
 
+/// Like `push`, under the file mode creation mask `mask`.
+fn push_with_umask(collection: &Collection, mask: u32, args: &[&str]) -> Run {
+    Antiq::new()
+        .env("TZ", "UTC")
+        .umask(mask)
+        .arg("-C")
+        .arg(collection.root())
+        .arg("--json")
+        .arg("push")
+        .args(args)
+        .run()
+}
+
 fn push_text(collection: &Collection, args: &[&str]) -> Run {
     Antiq::new()
         .env("TZ", "UTC")
@@ -218,6 +231,21 @@ fn a_real_run_repairs_before_it_goes_on() {
 
     assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
     assert!(!Path::new(&stale).exists(), "repair 2 removes the entry");
+}
+
+#[test]
+fn the_help_of_init_names_the_empty_directory_and_the_last_missing_level_over_ssh() {
+    let run = Antiq::new().arg("push").arg("--help").run();
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let help = run.stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(!help.contains("marker and directory"), "{help}");
+    assert!(
+        help.contains(
+            "Write the target's marker on an empty directory (over ssh, also create its last missing level)"
+        ),
+        "{help}"
+    );
 }
 
 #[test]
@@ -952,7 +980,6 @@ fn a_missing_ssh_directory_is_refused_unless_init_creates_it() {
     assert!(message.contains("does not exist"), "{message}");
     let message = refused_message(&push(&collection, &["--force"]));
     assert!(message.contains("does not exist"), "{message}");
-    passes_the_precheck(&push(&collection, &["--init"]));
 }
 
 #[test]
@@ -1127,4 +1154,200 @@ fn the_listing_and_the_fetch_are_run_in_the_c_locale_with_the_options_of_the_mir
             .filter(|l| l.starts_with("LC_ALL="))
             .all(|l| l == "LC_ALL=C")
     );
+}
+
+// =========================================================
+// Step 5: the marker
+// =========================================================
+
+/// The first rsync of 3.2.4 or later that a developer machine has in the
+/// places antiq searches. The tests that send files need a real one.
+fn real_rsync() -> std::path::PathBuf {
+    let mut dirs: Vec<std::path::PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    dirs.push("/opt/homebrew/bin".into());
+    dirs.push("/usr/local/bin".into());
+    for dir in dirs {
+        let candidate = dir.join("rsync");
+        let Ok(output) = std::process::Command::new(&candidate)
+            .arg("--version")
+            .output()
+        else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let version = text
+            .split_whitespace()
+            .nth(2)
+            .and_then(|v| {
+                let mut parts = v.split('.').map(|p| p.parse::<u32>().ok());
+                Some((
+                    parts.next()??,
+                    parts.next()??,
+                    parts.next().flatten().unwrap_or(0),
+                ))
+            })
+            .unwrap_or((0, 0, 0));
+        if text.starts_with("rsync") && version >= (3, 2, 4) {
+            return candidate;
+        }
+    }
+    panic!("these tests need an rsync 3.2.4 or newer in PATH, /opt/homebrew/bin or /usr/local/bin");
+}
+
+/// The bytes `push --init` writes for `collection` on this machine.
+fn expected_marker(collection: &Collection) -> Vec<u8> {
+    antiq::target::marker::Marker::new(
+        collection.id().parse().expect("a collection ID"),
+        support::cmd::machine_name(),
+        collection.root().to_str().expect("UTF-8").to_string(),
+    )
+    .to_bytes()
+}
+
+/// A collection pushing to `target` with the real rsync.
+fn with_real_rsync(target: &Path) -> Collection {
+    let collection = collection();
+    set_url(&collection, target.to_str().expect("a UTF-8 path"));
+    let rsync = real_rsync();
+    let quoted = serde_json::to_string(rsync.to_str().expect("UTF-8")).expect("quotes");
+    add_target_key(&collection, &format!("rsync = {quoted}"));
+    collection
+}
+
+fn tmp_entries(collection: &Collection) -> Vec<std::ffi::OsString> {
+    fs::read_dir(collection.path(".antiq/tmp"))
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn init_writes_the_marker_and_leaves_the_mode_of_the_target_root_as_it_was() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let target = Target::new();
+    let root = target.path();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).expect("mode");
+    let collection = with_real_rsync(&root);
+
+    let run = push_with_umask(&collection, 0o022, &["--init"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    let marker = root.join(".antiq-target");
+    assert_eq!(
+        fs::read(&marker).expect("written"),
+        expected_marker(&collection)
+    );
+    assert_eq!(fs::metadata(&marker).expect("exists").mode() & 0o777, 0o644);
+    let meta = fs::metadata(&root).expect("exists");
+    assert_eq!(meta.mode() & 0o777, 0o750, "the root keeps its mode");
+    assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn the_marker_mode_is_masked_by_the_umask_of_the_receiving_side() {
+    use std::os::unix::fs::MetadataExt;
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+
+    let run = push_with_umask(&collection, 0o027, &["--init"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    let meta = fs::metadata(target.path().join(".antiq-target")).expect("written");
+    assert_eq!(meta.mode() & 0o777, 0o640);
+}
+
+#[test]
+fn a_dry_run_with_init_writes_nothing() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    let before = snapshot(&collection.root());
+
+    let run = push(&collection, &["--init", "-n"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    assert_eq!(fs::read_dir(target.path()).expect("exists").count(), 0);
+    assert_eq!(snapshot(&collection.root()), before);
+}
+
+#[test]
+fn force_and_a_matching_marker_send_no_marker() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker_with(&collection.id(), "Some Other Mac", "/elsewhere");
+    passes_the_precheck(&push(&collection, &["--force"]));
+    target.marker(&collection);
+    passes_the_precheck(&push(&collection, &[]));
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2, "only the version probes: {calls:?}");
+    assert!(calls.iter().all(|call| call[0] == "version"));
+}
+
+#[test]
+fn init_over_an_ssh_target_sends_the_marker_from_a_directory_of_its_own() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer(1, DOT, "", 0);
+    fake.answer(2, "", "", 0);
+
+    let run = push(&collection, &["--init"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let send = &calls[2];
+    assert!(send.contains(&"-r".to_string()), "{send:?}");
+    assert!(send.contains(&"--chmod=F644".to_string()), "{send:?}");
+    assert!(send.contains(&"--fsync".to_string()), "{send:?}");
+    assert_eq!(send.last().expect("a target"), "backup@nas:/srv/antiq/");
+    let from = &send[send.len() - 2];
+    assert!(from.contains(".antiq/tmp/push-"), "{from}");
+    assert!(!Path::new(from).exists(), "the directory is removed again");
+    assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn init_creates_the_last_level_of_a_missing_ssh_directory() {
+    let missing =
+        "rsync: [sender] change_dir \"/srv/antiq\" failed: No such file or directory (2)\n";
+    let (collection, fake) = ssh_targeted();
+    fake.answer(1, "", missing, 23);
+    fake.answer(2, "", "", 0);
+
+    let run = push(&collection, &["--init"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    assert_eq!(fake.calls().len(), 3);
+}
+
+#[test]
+fn a_marker_run_that_fails_is_exit_1_with_rsyncs_text() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer(1, DOT, "", 0);
+    fake.answer(
+        2,
+        "",
+        "rsync: mkdir \"/srv/antiq/a/b\" failed: No such file or directory (2)\n",
+        11,
+    );
+
+    let run = push(&collection, &["--init"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other");
+    let message = run.error_message();
+    assert!(message.contains("marker"), "{message}");
+    assert!(message.contains("exit 11"), "{message}");
+    assert!(message.contains("mkdir"), "{message}");
+    assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn a_dry_run_with_init_over_ssh_runs_only_the_listing() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all(DOT, "", 0);
+
+    let run = push(&collection, &["--init", "-n"]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    assert_eq!(fake.calls().len(), 2);
 }
