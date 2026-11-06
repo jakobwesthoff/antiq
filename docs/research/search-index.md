@@ -125,3 +125,93 @@ rounds. The index grew from 647.5 to 655.5 MB (`.del` files 1.5 MB). A new
 process needed 4.3 ms to open the index, build the reader and answer the
 first `ctr` count query. The update process peaked at 125 MB footprint
 and 177 MB maximum resident set size.
+
+## Tantivy: trigram index
+
+Same schema and writer settings as the word index, with a different
+`path` analyzer: `NgramTokenizer` with grams of exactly 3 characters
+(`prefix_only` off) and a lower-case filter, index option `Basic`. A query
+is run through the same analyzer and every trigram must match
+(`BooleanQuery` intersection). Queries shorter than 3 characters produce
+no trigram, so they cannot be asked of this index.
+
+Build: 15 000 000 documents added and committed in 19.5 s (6.4 s of it
+generating paths), 6.2 s waiting for merges (24 segments, then 10), 25.8
+s in all. Peak memory 652 MB footprint, 1769 MB maximum resident set
+size. Index size 1196.9 MB, of which the document store 481.1 MB, so
+715.8 MB without it: postings 668.6 MB, field norms 30.0 MB, fast fields
+16.5 MB, term dictionary 0.7 MB.
+
+Queries (same three evaluations as above, best of 5, second of two runs;
+the first run agreed within 0.4 ms). Index opened in 1.3 ms (10
+segments). Peak memory of the query process: 49 MB maximum resident set
+size, 7 MB footprint.
+
+| Query | Hits | Pieces | count ms | per piece ms | top 50 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `ctr` | 312 790 | 300 | 0.20 | 1.26 | 0.84 |
+| `ctrl` | 306 125 | 300 | 0.70 | 2.04 | 1.66 |
+| `scan` | 2 387 420 | 300 | 8.11 | 15.97 | 14.89 |
+| `scanner` | 1 265 190 | 300 | 15.22 | 25.57 | 29.61 |
+| `scanner/src` | 12 770 | 300 | 21.45 | 7.47 | 8.06 |
+| `.tif` | 762 365 | 300 | 1.99 | 4.04 | 3.60 |
+| `report` | 1 246 065 | 300 | 14.26 | 21.93 | 23.30 |
+| `qxz` | 0 | 0 | 0.00 | 0.19 | 0.00 |
+
+Incremental update, same three rounds as for the word index (pieces 42 to
+44), starting at 10 segments:
+
+| Step | Piece 42 | Piece 43 | Piece 44 |
+| --- | ---: | ---: | ---: |
+| remove: `delete_term` and commit | 24.6 ms | 43.8 ms | 26.1 ms |
+| add: 50 000 `add_document` (includes cloning the documents) | 211.1 ms | 243.4 ms | 247.6 ms |
+| add: with commit | 396.8 ms | 428.6 ms | 428.6 ms |
+| replace: delete, add, commit | 591.6 ms | 562.2 ms | 630.5 ms |
+
+Reader reloads took 0.3 to 4.9 ms. Segments after the three replace
+rounds: 18, 19, 27; after waiting for merges 20. The `ctr` count took
+0.41 ms afterwards against 0.20 ms before. The index grew from 1196.9 to
+1210.7 MB. A new process needed 2.8 ms to open the index and answer the
+first `ctr` count query. Peak memory 133 MB footprint, 203 MB maximum
+resident set size.
+
+## Tantivy: effect of a large word dictionary
+
+The word index above has 4 933 distinct words per set and 25 685
+terms in its largest segment (read after the update rounds), because five pieces repeat each set. A
+second dataset (`SIUNIQ=1` in the generator) gives every piece its own
+50 000 paths and replaces 30 % of the file names by 8 random lowercase
+letters, which makes the word dictionary large. Both index types were
+built again on it, with the settings above.
+
+| Figure | Word index | Trigram index |
+| --- | ---: | ---: |
+| Add and commit 15 000 000 documents | 14.2 s | 17.8 s |
+| Total with merges (segments 17, then 3 for both) | 17.6 s | 23.0 s |
+| Index size | 702.8 MB | 1220.2 MB |
+| of which store / postings / term dictionary | 485.8 / 125.8 / 46.5 MB | 485.5 / 688.2 / 0.4 MB |
+| Peak footprint / maximum resident set size, build | 784 MB / 1655 MB | 560 MB / 1721 MB |
+| Terms per segment (12 M, 1.5 M, 1.5 M documents) | 3 689 468, 470 038, 469 697 | not read |
+| Query process, maximum resident set size / footprint | 113 MB / 11.5 MB | 43 MB / 5 MB |
+
+Queries, best of 5, second run (in the first run the `top 50`
+column of the word index was 62.6 ms for `c` and 506 to 529 ms for `ct`,
+`ctr`, `ctrl` and `qxz`, while the file pages were read in):
+
+| Query | Word index hits | count ms | per piece ms | top 50 ms | Trigram index hits | count ms | per piece ms | top 50 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `c` (prefix) | 7 103 283 | 45.19 | 61.49 | 54.08 | not possible | | | |
+| `ct` (substring) | 2 810 275 | 309.07 | 314.75 | 313.04 | not possible | | | |
+| `ctr` | 214 471 | 290.48 | 288.68 | 290.60 | 219 338 | 0.12 | 0.95 | 0.55 |
+| `ctrl` | 212 984 | 288.67 | 290.64 | 290.21 | 212 985 | 0.51 | 1.47 | 1.15 |
+| `scan` (prefix) | 2 222 866 | 6.03 | 11.54 | 8.34 | 2 223 021 | 7.32 | 14.51 | 13.07 |
+| `scanner` (word) | 1 158 274 | 0.00 | 4.09 | 0.04 | 1 173 172 | 13.47 | 22.28 | 25.29 |
+| `scanner/src` | 78 133 | 5.46 | 9.72 | 9.54 | 12 107 | 6.94 | 7.10 | 7.29 |
+| `.tif` | 381 050 | 0.00 | 1.48 | 0.01 | 762 201 | 1.99 | 4.38 | 3.70 |
+| `report` | 213 547 | 0.00 | 0.92 | 0.01 | 1 162 027 | 13.38 | 20.35 | 21.39 |
+| `qxz` | 1 643 | 289.47 | 289.77 | 288.75 | 1 643 | 0.00 | 0.19 | 0.01 |
+| `scaner` (fuzzy, distance 1) | 1 158 274 | 4.11 | 7.15 | 5.10 | not run | | | |
+
+The substring queries `ct`, `ctr`, `ctrl` and `qxz` on the word index
+went from 2 to 17 ms to 289 to 315 ms. Prefix queries (`scan`, `c`)
+and whole-word queries did not change.
