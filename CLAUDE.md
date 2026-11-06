@@ -2,8 +2,8 @@
 
 Your idle folders, kept like antiques. One Rust
 crate with a library (`src/lib.rs`) and a command-line binary
-(`src/main.rs`). Version 1 is implemented and not yet released; the
-specification is `docs/specs/spec-v1.md`. Architecture decisions live
+(`src/main.rs`). Version 1 is released (`CHANGELOG.md` lists the
+releases); the specification is `docs/specs/spec-v1.md`. Architecture decisions live
 in `docs/adrs/`; deferred work and open design questions live in the
 todo vault at `todos/`.
 
