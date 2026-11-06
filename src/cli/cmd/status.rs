@@ -65,10 +65,11 @@ pub fn run(ctx: &Context, out: &mut Output) -> anyhow::Result<u8> {
         }
         out.result_blocks(&shown.findings)
             .context("print the result")?;
+        out.notices(&shown.stderr).context("print the notes")?;
+        // A hint is the last thing a run prints, so the notices come first.
         if let Some(hint) = due_hint(&report) {
             out.hint_result(&hint).context("print the result")?;
         }
-        out.notices(&shown.stderr).context("print the notes")?;
     }
     // Pieces that `archive` refuses are not a failure of `status`.
     Ok(0)
