@@ -1821,6 +1821,23 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   Item C2; the spec's "init" and "Configuration" sections show the
   written file.
 
+### 8.9 Module names (user decision, 2026-11-04)
+
+Three modules get names that say what they hold: `src/fsx` becomes
+`src/filesystem` (`FsxError` becomes `FilesystemError`), `src/ops`
+becomes `src/commands` (the behaviour of each command; `src/cli/cmd`
+stays), and `src/pack` becomes `src/archive` (the `.tar.zst` file of a
+version: packing, reading, checking, extracting; the command stays
+`commands::archive`). The user's reason: home-made shorthands such as
+`fsx`, `ops` and `pack` make the code harder to read, while readable
+short forms stay (`relpath`, `sysmem`, `id`, `cmd`); asqr's module
+names are the model. New modules follow the same rule.
+
+Item N1 does the rename as one mechanical step once F2, F4 and E0 are
+merged and before the next items start: `git mv`, every `use` line,
+type and doc reference, the paths in this plan todo, and no behaviour
+change; `scripts/check.sh` green.
+
 ### 8.8 Scenario tests (user decision, 2026-11-04, asqr 01M6KN9EE9TNBA3YM4XYS7Z2KB)
 
 The use cases of the scope round, extended, become integration tests
