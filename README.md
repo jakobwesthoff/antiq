@@ -197,7 +197,7 @@ A folder that changed while it was packed is skipped and stays as it is.
 > Each archive of a piece is a **version**, named by the time it was
 > packed. Most pieces have just one. A second one appears only when the
 > same path is archived again while the first is still stored, for
-> example after you [forked](#bringing-a-version-back) the piece, worked
+> example after you [forked](#working-on-a-copy) the piece, worked
 > on the copy and archived that. The versions then sit side by side, and
 > `unearth` and `fork` take the newest unless you name another.
 
