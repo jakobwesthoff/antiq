@@ -65,7 +65,10 @@ pub enum InitAction {
 #[derive(Debug, Clone)]
 pub struct InitPlan {
     root: PathBuf,
+    /// The patterns in effect: the default one when none was given.
     patterns: Vec<String>,
+    /// The patterns as given, which are the ones the config states.
+    given_patterns: Vec<String>,
     warnings: Vec<Warning>,
 }
 
@@ -143,6 +146,7 @@ pub fn plan(directory: &Path, patterns: &[String]) -> Result<InitPlan, InitError
         });
     }
 
+    let given_patterns = patterns.to_vec();
     let patterns = if patterns.is_empty() {
         vec!["*".to_string()]
     } else {
@@ -165,6 +169,7 @@ pub fn plan(directory: &Path, patterns: &[String]) -> Result<InitPlan, InitError
     Ok(InitPlan {
         root,
         patterns,
+        given_patterns,
         warnings,
     })
 }
@@ -199,7 +204,7 @@ fn render_config(
     ids: &dyn IdSource,
 ) -> Result<(ObjectId, String), InitError> {
     let id = ids.mint(clock.now());
-    let config = ConfigDoc::new(id, Some(&plan.patterns), &[]).render()?;
+    let config = ConfigDoc::new(id, &plan.given_patterns).render()?;
     Ok((id, config))
 }
 

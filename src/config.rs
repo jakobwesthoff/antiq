@@ -15,7 +15,7 @@ use crate::relpath::RelPath;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut};
 
 /// Errors of the config file.
 #[derive(Debug, thiserror::Error)]
@@ -261,23 +261,72 @@ pub struct ConfigDoc {
 }
 
 impl ConfigDoc {
-    /// The document `init` writes. Settings left at their default stay out
-    /// of the file, so a later change of a default reaches this collection.
-    /// `patterns` is always written; `None` writes the default pattern.
-    pub fn new(id: ObjectId, patterns: Option<&[String]>, exclude: &[RelPath]) -> ConfigDoc {
-        let mut doc = DocumentMut::new();
+    /// The document `init` writes. `id` and the patterns given on the
+    /// command line are active lines. Every other `[collection]` key is
+    /// shown commented out with its default, so that a later change of a
+    /// default still reaches this collection. The `[target]` block is
+    /// commented out as a whole.
+    pub fn new(id: ObjectId, given_patterns: &[String]) -> ConfigDoc {
+        let array = |items: Vec<String>| Array::from_iter(items).to_string();
+        let patterns = if given_patterns.is_empty() {
+            format!("# patterns = {}", array(defaults::patterns()))
+        } else {
+            format!("patterns = {}", array(given_patterns.to_vec()))
+        };
+        let ignore = array(defaults::ignore());
+        let idle_days = defaults::idle_days();
+        let soon_days = defaults::soon_days();
+        let text = format!(
+            r#"# antiq collection configuration.
 
-        let mut collection = Table::new();
-        collection.insert("id", value(id.to_string()));
-        let patterns = patterns.map_or_else(defaults::patterns, <[String]>::to_vec);
-        collection.insert("patterns", value(Array::from_iter(patterns)));
-        if !exclude.is_empty() {
-            let escaped = exclude.iter().map(RelPath::to_string);
-            collection.insert("exclude", value(Array::from_iter(escaped)));
-        }
-        doc.insert("collection", Item::Table(collection));
+[collection]
+# ID of this collection. The marker `push` writes to the target records it.
+id = "{id}"
 
-        ConfigDoc { doc, path: None }
+# Glob patterns that select the pieces, relative to this directory. When
+# matches nest, the shallowest one is the piece. A folder whose name starts
+# with a dot is a piece only if a pattern names the dot.
+{patterns}
+
+# Paths that are never pieces: literal paths relative to this directory,
+# not patterns. A `%` is written `%25` and a byte that is not UTF-8 `%XX`.
+# exclude = []
+
+# gitignore lines for paths that are not packed, not listed and not counted
+# for the idle check. `archive` deletes them with the folder. A line without
+# a `/` (except at its end) matches at any depth below the top of a piece; a
+# `/` at the start or in the middle anchors it at that top.
+# ignore = {ignore}
+
+# gitignore lines for paths that are packed but not counted for the idle
+# check, such as ".git/". The lines follow the same rules as `ignore`.
+# timeless = []
+
+# Days a piece must be idle before it is due.
+# idle_days = {idle_days}
+
+# Days before a piece is due from which `status` shows it as soon.
+# soon_days = {soon_days}
+
+# Where `push` mirrors the collection. Remove the `#` from the lines you
+# need; `url` is the only one `push` requires.
+#
+# [target]
+# An absolute path, or [user@]host:path for an ssh target, for example
+# "backup@nas.local:/volume1/antiq/projects".
+# url = "/Volumes/nas/antiq/projects"
+# The local rsync. Without it, rsync from PATH.
+# rsync = "/opt/homebrew/bin/rsync"
+# The rsync on the target, passed as --rsync-path.
+# rsync_path = "/usr/local/bin/rsync"
+# Set to false when the rsync on the target lacks --fsync.
+# fsync = false
+# Extra rsync options, one string each. An option here overrides antiq's own,
+# such as --no-perms after -a.
+# rsync_args = ["--no-perms"]
+"#
+        );
+        ConfigDoc::parse(&text, None).expect("the template is valid TOML")
     }
 
     /// Parses `text`. `path` only names the file in error messages.
@@ -652,44 +701,140 @@ idle_days = 30
         COLLECTION_ID.parse().expect("a ULID")
     }
 
-    #[test]
-    fn a_new_document_holds_only_what_init_sets() {
-        let document = ConfigDoc::new(collection_id(), None, &[]);
-        assert_eq!(
-            document.render().expect("renders"),
-            format!("[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"*\"]\n")
-        );
+    fn written(patterns: &[&str]) -> String {
+        let given: Vec<String> = patterns.iter().map(ToString::to_string).collect();
+        ConfigDoc::new(collection_id(), &given)
+            .render()
+            .expect("the written document is a valid config")
+    }
+
+    /// The line of `key` in a written document, active or commented out.
+    fn line_of(text: &str, key: &str) -> Option<usize> {
+        text.lines().position(|line| {
+            let line = line.strip_prefix("# ").unwrap_or(line);
+            line.starts_with(&format!("{key} = "))
+        })
     }
 
     #[test]
-    fn a_new_document_writes_the_given_patterns_and_the_escaped_excludes() {
-        let patterns = ["projects/*".to_string(), ".*".to_string()];
-        let exclude = [RelPath::from_bytes(b"a\xFFb".to_vec()).expect("valid")];
-        let document = ConfigDoc::new(collection_id(), Some(&patterns), &exclude);
-        assert_eq!(
-            document.render().expect("renders"),
-            format!(
-                "[collection]\nid = \"{COLLECTION_ID}\"\npatterns = [\"projects/*\", \".*\"]\nexclude = [\"a%FFb\"]\n"
-            )
-        );
-    }
-
-    #[test]
-    fn a_new_document_writes_empty_patterns_as_given() {
-        let document = ConfigDoc::new(collection_id(), Some(&[]), &[]);
-        assert!(
-            document
-                .render()
-                .expect("renders")
-                .contains("patterns = []\n")
-        );
-    }
-
-    #[test]
-    fn a_new_document_reads_back_with_defaults_for_the_rest() {
-        let document = ConfigDoc::new(collection_id(), None, &[]);
-        let config = document.config().expect("the document is a valid config");
+    fn a_new_document_reads_back_as_the_defaults() {
+        let config = Config::parse(&written(&[]), None).expect("the document parses");
         assert_eq!(config, Config::new(collection_id()));
+    }
+
+    #[test]
+    fn given_patterns_are_written_as_an_active_line() {
+        let text = written(&["projects/*", ".*"]);
+        assert!(
+            text.lines()
+                .any(|line| line == r#"patterns = ["projects/*", ".*"]"#),
+            "{text}"
+        );
+        let config = Config::parse(&text, None).expect("the document parses");
+        let mut expected = Config::new(collection_id());
+        expected.collection.patterns = vec!["projects/*".into(), ".*".into()];
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn patterns_with_quotes_and_backslashes_read_back() {
+        let text = written(&["a\"b", "c\\d"]);
+        let config = Config::parse(&text, None).expect("the document parses");
+        assert_eq!(config.collection.patterns, ["a\"b", "c\\d"]);
+    }
+
+    #[test]
+    fn only_what_init_sets_is_an_active_line() {
+        let active = |text: &str| -> Vec<String> {
+            let table: toml::Table = toml::from_str(text).expect("valid TOML");
+            table["collection"]
+                .as_table()
+                .expect("a table")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(active(&written(&[])), ["id"]);
+        assert_eq!(active(&written(&["a*"])), ["id", "patterns"]);
+    }
+
+    #[test]
+    fn every_collection_key_has_a_comment() {
+        let text = written(&[]);
+        let lines: Vec<&str> = text.lines().collect();
+        for key in COLLECTION_KEYS {
+            let index = line_of(&text, key).unwrap_or_else(|| panic!("{key} has no line"));
+            let above = lines[index.checked_sub(1).expect("a comment comes first")];
+            let key_line = |line: &str| {
+                COLLECTION_KEYS.iter().any(|other| {
+                    line.trim_start_matches("# ")
+                        .starts_with(&format!("{other} = "))
+                })
+            };
+            assert!(
+                above.starts_with("# ") && !key_line(above),
+                "{key} has no comment above it: {above:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_block_is_commented_out_with_every_key() {
+        let text = written(&[]);
+        assert!(text.lines().any(|line| line == "# [target]"), "{text}");
+        assert!(!text.lines().any(|line| line == "[target]"), "{text}");
+        for key in TARGET_KEYS {
+            assert!(
+                text.lines()
+                    .any(|line| line.starts_with(&format!("# {key} = "))),
+                "{key} has no example"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_examples_work_when_uncommented() {
+        let text = written(&[]);
+        let block = text
+            .split_once("# [target]\n")
+            .expect("the target block exists")
+            .1;
+        let examples: Vec<&str> = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("# "))
+            .filter(|line| {
+                TARGET_KEYS
+                    .iter()
+                    .any(|key| line.starts_with(&format!("{key} = ")))
+            })
+            .collect();
+        assert_eq!(examples.len(), TARGET_KEYS.len(), "{block}");
+        let config = Config::parse(&format!("{text}[target]\n{}\n", examples.join("\n")), None)
+            .expect("the uncommented block parses");
+        assert!(config.unknown_target_keys.is_empty());
+        let url = config.target.url.expect("an example url");
+        crate::target::url::TargetUrl::parse(&url).expect("the url example is valid");
+        assert!(config.target.rsync.is_some());
+        assert!(config.target.rsync_path.is_some());
+        assert!(!config.target.fsync);
+        assert_eq!(config.target.rsync_args, ["--no-perms"]);
+    }
+
+    #[test]
+    fn the_ssh_example_in_the_comment_is_a_valid_url() {
+        let text = written(&[]);
+        let comment = text
+            .lines()
+            .skip_while(|line| *line != "# [target]")
+            .take_while(|line| !line.starts_with("# url = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let example = comment
+            .split('"')
+            .nth(1)
+            .expect("the comment quotes an ssh url");
+        assert!(example.contains('@'), "{example}");
+        crate::target::url::TargetUrl::parse(example).expect("the ssh example is valid");
     }
 
     #[test]

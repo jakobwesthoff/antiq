@@ -771,6 +771,65 @@ error: kind `usage`, exit 2. `init` creates `.antiq/` with `config.toml`,
 exists complete or not at all. It does not look for the layout of
 `archive.sh`; its old archive files are brought in by hand with `import`.
 
+The `config.toml` it writes, here without `--pattern` and with the
+placeholder `01JBX…` for the ID:
+
+```toml
+# antiq collection configuration.
+
+[collection]
+# ID of this collection. The marker `push` writes to the target records it.
+id = "01JBX…"
+
+# Glob patterns that select the pieces, relative to this directory. When
+# matches nest, the shallowest one is the piece. A folder whose name starts
+# with a dot is a piece only if a pattern names the dot.
+# patterns = ["*"]
+
+# Paths that are never pieces: literal paths relative to this directory,
+# not patterns. A `%` is written `%25` and a byte that is not UTF-8 `%XX`.
+# exclude = []
+
+# gitignore lines for paths that are not packed, not listed and not counted
+# for the idle check. `archive` deletes them with the folder. A line without
+# a `/` (except at its end) matches at any depth below the top of a piece; a
+# `/` at the start or in the middle anchors it at that top.
+# ignore = [".DS_Store"]
+
+# gitignore lines for paths that are packed but not counted for the idle
+# check, such as ".git/". The lines follow the same rules as `ignore`.
+# timeless = []
+
+# Days a piece must be idle before it is due.
+# idle_days = 30
+
+# Days before a piece is due from which `status` shows it as soon.
+# soon_days = 3
+
+# Where `push` mirrors the collection. Remove the `#` from the lines you
+# need; `url` is the only one `push` requires.
+#
+# [target]
+# An absolute path, or [user@]host:path for an ssh target, for example
+# "backup@nas.local:/volume1/antiq/projects".
+# url = "/Volumes/nas/antiq/projects"
+# The local rsync. Without it, rsync from PATH.
+# rsync = "/opt/homebrew/bin/rsync"
+# The rsync on the target, passed as --rsync-path.
+# rsync_path = "/usr/local/bin/rsync"
+# Set to false when the rsync on the target lacks --fsync.
+# fsync = false
+# Extra rsync options, one string each. An option here overrides antiq's own,
+# such as --no-perms after -a.
+# rsync_args = ["--no-perms"]
+```
+
+The collection ID is always an active line. With `--pattern`, the
+`patterns` line is active too and holds the given patterns. Every other
+`[collection]` key is commented out at its default, so that a change of a
+default reaches the collections that never set the key. The `[target]`
+block is commented out as a whole.
+
 It refuses, also under `-n`, creating nothing and exiting 1, where
 `.antiq/` already exists, inside another collection (naming its root),
 where `.antiq` is a file or a symlink, and where a folder that would be a
@@ -1395,7 +1454,9 @@ is exit 1, also under `--if-reachable`.
 
 ## Configuration
 
-The configuration is per collection, in `.antiq/config.toml`:
+The configuration is per collection, in `.antiq/config.toml`. The file
+`init` writes (see "init") has the same keys as this example, all but the
+ID and the given patterns commented out:
 
 ```toml
 [collection]

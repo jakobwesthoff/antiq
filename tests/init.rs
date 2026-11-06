@@ -227,6 +227,52 @@ fn under_json_the_note_is_in_the_warnings_and_stderr_stays_empty() {
     );
 }
 
+#[test]
+fn the_written_config_parses_back_to_the_defaults_and_the_given_patterns() {
+    let tree = Tree::new();
+    assert_eq!(init_in(&tree, &[]).code(), 0);
+    let config = config_of(tree.root());
+    assert_eq!(config, Config::new(config.collection.id));
+
+    let tree = Tree::new();
+    assert_eq!(init_in(&tree, &["--pattern", "a*"]).code(), 0);
+    let config = config_of(tree.root());
+    let mut expected = Config::new(config.collection.id);
+    expected.collection.patterns = vec!["a*".into()];
+    assert_eq!(config, expected);
+}
+
+#[test]
+fn the_written_config_names_every_setting() {
+    let tree = Tree::new();
+    assert_eq!(init_in(&tree, &[]).code(), 0);
+    let text = fs::read_to_string(tree.path(".antiq/config.toml")).expect("the config exists");
+    for key in [
+        "id",
+        "patterns",
+        "exclude",
+        "ignore",
+        "timeless",
+        "idle_days",
+        "soon_days",
+        "url",
+        "rsync",
+        "rsync_path",
+        "fsync",
+        "rsync_args",
+    ] {
+        assert!(
+            text.lines().any(|line| {
+                line.strip_prefix("# ")
+                    .unwrap_or(line)
+                    .starts_with(&format!("{key} = "))
+            }),
+            "{key} is missing in:\n{text}"
+        );
+    }
+    assert!(text.contains("\n# [target]\n"), "{text}");
+}
+
 // =========================================================
 // Dry runs
 // =========================================================
