@@ -78,10 +78,6 @@ impl Collection {
         self.root.join(ANTIQ_DIR)
     }
 
-    pub fn config_path(&self) -> PathBuf {
-        self.antiq_dir().join("config.toml")
-    }
-
     pub fn lock_path(&self) -> PathBuf {
         self.antiq_dir().join("lock")
     }
@@ -113,10 +109,6 @@ impl Collection {
 
     pub fn trash_dir(&self) -> PathBuf {
         self.antiq_dir().join("trash")
-    }
-
-    pub fn recovered_dir(&self) -> PathBuf {
-        self.antiq_dir().join("recovered")
     }
 }
 
@@ -301,12 +293,10 @@ mod tests {
         let collection = Collection::find(temp.root()).expect("a collection");
         let antiq = canonical(temp.root()).join(".antiq");
         assert_eq!(collection.antiq_dir(), antiq);
-        assert_eq!(collection.config_path(), antiq.join("config.toml"));
         assert_eq!(collection.lock_path(), antiq.join("lock"));
         assert_eq!(collection.tmp_dir(), antiq.join("tmp"));
         assert_eq!(collection.trash_dir(), antiq.join("trash"));
         assert_eq!(collection.doomed_dir(), antiq.join("doomed"));
-        assert_eq!(collection.recovered_dir(), antiq.join("recovered"));
         assert_eq!(collection.pieces_dir(), antiq.join("pieces"));
     }
 
