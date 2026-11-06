@@ -5,6 +5,8 @@
 //! The `fork` command: extracts a working copy of a version.
 
 use super::unearth::label;
+use crate::cli::console::block::Block;
+use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{decimal_size, sanitize};
@@ -50,8 +52,13 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
             if ctx.json {
                 out.json(Some("fork"), &plan).context("print the result")?;
             } else {
-                out.dry_plan(
+                let info = plan
+                    .actions
+                    .iter()
+                    .any(|step| matches!(step, Step::Command(action) if action.skipped.is_none()));
+                out.dry_plan_explained(
                     &dry_run_lines(&plan, style, &zone),
+                    info.then(explanation).as_ref(),
                     "forked",
                     "fork the version",
                 )
@@ -135,6 +142,16 @@ fn check_text(check: &str, action: &ForkAction, style: Style, zone: &TimeZone) -
     }
 }
 
+/// What a terminal is told about the command after the plan.
+fn explanation() -> Block {
+    Block::info(
+        Rich::new()
+            .cmd("fork")
+            .text(" extracts a working copy of a stored version."),
+    )
+    .text(Rich::new().text("The version stays in the store unchanged."))
+}
+
 fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String> {
     let mut lines = Vec::new();
     for step in &plan.actions {
@@ -158,11 +175,18 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
                     "Would fork {piece} (version {version}) to {}",
                     sanitize(&action.path)
                 ));
+                // A terminal gets the checks as a list under a heading,
+                // a pipe keeps one `  check ...` line for each.
+                if style.terminal {
+                    lines.push("Checks the real run makes first:".to_string());
+                }
                 for check in &action.checks {
-                    lines.push(format!(
-                        "  check {}",
-                        check_text(check, action, style, zone)
-                    ));
+                    let text = check_text(check, action, style, zone);
+                    lines.push(if style.terminal {
+                        format!("  {text}")
+                    } else {
+                        format!("  check {text}")
+                    });
                 }
             }
         }

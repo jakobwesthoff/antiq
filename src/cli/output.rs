@@ -371,7 +371,23 @@ impl Output {
     /// the footer. `nothing_was` and `rerun` complete the footer's
     /// sentence, see [`Output::dry_footer`].
     pub fn dry_plan(&mut self, lines: &[String], nothing_was: &str, rerun: &str) -> io::Result<()> {
+        self.dry_plan_explained(lines, None, nothing_was, rerun)
+    }
+
+    /// As [`Output::dry_plan`], with an info block between the lines and
+    /// the footer that says what the command does. Only a terminal gets
+    /// it, and only when the plan has an action.
+    pub fn dry_plan_explained(
+        &mut self,
+        lines: &[String],
+        info: Option<&Block>,
+        nothing_was: &str,
+        rerun: &str,
+    ) -> io::Result<()> {
         if self.dry_lines(lines)? > 0 {
+            if let Some(info) = info {
+                self.info_result(info)?;
+            }
             self.dry_footer(nothing_was, rerun)?;
         }
         Ok(())

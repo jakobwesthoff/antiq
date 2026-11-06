@@ -165,3 +165,106 @@ fn an_init_dry_run_in_a_pipe_prints_the_config_with_the_comment_in_place_of_the_
         run.stderr
     );
 }
+
+fn one_scanner_version(builder: &mut CollectionBuilder) {
+    builder.version("projects/scanner", NEW, &[("main.rs", "fn main() {}\n")]);
+}
+
+#[test]
+fn a_rebuild_dry_run_names_what_is_checked_and_written_and_explains_rebuild() {
+    let world = world(one_scanner_version);
+    world
+        .collection()
+        .damage_remove_listing("projects/scanner", NEW);
+    let run = world.run_tty_env(&["rebuild", "-n", "projects/scanner", NEW], PLAIN);
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        "○ would rebuild  version 2026-11-04 22:02:11 of projects/scanner\n\
+         \x20 check    projects-scanner--2026-11-04T090211.tar.zst\n\
+         \x20 against  projects-scanner--2026-11-04T090211.tar.zst.sha256\n\
+         \x20 write    projects-scanner--2026-11-04T090211.sha256.zst\n\
+         \n\
+         \x20ℹ INFO  rebuild repairs a damaged version by writing only what is missing.\n\
+         ▌   It checks the archive against what survives first and runs only when asked,\n\
+         ▌   never as a repair.\n\
+         \n\
+         Dry run: nothing was rebuilt. Run again without -n to rebuild the version.\n"
+    );
+}
+
+#[test]
+fn a_rebuild_dry_run_in_a_pipe_keeps_its_one_sentence() {
+    let world = world(one_scanner_version);
+    world
+        .collection()
+        .damage_remove_listing("projects/scanner", NEW);
+    let run = world.run(&["rebuild", "-n", "projects/scanner", NEW]);
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        "Would check projects-scanner--2026-11-04T090211.tar.zst against projects-scanner--2026-11-04T090211.tar.zst.sha256 and write projects-scanner--2026-11-04T090211.sha256.zst\n"
+    );
+}
+
+#[test]
+fn an_unearth_dry_run_lists_the_checks_and_explains_unearth() {
+    let world = world(one_scanner_version);
+    let run = world.run_tty_env(&["unearth", "-n", "projects/scanner"], PLAIN);
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        "○ would unearth  projects/scanner (version 2026-11-04 22:02:11)\n\
+         Checks the real run makes first:\n\
+         \x20 the version 2026-11-04 22:02:11 is sound\n\
+         \x20 the destination projects/scanner is free\n\
+         \x20 there is room for 13 B\n\
+         \x20 the member names fit the volume (not run by -n)\n\
+         \x20 the extracted tree equals the listing (not run by -n)\n\
+         \n\
+         \x20ℹ INFO  unearth brings a stored version back as a live folder.\n\
+         ▌   It removes the version from the store once the folder is complete and\n\
+         ▌   verified.\n\
+         \n\
+         Dry run: nothing was unearthed. Run again without -n to unearth the version.\n"
+    );
+}
+
+#[test]
+fn a_fork_dry_run_lists_the_checks_and_explains_fork() {
+    let world = world(one_scanner_version);
+    let run = world.run_tty_env(
+        &["fork", "-n", "projects/scanner", "--name", "tools/copy"],
+        PLAIN,
+    );
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        "○ would fork  projects/scanner (version 2026-11-04 22:02:11) to tools/copy\n\
+         Checks the real run makes first:\n\
+         \x20 the version 2026-11-04 22:02:11 is sound\n\
+         \x20 the destination tools/copy is free\n\
+         \x20 there is room for 13 B\n\
+         \x20 the member names fit the volume (not run by -n)\n\
+         \x20 the extracted tree equals the listing (not run by -n)\n\
+         \n\
+         \x20ℹ INFO  fork extracts a working copy of a stored version.\n\
+         ▌   The version stays in the store unchanged.\n\
+         \n\
+         Dry run: nothing was forked. Run again without -n to fork the version.\n"
+    );
+}
+
+#[test]
+fn the_dry_runs_of_unearth_and_fork_in_a_pipe_keep_their_check_lines() {
+    let world = world(one_scanner_version);
+    let run = world.run(&["unearth", "-n", "projects/scanner"]);
+    run.expect_code(0);
+    assert!(
+        run.stdout.starts_with(
+            "Would unearth projects/scanner (version 2026-11-04T090211)\n  check the version"
+        ),
+        "{}",
+        run.stdout
+    );
+}

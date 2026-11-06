@@ -4,6 +4,8 @@
 
 //! The `rebuild` command: repairs a damaged version.
 
+use crate::cli::console::block::Block;
+use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
@@ -11,7 +13,7 @@ use crate::cli::{Context, RebuildArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::rebuild::{
-    Action, Basis, RebuildPlan, RebuildReport, RebuildRequest, plan, rebuild,
+    Action, Basis, RebuildEntry, RebuildPlan, RebuildReport, RebuildRequest, plan, rebuild,
 };
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
@@ -36,9 +38,20 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
         if ctx.json {
             out.json(Some("rebuild"), &plan).context("print the plan")?;
         } else {
-            let lines = render_plan(&plan);
-            out.dry_plan(&lines.stdout, "rebuilt", "rebuild the version")
-                .context("print the plan")?;
+            let terminal = out.stdout_style().terminal;
+            let lines = render_plan(&plan, terminal, &zone);
+            let info = matches!(
+                &plan,
+                RebuildPlan::Listed { actions, .. }
+                    if actions.iter().any(|action| matches!(action, Action::RebuildVersion(_)))
+            );
+            out.dry_plan_explained(
+                &lines.stdout,
+                info.then(explanation).as_ref(),
+                "rebuilt",
+                "rebuild the version",
+            )
+            .context("print the plan")?;
             out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
@@ -104,9 +117,36 @@ fn render(report: &RebuildReport, terminal: bool, zone: &TimeZone) -> Lines {
     Lines { stdout, stderr }
 }
 
+/// What a terminal is told about the command after the plan.
+fn explanation() -> Block {
+    Block::info(Rich::new().cmd("rebuild").text(" repairs a damaged version by writing only what is missing."))
+        .text(Rich::new().text("It checks the archive against what survives first and runs only when asked, never as a repair."))
+}
+
+/// The rows of a version on a terminal: what is checked, against what, and
+/// which files are written, each under its role.
+fn rows(entry: &RebuildEntry) -> Vec<String> {
+    let row = |role: &str, file: &str| format!("  {role:<9}{}", sanitize(file));
+    let mut rows = Vec::new();
+    match (&entry.basis, &entry.against) {
+        (Basis::ChecksumFile, Some(against)) => {
+            rows.push(row("check", &entry.archive));
+            rows.push(row("against", against));
+        }
+        (Basis::Listing, Some(against)) => {
+            rows.push(row("check", &format!("every member of {}", entry.archive)));
+            rows.push(row("against", against));
+        }
+        _ => rows.push(row("read", &format!("{} to its end", entry.archive))),
+    }
+    rows.extend(entry.write.iter().map(|file| row("write", file)));
+    rows
+}
+
 /// The plan of a dry run: one `Would ...` line per action on stdout, or the
-/// line about the holder of the lock.
-fn render_plan(plan: &RebuildPlan) -> Lines {
+/// line about the holder of the lock. A pipe gets one sentence for a
+/// version, a terminal the action and its rows.
+fn render_plan(plan: &RebuildPlan, terminal: bool, zone: &TimeZone) -> Lines {
     let (actions, warnings) = match plan {
         RebuildPlan::Held { lock_held, .. } => {
             return Lines {
@@ -121,16 +161,24 @@ fn render_plan(plan: &RebuildPlan) -> Lines {
             actions, warnings, ..
         } => (actions, warnings),
     };
-    let stdout = actions
-        .iter()
-        .map(|action| match action {
-            Action::Repair(repair) => format!("Would {}", repair.describe()),
+    let mut stdout = Vec::new();
+    for action in actions {
+        match action {
+            Action::Repair(repair) => stdout.push(format!("Would {}", repair.describe())),
+            Action::RebuildVersion(entry) if terminal => {
+                let version = local_labels(&[entry.stamp], zone).remove(0);
+                stdout.push(format!(
+                    "Would rebuild version {version} of {}",
+                    sanitize(&entry.piece.to_string())
+                ));
+                stdout.extend(rows(entry));
+            }
             Action::RebuildVersion(entry) => {
                 let archive = sanitize(&entry.archive);
                 let against = entry.against.as_deref().map(sanitize).unwrap_or_default();
                 let write: Vec<String> = entry.write.iter().map(|file| sanitize(file)).collect();
                 let write = write.join(", ");
-                match entry.basis {
+                stdout.push(match entry.basis {
                     Basis::ChecksumFile => {
                         format!("Would check {archive} against {against} and write {write}")
                     }
@@ -140,10 +188,10 @@ fn render_plan(plan: &RebuildPlan) -> Lines {
                     Basis::ReadableOnly => {
                         format!("Would read {archive} to its end and write {write}")
                     }
-                }
+                });
             }
-        })
-        .collect();
+        }
+    }
     let stderr = notice::warnings(warnings);
     Lines { stdout, stderr }
 }

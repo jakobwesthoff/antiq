@@ -1105,7 +1105,9 @@ checks it would make. (ADR 0061)
   extraction skips the version the same way: the staging is removed, and
   `needed` is the unpacked size of the listing.
 - `-n` prints a `Would unearth` line for the unearth and one indented
-  `check` line per check. It makes the checks of the version, of the
+  `check` line per check. On a terminal the checks stand without the word
+  `check` under the line `Checks the real run makes first:`, and an info
+  that says what `unearth` does follows them. It makes the checks of the version, of the
   destination and of the free space. A tree that repair 4 would give back to
   the destination makes it taken, and a destination on another volume than
   `.antiq/tmp/` is refused as a mount point. The checks of the member names
@@ -1171,7 +1173,8 @@ refused. `fork` writes
 never treat it as an unearth). Archived later, the copy becomes a new
 version (same path) or a new piece (new path); without edits that is an
 identical version, once due or at once with `archive <piece>`. `-n` names
-the version and the destination path. (ADR 0061)
+the version and the destination path, and the checks as `unearth -n` does,
+with an info that says what `fork` does. (ADR 0061)
 
 No room for the version (the unpacked size of the listing against the free
 space of `.antiq/tmp/`) skips it before anything is written, and so does a
@@ -1280,7 +1283,11 @@ member of <archive> against <listing> and write <checksum file>` and `Would
 read <archive> to its end and write <listing>, <checksum file>`. A dry run
 applies the refusals that follow from the sidecars and the size of the
 archive. It neither hashes nor reads the archive, so it can succeed where
-the real run refuses a mismatch.
+the real run refuses a mismatch. On a terminal the version is the action
+`Would rebuild version <time> of <piece>`, followed by one indented row
+for each step: `check`, `against`, `write` (one row for each file) or
+`read`. An info says what `rebuild` does, between the rows and the
+footer.
 
 ### import
 

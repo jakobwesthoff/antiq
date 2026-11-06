@@ -364,7 +364,11 @@ fn a_terminal_names_the_version_by_its_local_time() {
     );
     assert_eq!(
         plain.lines().nth(1),
-        Some("  check the version 2026-11-04 22:02:11 is sound"),
+        Some("Checks the real run makes first:")
+    );
+    assert_eq!(
+        plain.lines().nth(2),
+        Some("  the version 2026-11-04 22:02:11 is sound"),
         "{:?}",
         dry.stdout
     );
