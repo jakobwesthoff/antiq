@@ -6,7 +6,10 @@
 //!
 //! Callers hold the run lock; see the module docs of [`crate::fsx`].
 
-use super::{FsxError, io_error};
+use super::tree::TreeRoot;
+use super::{FsxError, failure, io_error};
+use crate::relpath::{Name, RelPath};
+use crate::tree::EntryKind;
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -53,6 +56,131 @@ pub(crate) fn flush_dir(dir: &Path) -> Result<(), FsxError> {
 fn flush_dir_with(dir: &Path, sync: Flush<'_>, fsync: Flush<'_>) -> Result<(), FsxError> {
     let handle = File::open(dir).map_err(io_error("flush directory", dir))?;
     flush_with(&handle, sync, fsync).map_err(io_error("flush directory", dir))
+}
+
+/// How the store operations make what they wrote durable. The real one
+/// flushes with [`flush_file`]; tests put a recorder in its place
+/// ([`recording::Recording`]) to see in which order the flushes and the
+/// renames happen and what the disk holds at each flush.
+///
+/// Both methods take the open handle, so a path deeper than the system
+/// limit is flushed like any other. `path` only names the target in the
+/// error and in the record.
+#[allow(
+    dead_code,
+    reason = "used by the versions store (move_in and the other operations)"
+)]
+pub(crate) trait Durable: Send + Sync {
+    /// Makes the data of an open file durable.
+    fn file(&self, file: &File, path: &Path) -> Result<(), FsxError>;
+    /// Makes the entries of an open directory durable.
+    fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError>;
+}
+
+/// The flushing of the platform ([`flush_file`]).
+#[allow(
+    dead_code,
+    reason = "used by the versions store (move_in and the other operations)"
+)]
+pub(crate) struct RealDurable;
+
+impl Durable for RealDurable {
+    fn file(&self, file: &File, path: &Path) -> Result<(), FsxError> {
+        flush_file(file, path)
+    }
+
+    fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError> {
+        flush_with(dir, &real_sync, &real_fsync).map_err(io_error("flush directory", path))
+    }
+}
+
+/// How an error or a record names `path` below `root`: the path itself,
+/// or `.` for the root.
+#[allow(
+    dead_code,
+    reason = "used by the versions store (move_in and the other operations)"
+)]
+pub(crate) fn named(root: &TreeRoot, path: &RelPath) -> std::path::PathBuf {
+    let shown = root.prefix().concat(path);
+    if shown.is_root() {
+        return std::path::PathBuf::from(".");
+    }
+    std::path::PathBuf::from(shown.to_string())
+}
+
+/// Makes the directory `dir` of `root` durable.
+#[allow(
+    dead_code,
+    reason = "used by the versions store (move_in and the other operations)"
+)]
+pub(crate) fn flush_dir_of(
+    durable: &dyn Durable,
+    root: &TreeRoot,
+    dir: &RelPath,
+) -> Result<(), FsxError> {
+    let handle = root
+        .open_dir_file(dir)
+        .map_err(failure("open directory", root, dir))?;
+    durable.dir(&handle, &named(root, dir))
+}
+
+/// Creates the directories of `chain` below `base` that are missing, and
+/// makes every directory of the chain durable together with its parent,
+/// also those that existed before: an earlier run may have created one
+/// and failed to flush it, and the archive step that follows relies on
+/// the whole chain being there after a crash. `base` itself must exist.
+///
+/// A component that exists as anything but a directory, a symlink to a
+/// directory included, is an error.
+#[allow(
+    dead_code,
+    reason = "used by the versions store (move_in and the other operations)"
+)]
+pub(crate) fn create_dir_chain(
+    durable: &dyn Durable,
+    base: &TreeRoot,
+    chain: &RelPath,
+) -> Result<(), FsxError> {
+    let mut parent = RelPath::root();
+    for component in chain.components() {
+        let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
+        let path = parent.join(&name);
+        ensure_dir(base, &path, &|path| base.create_dir(path, 0o777))?;
+        flush_dir_of(durable, base, &path)?;
+        flush_dir_of(durable, base, &parent)?;
+        parent = path;
+    }
+    Ok(())
+}
+
+/// Makes sure the directory `path` of `base` exists. `create` makes it
+/// when `lstat` finds nothing there.
+///
+/// Pieces are archived in parallel and two of them can share a parent
+/// that is new, so a `create` that fails because the name exists now is
+/// not an error when what exists is a directory.
+fn ensure_dir(
+    base: &TreeRoot,
+    path: &RelPath,
+    create: &dyn Fn(&RelPath) -> io::Result<()>,
+) -> Result<(), FsxError> {
+    let not_a_directory = || {
+        let source = io::Error::from(io::ErrorKind::NotADirectory);
+        failure("create directory", base, path)(source)
+    };
+    match base.lstat(path) {
+        Ok(entry) if entry.kind == EntryKind::Directory => Ok(()),
+        Ok(_) => Err(not_a_directory()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match create(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match base.lstat(path) {
+                Ok(entry) if entry.kind == EntryKind::Directory => Ok(()),
+                _ => Err(not_a_directory()),
+            },
+            Err(error) => Err(failure("create directory", base, path)(error)),
+        },
+        Err(error) => Err(failure("look at", base, path)(error)),
+    }
 }
 
 /// Replaces the file at `path` with `bytes`, or creates it.
@@ -126,6 +254,118 @@ fn temp_name(target: &OsStr) -> OsString {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     name
+}
+
+/// A [`Durable`] that records every flush and lets a test look at the
+/// state of the disk at that moment or make a flush fail.
+#[cfg(test)]
+pub(crate) mod recording {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum Flush {
+        File(PathBuf),
+        Dir(PathBuf),
+    }
+
+    type Observer = Box<dyn Fn(&Flush, &File) + Send + Sync>;
+
+    #[derive(Default)]
+    pub(crate) struct Recording {
+        flushes: Mutex<Vec<Flush>>,
+        observer: Mutex<Option<Observer>>,
+        /// File flushes from this one on (counted from 0) fail.
+        fail_files_from: Mutex<Option<usize>>,
+        /// Directory flushes from this one on (counted from 0) fail.
+        fail_dirs_from: Mutex<Option<usize>>,
+    }
+
+    impl Recording {
+        pub(crate) fn new() -> Recording {
+            Recording::default()
+        }
+
+        /// Called with every flush before it is recorded, so a test can
+        /// read the files as they are at that moment.
+        pub(crate) fn observe(&self, observer: impl Fn(&Flush, &File) + Send + Sync + 'static) {
+            *self.observer.lock().expect("no test panics holding it") = Some(Box::new(observer));
+        }
+
+        /// Makes the file flushes fail from the `n`th one on, counted from
+        /// 0 over the file flushes only.
+        pub(crate) fn fail_files_from(&self, n: usize) {
+            *self
+                .fail_files_from
+                .lock()
+                .expect("no test panics holding it") = Some(n);
+        }
+
+        /// Makes the directory flushes fail from the `n`th one on, counted
+        /// from 0 over the directory flushes only, so a test can let the
+        /// flushes of its setup pass and fail the one it is about.
+        pub(crate) fn fail_dirs_from(&self, n: usize) {
+            *self
+                .fail_dirs_from
+                .lock()
+                .expect("no test panics holding it") = Some(n);
+        }
+
+        pub(crate) fn flushes(&self) -> Vec<Flush> {
+            self.flushes
+                .lock()
+                .expect("no test panics holding it")
+                .clone()
+        }
+
+        fn record(
+            &self,
+            flush: Flush,
+            handle: &File,
+            fail_from: &Mutex<Option<usize>>,
+            same_kind: fn(&Flush) -> bool,
+        ) -> Result<(), FsxError> {
+            if let Some(observer) = &*self.observer.lock().expect("no test panics holding it") {
+                observer(&flush, handle);
+            }
+            let mut flushes = self.flushes.lock().expect("no test panics holding it");
+            let earlier = flushes.iter().filter(|flush| same_kind(flush)).count();
+            let path = match &flush {
+                Flush::File(path) | Flush::Dir(path) => path.clone(),
+            };
+            flushes.push(flush);
+            let from = *fail_from.lock().expect("no test panics holding it");
+            if from.is_some_and(|from| earlier >= from) {
+                return Err(FsxError::Io {
+                    action: "flush",
+                    path: path.display().to_string(),
+                    source: io::Error::from_raw_os_error(Errno::IO.raw_os_error()),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    impl Durable for Recording {
+        fn file(&self, file: &File, path: &Path) -> Result<(), FsxError> {
+            self.record(
+                Flush::File(path.to_path_buf()),
+                file,
+                &self.fail_files_from,
+                |flush| matches!(flush, Flush::File(_)),
+            )
+        }
+
+        fn dir(&self, dir: &File, path: &Path) -> Result<(), FsxError> {
+            self.record(
+                Flush::Dir(path.to_path_buf()),
+                dir,
+                &self.fail_dirs_from,
+                |flush| matches!(flush, Flush::Dir(_)),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +671,228 @@ mod tests {
         write_atomic_with(&target, b"2", &sync, &real_fsync).expect("second");
         let seen = seen.into_inner();
         assert_ne!(seen[0], seen[2], "{seen:?}");
+    }
+
+    use super::recording::{Flush, Recording};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn root_of(tree: &Tree) -> TreeRoot {
+        TreeRoot::open(tree.root()).expect("the root opens")
+    }
+
+    fn chain(text: &str) -> RelPath {
+        RelPath::parse(text).expect("a valid path")
+    }
+
+    fn dirs(recording: &Recording) -> Vec<String> {
+        recording
+            .flushes()
+            .iter()
+            .map(|flush| match flush {
+                Flush::Dir(path) => path.display().to_string(),
+                Flush::File(path) => format!("file {}", path.display()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_chain_is_created_and_each_directory_flushed_with_its_parent() {
+        let tree = Tree::new();
+        let recording = Recording::new();
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b/c")).expect("created");
+        assert!(tree.path("a/b/c").is_dir());
+        assert_eq!(dirs(&recording), ["a", ".", "a/b", "a", "a/b/c", "a/b"]);
+    }
+
+    #[test]
+    fn an_existing_prefix_is_flushed_again() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let recording = Recording::new();
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect("created");
+        assert_eq!(dirs(&recording), ["a", ".", "a/b", "a"]);
+    }
+
+    #[test]
+    fn a_complete_existing_chain_is_flushed_and_left_alone() {
+        let mut tree = Tree::new();
+        tree.dir("a/b");
+        tree.file("a/b/keep", b"x");
+        let recording = Recording::new();
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect("ok");
+        assert_eq!(dirs(&recording), ["a", ".", "a/b", "a"]);
+        assert!(tree.path("a/b/keep").is_file());
+    }
+
+    #[test]
+    fn an_empty_chain_does_nothing() {
+        let tree = Tree::new();
+        let recording = Recording::new();
+        create_dir_chain(&recording, &root_of(&tree), &RelPath::root()).expect("ok");
+        assert!(recording.flushes().is_empty());
+    }
+
+    #[test]
+    fn a_file_in_the_chain_is_refused() {
+        let mut tree = Tree::new();
+        tree.file("a", b"x");
+        let recording = Recording::new();
+        let error =
+            create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect_err("a file");
+        assert!(error.to_string().contains("create directory a"), "{error}");
+        assert!(tree.path("a").is_file());
+    }
+
+    #[test]
+    fn a_symlink_to_a_directory_in_the_chain_is_refused() {
+        let mut tree = Tree::new();
+        tree.dir("real");
+        tree.symlink("a", "real");
+        let recording = Recording::new();
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect_err("a symlink");
+        assert!(!tree.path("real/b").exists());
+    }
+
+    #[test]
+    fn a_missing_base_is_an_error() {
+        let tree = Tree::new();
+        let base = TreeRoot::open(tree.root()).expect("opens");
+        std::fs::remove_dir(tree.root()).expect("an empty root can go");
+        let recording = Recording::new();
+        let error = create_dir_chain(&recording, &base, &chain("a")).expect_err("no base");
+        assert!(matches!(error, FsxError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_created_is_an_error() {
+        let mut tree = Tree::new();
+        let locked = tree.dir("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("mode");
+        let _restore = super::super::RestoreModes(vec![locked]);
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let recording = Recording::new();
+        let error =
+            create_dir_chain(&recording, &root_of(&tree), &chain("locked/b")).expect_err("denied");
+        assert!(
+            error.to_string().contains("create directory locked/b"),
+            "{error}"
+        );
+        assert!(
+            recording.flushes().len() == 2,
+            "only locked and its parent were flushed"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_appears_while_it_is_created_is_accepted() {
+        let tree = Tree::new();
+        let base = root_of(&tree);
+        let racing = |path: &RelPath| {
+            base.create_dir(path, 0o777)
+                .expect("the other piece creates it first");
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        };
+        ensure_dir(&base, &chain("a"), &racing).expect("a directory is fine");
+        assert!(tree.path("a").is_dir());
+    }
+
+    #[test]
+    fn a_file_that_appears_while_a_directory_is_created_is_refused() {
+        let tree = Tree::new();
+        let base = root_of(&tree);
+        let racing = |path: &RelPath| {
+            drop(
+                base.create_file(path, 0o644)
+                    .expect("another process creates a file"),
+            );
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        };
+        let error = ensure_dir(&base, &chain("a"), &racing).expect_err("a file");
+        assert!(
+            matches!(&error, FsxError::Io { source, .. } if source.kind() == io::ErrorKind::NotADirectory),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn another_failure_to_create_is_passed_on() {
+        let tree = Tree::new();
+        let base = root_of(&tree);
+        let denied = |_: &RelPath| Err(io::Error::from_raw_os_error(Errno::ACCESS.raw_os_error()));
+        let error = ensure_dir(&base, &chain("a"), &denied).expect_err("denied");
+        assert!(
+            matches!(
+                error,
+                FsxError::Io {
+                    action: "create directory",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_failing_flush_of_the_new_directory_stops_the_chain() {
+        let tree = Tree::new();
+        let recording = Recording::new();
+        recording.fail_dirs_from(0);
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect_err("flush fails");
+        assert!(tree.path("a").is_dir());
+        assert!(!tree.path("a/b").exists());
+    }
+
+    #[test]
+    fn a_failing_flush_of_the_parent_stops_the_chain() {
+        let tree = Tree::new();
+        let recording = Recording::new();
+        recording.fail_dirs_from(1);
+        create_dir_chain(&recording, &root_of(&tree), &chain("a/b")).expect_err("flush fails");
+        assert!(!tree.path("a/b").exists());
+        assert_eq!(dirs(&recording), ["a", "."]);
+    }
+
+    #[test]
+    fn the_recording_sees_the_disk_and_fails_files_from_the_nth() {
+        let mut tree = Tree::new();
+        let target = tree.file("f", b"x");
+        let recording = Recording::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let watched = target.clone();
+        recording.observe(move |flush, _| {
+            sink.lock()
+                .expect("not poisoned")
+                .push((flush.clone(), watched.exists()));
+        });
+        recording.fail_files_from(1);
+        let file = File::open(&target).expect("opens");
+        recording
+            .file(&file, Path::new("f"))
+            .expect("the first passes");
+        recording
+            .file(&file, Path::new("f"))
+            .expect_err("the second fails");
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            [
+                (Flush::File("f".into()), true),
+                (Flush::File("f".into()), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_real_durable_flushes_a_file_and_a_directory() {
+        let mut tree = Tree::new();
+        let target = tree.file("f", b"x");
+        let file = File::open(&target).expect("opens");
+        RealDurable.file(&file, &target).expect("flushed");
+        let dir = File::open(tree.root()).expect("opens");
+        RealDurable.dir(&dir, tree.root()).expect("flushed");
     }
 }
