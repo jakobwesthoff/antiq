@@ -6,10 +6,6 @@
 //!
 //! Callers hold the run lock; see the module docs of [`crate::fsx`].
 
-// TODO: `archive` (I19), `unearth` (I20) and the start-of-run repairs
-// (I17) are the callers; until they land the library has none.
-#![allow(dead_code)]
-
 use super::tree::TreeRoot;
 use super::{FsxError, failure, shown};
 use crate::relpath::RelPath;
