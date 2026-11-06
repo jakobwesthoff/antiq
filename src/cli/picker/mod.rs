@@ -22,7 +22,6 @@
 
 mod layout;
 mod state;
-#[cfg_attr(not(test), allow(dead_code))]
 mod tree;
 
 use std::io::{self, Write};
@@ -38,8 +37,9 @@ use crossterm::{
 use unicode_width::UnicodeWidthStr;
 
 pub use layout::align_pieces;
-pub use state::{Contents, Members};
-use state::{Page, PickerState, VisibleRow};
+use state::{ChildLine, ListLine, Marker, Page, PickerState, VisibleRow};
+pub use state::{Contents, Entries, Members};
+pub use tree::Member;
 
 /// One picker row split by role: searched, displayed, and display-only.
 ///
@@ -58,6 +58,9 @@ pub struct Row {
     /// It must not depend on the row width: the picker scores it once and
     /// keeps that ranking when the terminal width changes.
     pub search: String,
+    /// The display column the row's size column ends at, for the tree lines
+    /// of an expanded piece to line their sizes up under it.
+    pub size_end: usize,
 }
 
 /// A key that acts on the selected item like Enter does, but tells the caller
@@ -88,7 +91,7 @@ pub struct EnterStays<A> {
 
 /// The Ctrl keys the picker itself handles. An [`AcceptKey`] on one of them
 /// is ignored, so a caller cannot take away aborting or moving the selection.
-const BUILT_IN_CTRL_KEYS: [char; 6] = ['c', 'd', 'n', 'p', 'u', 'w'];
+const BUILT_IN_CTRL_KEYS: [char; 7] = ['c', 'd', 'n', 'o', 'p', 'u', 'w'];
 
 /// The accept key a key press matches, if any.
 fn accept_key<A>(
@@ -107,10 +110,11 @@ fn accept_key<A>(
 
 /// The stats line's hint for Enter, if it stays open, and the accept keys,
 /// e.g. `⏎ print  ^Y path`, or empty when there are none.
-fn key_hints<A>(enter: Option<&EnterStays<A>>, keys: &[AcceptKey<A>]) -> String {
-    enter
-        .map(|e| format!("⏎ {}", e.hint))
+fn key_hints<A>(contents: bool, enter: Option<&EnterStays<A>>, keys: &[AcceptKey<A>]) -> String {
+    contents
+        .then(|| "^O contents".to_string())
         .into_iter()
+        .chain(enter.map(|e| format!("⏎ {}", e.hint)))
         .chain(
             keys.iter()
                 .map(|k| format!("^{} {}", k.ctrl.to_ascii_uppercase(), k.hint)),
@@ -239,11 +243,12 @@ fn run_loop<'c, T, A: Copy>(
     let (mut cols, rows) = terminal::size().context("while querying the terminal size")?;
     let mut built_row_width = row_width(cols);
     let picker_rows = render_all(&items, built_row_width);
+    let has_contents = contents.is_some();
     let mut state = PickerState::new(items, picker_rows, list_height(rows));
     if let Some(contents) = contents {
         state = state.with_contents(contents);
     }
-    let hints = key_hints(enter_stays, keys);
+    let hints = key_hints(has_contents, enter_stays, keys);
 
     // The first frame paints a fresh alternate screen and every later frame
     // erases per line, so a full clear is only needed again after a resize.
@@ -431,6 +436,7 @@ fn handle_key<T, A: Copy>(
         KeyCode::Char('d') if ctrl => state.page_better(Page::Half),
         KeyCode::PageUp => state.page_worse(Page::Full),
         KeyCode::PageDown => state.page_better(Page::Full),
+        KeyCode::Char('o') if ctrl => state.toggle_contents(),
         KeyCode::Char('w') if ctrl => state.delete_word(),
         KeyCode::Backspace => state.backspace(),
         // Plain typing (no Ctrl/Alt) edits the query. TODO: no intra-query
@@ -454,10 +460,18 @@ const PROMPT_PREFIX: &str = "❯ ";
 /// distinct from the prompt's `❯`. Two columns wide, like the unselected `  `.
 const SELECTION_POINTER: &str = "▌ ";
 
+/// The columns the triangle in front of a row takes, with its space.
+const MARKER_WIDTH: usize = 2;
+
+/// The columns in front of a row's content: the selection pointer (or the
+/// matching two-space gutter) and the triangle. The lines of a tree start
+/// behind the same columns.
+const GUTTER: usize = 2 + MARKER_WIDTH;
+
 /// The display columns a row's content gets on a terminal `cols` wide: what is
-/// left after the selection pointer (or the matching two-space gutter).
+/// left after the gutter.
 fn row_width(cols: u16) -> usize {
-    (cols as usize).saturating_sub(SELECTION_POINTER.width())
+    (cols as usize).saturating_sub(GUTTER)
 }
 
 /// Whether a terminal now `new_cols` wide needs its rows laid out again, given
@@ -509,8 +523,11 @@ fn draw<T>(
     let list_rows = lines.len() as u16;
     for (i, line) in lines.iter().enumerate() {
         queue!(tty, cursor::MoveTo(0, i as u16))?;
-        if let Some(row) = line {
-            draw_row(tty, row, cols)?;
+        match line {
+            ListLine::Blank => {}
+            ListLine::Piece(row) => draw_row(tty, row, cols)?,
+            ListLine::Child(child) => draw_child(tty, child, cols, state.size_end())?,
+            ListLine::Cut(text) => draw_cut(tty, text, cols)?,
         }
         queue!(tty, terminal::Clear(terminal::ClearType::UntilNewLine))?;
     }
@@ -535,6 +552,8 @@ fn draw<T>(
     // Dimmed stats under the second divider, aligned under the query text.
     let (matching, total) = state.counter();
     let rank = state.selected_rank();
+    let contents = state.contents_stat();
+    let detail = stats_detail(contents.as_deref(), state.selected_detail());
     queue!(
         tty,
         cursor::MoveTo(0, prompt_row + 2),
@@ -544,7 +563,7 @@ fn draw<T>(
             rank,
             matching,
             total,
-            state.selected_detail(),
+            detail.as_deref(),
             state.notice(),
             hints,
         )),
@@ -596,6 +615,17 @@ fn draw_divider(tty: &mut impl Write, cols: u16) -> Result<()> {
 /// A run of `fill` exactly `width` columns wide.
 fn divider_line(width: usize, fill: char) -> String {
     std::iter::repeat_n(fill, width).collect()
+}
+
+/// The text after the counter in the stats line: what the expanded piece's
+/// contents come to, then the selected row's detail.
+fn stats_detail(contents: Option<&str>, detail: Option<&str>) -> Option<String> {
+    let detail = detail.filter(|detail| !detail.is_empty());
+    match (contents, detail) {
+        (Some(contents), Some(detail)) => Some(format!("{contents} · {detail}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_string()),
+        (None, None) => None,
+    }
 }
 
 /// The smallest gap between the stats and the right-aligned key hints.
@@ -661,6 +691,12 @@ fn draw_row(tty: &mut impl Write, row: &VisibleRow<'_>, cols: u16) -> Result<()>
         queue!(tty, style::SetForegroundColor(style::Color::Cyan))?;
     }
     queue!(tty, style::Print(pointer))?;
+    let marker = match row.marker {
+        Marker::None => ' ',
+        Marker::Closed => '▸',
+        Marker::Open => '▾',
+    };
+    queue!(tty, style::Print(marker), style::Print(' '))?;
 
     // Clip to the terminal width (in display columns) so a long row never wraps
     // and breaks the layout. The `▌ ` bar is two display columns; a wide
@@ -669,7 +705,7 @@ fn draw_row(tty: &mut impl Write, row: &VisibleRow<'_>, cols: u16) -> Result<()>
     // `layout::fit_prefix`), so a row laid out to fit is drawn whole. The
     // visible part is a character prefix, so the highlight indices still
     // address its characters.
-    let shown = layout::fit_prefix(row.display, width.saturating_sub(pointer.width()));
+    let shown = layout::fit_prefix(row.display, width.saturating_sub(GUTTER));
     let highlights = row.highlights;
     for (i, c) in shown.chars().enumerate() {
         let matched = highlights.binary_search(&(i as u32)).is_ok();
@@ -692,6 +728,58 @@ fn draw_row(tty: &mut impl Write, row: &VisibleRow<'_>, cols: u16) -> Result<()>
         tty,
         style::SetAttribute(Attribute::Reset),
         style::ResetColor
+    )?;
+    Ok(())
+}
+
+/// Draw one line of the tree under the expanded piece: the name, bold for a
+/// directory with the matched characters yellow, and the size dimmed at the
+/// right.
+fn draw_child(
+    tty: &mut impl Write,
+    child: &ChildLine<'_>,
+    cols: u16,
+    size_end: usize,
+) -> Result<()> {
+    let cells = layout::child_cells(child, cols as usize, size_end, GUTTER);
+    queue!(tty, style::Print(" ".repeat(cells.indent)))?;
+    if child.dir {
+        queue!(tty, style::SetAttribute(Attribute::Bold))?;
+    }
+    for (i, c) in cells.text.chars().enumerate() {
+        let matched = child.highlights.binary_search(&(i as u32)).is_ok();
+        if matched {
+            queue!(tty, style::SetForegroundColor(style::Color::Yellow))?;
+        }
+        queue!(tty, style::Print(c))?;
+        if matched {
+            queue!(tty, style::ResetColor)?;
+        }
+    }
+    queue!(tty, style::SetAttribute(Attribute::Reset))?;
+    if !cells.size.is_empty() {
+        queue!(
+            tty,
+            style::Print(" ".repeat(cells.gap)),
+            style::SetAttribute(Attribute::Dim),
+            style::Print(&cells.size),
+            style::SetAttribute(Attribute::Reset),
+        )?;
+    }
+    Ok(())
+}
+
+/// Draw the dimmed line that says how many entries the tree leaves out,
+/// indented like the deepest lines of a shallow tree.
+fn draw_cut(tty: &mut impl Write, text: &str, cols: u16) -> Result<()> {
+    let indent = GUTTER + 2;
+    let shown = layout::fit_prefix(text, (cols as usize).saturating_sub(indent));
+    queue!(
+        tty,
+        style::Print(" ".repeat(indent)),
+        style::SetAttribute(Attribute::Dim),
+        style::Print(shown),
+        style::SetAttribute(Attribute::Reset),
     )?;
     Ok(())
 }
@@ -893,7 +981,7 @@ mod tests {
             closes: true,
         },
         AcceptKey {
-            ctrl: 'o',
+            ctrl: 't',
             hint: "other",
             action: Action::Second,
             closes: true,
@@ -905,7 +993,7 @@ mod tests {
         let ctrl = KeyModifiers::CONTROL;
         let action = |c| accept_key(&KEYS, KeyCode::Char(c), ctrl).map(|k| k.action);
         assert_eq!(action('y'), Some(Action::First));
-        assert_eq!(action('o'), Some(Action::Second));
+        assert_eq!(action('t'), Some(Action::Second));
     }
 
     #[test]
@@ -947,20 +1035,21 @@ mod tests {
 
     #[test]
     fn key_hints_name_each_key_and_its_purpose() {
-        assert_eq!(key_hints(None, &KEYS), "^Y path  ^O other");
-        assert_eq!(key_hints::<Action>(None, &[]), "");
+        assert_eq!(key_hints(false, None, &KEYS), "^Y path  ^T other");
+        assert_eq!(key_hints::<Action>(false, None, &[]), "");
     }
 
     #[test]
-    fn row_width_leaves_room_for_the_selection_pointer() {
-        assert_eq!(row_width(80), 80 - SELECTION_POINTER.width());
+    fn the_pointer_and_the_gutter_have_the_same_width() {
+        assert_eq!(SELECTION_POINTER.width(), 2);
+        assert_eq!(GUTTER, SELECTION_POINTER.width() + MARKER_WIDTH);
     }
 
     #[test]
     fn row_width_saturates_on_a_terminal_narrower_than_the_pointer() {
         assert_eq!(row_width(0), 0);
         assert_eq!(row_width(1), 0);
-        assert_eq!(row_width(2), 0);
+        assert_eq!(row_width(4), 0);
     }
 
     #[test]
@@ -1042,6 +1131,7 @@ mod tests {
                 display: s.clone(),
                 detail: String::new(),
                 search: s.clone(),
+                size_end: 0,
             })
             .collect();
         PickerState::new(items, rows, height)
@@ -1201,7 +1291,7 @@ mod tests {
             closes: false,
         },
         AcceptKey {
-            ctrl: 'o',
+            ctrl: 't',
             hint: "close",
             action: Action::Second,
             closes: true,
@@ -1221,7 +1311,7 @@ mod tests {
     fn a_key_that_closes_still_accepts() {
         let mut s = picker(10);
         assert_eq!(
-            handle_key(&mut s, &STAY_KEYS, ctrl('o')),
+            handle_key(&mut s, &STAY_KEYS, ctrl('t')),
             Flow::Accept(Some(Action::Second))
         );
     }
@@ -1318,7 +1408,7 @@ mod tests {
             Step::Accept(None)
         );
         assert_eq!(
-            step(&mut s, None, &STAY_KEYS, ctrl('o'), &mut on_stay),
+            step(&mut s, None, &STAY_KEYS, ctrl('t'), &mut on_stay),
             Step::Accept(Some(Action::Second))
         );
         assert_eq!(
@@ -1363,10 +1453,10 @@ mod tests {
     #[test]
     fn the_hint_of_an_enter_that_stays_comes_first() {
         assert_eq!(
-            key_hints(Some(&ENTER_PRINTS), &KEYS),
-            "⏎ print  ^Y path  ^O other"
+            key_hints(false, Some(&ENTER_PRINTS), &KEYS),
+            "⏎ print  ^Y path  ^T other"
         );
-        assert_eq!(key_hints(Some(&ENTER_PRINTS), &[]), "⏎ print");
+        assert_eq!(key_hints(false, Some(&ENTER_PRINTS), &[]), "⏎ print");
     }
 
     // -------------------------------------------------------------------------
@@ -1402,6 +1492,14 @@ mod tests {
     }
 
     impl Contents<String> for Recording {
+        fn has(&self, _: &String) -> bool {
+            false
+        }
+
+        fn entries(&mut self, _: &String) -> Result<Option<Entries>, String> {
+            unimplemented!("no test expands")
+        }
+
         fn members(&mut self, item: &String) -> Option<Members> {
             self.seen.borrow_mut().push(self.frames.text());
             Some(Members {
@@ -1499,5 +1597,355 @@ mod tests {
         let mut frames = Frames::default();
         react_to(&mut s, &mut frames, press(KeyCode::Char('z')));
         assert_eq!(frames.text(), "");
+    }
+
+    // -------------------------------------------------------------------------
+    // Contents under a piece
+    // -------------------------------------------------------------------------
+
+    /// Every item has one five-byte file.
+    struct OneFile;
+
+    impl Contents<String> for OneFile {
+        fn has(&self, _: &String) -> bool {
+            true
+        }
+
+        fn entries(&mut self, item: &String) -> Result<Option<Entries>, String> {
+            Ok(Some(Entries {
+                prefix: format!("{item}/"),
+                members: vec![tree::Member {
+                    path: "a.txt".to_string(),
+                    dir: false,
+                    size: 5,
+                }],
+            }))
+        }
+
+        fn members(&mut self, _: &String) -> Option<Members> {
+            None
+        }
+    }
+
+    /// A picker over `alpha`, `beta` and `gamma` whose rows end their size
+    /// column at 30.
+    fn with_files(height: usize) -> PickerState<'static, String> {
+        let mut state = picker(height).with_contents(Box::new(OneFile));
+        let rows = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|name| Row {
+                display: name.to_string(),
+                detail: String::new(),
+                search: name.to_string(),
+                size_end: 30,
+            })
+            .collect();
+        state.set_rows(rows);
+        state
+    }
+
+    fn tree_lines(state: &PickerState<String>) -> usize {
+        state
+            .list_lines()
+            .iter()
+            .filter(|line| matches!(line, ListLine::Child(_)))
+            .count()
+    }
+
+    #[test]
+    fn ctrl_o_expands_the_selected_piece_and_again_collapses_it() {
+        let mut s = with_files(10);
+        feed(&mut s, &[ctrl('o')]);
+        assert_eq!(tree_lines(&s), 1);
+        feed(&mut s, &[ctrl('o')]);
+        assert_eq!(tree_lines(&s), 0);
+    }
+
+    #[test]
+    fn an_accept_key_cannot_take_ctrl_o() {
+        let taking = [AcceptKey {
+            ctrl: 'o',
+            hint: "nope",
+            action: Action::First,
+            closes: true,
+        }];
+        let mut s = with_files(10);
+        assert_eq!(handle_key(&mut s, &taking, ctrl('o')), Flow::Continue);
+        assert_eq!(tree_lines(&s), 1);
+    }
+
+    #[test]
+    fn the_hint_for_the_contents_comes_before_the_hints_of_the_caller() {
+        assert_eq!(
+            key_hints(true, Some(&ENTER_PRINTS), &KEYS),
+            "^O contents  ⏎ print  ^Y path  ^T other"
+        );
+        assert_eq!(key_hints::<Action>(true, None, &[]), "^O contents");
+    }
+
+    #[test]
+    fn the_hints_of_find_with_print_take_47_columns() {
+        let hints = "^O contents  ⏎ print  ^F fork  ^K pin  ^X unpin";
+        assert_eq!(hints.width(), 47);
+    }
+
+    #[test]
+    fn the_stats_of_the_contents_come_before_the_detail() {
+        assert_eq!(
+            stats_detail(Some("4 701 in contents"), Some("01ARZ")).as_deref(),
+            Some("4 701 in contents · 01ARZ")
+        );
+        assert_eq!(
+            stats_detail(Some("4 701 in contents"), None).as_deref(),
+            Some("4 701 in contents")
+        );
+        assert_eq!(
+            stats_detail(Some("4 701 in contents"), Some("")).as_deref(),
+            Some("4 701 in contents")
+        );
+        assert_eq!(stats_detail(None, Some("01ARZ")).as_deref(), Some("01ARZ"));
+        assert_eq!(stats_detail(None, None), None);
+    }
+
+    #[test]
+    fn the_hints_win_over_the_counts_of_the_contents_at_80_columns() {
+        let hints = "^O contents  ⏎ print  ^F fork  ^K pin  ^X unpin";
+        let line = stats_line(
+            80,
+            Some(1),
+            9,
+            9_999_999,
+            Some("1 234 567 in contents · 01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            None,
+            hints,
+        );
+        assert!(line.ends_with(hints), "{line:?}");
+        assert!(line.starts_with("  1/9 · 9999999 total"), "{line:?}");
+        assert_eq!(line.width(), 80);
+    }
+
+    #[test]
+    fn the_rows_leave_room_for_the_pointer_and_the_triangle() {
+        assert_eq!(row_width(80), 76);
+    }
+
+    /// What `draw` writes for the picker at `cols` columns, as one string.
+    fn drawn(state: &PickerState<String>, cols: u16) -> String {
+        let mut frames = Frames::default();
+        draw(&mut frames, state, cols, false, "").expect("drawing succeeds");
+        frames.text()
+    }
+
+    #[test]
+    fn the_frame_shows_the_triangle_and_the_tree_with_its_size() {
+        let mut s = with_files(10);
+        let closed = drawn(&s, 80);
+        assert!(closed.contains("▸ alpha"), "{closed:?}");
+        feed(&mut s, &[ctrl('o')]);
+        let open = drawn(&s, 80);
+        assert!(open.contains("▾ alpha"), "{open:?}");
+        assert!(open.contains("a.txt"), "{open:?}");
+        assert!(open.contains("5 B"), "{open:?}");
+    }
+
+    #[test]
+    fn the_frame_shows_the_cut_line_dimmed() {
+        struct Many;
+        impl Contents<String> for Many {
+            fn has(&self, _: &String) -> bool {
+                true
+            }
+            fn entries(&mut self, item: &String) -> Result<Option<Entries>, String> {
+                Ok(Some(Entries {
+                    prefix: format!("{item}/"),
+                    members: (0..30)
+                        .map(|n| tree::Member {
+                            path: format!("f{n}"),
+                            dir: false,
+                            size: 1,
+                        })
+                        .collect(),
+                }))
+            }
+            fn members(&mut self, _: &String) -> Option<Members> {
+                None
+            }
+        }
+        let mut s = picker(10).with_contents(Box::new(Many));
+        feed(&mut s, &[ctrl('o')]);
+        let frame = drawn(&s, 80);
+        assert!(frame.contains("… 26 more members"), "{frame:?}");
+    }
+
+    // -------------------------------------------------------------------------
+    // The expanded tree on the screen
+    // -------------------------------------------------------------------------
+
+    use antiq::id::ObjectId;
+    use antiq::ops::find::{FoundPiece, FoundState};
+    use antiq::relpath::{Name, RelPath};
+    use antiq::tracking::PieceState;
+    use std::path::PathBuf;
+
+    fn found(number: u64, path: &str, state: PieceState, size: Option<u64>) -> FoundPiece {
+        let rel = RelPath::parse(path).expect("a valid path");
+        let name = Name::from_bytes(path.as_bytes().to_vec()).expect("a valid name");
+        let id = ObjectId::from_ulid(ulid::Ulid::from_parts(1_600_000_000_000 + number, 1));
+        FoundPiece {
+            id,
+            abs_path: format!("/work/{path}"),
+            folder: PathBuf::from(format!("/work/{path}")),
+            short_id: id.to_string()[..10].to_string(),
+            path: rel,
+            name,
+            state: FoundState::Piece(state),
+            created: "2026-09-03T08:00:00Z".parse().expect("a time"),
+            size,
+        }
+    }
+
+    /// The contents of the third piece: a source directory with a scanner
+    /// below it and 4 700 scans.
+    struct Scans;
+
+    impl Scans {
+        const PIECE: &'static str = "2026_09_03_data-extraction";
+
+        fn members() -> Vec<tree::Member> {
+            let dir = |path: &str| tree::Member {
+                path: path.to_string(),
+                dir: true,
+                size: 0,
+            };
+            let file = |path: String, size: u64| tree::Member {
+                path,
+                dir: false,
+                size,
+            };
+            let mut members = vec![
+                dir("src"),
+                dir("src/scanner"),
+                file("src/scanner/lib.rs".to_string(), 61 * 1024),
+                file("src/util.rs".to_string(), 27 * 1024),
+                dir("data"),
+                dir("data/raw"),
+            ];
+            members.extend((1..=4700).map(|n| {
+                let size = if n <= 2 { 48 * 1024 * 1024 } else { 1024 };
+                file(format!("data/raw/scan-{n:04}.tif"), size)
+            }));
+            members
+        }
+    }
+
+    impl Contents<FoundPiece> for Scans {
+        fn has(&self, piece: &FoundPiece) -> bool {
+            piece.path.to_string() == Self::PIECE
+        }
+
+        fn entries(&mut self, _: &FoundPiece) -> Result<Option<Entries>, String> {
+            Ok(Some(Entries {
+                prefix: format!("{}/", Self::PIECE),
+                members: Self::members(),
+            }))
+        }
+
+        fn members(&mut self, piece: &FoundPiece) -> Option<Members> {
+            self.has(piece).then(|| Members {
+                prefix: format!("{}/", Self::PIECE),
+                paths: Self::members().into_iter().map(|m| m.path).collect(),
+            })
+        }
+    }
+
+    /// The picker over three pieces with the query `scan`, the third piece
+    /// selected and expanded, as the screen shows it at `cols` columns:
+    /// every list line, the prompt and the stats line, without colors.
+    fn expanded_tree_at(cols: u16) -> String {
+        let pieces = vec![
+            found(1, "2026_07_01_scan-tools", PieceState::Live, Some(3 * 1024)),
+            found(
+                2,
+                "2026_08_02_scanner-old",
+                PieceState::RemoteOnly,
+                Some(5 * 1024),
+            ),
+            found(
+                3,
+                Scans::PIECE,
+                PieceState::Archived,
+                Some(2 * 1024 * 1024 * 1024),
+            ),
+        ];
+        let rows = align_pieces(&pieces, row_width(cols));
+        let mut state = PickerState::new(pieces, rows, 12).with_contents(Box::new(Scans));
+        type_query(&mut state, "scan");
+        state.select_worse();
+        state.select_worse();
+        state.toggle_contents();
+
+        let mut frame = String::new();
+        for line in state.list_lines() {
+            let text = match line {
+                ListLine::Blank => continue,
+                ListLine::Piece(row) => {
+                    let mark = match row.marker {
+                        Marker::None => ' ',
+                        Marker::Closed => '▸',
+                        Marker::Open => '▾',
+                    };
+                    let bar = if row.selected { '▌' } else { ' ' };
+                    let shown = layout::fit_prefix(row.display, row_width(cols));
+                    format!("{bar} {mark} {shown}")
+                }
+                ListLine::Child(child) => {
+                    let cells = layout::child_cells(&child, cols.into(), state.size_end(), GUTTER);
+                    format!(
+                        "{}{}{}{}",
+                        " ".repeat(cells.indent),
+                        cells.text,
+                        " ".repeat(cells.gap),
+                        cells.size
+                    )
+                }
+                ListLine::Cut(text) => format!("{}{text}", " ".repeat(GUTTER + 2)),
+            };
+            frame.push_str(text.trim_end());
+            frame.push('\n');
+        }
+        frame.push_str(&format!("❯ {}\n", state.query()));
+        let contents = state.contents_stat();
+        let detail = stats_detail(contents.as_deref(), None);
+        let (matching, total) = state.counter();
+        frame.push_str(
+            stats_line(
+                cols.into(),
+                state.selected_rank(),
+                matching,
+                total,
+                detail.as_deref(),
+                None,
+                "^O contents  ^F fork  ^K pin  ^X unpin",
+            )
+            .trim_end(),
+        );
+        frame.push('\n');
+        frame
+    }
+
+    fn type_query(state: &mut PickerState<'_, FoundPiece>, query: &str) {
+        for c in query.chars() {
+            state.push_char(c);
+        }
+    }
+
+    #[test]
+    fn the_expanded_tree_at_80_columns() {
+        insta::assert_snapshot!(expanded_tree_at(80));
+    }
+
+    #[test]
+    fn the_expanded_tree_at_120_columns() {
+        insta::assert_snapshot!(expanded_tree_at(120));
     }
 }

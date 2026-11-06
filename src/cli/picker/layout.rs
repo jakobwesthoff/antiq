@@ -20,6 +20,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::Row;
+use super::state::ChildLine;
 use crate::cli::cmd::find::{human_size, state_word};
 use crate::cli::cmd::status::{mid, sanitize};
 
@@ -46,6 +47,9 @@ pub fn align_pieces(pieces: &[FoundPiece], width: usize) -> Vec<Row> {
     let fixed = state_w + size_w + created_w + 3 * SEPARATOR.width();
     let piece_w = widest(|cells| &cells.piece).min(width.saturating_sub(fixed));
 
+    // The sizes of an expanded piece's tree end where this column does.
+    let size_end = piece_w + state_w + size_w + 2 * SEPARATOR.width();
+
     pieces
         .iter()
         .zip(&cells)
@@ -59,6 +63,7 @@ pub fn align_pieces(pieces: &[FoundPiece], width: usize) -> Vec<Row> {
             .join(SEPARATOR),
             detail: piece.id.to_string(),
             search: search_text(piece, &cells.piece),
+            size_end,
         })
         .collect()
 }
@@ -90,6 +95,53 @@ fn search_text(piece: &FoundPiece, shown_path: &str) -> String {
         shown_path.to_string()
     } else {
         format!("{shown_path}{SEPARATOR}{name}")
+    }
+}
+
+/// The cells of one tree line under an expanded piece.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ChildCells {
+    /// The blank columns in front of the text.
+    pub indent: usize,
+    /// The name, a character prefix of the line's text so that its highlight
+    /// positions stay valid.
+    pub text: String,
+    /// The blank columns between the text and the size.
+    pub gap: usize,
+    /// The size for people, empty when the line is too narrow for it.
+    pub size: String,
+}
+
+/// Lay out `line` on a terminal `width` columns wide: indented two columns per
+/// level behind the `gutter` of the selection pointer and the triangle, with
+/// its size ending `size_end` columns behind the gutter, where the size
+/// column of the piece rows ends.
+pub fn child_cells(
+    line: &ChildLine<'_>,
+    width: usize,
+    size_end: usize,
+    gutter: usize,
+) -> ChildCells {
+    let indent = gutter + 2 * line.depth;
+    let size = human_size(Some(line.size));
+    // The columns from the start of the name to the end of the size.
+    let room = (gutter + size_end).min(width).saturating_sub(indent);
+    if room <= size.width() {
+        let text = fit_prefix(line.text, width.saturating_sub(indent)).to_string();
+        return ChildCells {
+            indent,
+            text,
+            gap: 0,
+            size: String::new(),
+        };
+    }
+    let text = fit_prefix(line.text, room - size.width() - 1).to_string();
+    let gap = room - text.width() - size.width();
+    ChildCells {
+        indent,
+        text,
+        gap,
+        size,
     }
 }
 
@@ -233,6 +285,21 @@ mod tests {
                 format!("remote{}remote-only   512 B  2026-09-03", sp(22)),
             ]
         );
+    }
+
+    #[test]
+    fn the_size_column_ends_at_size_end_in_every_row() {
+        for width in [100, 50] {
+            let rows = align_pieces(&three(), width);
+            let ends: Vec<String> = rows
+                .iter()
+                .map(|row| fit_prefix(&row.display, rows[0].size_end).to_string())
+                .collect();
+            assert!(ends[0].ends_with("12 MiB"), "{ends:?}");
+            assert!(ends[1].ends_with("-"), "{ends:?}");
+            assert!(ends[2].ends_with("512 B"), "{ends:?}");
+            assert!(rows.iter().all(|row| row.size_end == rows[0].size_end));
+        }
     }
 
     #[test]
@@ -428,5 +495,59 @@ mod tests {
     #[test]
     fn truncate_to_one_column_is_only_the_ellipsis() {
         assert_eq!(truncate("abc", 1), "…");
+    }
+
+    fn child(depth: usize, text: &str, size: u64) -> ChildLine<'_> {
+        ChildLine {
+            depth,
+            text,
+            dir: false,
+            size,
+            highlights: &[],
+        }
+    }
+
+    #[test]
+    fn a_tree_line_ends_its_size_where_the_size_column_ends() {
+        let cells = child_cells(&child(0, "main.rs", 2048), 80, 50, 4);
+        assert_eq!(
+            cells,
+            ChildCells {
+                indent: 4,
+                text: "main.rs".to_string(),
+                gap: 36,
+                size: "2.0 KiB".to_string(),
+            }
+        );
+        assert_eq!(4 + 7 + 36 + 7, 4 + 50);
+    }
+
+    #[test]
+    fn a_tree_line_is_indented_two_columns_per_level() {
+        let cells = child_cells(&child(2, "x", 1), 80, 50, 4);
+        assert_eq!(cells.indent, 8);
+        assert_eq!(cells.indent + 1 + cells.gap + cells.size.width(), 4 + 50);
+    }
+
+    #[test]
+    fn a_long_name_is_clipped_to_leave_a_column_before_the_size() {
+        let long = "n".repeat(60);
+        let cells = child_cells(&child(0, &long, 2048), 80, 50, 4);
+        assert_eq!(cells.text, "n".repeat(42));
+        assert_eq!(cells.gap, 1);
+    }
+
+    #[test]
+    fn a_line_too_narrow_for_its_size_shows_the_name_alone() {
+        let cells = child_cells(&child(0, "main.rs", 2048), 10, 50, 4);
+        assert_eq!(cells.size, "");
+        assert_eq!(cells.text, "main.rs".chars().take(6).collect::<String>());
+        assert_eq!(cells.gap, 0);
+    }
+
+    #[test]
+    fn a_size_column_beyond_the_terminal_ends_at_its_edge() {
+        let cells = child_cells(&child(0, "a", 5), 30, 100, 4);
+        assert_eq!(cells.indent + 1 + cells.gap + cells.size.width(), 30);
     }
 }

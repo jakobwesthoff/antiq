@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::cmd::Antiq;
 use support::objects::{entry, metadata, put_entry, put_meta};
-use support::pty::{COLS, CTRL_F, CTRL_K, CTRL_X, ENTER, ESC, Options, Pty, Stream};
+use support::pty::{COLS, CTRL_F, CTRL_K, CTRL_O, CTRL_X, ENTER, ESC, Options, Pty, Stream};
 use support::tree::{COLLECTION_ID, TempCollection};
 
 fn days_ago(days: i64) -> i64 {
@@ -39,9 +39,16 @@ fn live_object(temp: &mut TempCollection, number: u8, at: &str) {
 /// A collection with the piece `old-app`, archived and gone from disk, and
 /// the live pieces `alpha` and `beta`.
 fn collection() -> TempCollection {
+    collection_of(&["main.txt"])
+}
+
+/// Like [`collection`], with `files` in `old-app`, each five bytes long.
+fn collection_of(files: &[&str]) -> TempCollection {
     let mut temp = TempCollection::minimal();
-    temp.tree()
-        .file_with("old-app/main.txt", "hello", 0o644, days_ago(40));
+    for file in files {
+        temp.tree()
+            .file_with(&format!("old-app/{file}"), "hello", 0o644, days_ago(40));
+    }
     let archived = Antiq::new().arg("-C").arg(temp.root()).arg("archive").run();
     assert_eq!(archived.code(), 0, "stderr: {}", archived.stderr);
     assert!(
@@ -51,6 +58,23 @@ fn collection() -> TempCollection {
     live_object(&mut temp, 11, "alpha");
     live_object(&mut temp, 12, "beta");
     temp
+}
+
+/// Damage the listing of `old-app` and remove the member cache that would
+/// answer without it.
+fn corrupt_listing(temp: &TempCollection) {
+    let objects = temp.root().join(".antiq/objects");
+    let listing = fs::read_dir(&objects)
+        .expect("the objects directory")
+        .flat_map(|object| fs::read_dir(object.expect("an object").path()).expect("lists"))
+        .map(|item| item.expect("an item").path())
+        .find(|path| path.to_string_lossy().ends_with(".listing.zst"))
+        .expect("the listing file");
+    fs::write(&listing, "damaged").expect("a file");
+    // The member cache would answer without the listing.
+    let cache = temp.root().join(".antiq/index");
+    assert!(cache.is_dir(), "the archive left a member cache");
+    fs::remove_dir_all(&cache).expect("the cache is removed");
 }
 
 fn root(temp: &TempCollection) -> PathBuf {
@@ -321,18 +345,7 @@ fn a_member_path_finds_the_piece() {
 #[test]
 fn a_corrupt_listing_is_noted_once() {
     let temp = collection();
-    let objects = temp.root().join(".antiq/objects");
-    let listing = fs::read_dir(&objects)
-        .expect("the objects directory")
-        .flat_map(|object| fs::read_dir(object.expect("an object").path()).expect("lists"))
-        .map(|item| item.expect("an item").path())
-        .find(|path| path.to_string_lossy().ends_with(".listing.zst"))
-        .expect("the listing file");
-    fs::write(&listing, "damaged").expect("a file");
-    // The member cache would answer without the listing.
-    let cache = temp.root().join(".antiq/index");
-    assert!(cache.is_dir(), "the archive left a member cache");
-    fs::remove_dir_all(&cache).expect("the cache is removed");
+    corrupt_listing(&temp);
 
     let mut pty = open_picker(&temp, &[], Options::piped());
     pty.type_text("main");
@@ -348,4 +361,110 @@ fn a_corrupt_listing_is_noted_once() {
         "stderr: {}",
         finished.stderr
     );
+}
+
+#[test]
+fn ctrl_o_expands_the_selected_piece_and_again_collapses_it() {
+    let temp = collection();
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("old-app");
+    pty.wait_for("the piece alone", |screen| screen.contains("1/1 · 3 total"));
+    assert!(
+        pty.screen().contains("▸ old-app"),
+        "{}",
+        pty.screen().text()
+    );
+    pty.send(CTRL_O);
+    pty.wait_for("the contents", |screen| {
+        screen.contains("▾ old-app")
+            && screen
+                .lines()
+                .iter()
+                .any(|line| line.contains("main.txt") && line.trim_end().ends_with("5 B"))
+    });
+    pty.send(CTRL_O);
+    pty.wait_for("the collapsed piece", |screen| {
+        screen.contains("▸ old-app") && !screen.contains("main.txt")
+    });
+    pty.send(ESC);
+    pty.finish();
+}
+
+#[test]
+fn the_expanded_tree_shows_the_matching_members() {
+    let temp = collection_of(&["src/main.txt", "docs/guide.txt"]);
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("guide");
+    pty.wait_for("the piece found through its member", |screen| {
+        screen.contains("1/1 · 3 total")
+    });
+    pty.send(CTRL_O);
+    pty.wait_for("the matching member", |screen| {
+        screen.contains("docs/") && screen.contains("guide.txt") && screen.contains("1 in contents")
+    });
+    assert!(
+        !pty.screen().contains("main.txt"),
+        "{}",
+        pty.screen().text()
+    );
+    pty.send(ESC);
+    pty.finish();
+}
+
+#[test]
+fn a_live_piece_has_no_contents() {
+    let temp = collection();
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("alpha");
+    pty.wait_for("the live piece", |screen| screen.contains("1/1 · 3 total"));
+    pty.send(CTRL_O);
+    pty.wait_for("the notice", |screen| {
+        screen.contains("no contents on this machine")
+    });
+    pty.send(ESC);
+    pty.finish();
+}
+
+#[test]
+fn ctrl_o_on_a_corrupt_listing_shows_an_error() {
+    let temp = collection();
+    corrupt_listing(&temp);
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("old-app");
+    pty.wait_for("the piece alone", |screen| screen.contains("1/1 · 3 total"));
+    pty.send(CTRL_O);
+    pty.wait_for("the error", |screen| screen.contains("error: "));
+    assert!(
+        pty.screen().contains("▸ old-app"),
+        "{}",
+        pty.screen().text()
+    );
+    pty.send(ESC);
+    let finished = pty.finish();
+    assert_eq!(finished.code(), 0, "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.stderr.matches("cannot be searched").count(),
+        1,
+        "stderr: {}",
+        finished.stderr
+    );
+}
+
+#[test]
+fn a_resize_redraws_the_tree() {
+    let temp = collection();
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("old-app");
+    pty.wait_for("the piece alone", |screen| screen.contains("1/1 · 3 total"));
+    pty.send(CTRL_O);
+    pty.wait_for("the contents", |screen| screen.contains("main.txt"));
+    pty.resize(120);
+    let wide = "─".repeat(120);
+    pty.wait_for("the wide frame with the tree", |screen| {
+        screen.lines().contains(&wide)
+            && screen.contains("▾ old-app")
+            && screen.contains("main.txt")
+    });
+    pty.send(ESC);
+    pty.finish();
 }

@@ -15,6 +15,7 @@ use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32Str, Utf32String};
 
 use super::Row;
+use super::tree::{Member, Tree, tree};
 
 /// The two pre-converted nucleo haystacks for one row, in their distinct
 /// coordinate spaces.
@@ -62,6 +63,33 @@ enum Scan {
     Hits(Vec<u32>),
 }
 
+/// The piece whose contents are expanded under its row.
+struct Expanded {
+    /// Index into [`PickerState::items`].
+    item: usize,
+    entries: Entries,
+    /// The lines for the current query and height.
+    tree: Tree,
+    /// Whether the tree is the whole listing, with no filter by the query.
+    whole: bool,
+}
+
+/// The notice for a piece that has nothing to expand on this machine.
+const NO_CONTENTS: &str = "no contents on this machine";
+
+/// `count` with a space between the thousands, `4 701`.
+fn grouped(count: usize) -> String {
+    let digits = count.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// The members the picker keeps in memory at most, summed over all items.
 const MEMBER_BUDGET: usize = 2_000_000;
 
@@ -84,6 +112,37 @@ pub struct VisibleRow<'a> {
     pub highlights: &'a [u32],
     /// Whether this row is the current selection.
     pub selected: bool,
+    /// What the triangle in front of the row shows.
+    pub marker: Marker,
+}
+
+/// The triangle in front of a piece's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Marker {
+    /// The piece has no contents to expand.
+    None,
+    Closed,
+    Open,
+}
+
+/// One line of the tree under the expanded piece's row.
+pub struct ChildLine<'a> {
+    /// How many directories lie above the line.
+    pub depth: usize,
+    pub text: &'a str,
+    pub dir: bool,
+    pub size: u64,
+    /// Char positions in `text` to highlight, ascending.
+    pub highlights: &'a [u32],
+}
+
+/// One line of the list region.
+pub enum ListLine<'a> {
+    Blank,
+    Piece(VisibleRow<'a>),
+    Child(ChildLine<'a>),
+    /// The line that says how many entries the tree leaves out.
+    Cut(String),
 }
 
 /// How far a page move goes: half the viewport height or all of it.
@@ -103,8 +162,24 @@ pub struct Members {
     pub paths: Vec<String>,
 }
 
-/// Where the picker reads the member paths of its items from.
+/// The entries of one piece's listing, for the tree under its row.
+pub struct Entries {
+    /// The text in front of each member path when a query is scored, as in
+    /// [`Members::prefix`].
+    pub prefix: String,
+    /// The entries in listing order.
+    pub members: Vec<Member>,
+}
+
+/// Where the picker reads the contents of its items from.
 pub trait Contents<T> {
+    /// Whether `item` has contents on this machine to expand.
+    fn has(&self, item: &T) -> bool;
+
+    /// The entries of `item`'s listing: `Ok(None)` when it has none on this
+    /// machine, an error text when they cannot be read.
+    fn entries(&mut self, item: &T) -> Result<Option<Entries>, String>;
+
     /// The members of `item`, or `None` when it has none on this machine or
     /// they cannot be read. The picker asks at most once per item and
     /// retains the answer within its budget.
@@ -137,6 +212,11 @@ pub struct PickerState<'c, T> {
     /// A message that replaces the counter in the stats line until the next
     /// key press.
     notice: Option<String>,
+    /// Whether each item has contents to expand.
+    has: Vec<bool>,
+    /// The display column the size column of the rows ends at, where the
+    /// sizes of the tree lines end.
+    size_end: usize,
     /// What the picker knows about the members of each item.
     slots: Vec<Slot>,
     /// How many members the `Loaded` slots hold together.
@@ -152,6 +232,8 @@ pub struct PickerState<'c, T> {
     /// Members scored over the picker's life.
     #[cfg(test)]
     scored_members: usize,
+    /// The piece that is expanded, if one is.
+    expanded: Option<Expanded>,
     /// Where the member paths of a piece come from, when the caller has any.
     contents: Option<Box<dyn Contents<T> + 'c>>,
 }
@@ -165,6 +247,7 @@ impl<'c, T> PickerState<'c, T> {
     /// to at least one so movement and scrolling always have room.
     pub fn new(items: Vec<T>, rows: Vec<Row>, height: usize) -> Self {
         debug_assert_eq!(items.len(), rows.len(), "one row per item");
+        let size_end = rows.first().map_or(0, |row| row.size_end);
         let mut display: Vec<String> = Vec::with_capacity(rows.len());
         let mut detail: Vec<String> = Vec::with_capacity(rows.len());
         let mut haystacks: Vec<Haystacks> = Vec::with_capacity(rows.len());
@@ -189,6 +272,8 @@ impl<'c, T> PickerState<'c, T> {
             offset: 0,
             height: height.max(1),
             notice: None,
+            has: vec![false; n],
+            size_end,
             slots: std::iter::repeat_with(|| Slot::Unloaded).take(n).collect(),
             retained: 0,
             budget: MEMBER_BUDGET,
@@ -197,6 +282,7 @@ impl<'c, T> PickerState<'c, T> {
             read_any: false,
             #[cfg(test)]
             scored_members: 0,
+            expanded: None,
             contents: None,
         };
         state.recompute();
@@ -232,6 +318,7 @@ impl<'c, T> PickerState<'c, T> {
                 .collect();
             self.scans.iter_mut().for_each(|scan| *scan = Scan::Unknown);
             self.scanned_query = None;
+            self.settle_expansion();
             return;
         }
 
@@ -350,6 +437,79 @@ impl<'c, T> PickerState<'c, T> {
                 highlights: Vec::new(),
             }))
             .collect();
+        self.settle_expansion();
+    }
+
+    /// Keep the expansion after the matches changed: the selection follows
+    /// the expanded piece and its tree follows the query, or the expansion
+    /// ends when the piece no longer matches.
+    fn settle_expansion(&mut self) {
+        let Some(expanded) = &self.expanded else {
+            return;
+        };
+        match self.scored.iter().position(|s| s.item == expanded.item) {
+            Some(rank) => {
+                self.selected = rank;
+                self.scroll_to_selection();
+                self.rebuild_tree();
+            }
+            None => self.expanded = None,
+        }
+    }
+
+    /// The most lines the tree under the expanded piece gets: its children
+    /// and the cut line. Half the list, at least three lines, and always one
+    /// line less than the list so the piece's own row stays.
+    fn cap(&self) -> usize {
+        if self.height < 2 {
+            0
+        } else {
+            (self.height - 1).min(3.max(self.height / 2))
+        }
+    }
+
+    /// Build the tree of the expanded piece again for the current query and
+    /// height.
+    ///
+    /// A query shows the members that match it as `<piece path>/<member>`.
+    /// When the piece's own row matches, every member would match through
+    /// the path, so the tree narrows to the members that match by their own
+    /// path, and shows everything when none does.
+    fn rebuild_tree(&mut self) {
+        let Some(mut expanded) = self.expanded.take() else {
+            return;
+        };
+        let cap = self.cap();
+        let query = self.query.trim();
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let through_path = !matches!(self.scans[expanded.item], Scan::Row);
+        let mut matched = None;
+        if !query.is_empty() {
+            let mut text = String::new();
+            let mut chars: Vec<char> = Vec::new();
+            let flags: Vec<bool> = expanded
+                .entries
+                .members
+                .iter()
+                .map(|member| {
+                    text.clear();
+                    if through_path {
+                        text.push_str(&expanded.entries.prefix);
+                    }
+                    text.push_str(&member.path);
+                    let haystack = Utf32Str::new(&text, &mut chars);
+                    pattern.score(haystack, &mut self.matcher).is_some()
+                })
+                .collect();
+            matched = flags.contains(&true).then_some(flags);
+        }
+        expanded.whole = matched.is_none();
+        let mut buf: Vec<u32> = Vec::new();
+        expanded.tree = tree(&expanded.entries.members, matched.as_deref(), cap, |line| {
+            let line = Utf32String::from(line);
+            highlights(&pattern, &line, &mut self.matcher, &mut buf)
+        });
+        self.expanded = Some(expanded);
     }
 
     /// Replace the displayed rows, e.g. after the terminal width changed and the
@@ -362,6 +522,7 @@ impl<'c, T> PickerState<'c, T> {
     /// they index into the display text that just changed.
     pub fn set_rows(&mut self, rows: Vec<Row>) {
         debug_assert_eq!(self.items.len(), rows.len(), "one row per item");
+        self.size_end = rows.first().map_or(0, |row| row.size_end);
         self.display.clear();
         self.detail.clear();
         for (haystack, row) in self.haystacks.iter_mut().zip(rows) {
@@ -388,6 +549,7 @@ impl<'c, T> PickerState<'c, T> {
 
     /// Let a query match the member paths `contents` gives, too.
     pub fn with_contents(mut self, contents: Box<dyn Contents<T> + 'c>) -> Self {
+        self.has = self.items.iter().map(|item| contents.has(item)).collect();
         self.contents = Some(contents);
         self
     }
@@ -396,6 +558,56 @@ impl<'c, T> PickerState<'c, T> {
     /// time, which can take a while.
     pub fn reading_pending(&self) -> bool {
         self.contents.is_some() && !self.read_any
+    }
+
+    /// Expand the contents of the selected piece in place, collapse them
+    /// when they are expanded already.
+    pub fn toggle_contents(&mut self) {
+        let Some(item) = self.scored.get(self.selected).map(|scored| scored.item) else {
+            return;
+        };
+        if self.expanded.as_ref().is_some_and(|e| e.item == item) {
+            self.expanded = None;
+            return;
+        }
+        if !self.has[item] {
+            self.notice = Some(NO_CONTENTS.to_string());
+            return;
+        }
+        let contents = self
+            .contents
+            .as_mut()
+            .expect("an item has contents only when a source says so");
+        match contents.entries(&self.items[item]) {
+            Ok(Some(entries)) => {
+                self.expanded = Some(Expanded {
+                    item,
+                    entries,
+                    tree: Tree::default(),
+                    whole: true,
+                });
+                self.rebuild_tree();
+            }
+            Ok(None) => self.notice = Some(NO_CONTENTS.to_string()),
+            Err(reason) => self.notice = Some(format!("error: {reason}")),
+        }
+    }
+
+    /// What the stats line says of the expanded piece's contents, if one is
+    /// expanded.
+    pub fn contents_stat(&self) -> Option<String> {
+        let expanded = self.expanded.as_ref()?;
+        let count = grouped(expanded.tree.matched);
+        Some(if expanded.whole {
+            format!("{count} members")
+        } else {
+            format!("{count} in contents")
+        })
+    }
+
+    /// The display column the sizes of the tree lines end at.
+    pub fn size_end(&self) -> usize {
+        self.size_end
     }
 
     /// The members scored so far.
@@ -427,6 +639,7 @@ impl<'c, T> PickerState<'c, T> {
             .offset
             .min(self.scored.len().saturating_sub(self.height));
         self.scroll_to_selection();
+        self.rebuild_tree();
     }
 
     /// Append a typed character to the query.
@@ -588,6 +801,11 @@ impl<'c, T> PickerState<'c, T> {
                     display: &self.display[s.item],
                     highlights: &s.highlights,
                     selected: i == self.selected,
+                    marker: match (self.has[s.item], &self.expanded) {
+                        (false, _) => Marker::None,
+                        (true, Some(expanded)) if expanded.item == s.item => Marker::Open,
+                        (true, _) => Marker::Closed,
+                    },
                 }
             })
             .collect()
@@ -600,14 +818,68 @@ impl<'c, T> PickerState<'c, T> {
     /// viewport rows in *screen* order (worst-ranked first/top, best-ranked
     /// last/bottom) and pads the top with `None` blanks when fewer rows match
     /// than the viewport can show, keeping the list flush above the prompt.
-    pub fn list_lines(&self) -> Vec<Option<VisibleRow<'_>>> {
-        let visible = self.visible();
-        let blanks = self.height.saturating_sub(visible.len());
-        let mut lines: Vec<Option<VisibleRow<'_>>> = Vec::with_capacity(self.height);
-        lines.extend(std::iter::repeat_with(|| None).take(blanks));
-        // `visible` is best-first; reverse it so the best match lands at the
-        // bottom, nearest the prompt.
-        lines.extend(visible.into_iter().rev().map(Some));
+    pub fn list_lines(&self) -> Vec<ListLine<'_>> {
+        // The window in screen order: the worst-ranked piece first, the best
+        // at the bottom, nearest the prompt.
+        let rows: Vec<VisibleRow<'_>> = self.visible().into_iter().rev().collect();
+        let expanded_at = self.expanded.as_ref().and_then(|expanded| {
+            let window = self.offset..(self.offset + self.height).min(self.scored.len());
+            window
+                .rev()
+                .position(|rank| self.scored[rank].item == expanded.item)
+        });
+        let selected_at = rows.iter().position(|row| row.selected);
+
+        let mut block: Vec<ListLine<'_>> = Vec::new();
+        if let (Some(expanded), Some(_)) = (&self.expanded, expanded_at) {
+            block.extend(expanded.tree.lines.iter().map(|line| {
+                ListLine::Child(ChildLine {
+                    depth: line.depth,
+                    text: &line.text,
+                    dir: line.dir,
+                    size: line.size,
+                    highlights: &line.highlights,
+                })
+            }));
+            if expanded.tree.more > 0 && self.cap() > 0 {
+                let what = if expanded.whole { "members" } else { "matches" };
+                block.push(ListLine::Cut(format!(
+                    "… {} more {what}",
+                    grouped(expanded.tree.more)
+                )));
+            }
+        }
+
+        // When the lines exceed the list, whole pieces go: the worse ones
+        // from the top, then the better ones from the bottom, never the
+        // selected one or the expanded one. What room the rows then leave is
+        // the block's.
+        let (mut first, mut end) = (0, rows.len());
+        if let Some(expanded_at) = expanded_at {
+            let keep_from = expanded_at.min(selected_at.unwrap_or(expanded_at));
+            let keep_to = expanded_at.max(selected_at.unwrap_or(expanded_at));
+            while (end - first) + block.len() > self.height {
+                if first < keep_from {
+                    first += 1;
+                } else if end - 1 > keep_to {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            }
+            block.truncate(self.height - (end - first));
+        }
+
+        let used = (end - first) + block.len();
+        let mut lines: Vec<ListLine<'_>> = Vec::with_capacity(self.height);
+        lines.extend(std::iter::repeat_with(|| ListLine::Blank).take(self.height - used));
+        let mut block = Some(block);
+        for (at, row) in rows.into_iter().enumerate().take(end).skip(first) {
+            lines.push(ListLine::Piece(row));
+            if Some(at) == expanded_at {
+                lines.extend(block.take().into_iter().flatten());
+            }
+        }
         lines
     }
 
@@ -636,7 +908,10 @@ impl<'c, T> PickerState<'c, T> {
         // Trailing whitespace (e.g. the empty prompt's `> `) is trimmed per line
         // so inline snapshots stay free of fragile trailing spaces.
         let mut out = String::new();
-        for row in self.list_lines().into_iter().flatten() {
+        for row in self.list_lines().into_iter().filter_map(|line| match line {
+            ListLine::Piece(row) => Some(row),
+            _ => None,
+        }) {
             let pointer = if row.selected { "> " } else { "  " };
             let marked: HashSet<u32> = row.highlights.iter().copied().collect();
             let mut line = String::new();
@@ -700,6 +975,7 @@ mod tests {
                 display: s.clone(),
                 detail: String::new(),
                 search: s.clone(),
+                size_end: 0,
             })
             .collect();
         PickerState::new(items, picker_rows, height)
@@ -719,6 +995,7 @@ mod tests {
                 display: display.to_string(),
                 detail: String::new(),
                 search: search.to_string(),
+                size_end: 0,
             })
             .collect();
         PickerState::new(items, picker_rows, height)
@@ -812,7 +1089,11 @@ mod tests {
         s.set_height(10);
         assert_eq!(s.offset, 10);
         assert!(s.offset <= s.selected && s.selected < s.offset + 10);
-        assert!(s.list_lines().iter().all(Option::is_some));
+        assert!(
+            s.list_lines()
+                .iter()
+                .all(|line| matches!(line, ListLine::Piece(_)))
+        );
     }
 
     #[test]
@@ -1044,6 +1325,7 @@ mod tests {
             display: "alpha".to_string(),
             detail: "ZID".into(),
             search: "alpha".to_string(),
+            size_end: 0,
         }];
         let mut s = PickerState::new(items, rows, 10);
         // The selected row's detail sits next to the counter, not in the row...
@@ -1065,11 +1347,13 @@ mod tests {
                 display: "alpha".to_string(),
                 detail: "ID-A".into(),
                 search: "alpha".to_string(),
+                size_end: 0,
             },
             Row {
                 display: "beta".to_string(),
                 detail: "ID-B".into(),
                 search: "beta".to_string(),
+                size_end: 0,
             },
         ];
         let mut s = PickerState::new(items, rows, 10);
@@ -1103,7 +1387,10 @@ mod tests {
     fn line_rows(s: &PickerState<String>) -> Vec<(String, bool)> {
         s.list_lines()
             .into_iter()
-            .flatten()
+            .filter_map(|line| match line {
+                ListLine::Piece(row) => Some(row),
+                _ => None,
+            })
             .map(|r| (r.display.to_string(), r.selected))
             .collect()
     }
@@ -1114,11 +1401,16 @@ mod tests {
         let lines = s.list_lines();
         // Exactly `height` lines; the top is blank so the list hugs the prompt.
         assert_eq!(lines.len(), 5);
-        assert!(lines[0].is_none());
-        assert!(lines[1].is_none());
-        assert!(lines[2].is_none());
-        assert!(lines[3].is_some());
-        assert!(lines[4].is_some());
+        assert!(
+            lines[..3]
+                .iter()
+                .all(|line| matches!(line, ListLine::Blank))
+        );
+        assert!(
+            lines[3..]
+                .iter()
+                .all(|line| matches!(line, ListLine::Piece(_)))
+        );
     }
 
     #[test]
@@ -1140,7 +1432,7 @@ mod tests {
         let s = state(&["r0", "r1", "r2", "r3", "r4"], 2);
         let lines = s.list_lines();
         assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(Option::is_some));
+        assert!(lines.iter().all(|line| matches!(line, ListLine::Piece(_))));
     }
 
     #[test]
@@ -1237,6 +1529,7 @@ mod tests {
                 display: display.to_string(),
                 detail: "ID".to_string(),
                 search: search.to_string(),
+                size_end: 0,
             })
             .collect()
     }
@@ -1387,10 +1680,51 @@ mod tests {
     /// Members by piece name; a piece without an entry has none to give.
     struct FakeContents {
         members: Vec<(String, Vec<String>)>,
+        /// The pieces whose entries cannot be read.
+        unreadable: Vec<String>,
         asked: Asked,
     }
 
     impl Contents<String> for FakeContents {
+        fn has(&self, item: &String) -> bool {
+            self.members.iter().any(|(name, _)| name == item)
+        }
+
+        /// A member path ending in `/` is a directory of no size, any other a
+        /// file of 10 bytes.
+        fn entries(&mut self, item: &String) -> Result<Option<Entries>, String> {
+            if self.unreadable.contains(item) {
+                return Err("boom".to_string());
+            }
+            let Some((_, paths)) = self.members.iter().find(|(name, _)| name == item) else {
+                return Ok(None);
+            };
+            // A piece listed without members has a listing that is gone by
+            // the time it is read.
+            if paths.is_empty() {
+                return Ok(None);
+            }
+            let members = paths
+                .iter()
+                .map(|path| match path.strip_suffix('/') {
+                    Some(dir) => Member {
+                        path: dir.to_string(),
+                        dir: true,
+                        size: 0,
+                    },
+                    None => Member {
+                        path: path.clone(),
+                        dir: false,
+                        size: 10,
+                    },
+                })
+                .collect();
+            Ok(Some(Entries {
+                prefix: format!("{item}/"),
+                members,
+            }))
+        }
+
         fn members(&mut self, item: &String) -> Option<Members> {
             self.asked.borrow_mut().push(item.clone());
             let (_, paths) = self.members.iter().find(|(name, _)| name == item)?;
@@ -1404,6 +1738,16 @@ mod tests {
     /// A picker over `pieces`, each with the member paths listed for it. A
     /// piece listed with `None` has no members to read.
     fn with_members(pieces: &[(&str, Option<&[&str]>)]) -> (PickerState<'static, String>, Asked) {
+        picker_over(pieces, &[], 10)
+    }
+
+    /// Like [`with_members`], `height` list rows tall and with pieces whose
+    /// entries cannot be read.
+    fn picker_over(
+        pieces: &[(&str, Option<&[&str]>)],
+        unreadable: &[&str],
+        height: usize,
+    ) -> (PickerState<'static, String>, Asked) {
         let names: Vec<&str> = pieces.iter().map(|(name, _)| *name).collect();
         let asked = Asked::default();
         let contents = FakeContents {
@@ -1418,9 +1762,13 @@ mod tests {
                     })
                 })
                 .collect(),
+            unreadable: unreadable.iter().map(|name| name.to_string()).collect(),
             asked: Rc::clone(&asked),
         };
-        (state(&names, 10).with_contents(Box::new(contents)), asked)
+        (
+            state(&names, height).with_contents(Box::new(contents)),
+            asked,
+        )
     }
 
     /// How often the members of `piece` were asked for.
@@ -1603,5 +1951,444 @@ mod tests {
         let before = s.members_scored();
         s.push_char('m');
         assert_eq!(s.members_scored() - before, 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // The tree under an expanded piece
+    // -------------------------------------------------------------------------
+
+    /// The list region as text, top to bottom: a piece row is its selection
+    /// bar, its triangle and its display, a tree line is indented by two
+    /// columns per level behind the four of the pointer and the triangle.
+    fn screen(s: &PickerState<String>) -> Vec<String> {
+        s.list_lines()
+            .into_iter()
+            .map(|line| match line {
+                ListLine::Blank => String::new(),
+                ListLine::Piece(row) => {
+                    let mark = match row.marker {
+                        Marker::None => ' ',
+                        Marker::Closed => '▸',
+                        Marker::Open => '▾',
+                    };
+                    let bar = if row.selected { '>' } else { ' ' };
+                    format!("{bar}{mark} {}", row.display)
+                }
+                ListLine::Child(child) => {
+                    format!("    {}{}", "  ".repeat(child.depth), child.text)
+                }
+                ListLine::Cut(text) => format!("      {text}"),
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// `count` file paths `<stem>1`, `<stem>2`, and so on.
+    fn numbered(stem: &str, count: usize) -> Vec<String> {
+        (1..=count).map(|n| format!("{stem}{n}")).collect()
+    }
+
+    /// A picker over the pieces `names`, each with the members `paths`.
+    fn expandable(
+        pieces: &[(&str, &[&str])],
+        height: usize,
+    ) -> (PickerState<'static, String>, Asked) {
+        let pieces: Vec<(&str, Option<&[&str]>)> = pieces
+            .iter()
+            .map(|(name, paths)| (*name, Some(*paths)))
+            .collect();
+        picker_over(&pieces, &[], height)
+    }
+
+    /// A picker over `names`, the first holding the members `paths`.
+    fn first_expandable(
+        paths: &[String],
+        names: &[&str],
+        height: usize,
+    ) -> PickerState<'static, String> {
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut pieces: Vec<(&str, Option<&[&str]>)> = vec![(names[0], Some(&refs))];
+        pieces.extend(names[1..].iter().map(|name| (*name, None)));
+        picker_over(&pieces, &[], height).0
+    }
+
+    #[test]
+    fn a_toggle_expands_the_selected_piece_and_the_next_collapses_it() {
+        let (mut s, _) = expandable(
+            &[("alpha", &["src/", "src/a.rs", "b.txt"]), ("beta", &["x"])],
+            10,
+        );
+        let closed = screen(&s);
+        assert_eq!(closed, [" ▸ beta", ">▸ alpha"]);
+        s.toggle_contents();
+        assert_eq!(
+            screen(&s),
+            [" ▸ beta", ">▾ alpha", "    src/", "      a.rs", "    b.txt"]
+        );
+        s.toggle_contents();
+        assert_eq!(screen(&s), closed);
+    }
+
+    #[test]
+    fn a_toggle_on_another_piece_moves_the_expansion() {
+        let (mut s, _) = expandable(&[("alpha", &["a1"]), ("beta", &["b1"])], 10);
+        s.toggle_contents();
+        s.select_worse();
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ beta", "    b1", " ▸ alpha"]);
+    }
+
+    #[test]
+    fn moving_the_selection_leaves_the_expansion() {
+        let (mut s, _) = expandable(&[("alpha", &["a1"]), ("beta", &["b1"])], 10);
+        s.toggle_contents();
+        s.select_worse();
+        assert_eq!(screen(&s), [">▸ beta", " ▾ alpha", "    a1"]);
+    }
+
+    #[test]
+    fn a_piece_without_contents_sets_the_notice() {
+        let (mut s, _) = picker_over(&[("alpha", None)], &[], 10);
+        s.toggle_contents();
+        assert_eq!(s.notice(), Some("no contents on this machine"));
+        assert_eq!(screen(&s), [">  alpha"]);
+    }
+
+    #[test]
+    fn a_piece_whose_listing_is_gone_sets_the_notice() {
+        let (mut s, _) = picker_over(&[("alpha", Some(&[]))], &[], 10);
+        s.toggle_contents();
+        assert_eq!(s.notice(), Some("no contents on this machine"));
+    }
+
+    #[test]
+    fn an_unreadable_listing_sets_an_error_notice() {
+        let (mut s, _) = picker_over(&[("alpha", Some(&["a"]))], &["alpha"], 10);
+        s.toggle_contents();
+        assert_eq!(s.notice(), Some("error: boom"));
+        assert_eq!(screen(&s), [">▸ alpha"]);
+    }
+
+    #[test]
+    fn a_toggle_with_nothing_selected_does_nothing() {
+        let (mut s, _) = expandable(&[("alpha", &["a1"])], 10);
+        s.push_char('z');
+        s.toggle_contents();
+        assert_eq!(s.notice(), None);
+        assert!(screen(&s).is_empty());
+    }
+
+    #[test]
+    fn the_block_stops_at_the_cap_with_a_cut_line() {
+        let s = {
+            let mut s = first_expandable(&numbered("file", 30), &["alpha"], 10);
+            s.toggle_contents();
+            s
+        };
+        // At height 10 the cap is 5: four files and the cut.
+        assert_eq!(
+            screen(&s),
+            [
+                ">▾ alpha",
+                "    file1",
+                "    file2",
+                "    file3",
+                "    file4",
+                "      … 26 more members"
+            ]
+        );
+        assert_eq!(s.contents_stat().as_deref(), Some("30 members"));
+    }
+
+    #[test]
+    fn counts_have_a_space_as_their_thousands_separator() {
+        let mut s = first_expandable(&numbered("file", 1234), &["alpha"], 10);
+        s.toggle_contents();
+        assert_eq!(s.contents_stat().as_deref(), Some("1 234 members"));
+        assert!(screen(&s).contains(&"      … 1 230 more members".to_string()));
+    }
+
+    #[test]
+    fn a_taller_list_gets_a_longer_block() {
+        let mut s = first_expandable(&numbered("file", 30), &["alpha"], 10);
+        s.toggle_contents();
+        s.set_height(20);
+        // The cap at height 20 is 10: nine files and the cut.
+        let lines = screen(&s);
+        assert_eq!(lines.len(), 11);
+        assert_eq!(lines[9], "    file9");
+        assert_eq!(lines[10], "      … 21 more members");
+    }
+
+    #[test]
+    fn a_short_list_gets_a_shorter_block() {
+        let mut s = first_expandable(&numbered("file", 30), &["alpha"], 20);
+        s.toggle_contents();
+        s.set_height(4);
+        assert_eq!(
+            screen(&s),
+            [
+                ">▾ alpha",
+                "    file1",
+                "    file2",
+                "      … 28 more members"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_worse_pieces_give_way_first() {
+        let names = ["p1", "p2", "p3", "p4", "p5", "p6"];
+        let paths = numbered("f", 30);
+        let mut s = first_expandable(&paths, &names, 6);
+        s.toggle_contents();
+        assert_eq!(
+            screen(&s),
+            [
+                "   p3",
+                "   p2",
+                ">▾ p1",
+                "    f1",
+                "    f2",
+                "      … 28 more members"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_better_pieces_give_way_when_no_worse_one_is_left() {
+        let refs = numbered("f", 30);
+        let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
+        let pieces: Vec<(&str, Option<&[&str]>)> = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
+            .iter()
+            .map(|name| (*name, Some(refs.as_slice())))
+            .collect();
+        let (mut s, _) = picker_over(&pieces, &[], 7);
+        for _ in 0..6 {
+            s.select_worse();
+        }
+        s.toggle_contents();
+        assert_eq!(
+            screen(&s),
+            [
+                ">▾ p7",
+                "    f1",
+                "    f2",
+                "      … 28 more members",
+                " ▸ p6",
+                " ▸ p5",
+                " ▸ p4"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selected_row_apart_from_the_expanded_one_keeps_its_place_at_any_height() {
+        for height in 1..=4 {
+            let names = ["p1", "p2", "p3", "p4", "p5"];
+            let paths = numbered("f", 30);
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let pieces: Vec<(&str, Option<&[&str]>)> = names
+                .iter()
+                .map(|name| (*name, Some(refs.as_slice())))
+                .collect();
+            let (mut s, _) = picker_over(&pieces, &[], 10);
+            s.select_worse();
+            s.select_worse();
+            s.toggle_contents();
+            s.select_better();
+            s.set_height(height);
+            let lines = s.list_lines();
+            assert_eq!(lines.len(), height, "height {height}");
+            let selected = lines
+                .iter()
+                .filter(|line| matches!(line, ListLine::Piece(row) if row.selected))
+                .count();
+            assert_eq!(selected, 1, "height {height}: the selected row shows");
+            // A tree line is only ever directly below the row it belongs to.
+            let text = screen(&s);
+            for (at, line) in text.iter().enumerate() {
+                if line.starts_with("    ") {
+                    assert!(
+                        text[..at]
+                            .iter()
+                            .rev()
+                            .find(|above| !above.starts_with("    "))
+                            .is_some_and(|row| row.contains('▾')),
+                        "height {height}: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_block_is_clipped_to_the_room_the_rows_leave() {
+        let names = ["p1", "p2", "p3"];
+        let paths = numbered("f", 30);
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let pieces: Vec<(&str, Option<&[&str]>)> = names
+            .iter()
+            .map(|name| (*name, Some(refs.as_slice())))
+            .collect();
+        let (mut s, _) = picker_over(&pieces, &[], 10);
+        s.select_worse();
+        s.select_worse();
+        s.toggle_contents();
+        s.select_better();
+        s.set_height(3);
+        assert_eq!(screen(&s), [" ▾ p3", "    f1", ">▸ p2"]);
+    }
+
+    #[test]
+    fn a_query_that_keeps_the_piece_keeps_the_selection_on_it() {
+        let (mut s, _) = expandable(
+            &[
+                ("alpha", &["x.rs"]),
+                ("beta", &["a1.rs", "b.rs"]),
+                ("gamma", &["z"]),
+            ],
+            6,
+        );
+        s.select_worse();
+        s.toggle_contents();
+        s.push_char('a');
+        assert_eq!(s.selected().map(String::as_str), Some("beta"));
+        let lines = screen(&s);
+        assert!(
+            lines.iter().any(|line| line.starts_with(">▾ beta")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"    a1.rs".to_string()), "{lines:?}");
+        assert!(!lines.contains(&"    b.rs".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn a_query_that_drops_the_piece_collapses_the_block() {
+        let (mut s, _) = expandable(
+            &[
+                ("alpha", &["x.rs"]),
+                ("beta", &["y.rs"]),
+                ("gamma", &["z.rs"]),
+            ],
+            10,
+        );
+        s.select_worse();
+        s.toggle_contents();
+        type_query(&mut s, "gam");
+        assert_eq!(s.selected().map(String::as_str), Some("gamma"));
+        assert_eq!(screen(&s), [">▸ gamma"]);
+        assert_eq!(s.contents_stat(), None);
+        s.backspace();
+        s.backspace();
+        s.backspace();
+        assert!(
+            screen(&s).iter().all(|line| !line.contains('▾')),
+            "the expansion is gone for good"
+        );
+    }
+
+    #[test]
+    fn a_member_only_match_shows_the_matching_members_below_their_directories() {
+        let (mut s, _) = expandable(
+            &[(
+                "zzz",
+                &[
+                    "src/",
+                    "src/main.rs",
+                    "src/lib.rs",
+                    "docs/",
+                    "docs/guide.txt",
+                ],
+            )],
+            10,
+        );
+        type_query(&mut s, "main");
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ zzz", "    src/", "      main.rs"]);
+        assert_eq!(s.contents_stat().as_deref(), Some("1 in contents"));
+    }
+
+    #[test]
+    fn a_row_match_narrows_the_children_to_the_members_that_match_themselves() {
+        let (mut s, _) = expandable(&[("main-app", &["main.rs", "lib.rs"])], 10);
+        type_query(&mut s, "main");
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ main-app", "    main.rs"]);
+        assert_eq!(s.contents_stat().as_deref(), Some("1 in contents"));
+    }
+
+    #[test]
+    fn a_row_match_with_no_matching_member_shows_the_whole_tree() {
+        let (mut s, _) = expandable(&[("main-app", &["lib.rs", "util.rs"])], 10);
+        type_query(&mut s, "main");
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ main-app", "    lib.rs", "    util.rs"]);
+        assert_eq!(s.contents_stat().as_deref(), Some("2 members"));
+    }
+
+    #[test]
+    fn a_cut_of_matching_members_says_matches() {
+        let mut s = first_expandable(&numbered("scan", 40), &["zzz"], 10);
+        type_query(&mut s, "scan");
+        s.toggle_contents();
+        let lines = screen(&s);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("      … 36 more matches")
+        );
+        assert_eq!(s.contents_stat().as_deref(), Some("40 in contents"));
+    }
+
+    #[test]
+    fn the_tree_lines_highlight_what_the_query_matched() {
+        let (mut s, _) = expandable(&[("zzz", &["src/main.rs"])], 10);
+        type_query(&mut s, "main");
+        s.toggle_contents();
+        let marked: Vec<Vec<u32>> = s
+            .list_lines()
+            .into_iter()
+            .filter_map(|line| match line {
+                ListLine::Child(child) => Some(child.highlights.to_vec()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [Vec::<u32>::new(), vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn the_pieces_with_contents_show_a_triangle_and_the_others_none() {
+        let (mut s, _) = picker_over(&[("alpha", Some(&["a"])), ("beta", None)], &[], 10);
+        let markers = |s: &PickerState<String>| -> Vec<Marker> {
+            s.visible().iter().map(|row| row.marker).collect()
+        };
+        assert_eq!(markers(&s), [Marker::Closed, Marker::None]);
+        s.toggle_contents();
+        assert_eq!(markers(&s), [Marker::Open, Marker::None]);
+    }
+
+    #[test]
+    fn the_size_column_end_follows_the_rows() {
+        let mut s = state(&["alpha"], 10);
+        assert_eq!(s.size_end(), 0);
+        let mut moved = rows(&[("alpha", "alpha")]);
+        moved[0].size_end = 30;
+        s.set_rows(moved);
+        assert_eq!(s.size_end(), 30);
+    }
+
+    #[test]
+    fn a_tree_line_carries_its_size_and_type() {
+        let (mut s, _) = expandable(&[("alpha", &["src/", "src/a.rs"])], 10);
+        s.toggle_contents();
+        let kinds: Vec<(bool, u64)> = s
+            .list_lines()
+            .into_iter()
+            .filter_map(|line| match line {
+                ListLine::Child(child) => Some((child.dir, child.size)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [(true, 10), (false, 10)]);
     }
 }

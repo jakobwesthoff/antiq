@@ -2055,19 +2055,28 @@ the picker's fuzzy matching, in and outside the picker. `find` lists
 objects only; a new piece without an ID shows in `status`. The picker
 starts as a copy of ntropy's picker. It offers unearthing (Enter), a
 view of a piece's contents, printing the path (`--print`), forking, and
-pinning or unpinning. A key expands the selected piece in place into a
-tree of its contents, read from its listing; when the query matches
-member paths,
-the matching members show as the expanded piece's children. After
-pinning, unpinning or printing the picker stays open; unearthing and
-forking close it. (ADR 0057) The keys are Enter, Ctrl-F, Ctrl-K and
-Ctrl-X. Enter unearths the selected piece and closes the picker; with
-`--print` it prints the piece instead and the picker stays open. Ctrl-F
-forks the piece, keeping its path, and closes the picker. Ctrl-K pins and
-Ctrl-X unpins, and the picker stays open. The result of a pin, an unpin
+pinning or unpinning. After pinning, unpinning or printing the picker
+stays open; unearthing and forking close it. (ADR 0057) The keys are
+Enter, Ctrl-O, Ctrl-F, Ctrl-K and Ctrl-X. Ctrl-O expands the selected
+piece in place into a tree of its contents, read from its listing, and
+collapses it when it is the expanded one. One piece is expanded at a
+time, and moving the selection leaves the expansion. A triangle in front
+of a row shows that the piece has contents: `▸` when collapsed, `▾` when
+expanded. A piece without a listing on this machine, or with one that
+cannot be read, is not expanded, and the status line says why. Enter
+unearths the selected piece and closes the picker; with `--print` it
+prints the piece instead and the picker stays open. Ctrl-F forks the
+piece, keeping its path, and closes the picker. Ctrl-K pins and Ctrl-X
+unpins, and the picker stays open. The result of a pin, an unpin
 or a print, or the error that stopped it, replaces the counter in the
-status line until the next key. Esc and Ctrl-C close the picker without
-an action and the exit code is 0. Unearthing and forking run after the
+status line until the next key. A piece that matches through its own
+text ranks above a piece that matches through a member only, and a
+member-only match has no highlight in its row. The first query reads the
+listings of the pieces whose own text does not match, and the status
+line says `reading contents...` while it does; the picker keeps the
+member paths of at most 2 000 000 members and reads a listing again when
+a later query needs one it dropped. Esc and Ctrl-C close the picker
+without an action and the exit code is 0. Unearthing and forking run after the
 picker has closed, as the commands of the same name, and print what they
 print.
 `--print` prints the absolute path of the picked piece's folder, for an
@@ -2078,6 +2087,23 @@ prints the path of every match, one per line. The path is written as the
 filesystem holds it, not in the escaped form of "Metadata", so that a
 shell can use it; the table and the JSON use the escaped form. With
 `--json`, `find` prints the matches as JSON and `--print` adds nothing.
+
+The tree sits directly below the piece's row. Its sizes end under the
+size column of the rows; a directory shows the sum of the file sizes
+below it, in bold, and a directory whose only entry is another directory
+is one line with it (`data/raw/`). The tree gets half the height of the
+list, at least three lines, and never the line of the piece itself; the
+last of its lines says how many entries it leaves out, as `… 4 698 more
+matches`. When the list is too short for the rows and the tree, the
+selected row and the expanded piece stay and the tree is clipped to the
+room left. With no query the tree shows every member. With a query it
+shows the members that match as `<path of the piece>/<member>`, with the
+directories that lead to them; a directory that matches is one line that
+stands for everything below it. When the piece's own text matches, every
+member would match through it, so the tree shows the members that match
+by their own path, or every member when none does. The status line then
+gives the number of entries the tree is about, as `4 701 in contents`
+for a query and `4 701 members` without one.
 
 Without `--print` and outside the picker, `find` lists the matches as a
 table of the state, the path, the size of the current payload and the

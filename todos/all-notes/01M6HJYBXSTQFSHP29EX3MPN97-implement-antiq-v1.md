@@ -3110,6 +3110,37 @@ Notes for the items that call the strict verify and the listing comparison
   metadata leaves the entry at the metadata's old path and the folder at
   `--to` a new piece.
 
+### I40
+
+- 2026-11-04: the contents view lives in `src/cli/picker/`.
+  `tree.rs` builds the lines of a tree from a listing's entries and
+  touches no terminal. `state.rs` holds the `Contents` trait (`has`,
+  `entries`, `members`) and `PickerState<'c, T>`, which owns the source;
+  `pick_with_keys` takes it as `contents`, before `on_stay`. `entries`
+  returns `Entries { prefix, members }`, as the prefix `<piece path>/`
+  is what a query is scored against. `FindContents` in
+  `src/cli/cmd/find.rs` implements the trait over the index, with
+  `Index::listing_entries` (new, next to `Index::members`) for the
+  entries. Ctrl-O is a built-in key; an accept key on `o` is ignored.
+- Searching: a piece whose row text does not match is scored through its
+  members as `<piece path>/<member>`; its members are read on the first
+  scan that needs them and kept up to 2 000 000 members in all. A query
+  that extends the last one scores only the previous hits, unless it
+  holds one of `! ^ ' $ \`. A listing that cannot be read becomes a
+  note `the contents of <id> cannot be searched: ...` after the picker
+  closes, once, and not when the search of `find` printed it already.
+- Layout: `Row` has `size_end`, the column where the size column of the
+  rows ends. Rows are built for the width less the 4 columns of the
+  pointer and the triangle. A tree has at most `min(height - 1,
+  max(3, height / 2))` lines; `list_lines` drops whole pieces, worse
+  ones from the top first, when the lines exceed the list, and clips
+  the tree to the room left.
+- Measured once with 300 pieces of 50 000 members in a release build,
+  members made in memory: the first character took 1.1 s, a second
+  character 1.2 s, a backspace 1.1 s, and the process peaked at 177 MB.
+  The budget keeps 40 of the 300 pieces, so the other 260 are read
+  again for every query.
+
 ## Relations
 
 - Relates to: [Define the v1 scope and architecture of antiq](01M6E17PET32XD9PC04AJ2PBZY-define-the-v1-scope-and-architecture-of-antiq.md)

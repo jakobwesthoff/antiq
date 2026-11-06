@@ -13,11 +13,14 @@
 use crate::cli::cmd::status::{Color, WIDE_FROM, mid, pad, pad_left, paint, sanitize};
 use crate::cli::cmd::{fork, pin, unearth};
 use crate::cli::output::{Output, Style};
-use crate::cli::picker::{AcceptKey, Contents, EnterStays, Members, align_pieces, pick_with_keys};
+use crate::cli::picker::{
+    AcceptKey, Contents, EnterStays, Entries, Member, Members, align_pieces, pick_with_keys,
+};
 use crate::cli::{Context, FindArgs, ForkArgs, UnearthArgs, tty};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::index::Index;
+use antiq::listing::ListingType;
 use antiq::ops::find::{FindReport, FoundPiece, FoundState, find};
 use antiq::ops::pin::{Direction, Pinned, run as pin_piece};
 use anyhow::Context as _;
@@ -200,7 +203,46 @@ struct FindContents<'a> {
     reported: &'a [String],
 }
 
+impl FindContents<'_> {
+    /// Note that the contents of `found` cannot be read, unless the search
+    /// or an earlier try said so already, and say why.
+    fn unreadable(&self, found: &FoundPiece, error: &antiq::index::IndexError) -> String {
+        let reason = sanitize(&error.to_string());
+        let note = format!(
+            "note: the contents of {} cannot be searched: {reason}",
+            found.id
+        );
+        if !self.reported.contains(&note) && !self.unsearchable.borrow().contains(&note) {
+            self.unsearchable.borrow_mut().push(note);
+        }
+        reason
+    }
+}
+
 impl Contents<FoundPiece> for FindContents<'_> {
+    fn has(&self, found: &FoundPiece) -> bool {
+        self.index
+            .get(found.id)
+            .is_some_and(|entry| entry.listing.is_some())
+    }
+
+    fn entries(&mut self, found: &FoundPiece) -> Result<Option<Entries>, String> {
+        match self.index.listing_entries(self.collection, found.id) {
+            Ok(entries) => Ok(entries.map(|entries| Entries {
+                prefix: format!("{}/", sanitize(&found.path.to_string())),
+                members: entries
+                    .iter()
+                    .map(|entry| Member {
+                        path: sanitize(&entry.path.to_string()),
+                        dir: entry.kind == ListingType::Dir,
+                        size: entry.size,
+                    })
+                    .collect(),
+            })),
+            Err(error) => Err(self.unreadable(found, &error)),
+        }
+    }
+
     fn members(&mut self, found: &FoundPiece) -> Option<Members> {
         match self.index.members(self.collection, found.id) {
             Ok(members) => members.map(|members| Members {
@@ -211,14 +253,7 @@ impl Contents<FoundPiece> for FindContents<'_> {
                     .collect(),
             }),
             Err(error) => {
-                let note = format!(
-                    "note: the contents of {} cannot be searched: {}",
-                    found.id,
-                    sanitize(&error.to_string())
-                );
-                if !self.reported.contains(&note) {
-                    self.unsearchable.borrow_mut().push(note);
-                }
+                self.unreadable(found, &error);
                 None
             }
         }

@@ -103,9 +103,8 @@ fn nodes(entries: &[Member]) -> Vec<Node> {
 /// `matched` says which entries match the query, or is `None` for the whole
 /// tree. A matching directory is a line of its own that stands for
 /// everything below it. A directory that only leads to matches shows, with
-/// the matches below it. A directory whose shown children are one directory
-/// is joined with it into one line (`data/raw/`), whose size is that of the
-/// last directory.
+/// the matches below it. A directory whose only entry is another directory is
+/// joined with it into one line (`data/raw/`), which has the size of both.
 ///
 /// At most `cap` lines come out, the last of them left to the caller's cut
 /// line when the tree does not fit: with a cut, `cap - 1` lines remain.
@@ -240,10 +239,11 @@ impl Walker<'_> {
         if last.dir {
             text.push('/');
         }
-        // Join the directory with the one directory it shows.
+        // Join the directory with its only child when that is a directory:
+        // a directory with any other entry in the listing, shown or not,
+        // keeps its own line.
         while last.dir && !(self.leaf)(last) {
-            let mut shown = last.children.iter().filter(|&&c| self.nodes[c].visible);
-            let (Some(&only), None) = (shown.next(), shown.next()) else {
+            let &[only] = last.children.as_slice() else {
                 break;
             };
             if !self.nodes[only].dir {
@@ -496,5 +496,17 @@ mod tests {
         let walked = walk(&entries, None, 4);
         assert_eq!(walked.lines.len(), 4);
         assert_eq!(walked.total, 1000, "the entries are counted in full");
+    }
+
+    #[test]
+    fn a_directory_with_a_sibling_that_did_not_match_is_not_merged() {
+        let entries = [
+            dir("src"),
+            dir("src/scanner"),
+            file("src/scanner/lib.rs", 61),
+            file("src/util.rs", 27),
+        ];
+        let tree = tree(&entries, Some(&[false, true, false, false]), 10, nothing);
+        assert_eq!(lines(&tree), [(0, "src/", 88), (1, "scanner/", 61)]);
     }
 }

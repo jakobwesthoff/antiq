@@ -38,6 +38,7 @@ pub const ENTER: &[u8] = b"\r";
 pub const ESC: &[u8] = b"\x1b";
 pub const CTRL_F: &[u8] = b"\x06";
 pub const CTRL_K: &[u8] = b"\x0b";
+pub const CTRL_O: &[u8] = b"\x0f";
 pub const CTRL_X: &[u8] = b"\x18";
 
 // =========================================================
