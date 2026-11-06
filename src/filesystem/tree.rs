@@ -324,6 +324,26 @@ impl TreeRoot {
         )
     }
 
+    /// Moves the entry at `from` to `to` in `to_root` like [`rename`], but
+    /// an existing target that is not a directory is replaced atomically.
+    ///
+    /// [`rename`]: TreeRoot::rename
+    pub fn rename_replace(
+        &self,
+        from: &RelPath,
+        to_root: &TreeRoot,
+        to: &RelPath,
+    ) -> io::Result<()> {
+        let (source, source_name) = self.split(from)?;
+        let (target, target_name) = to_root.split(to)?;
+        Ok(renameat(
+            source.as_fd(),
+            source_name,
+            target.as_fd(),
+            target_name,
+        )?)
+    }
+
     /// Removes the file, symlink or other non-directory entry at `path`,
     /// relative to this root.
     pub fn remove_file(&self, path: &RelPath) -> io::Result<()> {
@@ -781,6 +801,61 @@ mod tests {
 
     fn path(text: &str) -> RelPath {
         RelPath::parse(text).expect("valid path")
+    }
+
+    #[test]
+    fn rename_replace_puts_the_new_content_over_an_existing_file() {
+        let mut tree = Tree::new();
+        tree.file("a/new", "new");
+        tree.file("a/old", "old");
+        let root = root_of(&tree);
+
+        root.rename_replace(&path("a/new"), &root, &path("a/old"))
+            .expect("the file is renamed over the old one");
+
+        assert_eq!(fs::read(tree.path("a/old")).expect("read"), b"new");
+        assert!(!tree.path("a/new").exists());
+    }
+
+    #[test]
+    fn rename_replace_moves_between_two_roots() {
+        let mut tree = Tree::new();
+        tree.file("a/new", "new");
+        tree.dir("b");
+        let from = root_of(&tree).sub(&path("a")).expect("sub root");
+        let to = root_of(&tree).sub(&path("b")).expect("sub root");
+
+        from.rename_replace(&path("new"), &to, &path("moved"))
+            .expect("the file moves");
+
+        assert_eq!(fs::read(tree.path("b/moved")).expect("read"), b"new");
+    }
+
+    #[test]
+    fn rename_replace_refuses_a_non_empty_directory_and_keeps_the_source() {
+        let mut tree = Tree::new();
+        tree.file("a/new", "new");
+        tree.file("a/dir/inner", "x");
+        let root = root_of(&tree);
+
+        root.rename_replace(&path("a/new"), &root, &path("a/dir"))
+            .expect_err("a directory is not replaced");
+
+        assert!(tree.path("a/new").exists());
+        assert!(tree.path("a/dir/inner").exists());
+    }
+
+    #[test]
+    fn rename_replace_reports_a_missing_source() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let root = root_of(&tree);
+
+        let error = root
+            .rename_replace(&path("a/none"), &root, &path("a/target"))
+            .expect_err("nothing to move");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

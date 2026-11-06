@@ -276,14 +276,19 @@ is not packed and is deleted with the folder. `.antiq-pin` never reaches
 packing, since a pinned piece is not archived.
 
 `.antiq-restored` holds one line, `restored <UTC time>[ version <stamp>]`,
-and is read only as a regular file at the piece's top. `unearth` and
+with or without its line end, and is read only as a regular file at the
+piece's top. The time is written `YYYY-MM-DDTHH:MM:SSZ`, whole seconds in
+UTC, and no other spelling is read. `unearth` and
 `fork` write it (see there).
 
 Markers (`.antiq-restored`, `.antiq-pin`) are written in `.antiq/tmp/` and
 renamed over their place, then the piece's top is flushed; a leftover
 stays in `tmp/`, which the repairs empty. A top without owner write gets
 it for the rename and its recorded mode back right after. A top on another
-device than `.antiq/tmp/` is refused with the reason "mount point".
+device than `.antiq/tmp/`, and a top whose rename fails with `EXDEV`
+(a bind mount shares the device number), is refused with the reason
+"mount point". An entry at the marker's place that is not a file stays as
+it is and the write is refused.
 
 ## Idle
 
