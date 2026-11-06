@@ -668,17 +668,30 @@ impl Piece<'_, '_> {
 
     /// Step 5. A write that failed after the document reached the disk
     /// leaves everything in place for the repairs; otherwise the files of
-    /// this run go.
+    /// this run go. When `meta.pending` cannot be read back, nobody can tell
+    /// which of the two happened, and the files stay: a document naming a
+    /// payload that was deleted is worse than files nothing names.
     fn record(&self, metadata: &Metadata, placed: &[PathBuf]) -> Flow<()> {
         let outcome = self.at(Step::WriteMetadata).and_then(|()| {
             self.store()
                 .write_pending(self.cx.lock, metadata)
                 .map_err(|error| Stop::from_error(&error))
         });
-        if outcome.is_err() && !is_recorded(&self.store(), metadata) {
-            discard(placed);
+        if outcome.is_ok() {
+            return outcome;
         }
-        outcome
+        match is_recorded(&self.store(), metadata) {
+            Ok(recorded) => {
+                if !recorded {
+                    discard(placed);
+                }
+                outcome
+            }
+            Err(error) => Err(Stop::error(format!(
+                "the metadata state is unknown, the files stay for the repairs: {}",
+                chain(&error)
+            ))),
+        }
     }
 
     // =====================================================
@@ -743,12 +756,12 @@ impl Piece<'_, '_> {
 // Helpers
 // =========================================================
 
-/// Whether `meta.pending` holds exactly `metadata`.
-fn is_recorded(store: &Store<'_>, metadata: &Metadata) -> bool {
-    matches!(
-        store.current(metadata.id),
-        Ok(Some(current)) if current.source == Source::Pending && current.metadata == *metadata
-    )
+/// Whether `meta.pending` holds exactly `metadata`; an error when the
+/// metadata cannot be read.
+fn is_recorded(store: &Store<'_>, metadata: &Metadata) -> Result<bool, crate::store::StoreError> {
+    Ok(store
+        .current(metadata.id)?
+        .is_some_and(|current| current.source == Source::Pending && current.metadata == *metadata))
 }
 
 /// Where a new document for the object comes from.
@@ -1777,29 +1790,54 @@ mod tests {
     #[test]
     fn a_failed_metadata_write_removes_the_files() {
         let world = lone_piece("a");
+        let report = run(&world, &Scripted::failing(Step::WriteMetadata, libc::EIO));
+        let [row] = skipped(&report) else {
+            panic!("one piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        for id in objects(&world) {
+            assert_eq!(object_files(&world, id), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn a_failed_metadata_write_that_cannot_be_read_back_keeps_the_files() {
+        let world = lone_piece("a");
         let collection_dir = world.collection.objects_dir();
-        let seams = Scripted::before(Step::WriteMetadata, move || {
-            // A directory where `meta.pending` goes makes the write fail.
+        let seams = Scripted::on(move |step, _| {
+            if step != Step::WriteMetadata {
+                return Ok(());
+            }
+            // Whether the write reached the disk cannot be told when
+            // `meta.pending` does not parse.
             let object = fs::read_dir(&collection_dir)
                 .expect("lists")
                 .next()
                 .expect("the object directory exists")
                 .expect("an item")
                 .path();
-            fs::create_dir(object.join("meta.pending")).expect("a directory");
+            fs::write(object.join("meta.pending"), "not json").expect("written");
+            Err(io::Error::from_raw_os_error(libc::EIO))
         });
         let report = run(&world, &seams);
         let [row] = skipped(&report) else {
             panic!("one piece is skipped: {report:?}");
         };
         assert_eq!(row.reason, SkipReason::Error);
-        for id in objects(&world) {
-            assert_eq!(
-                object_files(&world, id),
-                ["meta.pending"],
-                "only the blocker is left"
-            );
-        }
+        assert!(
+            row.message.contains("metadata state is unknown"),
+            "{}",
+            row.message
+        );
+        let [id] = objects(&world)[..] else {
+            panic!("one object");
+        };
+        assert_eq!(
+            object_files(&world, id).len(),
+            3,
+            "payload, listing and meta.pending stay"
+        );
+        assert!(piece_path(&world, "a/note.txt").exists());
     }
 
     #[test]
@@ -1846,12 +1884,12 @@ mod tests {
         };
         let store = store(&world);
         let metadata = pending(&world, done.id);
-        assert!(is_recorded(&store, &metadata));
+        assert!(is_recorded(&store, &metadata).expect("reads"));
         let mut other = metadata.clone();
         other.history.clear();
-        assert!(!is_recorded(&store, &other));
+        assert!(!is_recorded(&store, &other).expect("reads"));
         fs::remove_file(world.collection.meta_pending_path(done.id)).expect("removes");
-        assert!(!is_recorded(&store, &metadata));
+        assert!(!is_recorded(&store, &metadata).expect("reads"));
     }
 
     #[test]
