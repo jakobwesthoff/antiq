@@ -91,7 +91,7 @@ const END_MARKER: u64 = 1024;
 /// Reads `package` to its end.
 ///
 /// The package must be one antiq wrote in this run or one that passed
-/// the scan of `unpack` or `check_structure`: the tar reader
+/// the scan of `unpack`: the tar reader
 /// loads a long-name or pax record whole, whatever size its header gives.
 pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;

@@ -4,8 +4,6 @@
 
 //! The extraction that `unearth` and `fork` share.
 
-#![allow(dead_code, reason = "the restore core that uses these follows")]
-
 use crate::archive::TargetRules;
 use crate::archive::extract::ExtractionFlush;
 use crate::archive::extract::unpack_flushed;
@@ -530,6 +528,7 @@ pub(crate) enum Method {
 
 /// The kernel `(major, minor)` of a `uname` release such as
 /// `5.15.0-91-generic`.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn parse_kernel(release: &str) -> Option<(u32, u32)> {
     let mut numbers = release.split('.');
     let major = numbers.next()?.parse().ok()?;
@@ -643,6 +642,7 @@ pub(crate) struct TreeFlush {
 }
 
 impl TreeFlush {
+    #[cfg(test)]
     pub(crate) fn begin(extract_dir: &Path) -> io::Result<TreeFlush> {
         TreeFlush::begin_with(extract_dir, Platform::real())
     }
@@ -664,6 +664,7 @@ impl TreeFlush {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn method(&self) -> Method {
         self.method
     }
@@ -739,8 +740,14 @@ pub(crate) enum Step {
     Verified,
     MarkerWritten,
     Flushed,
+    /// The folders above the destination exist, and nothing is renamed yet.
+    ParentsMade,
     Renamed,
     ParentFlushed,
+    /// The version is deleted from the store (reached by `unearth`).
+    VersionDeleted,
+    /// The marker holds the time alone (reached by `unearth`).
+    MarkerRewritten,
 }
 
 /// Everything `bring_back` takes from the system. The real one is
@@ -793,9 +800,12 @@ pub(crate) enum Skipped {
 #[derive(Debug)]
 pub(crate) enum Brought {
     /// The folder is in place. `time` is what `.antiq-restored` holds.
+    /// `failure` is what went wrong after the rename: the folder is then
+    /// in place but not known to be durable.
     Done {
         time: Timestamp,
         warnings: Vec<String>,
+        failure: Option<RestoreError>,
     },
     Skipped {
         reason: Skipped,
@@ -848,8 +858,8 @@ fn summarize(mut differences: Vec<String>) -> Vec<String> {
 /// and the folders above the destination that this run made.
 ///
 /// A full volume anywhere before the rename ends in [`Brought::Skipped`]
-/// with nothing left behind. After the rename the folder is in place and a
-/// failure is an error.
+/// with nothing left behind. After the rename the folder is in place, and a
+/// failure from there on comes back in [`Brought::Done`] as `failure`.
 pub(crate) fn bring_back(
     collection: &Collection,
     places: &Places,
@@ -872,6 +882,7 @@ pub(crate) fn bring_back(
     }
     hooks.reached(Step::SpaceChecked)?;
 
+    let time = Timestamp::from_second(now.as_second()).expect("a whole second of a time is valid");
     let mut placed = Placed::default();
     let result = place(
         collection,
@@ -879,17 +890,22 @@ pub(crate) fn bring_back(
         rules,
         chosen,
         marker_version,
-        now,
+        time,
         hooks,
         &root,
         &mut placed,
     );
     match result {
-        Ok(time) => Ok(Brought::Done {
+        Ok(()) => Ok(Brought::Done {
             time,
             warnings: placed.warnings,
+            failure: None,
         }),
-        Err(error) if placed.renamed => Err(error),
+        Err(error) if placed.renamed => Ok(Brought::Done {
+            time,
+            warnings: placed.warnings,
+            failure: Some(error),
+        }),
         Err(error) => {
             take_back(&root, &mut placed);
             if space::is_out_of_space(&error) {
@@ -933,11 +949,11 @@ fn place(
     rules: &Rules,
     chosen: &Chosen,
     marker_version: Option<Stamp>,
-    now: Timestamp,
+    time: Timestamp,
     hooks: &dyn Hooks,
     root: &TreeRoot,
     placed: &mut Placed,
-) -> Result<Timestamp, RestoreError> {
+) -> Result<(), RestoreError> {
     let target = &chosen.piece;
     let extract = RelPath::parse(".antiq/tmp/extract").expect("a valid path");
     create_dir_chain(hooks.durable(), root, &extract)?;
@@ -952,8 +968,10 @@ fn place(
         .target_rules(&staging)
         .map_err(io_at("probe the volume of", &staged))?;
     let missing = check_destination(root, rules, target)?;
-    check_destination_names(target, &missing, &volume)?;
+    // Names are judged by the volume the folder will be on, so a destination
+    // on another volume than the staging is refused before they are.
     check_same_volume(root, hooks, &extract, target, &missing)?;
+    check_destination_names(target, &missing, &volume)?;
 
     let archive_name = chosen
         .version
@@ -990,7 +1008,6 @@ fn place(
     }
     hooks.reached(Step::Verified)?;
 
-    let time = Timestamp::from_second(now.as_second()).expect("a whole second of a time is valid");
     let marker = Restored {
         time,
         version: marker_version,
@@ -1026,6 +1043,7 @@ fn place(
     if !placed.created.is_empty() {
         create_dir_chain(hooks.durable(), root, &parent)?;
     }
+    hooks.reached(Step::ParentsMade)?;
     let moved = hooks.move_dir(root, &staged, target)?;
     placed.renamed = true;
     if let Some(error) = moved.mode_restore_error {
@@ -1036,7 +1054,7 @@ fn place(
     hooks.durable().dir(&top, &named(root, target))?;
     flush_dir_of(hooks.durable(), root, &parent)?;
     hooks.reached(Step::ParentFlushed)?;
-    Ok(time)
+    Ok(())
 }
 
 /// Makes the first unused numbered folder below `extract`.
@@ -1060,7 +1078,7 @@ fn parent_of(path: &RelPath) -> RelPath {
 
 /// Refuses a destination whose nearest existing folder is on another
 /// volume than the staging, as the rename could not cross it.
-fn check_same_volume(
+pub(crate) fn check_same_volume(
     root: &TreeRoot,
     hooks: &dyn Hooks,
     extract: &RelPath,
@@ -2374,7 +2392,7 @@ mod bring_tests {
 
     fn done(result: Result<Brought, RestoreError>) -> (Timestamp, Vec<String>) {
         match result.expect("the version comes back") {
-            Brought::Done { time, warnings } => (time, warnings),
+            Brought::Done { time, warnings, .. } => (time, warnings),
             other => panic!("expected Done, got {other:?}"),
         }
     }
@@ -2462,6 +2480,7 @@ mod bring_tests {
                 "MarkerWritten",
                 "barrier",
                 "Flushed",
+                "ParentsMade",
                 "Renamed",
                 "ParentFlushed"
             ]
@@ -2748,7 +2767,7 @@ mod bring_tests {
     }
 
     #[test]
-    fn a_full_volume_after_the_rename_is_an_error_and_the_folder_stays() {
+    fn a_full_volume_after_the_rename_is_returned_with_the_folder_in_place() {
         let world = World::new();
         // The chain flushes "projects" before the rename too, so only the
         // second flush of it, the parent flush after the rename, fails.
@@ -2761,9 +2780,17 @@ mod bring_tests {
             }
             None
         });
-        let error = world.run(&spy).expect_err("an error after the rename");
+        let Brought::Done { failure, time, .. } = world
+            .run(&spy)
+            .expect("a failure after the rename is no error")
+        else {
+            panic!("the folder is in place");
+        };
+        let error = failure.expect("the flush failure comes back beside the folder");
         assert!(space::is_out_of_space(&error), "{error:?}");
+        assert_eq!(time.to_string(), "2026-11-05T10:00:00Z");
         assert!(world.destination().join("main.rs").exists());
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
     }
 
     #[test]
@@ -2823,6 +2850,24 @@ mod bring_tests {
     }
 
     #[test]
+    fn a_destination_on_another_volume_is_a_mount_point_before_its_names_are_judged() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.device = Some(|path| u64::from(!path.to_string().starts_with(".antiq")));
+        spy.volume = Some(TargetRules {
+            name_limit: NameLimit {
+                max: 5,
+                unit: LengthUnit::Bytes,
+            },
+            ..TargetRules::linux()
+        });
+        match world.run(&spy).expect_err("refused") {
+            RestoreError::Target { problem, .. } => assert_eq!(problem, TargetProblem::MountPoint),
+            other => panic!("expected a target problem, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_destination_that_the_names_of_the_volume_cannot_hold_is_refused_before_extraction() {
         let world = World::new();
         let mut spy = world.spy();
@@ -2851,7 +2896,7 @@ mod bring_tests {
     }
 
     #[test]
-    fn a_crash_at_every_step_leaves_the_version_and_no_folder_before_the_rename() {
+    fn a_failure_at_every_step_before_the_rename_removes_staging_and_parents() {
         for step in [
             Step::SpaceChecked,
             Step::StagingMade,
@@ -2859,6 +2904,7 @@ mod bring_tests {
             Step::Verified,
             Step::MarkerWritten,
             Step::Flushed,
+            Step::ParentsMade,
         ] {
             let world = World::new();
             let spy = world.spy().on(step, || {
