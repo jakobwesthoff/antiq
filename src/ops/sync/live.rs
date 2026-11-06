@@ -964,7 +964,41 @@ pub(super) fn delete_committed(
             remove_quietly(&ctx.collection.manifest_path(id));
         }
     }
+    drop_uploaded_packages(ctx, report);
     Ok(())
+}
+
+/// Removes the live packages of this machine from the local object
+/// directory of every object committed or settled in this run, except those
+/// a recorded change still names. A package is kept locally only until its
+/// change is committed; after that the remote holds it, and the manifest
+/// beside it is what tells a changed piece.
+fn drop_uploaded_packages(ctx: &SyncContext<'_>, report: &SyncReport) {
+    let store = Store::new(ctx.collection);
+    let committed: BTreeSet<ObjectId> = report.committed.iter().map(|c| c.id).collect();
+    for id in committed {
+        // An object whose state cannot be read keeps its files.
+        let Ok(Some(current)) = store.current(id) else {
+            continue;
+        };
+        let named = match current.source {
+            Source::Pending => live_files(&current.metadata, ctx.machine),
+            Source::Committed(_) => Vec::new(),
+        };
+        let Ok(versions) = store.committed_versions(id) else {
+            continue;
+        };
+        for number in versions {
+            let Some(version) = read_version(&store, id, number) else {
+                continue;
+            };
+            for file in live_files(&version, ctx.machine) {
+                if !named.contains(&file) {
+                    remove_quietly(&store.file_path(id, &file));
+                }
+            }
+        }
+    }
 }
 
 /// Whether the newest committed version of `id` and every committed version
@@ -1403,6 +1437,84 @@ mod tests {
     }
 
     #[test]
+    fn a_committed_package_is_not_kept_in_the_local_object_directory() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+
+        anna.sync();
+
+        let id = only_object(&anna);
+        let file = live_payloads(&anna, id).remove(0).file;
+        assert!(shared.names(id).contains(&file.as_str().to_string()));
+        assert!(
+            !anna.collection.object_dir(id).join(file.as_str()).exists(),
+            "the package is on the remote and nowhere else needs it"
+        );
+        assert!(
+            anna.collection.manifest_path(id).exists(),
+            "the manifest stays to tell a changed piece"
+        );
+    }
+
+    #[test]
+    fn a_package_whose_change_is_settled_is_not_kept_in_the_local_object_directory() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let file = live_payloads(&anna, id).remove(0).file;
+        // The state after a stop between the remote's commit and the local
+        // promotion: the recorded change is the committed version, and the
+        // package is still in the store.
+        let local = anna.collection.object_dir(id).join(file.as_str());
+        fs::write(&local, shared.read(id, file.as_str())).expect("the package is back");
+        fs::copy(
+            anna.store().meta_path(id, 1),
+            anna.collection.meta_pending_path(id),
+        )
+        .expect("the committed version is recorded again");
+
+        let report = anna.sync();
+
+        assert_eq!(
+            report
+                .committed
+                .iter()
+                .map(|c| c.version)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "{report:?}"
+        );
+        assert!(!anna.collection.meta_pending_path(id).exists());
+        assert!(!local.exists());
+    }
+
+    // The run records no change after its commits, so the guard is reached
+    // with a report written by hand.
+    #[test]
+    fn a_package_a_recorded_change_names_stays_in_the_local_object_directory() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let file = live_payloads(&anna, id).remove(0).file;
+        let local = anna.collection.object_dir(id).join(file.as_str());
+        fs::write(&local, shared.read(id, file.as_str())).expect("the package is back");
+        anna.record_history(id, HistoryAction::Unearth);
+        let mut report = crate::ops::sync::SyncReport::default();
+        report
+            .committed
+            .push(crate::ops::sync::CommittedVersion { id, version: 1 });
+
+        under_lock(&anna, |ctx| super::drop_uploaded_packages(ctx, &report));
+
+        assert!(local.exists());
+    }
+
+    #[test]
     fn a_touched_file_with_the_same_content_only_replaces_the_manifest() {
         let shared = Shared::new();
         let anna = Machine::new(&shared, "anna");
@@ -1520,7 +1632,10 @@ mod tests {
         assert_eq!(second.version, 1, "the first package never was committed");
         let local = anna.collection.object_dir(id);
         assert!(!local.join(first.file.as_str()).exists());
-        assert!(local.join(second.file.as_str()).exists());
+        assert!(
+            !local.join(second.file.as_str()).exists(),
+            "committed, so only the remote holds it"
+        );
         assert!(shared.names(id).contains(&second.file.as_str().to_string()));
     }
 
@@ -2577,13 +2692,13 @@ mod tests {
         let package = live_payloads(&anna, id).remove(0);
         // The other machine's package has to be uploadable for the commit
         // to go through.
-        fs::copy(
-            anna.collection.object_dir(id).join(package.file.as_str()),
+        fs::write(
             anna.collection
                 .object_dir(id)
                 .join("ffffffffffffffff-proj.tar.zst"),
+            shared.read(id, package.file.as_str()),
         )
-        .expect("copied");
+        .expect("written");
         record_by_hand(&anna, id, |metadata| {
             let mut other = metadata.payloads[0].clone();
             other.machine = "ben".into();
