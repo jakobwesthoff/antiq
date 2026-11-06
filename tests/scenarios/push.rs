@@ -105,13 +105,27 @@ fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
     run.expect_code(0);
     let mut screen = crate::support::screen::Screen::new(80, 24);
     screen.feed(run.stdout.as_bytes());
-    // The seconds of the times depend on the machine; the tests allow one.
+    // How long a piece took depends on the load of the machine. The line
+    // keeps its `m:ss` time, which the assertions below still require, and
+    // reads as 0:00 whatever it was.
     let lines: Vec<String> = screen
         .lines()
         .into_iter()
-        .map(|line| match line.strip_suffix("0:01") {
-            Some(rest) => format!("{rest}0:00"),
-            None => line,
+        .map(|line| {
+            let time_start = line.len().saturating_sub(4);
+            let is_time = line.get(time_start..).is_some_and(|tail| {
+                let tail = tail.as_bytes();
+                tail.len() == 4
+                    && tail[0].is_ascii_digit()
+                    && tail[1] == b':'
+                    && tail[2].is_ascii_digit()
+                    && tail[3].is_ascii_digit()
+            });
+            if is_time {
+                format!("{}0:00", &line[..time_start])
+            } else {
+                line
+            }
         })
         .collect();
     let (summary, rest) = (&lines[6], &lines[7..]);
