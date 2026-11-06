@@ -34,6 +34,20 @@ impl BrakeHold {
     pub fn items(&self) -> &[Candidate] {
         &self.items
     }
+
+    /// The items as a person reads them: one line each with path and ID,
+    /// and a last line counting those the hold does not list.
+    pub fn item_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .items
+            .iter()
+            .map(|item| format!("{} ({})", item.path, item.id))
+            .collect();
+        if self.planned > self.items.len() {
+            lines.push(format!("and {} more", self.planned - self.items.len()));
+        }
+        lines
+    }
 }
 
 /// What a step needs to pass the brake: whether `--force` was given and
@@ -46,7 +60,7 @@ pub struct BrakeInput<'a> {
 /// Errors of the brake.
 #[derive(Debug, thiserror::Error)]
 pub enum BrakeError {
-    #[error("the brake holds {} of {} objects", .0.planned, .0.set_size)]
+    #[error("the brake holds {} of {} pieces", .0.planned, .0.set_size)]
     Held(BrakeHold),
 }
 
@@ -85,17 +99,9 @@ pub fn gate(
     if force {
         return Ok(());
     }
-    let mut details: Vec<String> = hold
-        .items()
-        .iter()
-        .map(|item| format!("{} ({})", item.path, item.id))
-        .collect();
-    if hold.planned > hold.items().len() {
-        details.push(format!("and {} more", hold.planned - hold.items().len()));
-    }
     let question = Question {
         title: title(&hold),
-        details,
+        details: hold.item_lines(),
         choices: vec![Choice::new("stop", "Stop"), Choice::new("go", "Go on")],
         default: 0,
     };

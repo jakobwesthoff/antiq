@@ -12,6 +12,7 @@ pub mod tty;
 
 use self::output::Output;
 use self::tty::TtyInteraction;
+use antiq::brake::BrakeError;
 use antiq::error::ErrorKind;
 use antiq::interact::{Interaction, NonInteractive};
 use antiq::remote::policy::{self, Outcome};
@@ -431,6 +432,13 @@ fn finish(
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
     } else {
         out.plain_error(&description.root, &description.contexts)
+            .and_then(|()| match description.library_error {
+                Some(antiq::Error::Brake(BrakeError::Held(hold))) => hold
+                    .item_lines()
+                    .iter()
+                    .try_for_each(|line| out.note(&format!("  {}", cmd::status::sanitize(line)))),
+                _ => Ok(()),
+            })
     };
     match outcome {
         // A run that was partial before the remote stopped it stays partial.

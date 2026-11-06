@@ -1998,7 +1998,8 @@ entries (`reconcile --prune`), `remote remove` while pieces exist only
 on the remote, and `resolve --drop-superseded`. When planned removals
 exceed `brake_percent` of the affected set, the step stops and lists up
 to ten. On a terminal it asks; without one it refuses unless `--force`
-is given. `--dry-run` reports where the brake would hold. Removing live
+is given, and the console prints the listed items below the error, one
+line each with path and ID, and a line counting the rest. `--dry-run` reports where the brake would hold. Removing live
 packages and moving archives to the remote-only tier do not go through
 the brake. `archive` does not either: each folder is deleted only after
 its own strict verify and commit. No archive on the remote is deleted

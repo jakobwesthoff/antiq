@@ -90,11 +90,24 @@ fn the_console_names_the_refusal() {
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
     assert!(
-        run.stderr.contains("the brake holds 3 of 10 objects"),
+        run.stderr.contains("the brake holds 3 of 10 pieces"),
         "{}",
         run.stderr
     );
     assert!(config_of(&temp).contains("[[remote]]"));
+}
+
+#[test]
+fn the_console_lists_the_items_of_a_refusal() {
+    let (temp, _remotes) = world(7, 3);
+
+    let run = antiq_in(&temp, &["remote", "remove"]);
+
+    assert_eq!(run.code(), 1);
+    for number in 8..=10 {
+        let line = format!("projects/piece-{number} ({})", support::objects::id(number));
+        assert!(run.stderr.contains(&line), "{}", run.stderr);
+    }
 }
 
 #[test]

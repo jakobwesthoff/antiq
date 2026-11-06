@@ -1343,3 +1343,16 @@ fn under_json_the_error_of_an_away_remote_has_no_pruned_key_without_a_drop() {
         run.stdout
     );
 }
+
+#[test]
+fn the_console_lists_the_items_of_a_refused_drop() {
+    let world = three_of_ten();
+
+    let run = world.reconcile(&["--prune"]);
+
+    assert_eq!(run.code(), 1, "{}{}", run.stdout, run.stderr);
+    for (number, path) in [(8, "gone8"), (9, "gone9"), (10, "gone10")] {
+        let line = format!("{path} ({})", id(number));
+        assert!(run.stderr.contains(&line), "{}", run.stderr);
+    }
+}
