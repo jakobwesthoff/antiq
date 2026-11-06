@@ -1046,3 +1046,219 @@ fn run_within_kills_a_command_at_the_deadline_and_returns_finished_runs() {
     assert_eq!(done.stdout, "unset\n");
     assert_eq!(done.code(), 0);
 }
+
+// =========================================================
+// Stored versions, damage, ageing and sources
+// =========================================================
+
+use crate::support::scenario::versions::Source;
+use std::process::Command;
+
+const STAMP: &str = "2026-09-03T101500";
+
+fn collection_with_version() -> Collection {
+    Collection::build(&Clock::now())
+        .version(
+            "old/client-site",
+            STAMP,
+            &[("src/main.rs", "fn main() {}\n"), ("README", "hello\n")],
+        )
+        .finish()
+}
+
+fn shasum(folder: &std::path::Path, file: &std::path::Path) -> bool {
+    Command::new("shasum")
+        .args(["-a", "256", "-c"])
+        .arg(file)
+        .current_dir(folder)
+        .output()
+        .expect("shasum runs")
+        .status
+        .success()
+}
+
+#[test]
+fn a_written_version_has_three_files_named_after_the_piece_and_stamp() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let folder = collection.path(".antiq/pieces/old/client-site");
+    for (path, name) in [
+        (&files.archive, "old-client-site--2026-09-03T101500.tar.zst"),
+        (
+            &files.checksum,
+            "old-client-site--2026-09-03T101500.tar.zst.sha256",
+        ),
+        (
+            &files.listing,
+            "old-client-site--2026-09-03T101500.sha256.zst",
+        ),
+    ] {
+        assert_eq!(path, &folder.join(name));
+        assert!(path.exists(), "{name} is written");
+    }
+}
+
+#[test]
+fn the_checksum_file_passes_shasum_in_the_store_folder() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let folder = collection.path(".antiq/pieces/old/client-site");
+    let text = fs::read_to_string(&files.checksum).expect("the checksum file exists");
+    assert!(
+        text.ends_with("  old-client-site--2026-09-03T101500.tar.zst\n"),
+        "{text:?}"
+    );
+    assert!(shasum(&folder, &files.checksum));
+}
+
+#[test]
+fn the_listing_is_a_valid_listing_of_the_files_and_names_the_archive_size() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let listing = antiq::listing::read_full(fs::File::open(&files.listing).expect("it exists"))
+        .expect("antiq reads the listing in full");
+    assert_eq!(listing.header.piece.to_string(), "old/client-site");
+    assert_eq!(
+        listing.header.archive,
+        "old-client-site--2026-09-03T101500.tar.zst"
+    );
+    assert_eq!(
+        listing.header.archive_bytes,
+        fs::metadata(&files.archive).expect("it exists").len()
+    );
+    assert_eq!(listing.header.archived.to_string(), "2026-09-03T10:15:00Z");
+    let paths: Vec<String> = listing.entries.iter().map(|e| e.path.to_string()).collect();
+    assert_eq!(paths, ["README", "src", "src/main.rs"]);
+    assert_eq!((listing.files, listing.bytes), (2, 19));
+}
+
+#[test]
+fn the_archive_unpacks_to_one_directory_named_after_the_folder() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let bytes = zstd::stream::decode_all(fs::File::open(&files.archive).expect("it exists"))
+        .expect("the archive decompresses");
+    let mut names: Vec<String> = tar::Archive::new(&bytes[..])
+        .entries()
+        .expect("the archive lists")
+        .map(|e| {
+            e.expect("an entry")
+                .path()
+                .expect("a path")
+                .display()
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "client-site",
+            "client-site/README",
+            "client-site/src",
+            "client-site/src/main.rs"
+        ]
+    );
+}
+
+#[test]
+fn the_name_part_keeps_safe_characters_and_collapses_the_rest() {
+    let collection = Collection::build(&Clock::now())
+        .version("My Docs/Süd", STAMP, &[("a", "x")])
+        .finish();
+    let folder = collection.path(".antiq/pieces/My Docs/Süd");
+    assert!(
+        folder
+            .join("My-Docs-S-d--2026-09-03T101500.tar.zst")
+            .exists()
+    );
+}
+
+#[test]
+fn a_counter_stamp_is_part_of_the_file_names() {
+    let collection = Collection::build(&Clock::now())
+        .version("p", "2026-09-03T101500-2", &[("a", "x")])
+        .finish();
+    assert!(
+        collection
+            .path(".antiq/pieces/p/p--2026-09-03T101500-2.sha256.zst")
+            .exists()
+    );
+}
+
+#[test]
+fn damage_helpers_break_one_file_each() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    let folder = collection.path(".antiq/pieces/old/client-site");
+    let size = fs::metadata(&files.archive).expect("it exists").len();
+
+    collection.damage_truncate_archive("old/client-site", STAMP);
+    let truncated = fs::metadata(&files.archive).expect("it exists").len();
+    assert!(truncated < size, "{truncated} < {size}");
+    assert!(
+        !shasum(&folder, &files.checksum),
+        "the checksum no longer matches"
+    );
+
+    collection.damage_corrupt_checksum("old/client-site", STAMP);
+    let text = fs::read_to_string(&files.checksum).expect("it exists");
+    assert!(!text.contains("tar.zst"), "{text:?}");
+
+    collection.damage_remove_listing("old/client-site", STAMP);
+    assert!(!files.listing.exists());
+    assert!(files.archive.exists() && files.checksum.exists());
+
+    collection.damage_remove_archive("old/client-site", STAMP);
+    assert!(!files.archive.exists());
+    assert!(files.checksum.exists());
+}
+
+#[test]
+fn set_age_ages_the_files_of_a_piece_and_rewrites_the_restored_marker() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("p", |piece| {
+            piece
+                .age_days(10)
+                .file("a", "x")
+                .file("sub/b", "y")
+                .restored(10, Some(STAMP));
+        })
+        .finish();
+    collection.set_age("p", 50);
+    assert_eq!(mtime(&collection.path("p/a")), clock.days_ago(50));
+    assert_eq!(mtime(&collection.path("p/sub/b")), clock.days_ago(50));
+    assert_eq!(
+        mtime(&collection.path("p/.antiq-restored")),
+        clock.days_ago(50)
+    );
+    let marker = fs::read_to_string(collection.path("p/.antiq-restored")).expect("it exists");
+    let time = jiff::Timestamp::from_second(clock.days_ago(50))
+        .expect("representable")
+        .strftime("%Y-%m-%dT%H:%M:%SZ");
+    assert_eq!(marker, format!("restored {time} version {STAMP}\n"));
+}
+
+#[test]
+fn set_age_leaves_a_piece_without_marker_without_one() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("p", |piece| {
+            piece.file("a", "x");
+        })
+        .finish();
+    collection.set_age("p", 50);
+    assert!(!collection.path("p/.antiq-restored").exists());
+}
+
+#[test]
+fn a_source_is_a_folder_outside_the_collection_with_aged_files() {
+    let clock = Clock::now();
+    let source = Source::new(&clock, |piece| {
+        piece.age_days(40).file("notes/a.txt", "x");
+    });
+    let file = source.path().join("notes/a.txt");
+    assert_eq!(fs::read_to_string(&file).expect("it exists"), "x");
+    assert_eq!(mtime(&file), clock.days_ago(40));
+}

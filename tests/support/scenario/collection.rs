@@ -64,6 +64,18 @@ enum Entry {
     },
 }
 
+/// The text of an `.antiq-restored` marker written `days` before the
+/// clock's base.
+pub(super) fn restored_line(clock: &Clock, days: i64, version: Option<&str>) -> String {
+    let time = jiff::Timestamp::from_second(clock.days_ago(days))
+        .expect("the time is representable")
+        .strftime("%Y-%m-%dT%H:%M:%SZ");
+    match version {
+        Some(stamp) => format!("restored {time} version {stamp}\n"),
+        None => format!("restored {time}\n"),
+    }
+}
+
 /// The content of one piece: files with ages, links, control files.
 #[derive(Default)]
 pub struct PieceBuilder {
@@ -147,7 +159,7 @@ impl PieceBuilder {
         self
     }
 
-    fn write(&self, clock: &Clock, tree: &mut Tree, piece: &str) {
+    pub(super) fn write(&self, clock: &Clock, tree: &mut Tree, piece: &str) {
         tree.dir(piece);
         let aged = |relative: &str, content: &[u8], days: i64, tree: &mut Tree| {
             let path = tree.file(&format!("{piece}/{relative}"), content);
@@ -179,13 +191,7 @@ impl PieceBuilder {
             aged(".antiq-pin", b"", self.age, tree);
         }
         if let Some((days, version)) = &self.restored {
-            let time = jiff::Timestamp::from_second(clock.days_ago(*days))
-                .expect("the time is representable")
-                .strftime("%Y-%m-%dT%H:%M:%SZ");
-            let line = match version {
-                Some(stamp) => format!("restored {time} version {stamp}\n"),
-                None => format!("restored {time}\n"),
-            };
+            let line = restored_line(clock, *days, version.as_deref());
             aged(".antiq-restored", line.as_bytes(), self.age, tree);
         }
     }
@@ -244,11 +250,15 @@ fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| item.to_string()).collect()
 }
 
+/// The `(path, content)` files of a stored version.
+pub type StoredFiles = Vec<(String, Vec<u8>)>;
+
 pub struct CollectionBuilder {
     clock: Clock,
     keys: ConfigKeys,
     pieces: Vec<(String, PieceBuilder)>,
     outside: Vec<(String, Vec<u8>)>,
+    versions: Vec<(String, String, StoredFiles)>,
 }
 
 impl CollectionBuilder {
@@ -307,6 +317,23 @@ impl CollectionBuilder {
         self
     }
 
+    /// A stored version of `piece` with the stamp `stamp` and the given
+    /// `(path, content)` files, written to the store.
+    pub fn version(
+        &mut self,
+        piece: &str,
+        stamp: &str,
+        files: &[(&str, &str)],
+    ) -> &mut CollectionBuilder {
+        let files = files
+            .iter()
+            .map(|(path, content)| (path.to_string(), content.as_bytes().to_vec()))
+            .collect();
+        self.versions
+            .push((piece.to_string(), stamp.to_string(), files));
+        self
+    }
+
     pub fn finish(&mut self) -> Collection {
         let mut tree = Tree::new();
         for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
@@ -323,6 +350,9 @@ impl CollectionBuilder {
             tree,
             clock: self.clock,
         };
+        for (piece, stamp, files) in &self.versions {
+            collection.add_version(piece, stamp, files);
+        }
         collection.settle();
         collection
     }
@@ -340,6 +370,7 @@ impl Collection {
             keys: ConfigKeys::default(),
             pieces: Vec::new(),
             outside: Vec::new(),
+            versions: Vec::new(),
         }
     }
 
