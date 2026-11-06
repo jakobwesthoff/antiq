@@ -1006,13 +1006,32 @@ rsync runs with `LC_ALL=C`, every `RSYNC_*` variable and `CVSIGNORE`
 removed from its environment, `--stats`, `--no-human-readable`,
 `--no-whole-file` and `--timeout`, never with `--inplace` or
 `--append`. A new live package is seeded on the NAS as a hard link to
-the current one and transferred onto it; no transfer of a live package
-deletes files. An archive is uploaded onto its temp name with
-`--partial-dir=.antiq-partial`, so an interrupted upload resumes, and
-fetched for unearthing into `.antiq/tmp/`. Any non-zero exit fails the
-transfer: the temp name stays for the next attempt or is removed, and
-the piece stays pending. After a transfer, the size on the NAS is
-checked against the local file in the same command as the rename.
+the current one and transferred onto it; the link is made only when the
+current package is a regular file and no symlink and the temp name is
+free, and a seed that does not link costs the transfer of the whole
+file, not an error. No transfer of a live package deletes files. An
+upload without a seed goes onto its temp name with
+`--partial-dir=.antiq-partial`, so an interrupted upload resumes; a
+seeded upload has no partial directory. Archives are fetched for
+unearthing into `.antiq/tmp/`.
+
+A final name that holds a file with the SHA-256 of the upload counts as
+put and nothing is transferred; other content there, or an entry that
+is not a regular file, is a conflict and nothing is replaced. This is
+checked before the transfer and again at its end. The command that ends
+an upload runs `sync`, checks the size on the NAS against the local
+file, links the temp name to the final name only when that is free,
+removes the temp name and runs `sync` again. A wrong size fails the
+transfer and leaves the temp name.
+
+A failed rsync is told apart as a failed command is: ssh's own lines in
+rsync's output, or in the master connection's log written during the
+transfer, decide between away and broken, so a master that drops during
+a transfer is away. Without such a line, exit 255 is broken and every
+other exit is a failed transfer, 30 (timeout) and death by a signal
+included. Exits 23, 24 and 11 are a failed transfer whatever ssh
+printed. After a failed transfer the temp name stays for the next
+attempt or is removed, and the piece stays pending.
 
 ### Several machines
 

@@ -71,9 +71,14 @@ while [ $# -gt 0 ]; do
         shift
         break
         ;;
-    *)
+    -*)
         echo "shim: unknown option $1" >&2
         exit 255
+        ;;
+    *)
+        # The first word that is no option is the host. rsync puts no
+        # `--` before it.
+        break
         ;;
     esac
 done

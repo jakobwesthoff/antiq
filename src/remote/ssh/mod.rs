@@ -20,12 +20,16 @@ use super::{
 };
 use crate::config::{MachineConfig, RemoteConfig};
 use crate::id::ObjectId;
+use crate::remote::rsync::{Rsync, RsyncError, TransferSettings};
 use crate::report::Warning;
+use classify::{Failure, decided_failure};
 use jiff::Timestamp;
 use script::{EXISTS_STATUS, Script};
 use session::{Output, Session, SessionError, SessionSettings, Target};
+use std::ffi::OsString;
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// Where an ssh remote lives: the parts of its URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +57,12 @@ const ROOT_UNUSABLE: i32 = 49;
 const MARKER_UNREADABLE: i32 = 50;
 /// The file the operation names is not there.
 const FILE_MISSING: i32 = 44;
+/// The upload on the NAS does not have the size of the local file.
+const SIZE_MISMATCH: i32 = 45;
+/// The final name of an upload holds the very bytes that were to be put.
+const SAME_BYTES: i32 = 46;
+/// The final name of an upload holds other bytes, or is no regular file.
+const OTHER_BYTES: i32 = 47;
 
 /// Lists the directory `$1/$2` as one `@entry <name> <d|f> <size> <mtime>`
 /// frame without a body per entry. Names with a byte outside
@@ -165,6 +175,84 @@ rm -f "$_t" || exit 1
 const DELETE: &str = r#"rm -f "$1/objects/$2${4:+/.antiq-partial}/$3" || exit 1
 "#;
 
+/// Shell functions of the upload scripts.
+///
+/// - `antiq_taken FILE SHA` ends with [`SAME_BYTES`] when FILE is a regular
+///   file with the SHA-256 SHA and with [`OTHER_BYTES`] for anything else.
+/// - `antiq_taken_temp TEMP FILE SHA` is that, and removes TEMP when the
+///   bytes are the same, since the upload is then already in place.
+const UPLOAD_FUNCTIONS: &str = r#"antiq_taken() {
+    if [ ! -f "$1" ] || [ -h "$1" ]; then return 47; fi
+    _taken=$(antiq_sha256 "$1") || return $?
+    [ "$_taken" = "$2" ] && return 46
+    return 47
+}
+antiq_taken_temp() {
+    antiq_taken "$2" "$3"
+    _rc=$?
+    [ "$_rc" -eq 46 ] && rm -f "$1"
+    return "$_rc"
+}
+"#;
+
+/// Before the transfer, with `$3` the temp name, `$4` the final name, `$5`
+/// the SHA-256 and `$6` the seed or nothing. A taken final name ends the
+/// script with [`SAME_BYTES`] or [`OTHER_BYTES`]. A seed that is a regular
+/// file and no symlink is hard-linked to the temp name when that is free,
+/// so that rsync finds the old package next to the new one. A seed that
+/// does not link only costs the transfer of the whole file.
+const UPLOAD_PREPARE: &str = r#"_d="$1/objects/$2"
+mkdir -p "$_d" || exit 1
+_f="$_d/$4"
+if [ -e "$_f" ] || [ -h "$_f" ]; then
+    antiq_taken "$_f" "$5"
+    exit $?
+fi
+if [ -n "$6" ]; then
+    _s="$_d/$6"
+    _t="$_d/$3"
+    if [ -f "$_s" ] && [ ! -h "$_s" ] && [ ! -e "$_t" ] && [ ! -h "$_t" ]; then
+        ln "$_s" "$_t" 2>/dev/null
+    fi
+fi
+exit 0
+"#;
+
+/// After the transfer, with `$6` the size of the local file. The size is
+/// checked after a `sync`, the final name is a hard link that is made only
+/// when the name is free, and the temp name goes once the name is in
+/// place.
+const UPLOAD_FINISH: &str = r#"_d="$1/objects/$2"
+_t="$_d/$3"
+_f="$_d/$4"
+sync || exit 1
+_st=$(antiq_stat "$_t")
+_rc=$?
+[ "$_rc" -eq 0 ] || exit "$_rc"
+if [ "${_st%% *}" != "$6" ]; then
+    printf 'the upload has %s bytes on the NAS instead of %s\n' "${_st%% *}" "$6" >&2
+    exit 45
+fi
+if [ -e "$_f" ] || [ -h "$_f" ]; then
+    antiq_taken_temp "$_t" "$_f" "$5"
+    exit $?
+fi
+if ! _e=$(ln "$_t" "$_f" 2>&1); then
+    if [ -e "$_f" ] || [ -h "$_f" ]; then
+        antiq_taken_temp "$_t" "$_f" "$5"
+        exit $?
+    fi
+    printf '%s\n' "$_e" >&2
+    exit 48
+fi
+rm -f "$_t" || exit 1
+sync || exit 1
+"#;
+
+/// The file `$3` of the object `$2` is there to be fetched.
+const FETCH_CHECK: &str = r#"[ -f "$1/objects/$2/$3" ] || exit 44
+"#;
+
 /// Shell functions every script of the remote starts with. They use
 /// only POSIX `sh` and tools every NAS has.
 ///
@@ -246,17 +334,26 @@ antiq_root_check() {
 "#;
 
 /// Points where a test replaces a step of the production behaviour.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct SshSeams {
     /// The script text that creates a file and fails when it exists, in
     /// place of [`script::EXCLUSIVE_CREATE`].
     pub exclusive_create: &'static str,
+    /// Runs after the checks of a transfer and before rsync starts.
+    pub before_transfer: Option<Hook>,
+    /// Runs after rsync ended well and before the far side is asked to
+    /// finish the upload.
+    pub after_transfer: Option<Hook>,
 }
+
+type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 impl Default for SshSeams {
     fn default() -> SshSeams {
         SshSeams {
             exclusive_create: script::EXCLUSIVE_CREATE,
+            before_transfer: None,
+            after_transfer: None,
         }
     }
 }
@@ -267,9 +364,10 @@ pub struct SshRemote {
     host: String,
     root: String,
     id: ObjectId,
-    #[allow(dead_code)] // read by the transfers
     machine: MachineConfig,
     seams: SshSeams,
+    /// The rsync of this machine, probed at the first transfer.
+    rsync: Mutex<Option<Rsync>>,
 }
 
 /// What a script answered after the root check passed.
@@ -277,7 +375,6 @@ struct Answer {
     /// The remote clock, for a script made with a clock.
     clock: Option<i64>,
     /// The frames after the marker frame.
-    #[allow(dead_code)] // read by the operations that return data
     frames: Vec<Frame>,
 }
 
@@ -375,6 +472,7 @@ impl SshRemote {
             id,
             machine,
             seams: SshSeams::default(),
+            rsync: Mutex::new(None),
         }
     }
 
@@ -486,6 +584,12 @@ impl SshRemote {
         }
     }
 
+    fn conflict(&self, upload: &Upload<'_>) -> RemoteError {
+        RemoteError::PayloadConflict {
+            name: upload.final_name.to_string(),
+        }
+    }
+
     fn exec(&self, script: &Script) -> Result<Output, RemoteError> {
         self.session.run(script).map_err(map_session)
     }
@@ -516,6 +620,54 @@ impl SshRemote {
         let script = self.script(LIST_DIR).arg(format!("objects/{id}{subdir}"));
         let answer = self.run(&script, false, "list")?;
         parse_entries(&answer.frames)
+    }
+
+    /// The rsync of this machine. It is probed once; a machine without a
+    /// usable one fails here, before the first call to the NAS.
+    fn rsync(&self) -> Result<Rsync, RemoteError> {
+        let mut cached = self.rsync.lock().expect("no panic holds the rsync lock");
+        if let Some(rsync) = &*cached {
+            return Ok(rsync.clone());
+        }
+        let rsync = Rsync::from_machine(&self.machine)?;
+        *cached = Some(rsync.clone());
+        Ok(rsync)
+    }
+
+    /// Runs rsync between `source` and `destination` over the session's
+    /// ssh command. A failure is told apart with the text the master wrote
+    /// to its log during the transfer: a master that dies leaves rsync with
+    /// nothing but "connection unexpectedly closed".
+    fn transfer(
+        &self,
+        rsync: &Rsync,
+        resumable: bool,
+        source: OsString,
+        destination: OsString,
+    ) -> Result<crate::remote::rsync::TransferStats, RemoteError> {
+        let settings =
+            TransferSettings::for_machine(&self.machine, self.session.rsh_argv(), resumable);
+        let log = self.session.log_path();
+        let logged = std::fs::metadata(log).map(|meta| meta.len()).unwrap_or(0);
+        rsync
+            .transfer(&settings, &source, &destination)
+            .run()
+            .map_err(|error| {
+                let tail = std::fs::read(log)
+                    .map(|bytes| bytes.into_iter().skip(logged as usize).collect::<Vec<u8>>())
+                    .unwrap_or_default();
+                classify_rsync_failure(error, &String::from_utf8_lossy(&tail))
+            })
+    }
+
+    fn remote_path(&self, id: ObjectId, name: &str) -> OsString {
+        format!("{}:{}/objects/{id}/{name}", self.host, self.root).into()
+    }
+
+    fn run_hook(hook: &Option<Hook>) {
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn check_root(&self, body: &str, action: &'static str) -> Result<(), RemoteError> {
@@ -603,8 +755,41 @@ fn canonical_object(text: &str) -> Option<ObjectId> {
     (id.to_string() == text).then_some(id)
 }
 
-fn pending() -> RemoteError {
-    RemoteError::Unsupported("this operation of the ssh remote".into())
+/// A local path as rsync reads it: a relative one gets `./`, since rsync
+/// takes a name with a colon for `host:path`. Joining an absolute path
+/// to `.` gives that path.
+fn local_arg(path: &Path) -> OsString {
+    Path::new(".").join(path).into_os_string()
+}
+
+/// What a failed rsync means for the remote. ssh's own lines, in rsync's
+/// stderr or in the master's log, tell away from broken the way they do
+/// for a command. Codes 23, 24 and 11 are rsync's own findings about
+/// files and are a failed transfer whatever else was printed. Without
+/// such a line, 255 is broken and every other code, a timeout (30), a
+/// signal and a failure to start rsync included, is a failed transfer.
+fn classify_rsync_failure(error: RsyncError, master_log: &str) -> RemoteError {
+    let RsyncError::Failed {
+        code: Some(code),
+        stderr,
+    } = &error
+    else {
+        return RemoteError::Transfer(error.to_string());
+    };
+    if matches!(code, 23 | 24 | 11) {
+        return RemoteError::Transfer(error.to_string());
+    }
+    let decided =
+        decided_failure(stderr.as_bytes()).or_else(|| decided_failure(master_log.as_bytes()));
+    match decided {
+        Some(Failure::Away(message)) => RemoteError::Away {
+            message,
+            overdue: false,
+        },
+        Some(Failure::Broken(message)) => RemoteError::Broken(message),
+        None if *code == 255 => RemoteError::Broken(error.to_string()),
+        None => RemoteError::Transfer(error.to_string()),
+    }
 }
 
 impl Remote for SshRemote {
@@ -672,8 +857,20 @@ impl Remote for SshRemote {
         let answer = self.run_on_file(READ_FILE, id, name, "read")?;
         file_bytes(answer.frames)
     }
-    fn get_payload(&self, _id: ObjectId, _name: &str, _to: &Path) -> Result<Transfer, RemoteError> {
-        Err(pending())
+    fn get_payload(&self, id: ObjectId, name: &str, to: &Path) -> Result<Transfer, RemoteError> {
+        plain_name(name)?;
+        let rsync = self.rsync()?;
+        self.run_on_file(FETCH_CHECK, id, name, "fetch")?;
+        Self::run_hook(&self.seams.before_transfer);
+        let stats = self.transfer(&rsync, false, self.remote_path(id, name), local_arg(to))?;
+        let bytes = match stats.literal_bytes {
+            Some(bytes) => bytes,
+            None => std::fs::metadata(to).map(|meta| meta.len()).unwrap_or(0),
+        };
+        Ok(Transfer {
+            bytes,
+            already_present: false,
+        })
     }
     fn create_exclusive(&self, id: ObjectId, name: &str) -> Result<Created, RemoteError> {
         plain_name(name)?;
@@ -725,8 +922,72 @@ impl Remote for SshRemote {
         self.answer(output, false, "rename")?;
         Ok(Placement::Placed)
     }
-    fn put_payload(&self, _upload: &Upload<'_>) -> Result<Transfer, RemoteError> {
-        Err(pending())
+    fn put_payload(&self, upload: &Upload<'_>) -> Result<Transfer, RemoteError> {
+        plain_name(upload.temp)?;
+        plain_name(upload.final_name)?;
+        if let Some(seed) = upload.seed {
+            plain_name(seed)?;
+        }
+        let id = upload.id;
+        let size = std::fs::metadata(upload.source)
+            .map_err(|source| RemoteError::Io {
+                action: "read",
+                path: upload.source.display().to_string(),
+                source,
+            })?
+            .len();
+        let rsync = self.rsync()?;
+        let already_present = Transfer {
+            bytes: 0,
+            already_present: true,
+        };
+
+        let prepare = self
+            .script(&format!("{UPLOAD_FUNCTIONS}{UPLOAD_PREPARE}"))
+            .arg(id.to_string())
+            .arg(upload.temp)
+            .arg(upload.final_name)
+            .arg(upload.sha256)
+            .arg(upload.seed.unwrap_or(""));
+        let output = self.exec(&prepare)?;
+        match output.status {
+            SAME_BYTES => return Ok(already_present),
+            OTHER_BYTES => return Err(self.conflict(upload)),
+            _ => {}
+        }
+        self.answer(output, false, "prepare the upload of")?;
+
+        Self::run_hook(&self.seams.before_transfer);
+        let stats = self.transfer(
+            &rsync,
+            upload.seed.is_none(),
+            local_arg(upload.source),
+            self.remote_path(id, upload.temp),
+        )?;
+        Self::run_hook(&self.seams.after_transfer);
+
+        let finish = self
+            .script(&format!("{UPLOAD_FUNCTIONS}{UPLOAD_FINISH}"))
+            .arg(id.to_string())
+            .arg(upload.temp)
+            .arg(upload.final_name)
+            .arg(upload.sha256)
+            .arg(size.to_string());
+        let output = self.exec(&finish)?;
+        match output.status {
+            SAME_BYTES => return Ok(already_present),
+            OTHER_BYTES => return Err(self.conflict(upload)),
+            SIZE_MISMATCH => {
+                let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(RemoteError::Transfer(reason));
+            }
+            _ => {}
+        }
+        self.answer(output, false, "finish the upload of")?;
+        Ok(Transfer {
+            bytes: stats.literal_bytes.unwrap_or(size),
+            already_present: false,
+        })
     }
     fn delete(&self, id: ObjectId, name: &str) -> Result<(), RemoteError> {
         plain_name(name)?;
@@ -1903,6 +2164,7 @@ mod tests {
         let far = Far::new();
         let seams = SshSeams {
             exclusive_create: "exit 17",
+            ..SshSeams::default()
         };
         let remote = far.remote().with_seams(seams);
         assert_eq!(
@@ -2160,5 +2422,857 @@ exec /usr/bin/stat "$@""#,
             ));
         }
         assert_eq!(far.commands(), 0);
+    }
+
+    // ----- transfers -----
+
+    #[test]
+    fn rsync_reaches_the_far_side_through_the_shim() {
+        use crate::remote::rsync::{Rsync, TransferSettings};
+        let far = Far::new();
+        let remote = far.remote_with_seams(SshSeams::default());
+        let rsync = Rsync::from_machine(&remote.machine).expect("rsync");
+        let settings =
+            TransferSettings::for_machine(&remote.machine, remote.session.rsh_argv(), false);
+        let source = far.state.path().join("local.bin");
+        std::fs::write(&source, "carried").expect("source");
+        let destination = far.object_dir(OBJECT).join("carried.bin");
+        let target = format!("nas:{}", destination.display());
+        rsync
+            .transfer(&settings, source.as_os_str(), target.as_ref())
+            .run()
+            .expect("rsync runs through the shim");
+        assert_eq!(std::fs::read(destination).expect("copied"), b"carried");
+    }
+
+    // ----- payload helpers -----
+
+    /// Bytes that do not repeat, so that rsync finds a match only where
+    /// two files share a stretch.
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn sha_of(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        crate::pack::hashing::hex(&Sha256::digest(bytes))
+    }
+
+    impl Far {
+        fn local(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.state.path().join(name);
+            std::fs::write(&path, bytes).expect("local file");
+            path
+        }
+
+        fn remote_with(&self, rsync: &Path, seams: SshSeams) -> SshRemote {
+            let machine = MachineConfig {
+                rsync: Some(rsync.to_path_buf()),
+                ..MachineConfig::default()
+            };
+            self.remote_of(machine, seams)
+        }
+
+        fn remote_of(&self, machine: MachineConfig, seams: SshSeams) -> SshRemote {
+            SshRemote::with_session(
+                self.session(),
+                self.root().to_str().expect("UTF-8").to_string(),
+                id(),
+                machine,
+                "nas".into(),
+            )
+            .with_seams(seams)
+        }
+
+        fn real_rsync() -> PathBuf {
+            crate::remote::rsync::Rsync::resolve(None, &std::env::var_os("PATH").expect("PATH"))
+                .expect("these tests need an rsync 3.1 or later")
+                .path()
+                .to_path_buf()
+        }
+
+        fn remote_with_seams(&self, seams: SshSeams) -> SshRemote {
+            self.remote_with(&Far::real_rsync(), seams)
+        }
+
+        /// What the fake rsync was called with, one call per entry.
+        fn fake_calls(fake: &Path) -> Vec<Vec<String>> {
+            let raw = std::fs::read(fake.with_file_name("calls.log")).unwrap_or_default();
+            raw.split(|&byte| byte == b'\n')
+                .flat_map(|chunk| chunk.split(|&byte| byte == 0))
+                .fold(Vec::<Vec<String>>::new(), |mut calls, word| {
+                    match word {
+                        b"version" | b"transfer" => {
+                            calls.push(vec![String::from_utf8_lossy(word).into_owned()])
+                        }
+                        b"" => {}
+                        word => calls
+                            .last_mut()
+                            .expect("a call starts with its mode")
+                            .push(String::from_utf8_lossy(word).into_owned()),
+                    }
+                    calls
+                })
+        }
+    }
+
+    /// A directory with a fake rsync that passes the probe.
+    fn fake_rsync() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-rsync.sh");
+        let path = dir.path().join("rsync");
+        std::os::unix::fs::symlink(fixture, &path).expect("link");
+        std::fs::write(
+            dir.path().join("version"),
+            "rsync  version 3.5.1  protocol version 33\n",
+        )
+        .expect("version");
+        (dir, path)
+    }
+
+    fn upload<'a>(source: &'a Path, sha: &'a str) -> Upload<'a> {
+        Upload::new(object(), ".pack.laptop.part", "pack.tar", source, sha)
+    }
+
+    fn transfers(calls: &[Vec<String>]) -> usize {
+        calls.iter().filter(|call| call[0] == "transfer").count()
+    }
+
+    // ----- put -----
+
+    #[test]
+    fn a_put_places_the_file_and_removes_the_temp() {
+        let far = Far::new();
+        let bytes = noise(300_000, 1);
+        let source = far.local("pack.tar", &bytes);
+        let sha = sha_of(&bytes);
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&upload(&source, &sha))
+            .expect("put");
+        assert_eq!(moved.bytes, 300_000);
+        assert!(!moved.already_present);
+        assert_eq!(
+            std::fs::read(far_file(&far, "pack.tar")).expect("final"),
+            bytes
+        );
+        assert!(!far_file(&far, ".pack.laptop.part").exists());
+    }
+
+    #[test]
+    fn a_put_of_a_name_that_holds_the_same_bytes_runs_no_transfer() {
+        let far = Far::new();
+        let (fake_dir, fake) = fake_rsync();
+        let bytes = noise(1_000, 2);
+        let source = far.local("pack.tar", &bytes);
+        std::fs::write(far_file(&far, "pack.tar"), &bytes).expect("there already");
+        let moved = far
+            .remote_with(&fake, SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect("put");
+        assert!(moved.already_present);
+        assert_eq!(moved.bytes, 0);
+        assert_eq!(transfers(&Far::fake_calls(&fake)), 0);
+        drop(fake_dir);
+    }
+
+    #[test]
+    fn a_put_onto_a_name_with_other_bytes_is_a_conflict_and_changes_nothing() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let bytes = noise(1_000, 3);
+        let source = far.local("pack.tar", &bytes);
+        std::fs::write(far_file(&far, "pack.tar"), "other").expect("there already");
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("conflict");
+        assert!(
+            matches!(error, RemoteError::PayloadConflict { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(far_file(&far, "pack.tar")).expect("kept"),
+            b"other"
+        );
+        assert_eq!(transfers(&Far::fake_calls(&fake)), 0);
+    }
+
+    #[test]
+    fn a_name_that_is_a_directory_is_a_conflict() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let source = far.local("pack.tar", b"x");
+        std::fs::create_dir(far_file(&far, "pack.tar")).expect("directory");
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(b"x")))
+            .expect_err("conflict");
+        assert!(
+            matches!(error, RemoteError::PayloadConflict { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_upload_resumes_from_its_partial_file() {
+        let far = Far::new();
+        let bytes = noise(400_000, 4);
+        let source = far.local("pack.tar", &bytes);
+        let partial = far_file(&far, ".antiq-partial");
+        std::fs::create_dir(&partial).expect("dir");
+        std::fs::write(partial.join(".pack.laptop.part"), &bytes[..300_000]).expect("partial");
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect("put");
+        assert!(moved.bytes < 200_000, "literal bytes: {}", moved.bytes);
+        assert_eq!(
+            std::fs::read(far_file(&far, "pack.tar")).expect("final"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_seeded_upload_sends_only_what_differs_and_leaves_the_seed_alone() {
+        let far = Far::new();
+        let old = noise(400_000, 5);
+        let mut new = old.clone();
+        new[200_000..200_100].copy_from_slice(&noise(100, 6));
+        std::fs::write(far_file(&far, "live.old"), &old).expect("seed");
+        // rsync skips a file whose size and modification time match, and
+        // the temp is a link to the seed.
+        let source = far.local("live.new", &new);
+        set_mtime(&source, 2_000_000_000);
+        let sha = sha_of(&new);
+        let with_seed = Upload {
+            seed: Some("live.old"),
+            ..Upload::new(object(), ".live.laptop.part", "live.new", &source, &sha)
+        };
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&with_seed)
+            .expect("put");
+        assert!(moved.bytes < 100_000, "literal bytes: {}", moved.bytes);
+        assert_eq!(std::fs::read(far_file(&far, "live.new")).expect("new"), new);
+        assert_eq!(std::fs::read(far_file(&far, "live.old")).expect("old"), old);
+        assert!(!far_file(&far, ".live.laptop.part").exists());
+    }
+
+    #[test]
+    fn a_missing_seed_sends_the_whole_file() {
+        let far = Far::new();
+        let bytes = noise(100_000, 7);
+        let source = far.local("live.new", &bytes);
+        let sha = sha_of(&bytes);
+        let with_seed = Upload {
+            seed: Some("live.gone"),
+            ..Upload::new(object(), ".live.laptop.part", "live.new", &source, &sha)
+        };
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&with_seed)
+            .expect("put");
+        assert_eq!(moved.bytes, 100_000);
+        assert_eq!(
+            std::fs::read(far_file(&far, "live.new")).expect("new"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_seed_that_is_a_symlink_is_not_linked() {
+        let far = Far::new();
+        let bytes = noise(100_000, 8);
+        std::fs::write(far.root().join("elsewhere"), &bytes).expect("target");
+        std::os::unix::fs::symlink(far.root().join("elsewhere"), far_file(&far, "live.old"))
+            .expect("symlink");
+        let source = far.local("live.new", &bytes);
+        let sha = sha_of(&bytes);
+        let with_seed = Upload {
+            seed: Some("live.old"),
+            ..Upload::new(object(), ".live.laptop.part", "live.new", &source, &sha)
+        };
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&with_seed)
+            .expect("put");
+        assert_eq!(moved.bytes, 100_000);
+    }
+
+    #[test]
+    fn an_upload_that_arrives_short_is_an_error_and_keeps_its_temp() {
+        let far = Far::new();
+        let bytes = noise(50_000, 9);
+        let source = far.local("pack.tar", &bytes);
+        let temp = far_file(&far, ".pack.laptop.part");
+        let truncate = {
+            let temp = temp.clone();
+            std::sync::Arc::new(move || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&temp)
+                    .expect("temp")
+                    .set_len(10)
+                    .expect("truncated");
+            }) as Hook
+        };
+        let seams = SshSeams {
+            after_transfer: Some(truncate),
+            ..SshSeams::default()
+        };
+        let error = far
+            .remote_with_seams(seams)
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("short");
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+        assert!(error.to_string().contains("10 bytes"), "{error}");
+        assert!(!far_file(&far, "pack.tar").exists());
+        assert!(temp.exists());
+    }
+
+    #[test]
+    fn a_name_taken_during_the_upload_by_the_same_bytes_is_present() {
+        let far = Far::new();
+        let bytes = noise(20_000, 10);
+        let source = far.local("pack.tar", &bytes);
+        let place = {
+            let target = far_file(&far, "pack.tar");
+            let bytes = bytes.clone();
+            std::sync::Arc::new(move || std::fs::write(&target, &bytes).expect("rival")) as Hook
+        };
+        let seams = SshSeams {
+            after_transfer: Some(place),
+            ..SshSeams::default()
+        };
+        let moved = far
+            .remote_with_seams(seams)
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect("put");
+        assert!(moved.already_present);
+        assert_eq!(moved.bytes, 0);
+        assert!(!far_file(&far, ".pack.laptop.part").exists());
+    }
+
+    #[test]
+    fn a_name_taken_during_the_upload_by_other_bytes_is_a_conflict() {
+        let far = Far::new();
+        let bytes = noise(20_000, 11);
+        let source = far.local("pack.tar", &bytes);
+        let place = {
+            let target = far_file(&far, "pack.tar");
+            std::sync::Arc::new(move || std::fs::write(&target, "rival").expect("rival")) as Hook
+        };
+        let seams = SshSeams {
+            after_transfer: Some(place),
+            ..SshSeams::default()
+        };
+        let error = far
+            .remote_with_seams(seams)
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("conflict");
+        assert!(
+            matches!(error, RemoteError::PayloadConflict { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(far_file(&far, "pack.tar")).expect("rival"),
+            b"rival"
+        );
+        assert!(far_file(&far, ".pack.laptop.part").exists());
+    }
+
+    #[test]
+    fn the_far_side_syncs_before_and_after_the_final_name_appears() {
+        let far = Far::new();
+        let bytes = noise(20_000, 12);
+        let source = far.local("pack.tar", &bytes);
+        let log = far.state.path().join("sync.log");
+        far.wrap(
+            "sync",
+            &format!(
+                "d={dir}\n[ -e \"$d/.pack.laptop.part\" ] && t=temp || t=none\n[ -e \"$d/pack.tar\" ] && f=final || f=none\necho \"$t $f\" >> {log}",
+                dir = far_file(&far, "").display(),
+                log = log.display()
+            ),
+        );
+        far.remote_with_seams(SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect("put");
+        assert_eq!(
+            std::fs::read_to_string(log).expect("log"),
+            "temp none\nnone final\n"
+        );
+    }
+
+    #[test]
+    fn a_put_without_a_resolved_rsync_fails_before_any_ssh_call() {
+        let far = Far::new();
+        let source = far.local("pack.tar", b"x");
+        let remote = far.remote();
+        let error = remote
+            .put_payload(&upload(&source, &sha_of(b"x")))
+            .expect_err("no rsync");
+        assert!(matches!(error, RemoteError::Rsync(_)), "{error}");
+        assert_eq!(far.commands(), 0);
+        far.object_dir(OBJECT);
+        remote.list_dir(object()).expect("listing still works");
+    }
+
+    #[test]
+    fn rsync_gets_a_relative_source_with_a_dot_slash_and_never_deletes() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let remote = far.remote_with(&fake, SshSeams::default());
+        let _ = remote.put_payload(&upload(Path::new("Cargo.toml"), &sha_of(b"x")));
+        let calls = Far::fake_calls(&fake);
+        let call = calls
+            .iter()
+            .find(|call| call[0] == "transfer")
+            .expect("a transfer");
+        assert!(call.contains(&"./Cargo.toml".to_string()), "{call:?}");
+        assert!(
+            call.last()
+                .expect("destination")
+                .ends_with("/.pack.laptop.part"),
+            "{call:?}"
+        );
+        assert!(
+            call.contains(&"--partial-dir=.antiq-partial".to_string()),
+            "{call:?}"
+        );
+        for forbidden in ["--delete", "--inplace", "--append", "--remove-source-files"] {
+            assert!(
+                !call.iter().any(|arg| arg.starts_with(forbidden)),
+                "{forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seeded_upload_has_no_partial_directory() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let remote = far.remote_with(&fake, SshSeams::default());
+        let sha = sha_of(b"x");
+        let with_seed = Upload {
+            seed: Some("live.old"),
+            ..upload(Path::new("Cargo.toml"), &sha)
+        };
+        let _ = remote.put_payload(&with_seed);
+        let calls = Far::fake_calls(&fake);
+        let call = calls
+            .iter()
+            .find(|call| call[0] == "transfer")
+            .expect("a transfer");
+        assert!(
+            !call.iter().any(|arg| arg.starts_with("--partial-dir")),
+            "{call:?}"
+        );
+    }
+
+    // ----- get -----
+
+    #[test]
+    fn a_get_fetches_the_file_and_rewrites_an_existing_destination() {
+        let far = Far::new();
+        let bytes = noise(80_000, 13);
+        std::fs::write(far_file(&far, "pack.tar"), &bytes).expect("remote file");
+        let to = far.local("fetched.tar", b"stale and longer than nothing");
+        let moved = far
+            .remote_with_seams(SshSeams::default())
+            .get_payload(object(), "pack.tar", &to)
+            .expect("get");
+        assert_eq!(std::fs::read(&to).expect("fetched"), bytes);
+        assert!(moved.bytes > 0);
+        assert!(!moved.already_present);
+    }
+
+    #[test]
+    fn a_get_of_a_file_that_is_not_there_runs_no_transfer() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        far.object_dir(OBJECT);
+        let to = far.state.path().join("fetched.tar");
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .get_payload(object(), "nothing.tar", &to)
+            .expect_err("missing");
+        assert!(
+            matches!(error, RemoteError::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound),
+            "{error}"
+        );
+        assert_eq!(transfers(&Far::fake_calls(&fake)), 0);
+    }
+
+    #[test]
+    fn a_file_that_vanishes_before_the_get_starts_is_a_failed_transfer() {
+        let far = Far::new();
+        let file = far_file(&far, "pack.tar");
+        std::fs::write(&file, "x").expect("remote file");
+        let vanish =
+            std::sync::Arc::new(move || std::fs::remove_file(&file).expect("removed")) as Hook;
+        let seams = SshSeams {
+            before_transfer: Some(vanish),
+            ..SshSeams::default()
+        };
+        let to = far.state.path().join("fetched.tar");
+        let error = far
+            .remote_with_seams(seams)
+            .get_payload(object(), "pack.tar", &to)
+            .expect_err("vanished");
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+    }
+
+    #[test]
+    fn a_get_refuses_names_that_reach_outside_the_directory() {
+        let far = Far::new();
+        let to = far.state.path().join("fetched.tar");
+        let error = far
+            .remote_with_seams(SshSeams::default())
+            .get_payload(object(), "../x", &to)
+            .expect_err("name");
+        assert!(matches!(error, RemoteError::InvalidName { .. }), "{error}");
+        assert_eq!(far.commands(), 0);
+    }
+
+    // ----- failures of rsync -----
+
+    fn failed(code: Option<i32>, stderr: &str) -> crate::remote::rsync::RsyncError {
+        crate::remote::rsync::RsyncError::Failed {
+            code,
+            stderr: stderr.into(),
+        }
+    }
+
+    const CONNECT_REFUSED: &str =
+        include_str!("../../../tests/fixtures/ssh-texts/connect-refused.txt");
+    const PERMISSION_DENIED: &str =
+        include_str!("../../../tests/fixtures/ssh-texts/permission-denied.txt");
+    const KEEPALIVE: &str = include_str!("../../../tests/fixtures/ssh-texts/keepalive-timeout.txt");
+
+    #[test]
+    fn rsync_255_with_an_away_line_is_away() {
+        let error = classify_rsync_failure(failed(Some(255), CONNECT_REFUSED), "");
+        assert!(matches!(error, RemoteError::Away { .. }), "{error}");
+    }
+
+    #[test]
+    fn rsync_255_with_a_broken_line_is_broken() {
+        let error = classify_rsync_failure(failed(Some(255), PERMISSION_DENIED), "");
+        assert!(matches!(error, RemoteError::Broken(_)), "{error}");
+    }
+
+    #[test]
+    fn rsync_255_with_a_keepalive_drop_in_the_master_log_is_away() {
+        let error = classify_rsync_failure(
+            failed(Some(255), "rsync: connection unexpectedly closed"),
+            KEEPALIVE,
+        );
+        assert!(matches!(error, RemoteError::Away { .. }), "{error}");
+    }
+
+    #[test]
+    fn rsync_255_without_a_recognised_line_is_broken() {
+        let error = classify_rsync_failure(
+            failed(Some(255), "rsync: connection unexpectedly closed"),
+            "",
+        );
+        assert!(matches!(error, RemoteError::Broken(_)), "{error}");
+    }
+
+    #[test]
+    fn rsync_12_with_a_decided_line_follows_the_line() {
+        let error = classify_rsync_failure(failed(Some(12), CONNECT_REFUSED), "");
+        assert!(matches!(error, RemoteError::Away { .. }), "{error}");
+        let error = classify_rsync_failure(failed(Some(12), PERMISSION_DENIED), "");
+        assert!(matches!(error, RemoteError::Broken(_)), "{error}");
+    }
+
+    #[test]
+    fn rsync_12_without_a_decided_line_is_a_failed_transfer() {
+        let error = classify_rsync_failure(
+            failed(Some(12), "rsync error: error in rsync protocol data stream"),
+            "",
+        );
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+        assert!(error.to_string().contains("exit code 12"), "{error}");
+    }
+
+    #[test]
+    fn rsync_30_is_a_failed_transfer() {
+        let error = classify_rsync_failure(
+            failed(Some(30), "rsync error: timeout in data send/receive"),
+            "",
+        );
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+    }
+
+    #[test]
+    fn partial_transfers_and_vanished_files_are_failed_transfers_whatever_the_text_says() {
+        for code in [23, 24, 11] {
+            let error = classify_rsync_failure(failed(Some(code), CONNECT_REFUSED), KEEPALIVE);
+            assert!(matches!(error, RemoteError::Transfer(_)), "{code}: {error}");
+        }
+    }
+
+    #[test]
+    fn rsync_killed_by_a_signal_is_a_failed_transfer() {
+        let error = classify_rsync_failure(failed(None, ""), KEEPALIVE);
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+    }
+
+    #[test]
+    fn rsync_that_does_not_start_is_a_failed_transfer() {
+        let spawn = crate::remote::rsync::RsyncError::Spawn {
+            path: "/nowhere/rsync".into(),
+            source: std::io::Error::other("no such file"),
+        };
+        let error = classify_rsync_failure(spawn, "");
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+    }
+
+    #[test]
+    fn a_master_that_drops_before_the_transfer_makes_the_put_away() {
+        let far = Far::new();
+        let bytes = noise(20_000, 14);
+        let source = far.local("pack.tar", &bytes);
+        let fault = far.state.path().join("fault");
+        let drop_master = std::sync::Arc::new(move || {
+            std::fs::write(&fault, "master-drop command\n").expect("fault")
+        }) as Hook;
+        let seams = SshSeams {
+            before_transfer: Some(drop_master),
+            ..SshSeams::default()
+        };
+        let remote = far.remote_with_seams(seams);
+        remote.begin_phase().expect("phase");
+        let error = remote
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("dropped");
+        assert!(matches!(error, RemoteError::Away { .. }), "{error}");
+        assert!(!far_file(&far, "pack.tar").exists());
+    }
+
+    #[test]
+    fn a_master_that_drops_after_the_transfer_leaves_the_temp_and_no_final_name() {
+        let far = Far::new();
+        let bytes = noise(20_000, 15);
+        let source = far.local("pack.tar", &bytes);
+        let fault = far.state.path().join("fault");
+        let drop_master = std::sync::Arc::new(move || {
+            std::fs::write(&fault, "master-drop command\n").expect("fault")
+        }) as Hook;
+        let seams = SshSeams {
+            after_transfer: Some(drop_master),
+            ..SshSeams::default()
+        };
+        let remote = far.remote_with_seams(seams);
+        remote.begin_phase().expect("phase");
+        let error = remote
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("dropped");
+        assert!(matches!(error, RemoteError::Away { .. }), "{error}");
+        assert!(far_file(&far, ".pack.laptop.part").exists());
+        assert!(!far_file(&far, "pack.tar").exists());
+    }
+
+    // ----- more transfer cases -----
+
+    #[test]
+    fn the_rsync_of_the_machine_is_probed_once() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let remote = far.remote_with(&fake, SshSeams::default());
+        let sha = sha_of(b"x");
+        for _ in 0..2 {
+            let _ = remote.put_payload(&upload(Path::new("Cargo.toml"), &sha));
+        }
+        let calls = Far::fake_calls(&fake);
+        assert_eq!(calls.iter().filter(|call| call[0] == "version").count(), 1);
+        assert_eq!(transfers(&calls), 2);
+    }
+
+    #[test]
+    fn without_statistics_a_put_counts_the_size_of_the_file() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        let bytes = noise(1_234, 16);
+        let source = far.local("pack.tar", &bytes);
+        let place = {
+            let temp = far_file(&far, ".pack.laptop.part");
+            let bytes = bytes.clone();
+            std::sync::Arc::new(move || std::fs::write(&temp, &bytes).expect("temp")) as Hook
+        };
+        let seams = SshSeams {
+            after_transfer: Some(place),
+            ..SshSeams::default()
+        };
+        let moved = far
+            .remote_with(&fake, seams)
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect("put");
+        assert_eq!(moved.bytes, 1_234);
+    }
+
+    #[test]
+    fn without_statistics_a_get_counts_the_size_of_the_fetched_file() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        std::fs::write(far_file(&far, "pack.tar"), "x").expect("remote file");
+        let to = far.local("fetched.tar", &noise(777, 17));
+        let moved = far
+            .remote_with(&fake, SshSeams::default())
+            .get_payload(object(), "pack.tar", &to)
+            .expect("get");
+        assert_eq!(moved.bytes, 777);
+    }
+
+    #[test]
+    fn a_final_link_the_far_side_refuses_is_an_io_error_and_keeps_the_temp() {
+        let far = Far::new();
+        let bytes = noise(5_000, 18);
+        let source = far.local("pack.tar", &bytes);
+        far.wrap("ln", "echo 'ln: Operation not permitted' >&2; exit 1");
+        let error = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("ln fails");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert!(
+            error.to_string().contains("Operation not permitted"),
+            "{error}"
+        );
+        assert!(far_file(&far, ".pack.laptop.part").exists());
+        assert!(!far_file(&far, "pack.tar").exists());
+    }
+
+    #[test]
+    fn a_name_taken_while_the_final_link_is_made_is_looked_at() {
+        let far = Far::new();
+        let bytes = noise(5_000, 19);
+        let source = far.local("pack.tar", &bytes);
+        far.wrap(
+            "ln",
+            "echo rival > \"$2\"; echo 'ln: File exists' >&2; exit 1",
+        );
+        let error = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&upload(&source, &sha_of(&bytes)))
+            .expect_err("rival");
+        assert!(
+            matches!(error, RemoteError::PayloadConflict { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(far_file(&far, "pack.tar")).expect("rival"),
+            b"rival\n"
+        );
+    }
+
+    #[test]
+    fn a_put_of_a_source_that_is_not_there_is_an_io_error_before_any_ssh_call() {
+        let far = Far::new();
+        let error = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&upload(Path::new("/nonexistent/pack.tar"), &sha_of(b"x")))
+            .expect_err("no source");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn a_put_refuses_temp_final_and_seed_names_that_reach_outside_the_directory() {
+        let far = Far::new();
+        let source = far.local("pack.tar", b"x");
+        let sha = sha_of(b"x");
+        let remote = far.remote_with_seams(SshSeams::default());
+        let bad_temp = Upload::new(object(), "../t", "pack.tar", &source, &sha);
+        let bad_final = Upload::new(object(), ".t", "a/b", &source, &sha);
+        let bad_seed = Upload {
+            seed: Some(".."),
+            ..Upload::new(object(), ".t", "pack.tar", &source, &sha)
+        };
+        for upload in [bad_temp, bad_final, bad_seed] {
+            let error = remote.put_payload(&upload).expect_err("name");
+            assert!(matches!(error, RemoteError::InvalidName { .. }), "{error}");
+        }
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn what_the_master_logged_before_the_transfer_does_not_tell_how_it_failed() {
+        let far = Far::new();
+        let source = far.local("pack.tar", &noise(5_000, 20));
+        // The NAS side of rsync ends at once without a word.
+        let machine = MachineConfig {
+            rsync: Some(Far::real_rsync()),
+            remote_rsync: Some("/usr/bin/false".into()),
+            ..MachineConfig::default()
+        };
+        let old_news = {
+            let log_name = far.state.path().join("master.log");
+            std::sync::Arc::new(move || {
+                let log = std::fs::read_to_string(&log_name).expect("master log name");
+                let mut log = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(log.trim())
+                    .expect("master log");
+                std::io::Write::write_all(&mut log, KEEPALIVE.as_bytes()).expect("logged");
+            }) as Hook
+        };
+        let seams = SshSeams {
+            before_transfer: Some(old_news),
+            ..SshSeams::default()
+        };
+        let remote = far.remote_of(machine, seams);
+        remote.begin_phase().expect("phase");
+        let error = remote
+            .put_payload(&upload(&source, &sha_of(b"x")))
+            .expect_err("rsync fails");
+        assert!(matches!(error, RemoteError::Transfer(_)), "{error}");
+    }
+
+    #[test]
+    fn a_temp_name_that_is_a_directory_gets_no_seed_link_inside() {
+        let far = Far::new();
+        std::fs::write(far_file(&far, "live.old"), noise(5_000, 21)).expect("seed");
+        let temp = far_file(&far, ".live.laptop.part");
+        std::fs::create_dir(&temp).expect("directory");
+        let source = far.local("live.new", &noise(5_000, 22));
+        let sha = sha_of(b"x");
+        let with_seed = Upload {
+            seed: Some("live.old"),
+            ..Upload::new(object(), ".live.laptop.part", "live.new", &source, &sha)
+        };
+        let _ = far
+            .remote_with_seams(SshSeams::default())
+            .put_payload(&with_seed);
+        assert!(!temp.join("live.old").exists());
+    }
+
+    #[test]
+    fn a_get_of_a_name_that_is_a_directory_is_not_found_and_runs_no_transfer() {
+        let far = Far::new();
+        let (_fake_dir, fake) = fake_rsync();
+        std::fs::create_dir(far_file(&far, "dir")).expect("directory");
+        let to = far.state.path().join("fetched");
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .get_payload(object(), "dir", &to)
+            .expect_err("directory");
+        assert!(
+            matches!(error, RemoteError::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound),
+            "{error}"
+        );
+        assert_eq!(transfers(&Far::fake_calls(&fake)), 0);
     }
 }
