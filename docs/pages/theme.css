@@ -135,10 +135,80 @@
 }
 
 .docs img {
-  margin: var(--space-md) 0;
+  margin: var(--space-md) 0 0;
+}
+
+/* The README writes an image's caption as an emphasised line directly
+   below it, in the same paragraph. */
+.docs p > img + em {
+  display: block;
+  margin: var(--space-xs) 0 var(--space-md);
+  text-align: center;
+  font-size: 0.9em;
+  color: var(--color-text-muted);
+}
+
+/* A term where the chapters define it. */
+.docs p strong {
+  color: var(--color-primary);
 }
 
 .use-cases h2 {
   margin-bottom: var(--space-lg);
   text-align: center;
 }
+
+/* Basic Usage on the quick start: one small listing per task, its head
+   naming the task and linking to the chapter that explains it. */
+.quickstart .usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+}
+
+.quickstart .step {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.quickstart .step-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-md);
+  align-items: baseline;
+  padding: 10px 16px;
+  background: rgba(var(--color-primary-rgb), 0.08);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.quickstart .step-title {
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.quickstart .step-desc {
+  color: var(--color-text-muted);
+  font-size: 0.92em;
+}
+
+.quickstart .step-more {
+  margin-left: auto;
+  color: var(--color-primary);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.quickstart .step .code-block {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+}
+
+/* State names in the documentation, in the colours of the console theme the
+   captures use (docs/pages/capture/common.tape). */
+.docs code.state-due { color: #fdd877; }
+.docs code.state-soon { color: #43c1be; }
+.docs code.state-pinned { color: #b49cff; }
+.docs code.state-refused { color: #ef6487; }

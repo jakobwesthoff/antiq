@@ -11,3 +11,15 @@
     </div>
   </div>
 </footer>
+<script>
+  // The states that `status` prints in colour get the same colours where the
+  // documentation names them, so the text matches the captures. GitHub shows
+  // the README without them.
+  (function () {
+    var states = { due: "state-due", soon: "state-soon", pinned: "state-pinned", refused: "state-refused" };
+    document.querySelectorAll(".docs code").forEach(function (code) {
+      var name = states[code.textContent];
+      if (name) code.classList.add(name);
+    });
+  })();
+</script>

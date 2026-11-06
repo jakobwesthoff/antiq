@@ -57,25 +57,60 @@ cargo install --path .</code></pre>
     </div>
 
     <h3>Basic Usage</h3>
-    <div class="code-block">
-      <pre><code class="language-bash"># Make this directory a collection;
-# each folder in it is a piece
-antiq init --pattern '*'
-
-# See what is idle, preview, archive
-antiq status
+    <div class="usage">
+      <div class="step">
+        <div class="step-head">
+          <span class="step-title">Make a collection</span>
+          <span class="step-desc">Every folder directly inside becomes a piece.</span>
+          <a class="step-more" href="#a-collection">Details&nbsp;→</a>
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash">antiq init --pattern '*'</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-head">
+          <span class="step-title">Archive what is idle</span>
+          <span class="step-desc">Look first, then archive.</span>
+          <a class="step-more" href="#archiving-idle-folders">Details&nbsp;→</a>
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash">antiq status
 antiq archive -n
-antiq archive
-
-# Find a version by name or by a file
-antiq list scan
-antiq grep 'main\.rs'
-
-# Extract a working copy of a version
-antiq fork scanner
-
-# Mirror to the target in the config
-antiq push --init</code></pre>
+antiq archive</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-head">
+          <span class="step-title">Find a version</span>
+          <span class="step-desc">By the piece's name or by a file it held.</span>
+          <a class="step-more" href="#finding-a-version">Details&nbsp;→</a>
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash">antiq list scan
+antiq grep 'main\.rs'</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-head">
+          <span class="step-title">Bring it back</span>
+          <span class="step-desc">A working copy, the version stays archived.</span>
+          <a class="step-more" href="#bringing-a-version-back">Details&nbsp;→</a>
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash">antiq fork scanner</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-head">
+          <span class="step-title">Mirror the collection</span>
+          <span class="step-desc">To the target set in <code>.antiq/config.toml</code>.</span>
+          <a class="step-more" href="#mirroring">Details&nbsp;→</a>
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash">antiq push --init</code></pre>
+        </div>
+      </div>
     </div>
   </div>
 </section>
