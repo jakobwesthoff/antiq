@@ -1811,6 +1811,53 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   Item C2; the spec's "init" and "Configuration" sections show the
   written file.
 
+### 8.8 Scenario tests (user decision, 2026-11-04, asqr 01M6KN9EE9TNBA3YM4XYS7Z2KB)
+
+The use cases of the scope round, extended, become integration tests
+that drive the real binary through a whole user task. Every scenario
+runs twice, once with text output and once with `--json`: both runs end
+in the same state, and every JSON object parses with the fields the spec
+names. The user's reason: so that every use case is known to work for
+scripting as well. Depth per scenario is discussed with the user before
+it is written; a scenario that costs too much is dropped after asking.
+
+Scenarios and the items each needs merged first:
+
+| Scenario | Needs |
+|---|---|
+| init: the commented config parses back to the defaults | C2 |
+| archive everything due: version in the store, folder gone, listing and checksum file present | C4 |
+| archive one piece now, not yet due | C4 |
+| dry run (`-n`) shows the plan and changes nothing | C4 |
+| ignore and timeless: `node_modules` not packed and deleted with the folder; a fresh `.git` keeps nothing young | C4 |
+| pin keeps a due folder; unpin lets the next run archive it | C3, C4 |
+| find by search word: `list scan` finds `projects/scanner` | C10, F8 |
+| list versions: local time in text, UTC in JSON | C10 |
+| unearth by name: folder back byte for byte, version gone, `.antiq-restored` written | C6 |
+| unearth a given version: by local date and by UTC stamp | C6 |
+| fork: with `--name` and without; the version stays | C7 |
+| forget one given version; forget all with `--all-versions --force`; the empty store folder goes | C8 |
+| grep finds a path in two versions of two pieces | C11 |
+| status shows due, soon, pinned and damaged | C1, C3, F7 |
+| unearthed and later archived again: the idle clock restarts, a new version follows | C4, C6 |
+| import a folder as a version, the folder stays | C5 |
+| verify a version without antiq: `shasum -a 256 -c`, `tar`, listing against the files | C4 |
+| a damaged version: status shows it, push refuses, rebuild repairs, push works | C9, P2, C1 |
+| push to a path target: `--init`, the target is a copy, a second push removes what is gone | P2 |
+| scheduled run with the target missing: `archive; push --if-reachable` exits 0 with a note | P2 |
+| worked on elsewhere and pushed back: host or path mismatch refused, `--force` pushes and leaves the marker, a hand-edited marker pushes normally | P2 |
+| restore everything from the target with `rsync -aH`: hard links kept, antiq works there, unearth works | P2, C6 |
+
+Not chosen: an interrupted run repaired by the next one, two runs at
+once.
+
+Work: item E0 builds the harness now (a collection builder with aged
+folders, a path target, running the binary in both modes and comparing
+end states, tree snapshots); the lead starts a scenario agent for each
+group of scenarios once the items it needs are merged, extending the
+harness as scenarios need it, so the harness keeps one structure. All
+scenarios are in before Z.
+
 ## Appendix A. Code map (evidence for the sections above)
 
 Gathered by reading main beb748f (rg, Read; no build). Line numbers are
