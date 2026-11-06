@@ -159,6 +159,7 @@ impl TreeRoot {
             nlink: raw.nlink,
             link_target,
             birth_ns: raw.birth_ns,
+            mount_root: raw.mount_root,
         })
     }
 
@@ -569,6 +570,7 @@ struct RawStat {
     device: u64,
     nlink: u64,
     birth_ns: Option<i128>,
+    mount_root: bool,
 }
 
 fn nanoseconds(seconds: i64, nanos: u32) -> i128 {
@@ -597,12 +599,18 @@ fn read_stat(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<RawStat> {
         nlink: u64::from(stat.stx_nlink),
         birth_ns: has_birth_time
             .then(|| nanoseconds(stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)),
+        mount_root: mount_root_from_attributes(stat.stx_attributes_mask, stat.stx_attributes),
     })
 }
 
 #[cfg(not(target_os = "linux"))]
 fn read_stat(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<RawStat> {
     let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    #[cfg(target_os = "macos")]
+    let mount_root = EntryKind::from_mode(u32::from(stat.st_mode)) == EntryKind::Directory
+        && mount_root_of(dir, name)?;
+    #[cfg(not(target_os = "macos"))]
+    let mount_root = false;
     let nanos = |nsec: i64| u32::try_from(nsec).unwrap_or(0);
     Ok(RawStat {
         mode: u32::from(stat.st_mode),
@@ -614,7 +622,73 @@ fn read_stat(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<RawStat> {
         device: u64::from(stat.st_dev as u32),
         nlink: u64::from(stat.st_nlink),
         birth_ns: birth_time(&stat),
+        mount_root,
     })
+}
+
+/// Whether the attributes `statx` reported say the entry is the root of a
+/// mount. `mask` lists the attributes the kernel knows: before Linux 5.8
+/// it leaves this one out, and an attribute it did not report says nothing.
+#[cfg(target_os = "linux")]
+fn mount_root_from_attributes(
+    mask: rustix::fs::StatxAttributes,
+    attributes: rustix::fs::StatxAttributes,
+) -> bool {
+    let mount_root = rustix::fs::StatxAttributes::MOUNT_ROOT;
+    mask.contains(mount_root) && attributes.contains(mount_root)
+}
+
+/// Whether the mount point names of an entry and of the directory holding
+/// it differ, which is how macOS tells a mount root on the device of its
+/// parent.
+#[cfg(target_os = "macos")]
+fn mount_names_differ(own: &[u8], parent: &[u8]) -> bool {
+    own != parent
+}
+
+/// What the failure of opening a directory to compare its mount point name
+/// means. A directory the process may not search cannot be entered either,
+/// so it counts as no mount root; one that was replaced since its `lstat`
+/// has changed; anything else, a shortage of descriptors included, is
+/// reported.
+#[cfg(target_os = "macos")]
+fn mount_root_after_failed_open(errno: Errno) -> io::Result<bool> {
+    match errno {
+        Errno::ACCESS => Ok(false),
+        Errno::NOTDIR | Errno::LOOP => Err(TreeError::Changed.into()),
+        other => Err(other.into()),
+    }
+}
+
+/// The name of the mount point of the filesystem `fd` lives on.
+#[cfg(target_os = "macos")]
+fn mount_point_name(fd: BorrowedFd<'_>) -> io::Result<Vec<u8>> {
+    let stat = rustix::fs::fstatfs(fd)?;
+    let name = stat.f_mntonname.iter();
+    Ok(name
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect())
+}
+
+/// Whether the directory `name` of `dir` is the root of a mount that
+/// shares the device of its parent. The directory is opened for searching
+/// only, which changes nothing about it. The root of a `TreeRoot` is named
+/// `.`, and its parent is then `..`. The two `fstatfs` calls and the
+/// `lstat` before them are not one atomic step.
+#[cfg(target_os = "macos")]
+fn mount_root_of(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<bool> {
+    let beside = if name == b"." { b".." } else { name };
+    let opened = match openat(dir, beside, SEARCH, Mode::empty()) {
+        Ok(fd) => fd,
+        Err(errno) => return mount_root_after_failed_open(errno),
+    };
+    let (own, parent) = if name == b"." {
+        (mount_point_name(dir)?, mount_point_name(opened.as_fd())?)
+    } else {
+        (mount_point_name(opened.as_fd())?, mount_point_name(dir)?)
+    };
+    Ok(mount_names_differ(&own, &parent))
 }
 
 #[cfg(target_os = "macos")]
@@ -648,6 +722,85 @@ mod tests {
 
     fn path(text: &str) -> RelPath {
         RelPath::parse(text).expect("valid path")
+    }
+
+    #[test]
+    fn an_ordinary_entry_is_no_mount_root() {
+        let mut tree = Tree::new();
+        tree.file("d/f", "x");
+        tree.symlink("d/l", "f");
+        tree.fifo("d/q");
+        let root = root_of(&tree);
+        for entry in ["d", "d/f", "d/l", "d/q"] {
+            let found = root.lstat(&path(entry)).expect("stat");
+            assert!(!found.mount_root, "{entry}");
+        }
+        assert!(!root.lstat(&RelPath::root()).expect("stat").mount_root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_data_volume_is_a_mount_root_below_a_parent_on_its_device() {
+        let parent = std::fs::metadata("/System/Volumes").expect("the parent exists");
+        let data = std::fs::metadata("/System/Volumes/Data").expect("exists");
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::dev(&data),
+            std::os::unix::fs::MetadataExt::dev(&parent),
+            "the test needs the data volume to share its parent's device"
+        );
+        let volumes = TreeRoot::open(Path::new("/System/Volumes")).expect("opens");
+        assert!(volumes.lstat(&path("Data")).expect("stat").mount_root);
+        let data = TreeRoot::open(Path::new("/System/Volumes/Data")).expect("opens");
+        assert!(data.lstat(&RelPath::root()).expect("stat").mount_root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_directory_that_cannot_be_searched_is_no_mount_root_and_still_has_a_stat() {
+        let mut tree = Tree::new();
+        tree.file("locked/f", "x");
+        let locked = tree.path("locked");
+        let _unlock = Unlock(vec![locked.clone()]);
+        std::fs::set_permissions(&locked, Permissions::from_mode(0o000)).expect("chmod");
+        let refused = std::fs::read_dir(&locked).expect_err("the test needs a non-root user");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let found = root_of(&tree).lstat(&path("locked")).expect("stat");
+        assert_eq!(found.kind, EntryKind::Directory);
+        assert!(!found.mount_root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mount_point_names_differ_when_they_are_not_the_same_bytes() {
+        assert!(mount_names_differ(b"/System/Volumes/Data", b"/"));
+        assert!(!mount_names_differ(b"/", b"/"));
+        assert!(!mount_names_differ(b"", b""));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_open_answers_by_its_errno() {
+        assert!(!mount_root_after_failed_open(Errno::ACCESS).expect("no mount root"));
+        for errno in [Errno::NOTDIR, Errno::LOOP] {
+            let error = mount_root_after_failed_open(errno).expect_err("changed");
+            assert_eq!(TreeError::of(&error), Some(&TreeError::Changed), "{errno}");
+        }
+        for errno in [Errno::NOENT, Errno::MFILE, Errno::NFILE, Errno::IO] {
+            let error = mount_root_after_failed_open(errno).expect_err("fails");
+            assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()), "{errno}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_mount_root_attribute_counts_only_when_the_kernel_reports_it() {
+        use rustix::fs::StatxAttributes as Attributes;
+        let root = Attributes::MOUNT_ROOT;
+        let none = Attributes::empty();
+        assert!(mount_root_from_attributes(root, root), "reported and set");
+        assert!(!mount_root_from_attributes(root, none), "reported, not set");
+        assert!(!mount_root_from_attributes(none, root), "an old kernel");
+        assert!(!mount_root_from_attributes(none, none));
     }
 
     /// Restores the permissions of directories a test locked.
@@ -988,6 +1141,7 @@ mod tests {
             device: 1,
             nlink: 1,
             birth_ns: None,
+            mount_root: false,
         }
     }
 

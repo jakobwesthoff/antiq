@@ -65,6 +65,10 @@ pub struct TreeEntry {
     /// Nanoseconds since the epoch, where the filesystem records a birth
     /// time.
     pub birth_ns: Option<i128>,
+    /// The entry is the root of a mounted filesystem. Unlike a different
+    /// `device`, this also holds for a bind mount or a firmlink, which
+    /// share the device of the directory they appear in.
+    pub mount_root: bool,
 }
 
 /// Something about a piece that the walk could not handle silently. Paths
@@ -132,6 +136,7 @@ mod tests {
             nlink: 1,
             link_target: None,
             birth_ns: None,
+            mount_root: false,
         }
     }
 

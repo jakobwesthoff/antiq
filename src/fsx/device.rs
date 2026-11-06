@@ -72,13 +72,11 @@ fn named_by_platform(path: &Path) -> io::Result<bool> {
 }
 
 /// Linux marks the root of every mount, bind mounts included, in the
-/// attributes of `statx`.
+/// attributes of `statx`, which the walk's `lstat` reads into
+/// `TreeEntry::mount_root`.
 #[cfg(target_os = "linux")]
 fn named_by_platform(path: &Path) -> io::Result<bool> {
-    use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags, statx};
-    let stat = statx(CWD, path, AtFlags::empty(), StatxFlags::empty())?;
-    let mount_root = StatxAttributes::MOUNT_ROOT;
-    Ok(stat.stx_attributes_mask.contains(mount_root) && stat.stx_attributes.contains(mount_root))
+    Ok(TreeRoot::open(path)?.lstat(&RelPath::root())?.mount_root)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -247,6 +245,60 @@ mod tests {
     #[test]
     fn proc_is_a_mount_point() {
         assert!(is_mount_point(Path::new("/proc")).expect("answers"));
+    }
+
+    /// A bind mount of `source` at `target`, undone when dropped. Mounting
+    /// needs CAP_SYS_ADMIN, which the privileged Linux container has.
+    #[cfg(target_os = "linux")]
+    struct BindMount(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl BindMount {
+        fn new(source: &Path, target: &Path) -> BindMount {
+            let status = std::process::Command::new("mount")
+                .arg("--bind")
+                .arg(source)
+                .arg(target)
+                .status()
+                .expect("mount runs");
+            assert!(
+                status.success(),
+                "the test needs the right to mount: run it as root in a privileged container"
+            );
+            BindMount(target.to_path_buf())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for BindMount {
+        fn drop(&mut self) {
+            // Best effort: a mount left behind goes with the container.
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
+    fn a_bind_mount_is_a_mount_root_on_its_parents_device() {
+        use std::os::unix::fs::MetadataExt;
+        let mut tree = Tree::new();
+        tree.file("src/precious", "x");
+        tree.dir("p/mnt");
+        let _mount = BindMount::new(&tree.path("src"), &tree.path("p/mnt"));
+
+        let parent_device = std::fs::metadata(tree.path("p")).expect("exists").dev();
+        let mount_device = std::fs::metadata(tree.path("p/mnt")).expect("exists").dev();
+        assert_eq!(
+            mount_device, parent_device,
+            "the test needs the bind mount to share its parent's device"
+        );
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let path = |text: &str| RelPath::parse(text).expect("valid path");
+        assert!(root.lstat(&path("p/mnt")).expect("stat").mount_root);
+        assert!(!root.lstat(&path("p")).expect("stat").mount_root);
+        assert!(is_mount_point(&tree.path("p/mnt")).expect("answers"));
+        assert!(!is_mount_point(&tree.path("p")).expect("answers"));
     }
 
     #[test]

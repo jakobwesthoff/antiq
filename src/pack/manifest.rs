@@ -275,6 +275,7 @@ mod tests {
             nlink: 1,
             link_target: None,
             birth_ns: None,
+            mount_root: false,
         }
     }
 

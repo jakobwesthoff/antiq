@@ -712,6 +712,7 @@ mod tests {
             nlink: 1,
             link_target: None,
             birth_ns: None,
+            mount_root: false,
         };
         let walked = PieceTree::new(path("piece"), vec![ancient], vec![]);
 
@@ -796,6 +797,7 @@ mod tests {
             nlink: 1,
             link_target: None,
             birth_ns: None,
+            mount_root: false,
         };
         let walked = PieceTree::new(path("piece"), vec![far], vec![]);
 
