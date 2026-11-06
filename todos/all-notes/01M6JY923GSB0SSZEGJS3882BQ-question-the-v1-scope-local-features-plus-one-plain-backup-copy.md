@@ -87,6 +87,36 @@ open, so the discussion survives without the conversation.
 - Two archives of the same path within the same second: rare, but it
   needs a rule.
 
+## Decided in round 5 (asqr 01M6K1PKC40GHH05KFMTS1X80G, 2026-11-04)
+
+- `list [query]`: the query is fuzzy on piece paths; every archived
+  version is its own row, the newest first. There is no `--versions`.
+- `unearth` takes a path (the newest version, or `--version` with a
+  timestamp or a unique prefix of one), or a search word that matches
+  exactly one piece; anything else is an error that lists the
+  candidates.
+- The one-way command is called `backup` for now; the user wavers
+  between `push` and `backup` and asked for the lead's opinion. It is
+  the only command that talks to the target.
+- The listing is a checksum file (`.sha256.zst`) with antiq's metadata
+  in `#` comment lines. The user finds the comment format proposed so
+  far neither easy to parse nor easy to read, and wants a better one,
+  or a middle way.
+- Verified on 2026-11-04: a comment after the path on the same line
+  does not work. Both `shasum -c` and GNU `sha256sum -c` read the rest
+  of the line as part of the file name and fail.
+- SHA-256 is the checksum.
+- A second archive of the same path within the same second gets a
+  counter suffix (`…T090211-2`).
+- A small `status` stays and never talks to the target. Wanted in it:
+  archive size, pinned folders, folders archived on the next run,
+  folders due within a few days, perhaps the last backup time if it is
+  stored locally. Pending backup changes belong to `backup -n`, not to
+  `status`. The user asked for an output proposal.
+- The tantivy index is likely not needed at first. `grep` searches the
+  real listings; its speed is still to be measured. The index research
+  stays in `docs/research/search-index.md`.
+
 ## Earlier open points (round 4, now mostly decided above), asqr 01M6K12ZP94T9VNSDT80ZY080W)
 
 - `unearth` semantics. The user called "the archive stays and
