@@ -81,6 +81,41 @@ pub fn is_pinned(collection: &TreeRoot, piece: &RelPath) -> Result<bool, PinErro
     }
 }
 
+/// Whether the piece at `piece` is pinned: a file or a symlink at the pin's
+/// name is, nothing is not. An entry of that name that is neither is an
+/// error, so that `pin` and `unpin` refuse it before they decide anything.
+pub fn current(collection: &TreeRoot, piece: &RelPath) -> Result<bool, PinError> {
+    let pin = pin_path(piece);
+    match lookup(collection, &pin) {
+        Ok(None) => Ok(false),
+        Ok(Some(kind)) if is_pin(kind) => Ok(true),
+        Ok(Some(_)) => Err(PinError::NotAFile { path: pin }),
+        Err(source) => Err(PinError::Stat { path: pin, source }),
+    }
+}
+
+/// What [`create_with`] would refuse, found without writing anything.
+///
+/// The device of the top matters only when the pin has to be written: over
+/// an existing pin `create` only flushes.
+#[allow(
+    dead_code,
+    reason = "the pin command (C3) is its caller and removes this"
+)]
+pub(crate) fn check_create(
+    collection: &TreeRoot,
+    piece: &RelPath,
+    site: &dyn Site,
+) -> Result<(), PinError> {
+    if current(collection, piece)? {
+        return Ok(());
+    }
+    markers::ensure_same_device(collection, piece, site).map_err(|source| PinError::Create {
+        path: pin_path(piece),
+        source,
+    })
+}
+
 /// Pins the piece at `piece` by writing its empty pin file the way every
 /// marker is written. A piece that is pinned already stays so. The pin is
 /// durable when this returns: the file and the entry in the piece's
@@ -445,6 +480,137 @@ mod tests {
         );
         assert!(error.to_string().contains("mount point"));
         assert!(!tree.path("a/.antiq-pin").exists());
+    }
+
+    // =========================================================
+    // Looking before writing
+    // =========================================================
+
+    /// A site that puts the piece `a` on another device than `.antiq/tmp/`.
+    struct OtherDevice(Recording);
+
+    impl Site for OtherDevice {
+        fn durable(&self) -> &dyn crate::filesystem::atomic::Durable {
+            &self.0
+        }
+        fn device(&self, root: &TreeRoot, path: &RelPath) -> io::Result<u64> {
+            let device = root.lstat(path)?.device;
+            Ok(if path.to_string() == "a" {
+                device + 1
+            } else {
+                device
+            })
+        }
+    }
+
+    #[test]
+    fn the_current_state_is_a_file_or_a_symlink_or_nothing() {
+        let mut tree = collection();
+        tree.dir("none");
+        tree.file("file/.antiq-pin", "");
+        tree.symlink("link/.antiq-pin", "nowhere");
+        let root = open(&tree);
+
+        assert!(!current(&root, &path("none")).expect("nothing is no pin"));
+        assert!(current(&root, &path("file")).expect("a file is a pin"));
+        assert!(current(&root, &path("link")).expect("a dangling symlink is a pin"));
+    }
+
+    #[test]
+    fn the_current_state_refuses_an_entry_that_is_no_pin() {
+        let mut tree = collection();
+        tree.dir("dir/.antiq-pin");
+        tree.fifo("fifo/.antiq-pin");
+        let root = open(&tree);
+
+        for piece in ["dir", "fifo"] {
+            let error = current(&root, &path(piece)).expect_err("not a pin");
+            let expected = format!("{piece}/.antiq-pin");
+            assert!(
+                matches!(&error, PinError::NotAFile { path } if path.to_string() == expected),
+                "{piece}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_current_state_of_a_piece_that_is_a_file_is_a_failed_lookup() {
+        let mut tree = collection();
+        tree.file("plain", "x");
+        let root = open(&tree);
+
+        let error = current(&root, &path("plain")).expect_err("a file has no top");
+        assert!(matches!(error, PinError::Stat { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_pin_check_accepts_a_top_it_could_pin_and_writes_nothing() {
+        let mut tree = collection();
+        tree.dir("a");
+        let root = open(&tree);
+        let site = Recorded(Recording::new());
+
+        check_create(&root, &path("a"), &site).expect("the top can be pinned");
+
+        assert!(!tree.path("a/.antiq-pin").exists());
+        assert_eq!(fs::read_dir(tree.path("a")).expect("lists").count(), 0);
+        assert_eq!(
+            fs::read_dir(tree.path(".antiq/tmp")).expect("tmp").count(),
+            0
+        );
+        assert!(site.0.flushes().is_empty());
+    }
+
+    #[test]
+    fn a_pin_check_refuses_what_create_refuses_before_writing() {
+        let mut tree = collection();
+        tree.dir("dir/.antiq-pin");
+        tree.file("plain", "x");
+        let root = open(&tree);
+        let site = Recorded(Recording::new());
+
+        let directory = check_create(&root, &path("dir"), &site).expect_err("a directory");
+        assert!(
+            matches!(directory, PinError::NotAFile { .. }),
+            "{directory:?}"
+        );
+        let file = check_create(&root, &path("plain"), &site).expect_err("a file has no top");
+        assert!(matches!(file, PinError::Stat { .. }), "{file:?}");
+    }
+
+    #[test]
+    fn a_pin_check_refuses_a_top_on_another_device_when_there_is_no_pin() {
+        let mut tree = collection();
+        tree.dir("a");
+        let root = open(&tree);
+
+        let error = check_create(&root, &path("a"), &OtherDevice(Recording::new()))
+            .expect_err("a mount point");
+
+        assert!(
+            matches!(
+                &error,
+                PinError::Create {
+                    source: MarkerError::MountPoint { .. },
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("mount point"));
+    }
+
+    #[test]
+    fn a_pin_check_accepts_a_pinned_top_on_another_device() {
+        // `create` only flushes over an existing pin, so it never meets
+        // the device.
+        let mut tree = collection();
+        tree.file("a/.antiq-pin", "");
+        let root = open(&tree);
+        let site = OtherDevice(Recording::new());
+
+        check_create(&root, &path("a"), &site).expect("an existing pin needs no write");
+        create_with(&root, &path("a"), &site).expect("and create agrees");
     }
 
     #[test]

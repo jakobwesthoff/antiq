@@ -213,6 +213,25 @@ fn with_owner_write(
     Ok(restored?)
 }
 
+/// Refuses a top on another device than `.antiq/tmp/` as a mount point.
+/// A marker is written in `tmp/` and renamed into place, which does not
+/// work across devices; `put` asks this before it writes anything, and a
+/// dry run asks it to refuse the same top.
+pub(crate) fn ensure_same_device(
+    root: &TreeRoot,
+    top: &RelPath,
+    site: &dyn Site,
+) -> Result<(), MarkerError> {
+    let tmp = RelPath::parse(TMP).expect("the temporary folder is a valid path");
+    let device_of = |path: &RelPath| site.device(root, path).map_err(failure("stat", root, path));
+    if device_of(top)? != device_of(&tmp)? {
+        return Err(MarkerError::MountPoint {
+            path: root.prefix().concat(top),
+        });
+    }
+    Ok(())
+}
+
 /// Writes the marker `name` with `content` at `top`.
 ///
 /// The content is written and flushed in `.antiq/tmp/`, then renamed over
@@ -230,14 +249,9 @@ pub(crate) fn put(
     let marker = marker_path(top, name);
     existing(root, &marker, name)?;
 
-    let tmp = RelPath::parse(TMP).expect("the temporary folder is a valid path");
-    let device_of = |path: &RelPath| site.device(root, path).map_err(failure("stat", root, path));
-    if device_of(top)? != device_of(&tmp)? {
-        return Err(MarkerError::MountPoint {
-            path: root.prefix().concat(top),
-        });
-    }
+    ensure_same_device(root, top, site)?;
 
+    let tmp = RelPath::parse(TMP).expect("the temporary folder is a valid path");
     let (temp, mut file) = create_temp(root, &tmp, name)?;
     file.write_all(content)
         .map_err(failure("write", root, &temp))?;
@@ -802,6 +816,22 @@ mod tests {
         assert!(error.to_string().contains("mount point"));
         assert!(temp_leftovers(&tree).is_empty());
         assert!(top_entries(&tree).is_empty());
+    }
+
+    #[test]
+    fn the_device_check_passes_on_one_device_and_refuses_two() {
+        let tree = collection();
+        let root = open(&tree);
+
+        ensure_same_device(&root, &path("p"), &Probe::default()).expect("one device");
+        let probe = Probe {
+            other_device: true,
+            ..Probe::default()
+        };
+        let error = ensure_same_device(&root, &path("p"), &probe).expect_err("two devices");
+
+        assert!(matches!(error, MarkerError::MountPoint { .. }), "{error}");
+        assert!(temp_leftovers(&tree).is_empty());
     }
 
     #[test]
