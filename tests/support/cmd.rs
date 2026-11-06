@@ -157,6 +157,12 @@ impl Antiq {
         self
     }
 
+    /// Removes `key` from the environment the command inherits.
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Antiq {
+        self.command.env_remove(key);
+        self
+    }
+
     /// Runs the command with the file mode creation mask `mask`, which
     /// every program it starts inherits.
     pub fn umask(mut self, mask: u32) -> Antiq {

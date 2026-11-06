@@ -1245,7 +1245,11 @@ fn run_within_kills_a_command_at_the_deadline_and_returns_finished_runs() {
         started.elapsed() < Duration::from_secs(10),
         "the child was killed"
     );
+    // `Antiq::program` passes the environment of the test run on, so the
+    // zone of the developer's shell has to be taken out to see that the
+    // program itself sets none.
     let done = Antiq::program(FAKE)
+        .env_remove("TZ")
         .args(["tz"])
         .run_within(Duration::from_secs(20))
         .expect("tz finishes");
