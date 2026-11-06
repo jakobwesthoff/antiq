@@ -2146,7 +2146,8 @@ when `skipped` or `unfinished` is not empty; a `kept` row alone does not
 make it partial.
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before
-and for a piece that was skipped), `id` (the new ID for a fork), `path`
+and for a piece that was skipped), `id` (the new ID for a fork; for a
+skipped fork, the other collection's piece, and `from` is absent), `path`
 (where the piece is, or would have been put), `abs_path`,
 `payload_version` (the archive that was unearthed, left out when nothing
 was and for a live package), `from` (a fork only: the ID of the other

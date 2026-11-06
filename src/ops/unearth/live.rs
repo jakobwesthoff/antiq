@@ -872,6 +872,27 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_skipped_for_room_names_the_other_piece_and_has_no_origin() {
+        let live = Live::foreign();
+        let room = |_: &Path| Ok(0);
+        let rename: super::super::local::Rename<'_> = &crate::fsx::moves::move_dir;
+
+        let report = live
+            .unearth_through(
+                &live.fx.request(ID),
+                Some(&live.remote),
+                &Live::environment(&room, &rename),
+            )
+            .expect("skips");
+
+        let json = serde_json::to_value(&report).expect("serialises");
+        assert_eq!(json["unearthed"], false);
+        assert_eq!(json["id"], ID);
+        assert!(json.get("from").is_none(), "{json}");
+        assert_eq!(json["skipped"]["reason"], "no_space");
+    }
+
+    #[test]
     fn a_full_volume_while_the_package_is_fetched_skips_the_piece() {
         let live = Live::own();
         let full = Full {
