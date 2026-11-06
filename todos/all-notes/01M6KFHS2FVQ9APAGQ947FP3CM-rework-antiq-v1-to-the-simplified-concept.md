@@ -1794,6 +1794,14 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   and the place ("while moving the version into the store", "while
   putting the files back into tmp/pack/...") so the user can tell where
   to look.
+- From F8 (3428c8e): C items resolve pieces with
+  `reference::resolve_piece` and the matching `CandidateSet` (live for
+  archive, pin, unpin; store for unearth, fork, rebuild;
+  store_and_sidecar_only for forget). A command error that wraps a
+  `ReferenceError` uses `#[from]` or `source`, never
+  `#[error(transparent)]`, or the `candidates` of an ambiguous reference
+  are lost. An empty search word matches every candidate; each C item
+  refuses an empty piece argument as a usage error (exit 2).
 - For F7: sidecars without their `.tar.zst` are an incomplete version
   only when `versions::store::is_being_stored` finds no staged archive
   for them in `tmp/pack/`; otherwise they are repair 1's and not
