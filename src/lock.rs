@@ -180,6 +180,33 @@ fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Lock
     }
 }
 
+/// Runs `attempt` again for a while as long as `held` calls its result a
+/// lock that is held. A parallel test that forks keeps a copy of the lock
+/// file's descriptor between its `fork` and its `exec`, so a lock that a
+/// test has just released can still read as held for a moment.
+#[cfg(test)]
+pub(crate) fn retry_while_held<T>(held: impl Fn(&T) -> bool, attempt: impl FnMut() -> T) -> T {
+    retry_with(100, std::time::Duration::from_millis(20), held, attempt)
+}
+
+#[cfg(test)]
+fn retry_with<T>(
+    tries: usize,
+    pause: std::time::Duration,
+    held: impl Fn(&T) -> bool,
+    mut attempt: impl FnMut() -> T,
+) -> T {
+    let mut result = attempt();
+    for _ in 0..tries {
+        if !held(&result) {
+            break;
+        }
+        std::thread::sleep(pause);
+        result = attempt();
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +322,44 @@ mod tests {
         assert!(lock_outcome(Ok(()), Path::new("/x")).expect("taken"));
         let contended = lock_outcome(Err(TryLockError::WouldBlock), Path::new("/x"));
         assert!(!contended.expect("a plain refusal"));
+    }
+
+    #[test]
+    fn a_held_result_is_tried_again_until_it_is_free() {
+        let mut calls = 0;
+        let result = retry_with(
+            10,
+            std::time::Duration::ZERO,
+            |held: &bool| *held,
+            || {
+                calls += 1;
+                calls < 4
+            },
+        );
+        assert!(!result);
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn a_result_that_stays_held_is_returned_after_the_tries() {
+        let mut calls = 0;
+        let result = retry_with(
+            10,
+            std::time::Duration::ZERO,
+            |held: &bool| *held,
+            || {
+                calls += 1;
+                true
+            },
+        );
+        assert!(result);
+        assert_eq!(calls, 11);
+    }
+
+    #[test]
+    fn a_free_result_is_returned_at_once() {
+        let result = retry_while_held(|held: &bool| *held, || false);
+        assert!(!result);
     }
 
     #[test]

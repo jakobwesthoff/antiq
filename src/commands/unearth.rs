@@ -739,6 +739,35 @@ mod tests {
         }
     }
 
+    /// Runs again right after a run ended, trying again while the lock the
+    /// run released still reads as held.
+    fn run_after_release(world: &World, request: &UnearthRequest) -> Result<Outcome, UnearthError> {
+        lock::retry_while_held(
+            |result| {
+                matches!(
+                    result,
+                    Err(UnearthError::Run(RunError::Lock(_))) | Ok(Outcome::Held(_))
+                )
+            },
+            || world.run_with(request, &Probe::default()),
+        )
+    }
+
+    fn rerun_after_release(world: &World) -> Result<Outcome, UnearthError> {
+        run_after_release(world, &world.request(false))
+    }
+
+    /// Takes the lock as the repairs of a next run would, once the run
+    /// before has let go of it.
+    fn lock_after_release(world: &World) -> lock::RunLock {
+        let collection = world.collection();
+        lock::retry_while_held(
+            |result: &Result<lock::RunLock, lock::LockError>| result.is_err(),
+            || lock::acquire(&collection.lock_path(), "test", &*world.clock),
+        )
+        .expect("the lock is free after the run")
+    }
+
     fn report(outcome: Result<Outcome, UnearthError>) -> UnearthReport {
         match outcome.expect("the unearth runs") {
             Outcome::Done(report) => report,
@@ -782,9 +811,7 @@ mod tests {
     fn a_second_unearth_of_the_piece_finds_no_version() {
         let world = World::new(&[NEW]);
         report(world.run(&Probe::default()));
-        let error = world
-            .run(&Probe::default())
-            .expect_err("no version is left");
+        let error = rerun_after_release(&world).expect_err("no version is left");
         assert!(
             matches!(error, UnearthError::Restore(RestoreError::Reference(_))),
             "{error:?}"
@@ -868,7 +895,7 @@ mod tests {
             );
             assert_eq!(world.store_files("projects/scanner").len(), 3, "{step:?}");
             let collection = world.collection();
-            let lock = lock::acquire(&collection.lock_path(), "test", &*world.clock).expect("lock");
+            let lock = lock_after_release(&world);
             repair::run(&collection, &lock);
             drop(lock);
             assert_eq!(world.state(), clean.state(), "{step:?}");
@@ -889,7 +916,7 @@ mod tests {
                 "{step:?}"
             );
             let collection = world.collection();
-            let lock = lock::acquire(&collection.lock_path(), "test", &*world.clock).expect("lock");
+            let lock = lock_after_release(&world);
             repair::run(&collection, &lock);
             drop(lock);
             assert_eq!(world.state(), clean.state(), "{step:?}");
@@ -913,7 +940,7 @@ mod tests {
             }
         }
         let collection = world.collection();
-        let lock = lock::acquire(&collection.lock_path(), "test", &*world.clock).expect("lock");
+        let lock = lock_after_release(&world);
         repair::run(&collection, &lock);
         drop(lock);
         assert_eq!(world.state(), clean.state());
@@ -937,8 +964,7 @@ mod tests {
                 "{step:?}: a crash leaves the staging"
             );
             assert_eq!(world.store_files("projects/scanner").len(), 3, "{step:?}");
-            // The next unearth works after the repairs emptied tmp/.
-            let again = report(world.run(&Probe::default()));
+            let again = report(rerun_after_release(&world));
             assert!(again.unearthed, "{step:?}");
             assert!(
                 again
@@ -963,7 +989,7 @@ mod tests {
         assert_eq!(fs::read_dir(&parent).expect("the parent exists").count(), 0);
         assert!(!parent.join("scanner").exists());
         assert_eq!(world.store_files("projects/scanner").len(), 3);
-        let again = report(world.run(&Probe::default()));
+        let again = report(rerun_after_release(&world));
         assert!(again.unearthed);
         assert!(parent.join("scanner/main.rs").exists());
     }
@@ -1291,10 +1317,7 @@ mod tests {
         let probe = Probe::default();
         probe.crash_at(Step::ParentFlushed);
         crashed(&world, &probe);
-        match world
-            .run_with(&world.request(true), &Probe::default())
-            .expect("dry run")
-        {
+        match run_after_release(&world, &world.request(true)).expect("dry run") {
             Outcome::DryRun(plan) => {
                 assert!(
                     plan.warnings.iter().any(|w| w
