@@ -308,8 +308,6 @@ pub enum PackError {
     TreeHasProblems(Problem),
     #[error("cannot walk the piece")]
     Walk(#[from] crate::walk::WalkError),
-    #[error("{0} is not implemented")]
-    NotImplemented(&'static str),
     #[error("cannot open the package")]
     OpenPackage(#[source] std::io::Error),
     #[error("the package is damaged: {0}")]
