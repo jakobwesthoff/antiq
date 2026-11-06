@@ -13,7 +13,7 @@ use antiq::index::Index;
 use antiq::lock::Holder;
 use antiq::ops::unearth::{Planned, Skipped, UnearthReport, UnearthRequest, apply, plan};
 use antiq::reference::{resolve, resolve_path};
-use antiq::report::CommandReport;
+use antiq::report::{self, CommandReport};
 use antiq::run::{Started, start};
 use anyhow::Context as _;
 use std::fs;
@@ -137,14 +137,10 @@ fn render(report: &UnearthReport) -> Lines {
     Lines { stdout, stderr }
 }
 
-/// What `status` says when another run holds the lock.
+/// The note every command prints while another run holds the lock, with
+/// the machine name made safe for the terminal.
 fn lock_note(holder: &Holder) -> String {
-    format!(
-        "note: another run holds the lock (pid {}, machine {}, started {})",
-        holder.pid,
-        sanitize(&holder.machine),
-        holder.started
-    )
+    format!("note: {}", sanitize(&report::lock_note(holder).message))
 }
 
 #[cfg(test)]
