@@ -282,7 +282,6 @@ impl Run {
             .to_string()
     }
 
-    /// The `message` of the error object of a `--json` run.
     /// The `fix` of the JSON error object: the help of the explanation.
     pub fn error_fix(&self) -> String {
         self.json()["error"]["fix"]
@@ -300,6 +299,7 @@ impl Run {
         }
     }
 
+    /// The `message` of the error object of a `--json` run.
     pub fn error_message(&self) -> String {
         self.json()["error"]["message"]
             .as_str()

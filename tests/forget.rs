@@ -966,21 +966,51 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
 }
 
 #[test]
-fn all_versions_without_force_is_refused_also_as_a_dry_run_and_deletes_nothing() {
+fn all_versions_without_force_is_refused_also_as_a_dry_run_and_changes_nothing() {
     both(three_versions, |world| {
+        let before = state(world);
         for args in [
             &["forget", "projects/scanner", "--all-versions"][..],
             &["forget", "projects/scanner", "--all-versions", "-n"],
         ] {
             let run = world.run(args);
             run.expect_code(2);
-            let shown = format!("{}{}", run.stdout, run.stderr);
-            assert!(shown.contains("needs `--force`"), "{args:?}: {shown}");
+            run.json_only(|json| {
+                assert!(
+                    json["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("needs `--force`")),
+                    "{args:?}: {json}"
+                );
+                assert_eq!(
+                    json["error"]["fix"],
+                    "Add `--force` to confirm, and check the effect first with `-n`.",
+                    "{args:?}"
+                );
+            });
             // A pipe prints the fix without the backticks of its code spans.
-            let confirms = shown.contains("Add `--force` to confirm")
-                || shown.contains("Add --force to confirm");
-            assert!(confirms, "{args:?}: {shown}");
+            run.text_only(|_| {
+                assert!(
+                    run.stderr.contains("needs `--force`"),
+                    "{args:?}: {}",
+                    run.stderr
+                );
+                assert!(
+                    run.stderr.contains(
+                        "fix: Add --force to confirm, and check the effect first with -n."
+                    ),
+                    "{args:?}: {}",
+                    run.stderr
+                );
+            });
+            assert_eq!(state(world), before, "{args:?} changed the collection");
         }
-        assert!(exists(world, "projects/scanner", SCANNER_NEW));
+        for (piece, stamp) in [
+            ("projects/scanner", SCANNER_OLD),
+            ("projects/scanner", SCANNER_NEW),
+            ("tools/scan-old", SCAN_OLD),
+        ] {
+            assert!(exists(world, piece, stamp), "{piece} {stamp}");
+        }
     });
 }
