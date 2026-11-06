@@ -730,8 +730,14 @@ never mixed:
   machine's current zone, as a prefix of that text. Near midnight a local
   date can differ from the UTC date of the stamp.
 
-An exact match wins over prefix matches; several matches are an error
-naming each version's stamp. When two versions of one piece render alike
+An exact match wins over prefix matches. Several matches are an error of
+the kind `other` that reads `` `<input>` matches several versions of
+<piece>: <stamps> ``, the stamps oldest first. An input that matches no
+version is an error of the kind `other` that reads `` `<input>` matches no
+version of <piece>; there are <stamps> ``, listing the stamps of all the
+versions of the piece, incomplete ones included: newest first for `unearth`
+and `fork`, oldest first for `forget` and `rebuild`. When two versions of
+one piece render alike
 in local time at different UTC offsets (the repeated hour when daylight
 saving time ends), text output adds the UTC offset. A local input matches
 the text with that offset where the output shows it
@@ -1193,7 +1199,9 @@ terminal and by its stamp otherwise; an incomplete version is always named
 by its stamp. The repairs that were done, the warnings and the failed
 deletions go to stderr. `-n` lists the repairs as `Would ...` lines, then
 for each version `Would delete version <time> of <piece>: <file>, ...`,
-naming the files in the order they are deleted.
+naming the files in the order they are deleted. With `--all-versions` the
+versions come oldest first, incomplete ones among them, in both the `Deleted`
+and the `Would delete` lines.
 
 ### rebuild
 
