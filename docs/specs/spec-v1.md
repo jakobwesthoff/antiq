@@ -574,10 +574,14 @@ workers, and several pieces are compressed in parallel. The number of
 compressors in flight is also limited by memory against 25 % of the
 machine's physical memory: an archive encoder counts 448 MiB plus 160 MiB
 per worker. When nothing else is compressing, one worker is always
-granted, with a warning when the memory limit is below the cost of an
-encoder with one worker. A compressor that finds no free worker or not
+granted, with a warning, once for the run, when the memory limit is below
+the cost of an encoder with one worker. A compressor that finds no free
+worker or not
 enough memory waits until another finishes, and waiting compressors are
-served in the order they asked.
+served in the order they asked. When the operating system does not report
+the physical memory, a real `archive` or `import` fails with `cannot size the
+pool of workers: the operating system does not report the physical memory`,
+the error kind `other`, after it has taken the lock and run the repairs.
 
 Symlinks are archived and restored as they are, whatever their target. An
 archive with a member whose path leads outside the piece is refused, and
@@ -993,7 +997,24 @@ for a crash between steps 5 and 6: the repairs give the folder back, since
 
 `archive` checks the names of the members against the rules of macOS and
 against those of Linux and warns about each name that one of them would
-refuse. (ADR 0054)
+refuse. (ADR 0054) The rules of macOS count a name in UTF-16 code units and
+a symlink target in bytes, up to 255 units and 1023 bytes; those of Linux
+count both in bytes, up to 255 and 4095.
+
+The warnings of a piece start with its path and `: `, except the one about
+the memory limit (see "Packaging"), which comes first. After it come, in
+this order:
+
+- what the packing did not store as it found it: a fifo, a socket, a
+  character device, a block device or a file of unknown type is not
+  archived; a modification time before 1970 is stored as 1970; a file that
+  was shorter when it was read than when the walk recorded it is padded with
+  zeros;
+- `its files add up to <N> bytes and take <M> bytes on disk; sparse files
+  are stored in full`, when the sizes of the piece's regular files (a file
+  with several links counted once) exceed the bytes they take on disk by more
+  than 1 GiB;
+- the name warnings above.
 
 ### unearth
 
