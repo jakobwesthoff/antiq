@@ -247,6 +247,10 @@ pub enum PackError {
     TreeHasProblems(Problem),
     #[error("{0} is not implemented")]
     NotImplemented(&'static str),
+    #[error("cannot open the package")]
+    OpenPackage(#[source] std::io::Error),
+    #[error("the package is damaged: {0}")]
+    Damaged(String),
 }
 
 impl crate::error::HasKind for PackError {}
@@ -277,10 +281,6 @@ mod tests {
                 .expect_err("not implemented")
                 .to_string(),
             TarZstd
-                .list(dir.path())
-                .expect_err("not implemented")
-                .to_string(),
-            TarZstd
                 .unpack(dir.path(), &root, &TargetRules)
                 .expect_err("not implemented")
                 .to_string(),
@@ -289,7 +289,6 @@ mod tests {
             errors,
             [
                 "the strict verify is not implemented",
-                "listing a package is not implemented",
                 "unpacking a package is not implemented",
             ]
         );

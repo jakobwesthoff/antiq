@@ -9,6 +9,7 @@
 #[path = "../../tests/support/tree.rs"]
 pub mod tree;
 
+pub mod package;
 mod pool;
 pub use pool::shared_pool;
 
