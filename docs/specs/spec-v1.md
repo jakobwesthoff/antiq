@@ -1037,7 +1037,11 @@ Every state-changing run, right after taking the lock, in this order:
   retry with owner write added stays, with a warning, and does not fail
   the run;
 - removes the temp files an interrupted atomic write left in `.antiq/`
-  and below it, outside `.antiq/recovered/`;
+  and below it, outside `.antiq/recovered/`: regular files named
+  `.<name>.<pid>.<n>.tmp`;
+- removes a live manifest whose ID has no tracking entry file, and keeps
+  one whose entry file exists but cannot be read, which the run reports
+  with a warning;
 - turns an `unearthing` entry whose folder matches the version's listing
   into `live`, with the time the entry was written (recorded in the
   entry) as its unearthing time, and drops any other `unearthing`

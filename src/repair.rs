@@ -63,6 +63,8 @@ pub(crate) trait Effects {
         to: &RelPath,
     ) -> Result<Moved, FsxError>;
     fn flush_dir(&self, dir: &Path) -> Result<(), FsxError>;
+    /// Removes a file; a file that is not there counts as removed.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn write_entry(
         &self,
         collection: &Collection,
@@ -98,6 +100,13 @@ impl Effects for RealEffects {
         atomic::flush_dir(dir)
     }
 
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        match fs::remove_file(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
     fn write_entry(
         &self,
         collection: &Collection,
@@ -131,6 +140,7 @@ pub(crate) fn run(
         root,
         entries: tracked.entries,
         protected: HashSet::new(),
+        unreadable: tracked.damaged.iter().map(|damaged| damaged.id).collect(),
         warnings: Vec::new(),
     };
 
@@ -149,6 +159,8 @@ pub(crate) fn run(
     // the trash before the trash is emptied.
     repairs.finish_removals()?;
     repairs.empty_run_directories();
+    repairs.remove_write_leftovers();
+    repairs.remove_orphan_manifests();
     Ok(repairs.warnings)
 }
 
@@ -208,6 +220,8 @@ struct Repairs<'a> {
     entries: Vec<TrackingEntry>,
     /// Trees in the trash that the emptying must leave alone.
     protected: HashSet<ObjectId>,
+    /// IDs whose tracking file exists and cannot be used.
+    unreadable: HashSet<ObjectId>,
     warnings: Vec<Warning>,
 }
 
@@ -586,6 +600,101 @@ impl Repairs<'_> {
             .and_then(|name| name.parse::<ObjectId>().ok())
             .is_some_and(|id| self.protected.contains(&id))
     }
+
+    // =========================================================
+    // Leftovers of atomic writes
+    // =========================================================
+
+    /// Removes the temp files that a write cut short left in `.antiq/`.
+    /// The run lock is ours, so no write of this collection is under way.
+    /// The run directories are emptied already and `recovered/` holds
+    /// what users may still want, so they are not entered.
+    fn remove_write_leftovers(&mut self) {
+        let skipped = [
+            self.collection.recovered_dir(),
+            self.collection.trash_dir(),
+            self.collection.tmp_dir(),
+            self.collection.staging_dir(),
+        ];
+        let mut pending = vec![self.collection.antiq_dir()];
+        while let Some(directory) = pending.pop() {
+            let items = match fs::read_dir(&directory) {
+                Ok(items) => items,
+                Err(error) => {
+                    self.warn(format!("cannot list {}: {error}", directory.display()));
+                    continue;
+                }
+            };
+            for item in items.flatten() {
+                let path = item.path();
+                let Ok(kind) = item.file_type() else { continue };
+                if kind.is_dir() {
+                    if !skipped.contains(&path) {
+                        pending.push(path);
+                    }
+                } else if kind.is_file() && is_write_leftover(&item.file_name()) {
+                    self.remove_file(&path);
+                }
+            }
+        }
+    }
+
+    // =========================================================
+    // Manifests
+    // =========================================================
+
+    /// Removes the live manifests of IDs that have no tracking entry: a
+    /// manifest belongs to an entry and is written after it. The entry of
+    /// an ID whose file cannot be read may still exist, so its manifest
+    /// stays.
+    fn remove_orphan_manifests(&mut self) {
+        let directory = self.collection.tracking_dir();
+        let Ok(items) = fs::read_dir(&directory) else {
+            return;
+        };
+        for item in items.flatten() {
+            let Some(id) = manifest_id(&item.file_name()) else {
+                continue;
+            };
+            let known =
+                self.entries.iter().any(|entry| entry.id == id) || self.unreadable.contains(&id);
+            if !known {
+                self.remove_file(&item.path());
+            }
+        }
+    }
+
+    fn remove_file(&mut self, path: &Path) {
+        if let Err(error) = self.effects.remove_file(path) {
+            self.warn(format!("cannot remove {}: {error}", path.display()));
+        }
+    }
+}
+
+/// Whether a name is `.<name>.<pid>.<counter>.tmp`, what `write_atomic`
+/// names its temp file.
+fn is_write_leftover(name: &OsStr) -> bool {
+    let Some(stem) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix('.'))
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = stem.rsplitn(3, '.');
+    let counter = parts.next().unwrap_or_default();
+    let pid = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    digits(counter) && digits(pid) && !target.is_empty()
+}
+
+/// The ID of a file named `<ULID>.manifest.json`, in the spelling the
+/// collection writes.
+fn manifest_id(name: &OsStr) -> Option<ObjectId> {
+    let name = name.to_str()?;
+    let id: ObjectId = name.strip_suffix(".manifest.json")?.parse().ok()?;
+    (name == format!("{id}.manifest.json")).then_some(id)
 }
 
 /// Whether a difference between a listing and a tree is a path that is
@@ -879,6 +988,12 @@ mod tests {
         fn flush_dir(&self, dir: &Path) -> Result<(), FsxError> {
             self.call("flush", &dir.display().to_string())?;
             RealEffects.flush_dir(dir)
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.call("remove_file", &path.display().to_string())
+                .map_err(|_| io::Error::other("refused by the test"))?;
+            RealEffects.remove_file(path)
         }
 
         fn write_entry(
@@ -1556,6 +1671,216 @@ mod tests {
 
         assert!(mentions(&warnings, "tmp"), "{warnings:?}");
         assert!(!mentions(&warnings, "staging"), "{warnings:?}");
+    }
+
+    // =====================================================================
+    // Leftovers of atomic writes and orphan manifests
+    // =====================================================================
+
+    const LEFTOVERS: &[&str] = &[
+        ".antiq/.config.toml.4242.0.tmp",
+        ".antiq/objects/01BX5ZZKBKACTAV9WEVGEMMVRZ/.meta.pending.4242.7.tmp",
+        ".antiq/tracking/.01BX5ZZKBKACTAV9WEVGEMMVRZ.json.4242.3.tmp",
+        ".antiq/index/.entries.1.2.tmp",
+    ];
+
+    #[test]
+    fn the_temp_files_of_interrupted_atomic_writes_are_removed() {
+        let mut world = World::new();
+        for leftover in LEFTOVERS {
+            world.tree().file(leftover, "half a write");
+        }
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for leftover in LEFTOVERS {
+            assert!(!world.at(leftover).exists(), "{leftover}");
+        }
+    }
+
+    #[test]
+    fn names_that_only_look_like_temp_files_stay() {
+        let mut world = World::new();
+        let stay = [
+            ".antiq/.keep.tmp",
+            ".antiq/a.1.2.tmp",
+            ".antiq/.a.1.2.tmpx",
+            ".antiq/.a.x.2.tmp",
+            ".antiq/..1.2.tmp",
+            ".antiq/objects/.upload.1.2.part",
+            ".antiq/recovered/old/.config.toml.4242.0.tmp",
+        ];
+        for name in stay {
+            world.tree().file(name, "x");
+        }
+        world.tree().dir(".antiq/.a.1.2.tmp.d");
+        world.tree().dir(".antiq/.dir.1.2.tmp");
+        world.tree().symlink(".antiq/.link.1.2.tmp", "nowhere");
+
+        world.run();
+
+        for name in stay {
+            assert!(world.at(name).exists(), "{name}");
+        }
+        assert!(world.at(".antiq/.dir.1.2.tmp").is_dir());
+        assert!(
+            fs::symlink_metadata(world.at(".antiq/.link.1.2.tmp")).is_ok(),
+            "a link is not a file"
+        );
+    }
+
+    #[test]
+    fn a_temp_file_that_cannot_be_removed_is_a_warning() {
+        let mut world = World::new();
+        world.tree().file(".antiq/.config.toml.4242.0.tmp", "x");
+        world.tree().file(".antiq/tracking/.x.1.2.tmp", "x");
+        let fails = |what: &str, subject: &str| what == "remove_file" && subject.ends_with("0.tmp");
+        let effects = Scripted::new(&fails);
+
+        let warnings = world.run_with(&effects).expect("the run goes on");
+
+        assert!(
+            mentions(&warnings, ".config.toml.4242.0.tmp"),
+            "{warnings:?}"
+        );
+        assert!(world.at(".antiq/.config.toml.4242.0.tmp").exists());
+        assert!(!world.at(".antiq/tracking/.x.1.2.tmp").exists());
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_listed_is_a_warning_and_the_walk_goes_on() {
+        let mut world = World::new();
+        world.tree().file(".antiq/index/.entries.1.2.tmp", "x");
+        world.tree().file(".antiq/objects/.x.1.2.tmp", "x");
+        let locked = world.tree().dir(".antiq/index");
+        fs::set_permissions(&locked, Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(&locked).is_err(),
+            "this test needs a user that mode 000 locks out"
+        );
+
+        let warnings = world.run();
+        fs::set_permissions(&locked, Permissions::from_mode(0o755)).expect("chmod back");
+
+        assert!(mentions(&warnings, "index"), "{warnings:?}");
+        assert!(!world.at(".antiq/objects/.x.1.2.tmp").exists());
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_counts_as_removed() {
+        let world = World::new();
+        RealEffects
+            .remove_file(&world.at("missing"))
+            .expect("nothing to remove");
+    }
+
+    fn manifest(world: &World, name: &str) -> PathBuf {
+        world.at(&format!(".antiq/tracking/{name}.manifest.json"))
+    }
+
+    #[test]
+    fn a_manifest_without_an_entry_is_removed() {
+        let mut world = World::new();
+        world
+            .tree()
+            .file(&format!(".antiq/tracking/{ID}.manifest.json"), "{}");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!manifest(&world, ID).exists());
+    }
+
+    #[test]
+    fn a_manifest_with_an_entry_stays() {
+        let mut world = World::new();
+        world
+            .tree()
+            .file(&format!(".antiq/tracking/{ID}.manifest.json"), "{}");
+        world.store_entry(&TrackingEntry::new(
+            id(ID),
+            path("projects/a"),
+            EntryState::Gone,
+            VersionTakenOut::Committed(1),
+            time(ARCHIVED_AT),
+        ));
+
+        world.run();
+
+        assert!(manifest(&world, ID).exists());
+    }
+
+    #[test]
+    fn a_manifest_whose_entry_is_damaged_stays() {
+        let mut world = World::new();
+        world
+            .tree()
+            .file(&format!(".antiq/tracking/{ID}.manifest.json"), "{}");
+        fs::write(world.collection.tracking_path(id(ID)), "not json").expect("damaged");
+
+        world.run();
+
+        assert!(manifest(&world, ID).exists());
+    }
+
+    #[test]
+    fn files_that_are_no_manifest_of_an_id_stay() {
+        let mut world = World::new();
+        let lower = ID.to_lowercase();
+        let stay = [
+            format!(".antiq/tracking/{lower}.manifest.json"),
+            ".antiq/tracking/notes.manifest.json".to_string(),
+            format!(".antiq/tracking/{ID}.manifest.json.bak"),
+        ];
+        for name in &stay {
+            world.tree().file(name, "{}");
+        }
+
+        world.run();
+
+        for name in &stay {
+            assert!(world.at(name).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_that_cannot_be_removed_is_a_warning() {
+        let mut world = World::new();
+        world
+            .tree()
+            .file(&format!(".antiq/tracking/{ID}.manifest.json"), "{}");
+        let fails = |what: &str, _: &str| what == "remove_file";
+        let effects = Scripted::new(&fails);
+
+        let warnings = world.run_with(&effects).expect("the run goes on");
+
+        assert!(mentions(&warnings, ID), "{warnings:?}");
+        assert!(manifest(&world, ID).exists());
+    }
+
+    #[test]
+    fn a_manifest_of_an_entry_made_by_this_run_stays() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        world.removing(ID, "projects/a", &archive);
+        world.to_trash(ID, "projects/a");
+        fs::remove_file(world.trash(ID).join("notes.txt")).expect("half a delete");
+        world
+            .tree()
+            .file(&format!(".antiq/tracking/{ID}.manifest.json"), "{}");
+
+        world.run();
+
+        assert_eq!(world.entry(ID).state, EntryState::Gone);
+        assert!(manifest(&world, ID).exists(), "the gone entry keeps it");
+    }
+
+    #[test]
+    fn a_missing_tracking_directory_gives_no_warning() {
+        let world = World::new();
+        fs::remove_dir(world.at(".antiq/tracking")).expect("empty");
+        assert!(world.run().is_empty());
     }
 
     // =====================================================================
