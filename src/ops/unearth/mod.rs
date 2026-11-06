@@ -121,7 +121,6 @@ impl crate::error::HasKind for UnearthError {
             UnearthError::Listing(error) => error.kind(),
             UnearthError::Remote(error) => error.kind(),
             UnearthError::Fork(error) => error.kind(),
-            UnearthError::Live(error) => error.kind(),
             UnearthError::UnreadableVersions { too_new: true, .. } => ErrorKind::FormatTooNew,
             _ => ErrorKind::Other,
         }
@@ -1585,18 +1584,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_errors_of_a_fork_and_of_a_live_package_keep_their_kinds() {
+    fn the_error_of_a_fork_keeps_its_kind() {
         let fork = UnearthError::Fork(ForkError::InvalidName {
             name: "a/../b".to_string(),
             reason: RelPath::parse("a/../b").expect_err("not a path"),
         });
-        let live = UnearthError::Live(LiveError::StreamCheck {
-            path: "package".into(),
-            reason: "damaged".to_string(),
-        });
 
         assert_eq!(fork.kind(), ErrorKind::Usage);
-        assert_eq!(live.kind(), ErrorKind::Other);
     }
 
     #[test]
