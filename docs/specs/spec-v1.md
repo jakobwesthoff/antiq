@@ -1528,6 +1528,41 @@ bytes, and a listing that does not parse, leave their object alone for
 the run and make it exit 3. A read of the remote's metadata that fails is
 repeated once; when it fails again the run warns and pulls nothing.
 
+After the pull, each object with a recorded change is classified once. A
+change that equals a committed version is recorded as committed when no
+newer version exists or the newest one builds on it. A change that does
+not build on the newest version, and a change with an open
+`version_conflict` decision, is a conflict: nothing of it is uploaded or
+committed, the piece is skipped and the run exits 3. Any other change is
+committed: the payloads and listings it names that the previous version
+did not are uploaded, at most `remote_jobs` objects at a time, the remote
+is flushed once after all uploads, and each object's metadata is then
+committed with the protocol above, at most `remote_jobs` at a time. What
+the outcome leaves behind:
+
+| Outcome | Recorded change | Tracking entry | Exit |
+|---|---|---|---|
+| committed | becomes `meta.<n>` | version taken out `pending` becomes `n`, `n` is listed in `committed_versions` | 0 |
+| overtaken | stays | `n` is listed in `committed_versions`, decision `version_conflict` | 3 |
+| contested | stays | unchanged; the next `sync` reads the remote again | 3 |
+| landed | stays until a second pull; then judged like an overtaken version: committed if the newer version builds on it, else a conflict | as for that outcome | 0 or 3 |
+| refused, or a failed upload or commit | stays | unchanged | 3 |
+
+`sync` drops no local archive when it commits. An upload stays pending
+(`pending_upload`) until the tier phase confirms the remote copy.
+
+An away or broken answer from the remote ends the run when a new check of
+the remote still finds it away or broken; if the remote is reachable the
+answer only fails the object it came to, and the run goes on. A remote
+error of another kind always fails only its object. What happened before
+the end of a run stays: uploaded files, committed versions, promoted
+changes. A run that ends so does not write `last_sync`.
+
+After the commits, `sync` cleans the remote (see "Committing a version"), keeping the
+temp names of uploads that are still pending. A cleanup that fails for a
+reason other than the remote's being gone is a warning and makes the run
+exit 3. A run that reaches its end writes `last_sync`.
+
 `sync` gives new pieces their ID. With `backup_live = false` it still
 does, and commits their metadata without a live payload. After a fork,
 the old ID's live package is deleted once the fork's change is
@@ -2189,7 +2224,9 @@ the piece is pinned afterwards), `changed` (whether the command changed the
 pin file) and `warnings`.
 
 `sync` adds `pulled` (a list of `{id, version}`), `listings` (the IDs of
-the objects whose listing was fetched), `skipped` (a list of `{id, path,
+the objects whose listing was fetched), `uploaded` (`{id, file, size}` for
+each file written to the remote), `committed` (`{id, version}`), `cleanup`
+(`{removed, skipped}`), `skipped` (a list of `{id, path,
 reason, message}`, `path` null where the piece's metadata cannot be read,
 `reason` one of `pull`, `error`, `conflict`, `contested` and `refused`)
 and `warnings`. The plan of a `--dry-run` has `pull_metadata` actions

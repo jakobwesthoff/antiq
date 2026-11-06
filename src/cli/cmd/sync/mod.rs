@@ -87,6 +87,24 @@ fn lines(report: &SyncReport) -> Vec<String> {
     for id in &report.listings {
         lines.push(format!("Fetched the listing of {id}"));
     }
+    for uploaded in &report.uploaded {
+        lines.push(format!(
+            "Uploaded {} of {} ({} bytes)",
+            uploaded.file, uploaded.id, uploaded.size
+        ));
+    }
+    for committed in &report.committed {
+        lines.push(format!(
+            "Committed version {} of {}",
+            committed.version, committed.id
+        ));
+    }
+    if report.cleanup.removed > 0 {
+        lines.push(format!(
+            "Removed {} leftover files from the remote",
+            report.cleanup.removed
+        ));
+    }
     if lines.is_empty() && report.skipped.is_empty() {
         lines.push("Nothing to sync.".to_string());
     }

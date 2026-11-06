@@ -4,10 +4,15 @@
 
 //! Two machines on one path remote, for the tests of `sync`.
 
+use crate::clock::Clock;
 use crate::clock::FixedClock;
 use crate::collection::Collection;
 use crate::id::{ObjectId, SeqIds};
+use crate::lock;
+use crate::meta::{HistoryAction, HistoryEntry};
 use crate::ops::import::{ImportRequest, import};
+use crate::ops::sync::{SyncReport, Synced, sync_with};
+use crate::remote::Remote;
 use crate::remote::testing::{FaultRemote, REMOTE_ID, path_remote, remote_root};
 use crate::store::Store;
 use crate::testing::package::pack_piece;
@@ -32,6 +37,29 @@ impl Shared {
     pub fn objects(&self) -> PathBuf {
         self.root.path().join("objects")
     }
+
+    /// The names in an object's directory on the remote, sorted.
+    pub fn names(&self, id: ObjectId) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.objects().join(id.to_string()))
+            .map(|entries| {
+                entries
+                    .map(|entry| {
+                        entry
+                            .expect("an entry")
+                            .file_name()
+                            .to_string_lossy()
+                            .into()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    pub fn read(&self, id: ObjectId, name: &str) -> Vec<u8> {
+        fs::read(self.objects().join(id.to_string()).join(name)).expect("the remote file")
+    }
 }
 
 /// One machine: a collection with a name, attached to the shared remote.
@@ -48,6 +76,11 @@ pub(super) struct Machine {
 impl Machine {
     /// `anna` and `ben` get their own collection IDs.
     pub fn new(shared: &Shared, name: &'static str) -> Machine {
+        Machine::with_jobs(shared, name, 1)
+    }
+
+    /// A machine that runs `jobs` remote operations at once.
+    pub fn with_jobs(shared: &Shared, name: &'static str, jobs: u32) -> Machine {
         let id = if name == "anna" {
             COLLECTION_ID
         } else {
@@ -55,7 +88,7 @@ impl Machine {
         };
         let mut temp = TempCollection::minimal();
         let config = format!(
-            "[collection]\nid = \"{id}\"\n\n[machine]\nname = \"{name}\"\n\n[[remote]]\nurl = \"{}\"\nid = \"{REMOTE_ID}\"\n",
+            "[collection]\nid = \"{id}\"\nremote_jobs = {jobs}\n\n[machine]\nname = \"{name}\"\n\n[[remote]]\nurl = \"{}\"\nid = \"{REMOTE_ID}\"\n",
             shared.root.path().display()
         );
         temp.tree().file(".antiq/config.toml", config);
@@ -78,6 +111,44 @@ impl Machine {
     /// This machine's view of the shared remote.
     pub fn remote(&self) -> FaultRemote {
         FaultRemote::new(path_remote(&self.remote_root, self.name))
+    }
+
+    /// Runs a real `sync` against this machine's view of the remote.
+    pub fn sync(&self) -> SyncReport {
+        self.sync_with(&self.remote())
+    }
+
+    pub fn sync_with(&self, remote: &dyn Remote) -> SyncReport {
+        match sync_with(&self.collection, &self.clock, remote, false).expect("the sync runs") {
+            Synced::Done(report) => report,
+            Synced::Planned { .. } => panic!("expected a real run"),
+        }
+    }
+
+    /// The tracking entry of `id`.
+    pub fn entry(&self, id: ObjectId) -> crate::tracking::TrackingEntry {
+        crate::tracking::read(&self.collection, id)
+            .expect("the entry reads")
+            .expect("there is an entry")
+    }
+
+    /// Records a change to `id`'s metadata that adds a history entry, as a
+    /// command of this machine would.
+    pub fn record_history(&self, id: ObjectId, action: HistoryAction) {
+        let current = self
+            .store()
+            .current(id)
+            .expect("reads")
+            .expect("the object exists");
+        let mut metadata = current.metadata;
+        metadata
+            .history
+            .push(HistoryEntry::new(self.clock.now(), self.name, action));
+        let lock =
+            lock::acquire(&self.collection.lock_path(), self.name, &self.clock).expect("free");
+        self.store()
+            .write_pending(&lock, &metadata)
+            .expect("recorded");
     }
 
     /// Imports a package whose piece holds one file, as a new object with a

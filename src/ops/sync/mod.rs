@@ -27,12 +27,15 @@ use crate::ops::status::{self, StatusError};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
 use crate::remote::away::{self, AwayError};
+use crate::remote::cleanup;
 use crate::remote::{Assessment, Reachability, Remote, RemoteError};
 use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, Started};
 use crate::store::{Store, StoreError};
 use crate::tracking::TrackingError;
+use jiff::SignedDuration;
 use serde::Serialize;
+use std::sync::Mutex;
 
 /// Errors of the `sync` command.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +58,10 @@ pub enum SyncError {
     /// that the away policy sees it.
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    /// A step on one object failed for a reason that has no error type of
+    /// its own.
+    #[error("{0}")]
+    Failed(String),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -114,19 +121,47 @@ pub struct SkippedObject {
     pub message: String,
 }
 
+/// A payload or listing that was written to the remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UploadedFile {
+    pub id: ObjectId,
+    pub file: String,
+    pub size: u64,
+}
+
+/// A metadata version of this machine that is committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommittedVersion {
+    pub id: ObjectId,
+    pub version: u32,
+}
+
+/// What the cleanup of the remote did.
+#[derive(Debug, Default, Serialize)]
+pub struct CleanupReport {
+    pub removed: usize,
+    pub skipped: usize,
+    /// The cleanup could not run to its end.
+    #[serde(skip)]
+    pub failed: bool,
+}
+
 /// What a run of `sync` did.
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
     pub pulled: Vec<PulledVersion>,
     /// Objects whose listing was fetched.
     pub listings: Vec<ObjectId>,
+    pub uploaded: Vec<UploadedFile>,
+    pub committed: Vec<CommittedVersion>,
     pub skipped: Vec<SkippedObject>,
+    pub cleanup: CleanupReport,
     pub warnings: Vec<Warning>,
 }
 
 impl CommandReport for SyncReport {
     fn partial(&self) -> bool {
-        !self.skipped.is_empty()
+        !self.skipped.is_empty() || self.cleanup.failed
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -260,11 +295,69 @@ pub fn sync_with(
 
 /// The phases of a real run, in the order of the spec.
 fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
-    let _pull_failed = pull::run(ctx, report)?;
+    let pull_failed = pull::run(ctx, report)?;
     live::refresh(ctx)?;
+    if pull_failed {
+        commit::skip_all(
+            ctx,
+            report,
+            SkipReason::Pull,
+            "the metadata on the remote could not be read",
+        )?;
+    } else {
+        commit::run(ctx, report)?;
+    }
+    cleanup(ctx, report)?;
     live::delete_committed(ctx)?;
     tiers::apply(ctx)?;
     away::record_sync(ctx.collection, ctx.lock, ctx.clock.now())?;
+    Ok(())
+}
+
+/// Removes what interrupted and finished commits left on the remote. Uploads
+/// that are still pending keep their temp files, since the next run
+/// continues them. A cleanup that fails for another reason than the
+/// remote's being gone is a warning and makes the run partial.
+fn cleanup(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
+    let keep = match commit::pending_temp_names(ctx) {
+        Ok(keep) => keep,
+        Err(error) => {
+            report.cleanup.failed = true;
+            report.warnings.push(Warning::new(format!(
+                "cleaning the remote was skipped, as the uploads that wait could not be listed: {error}"
+            )));
+            return Ok(());
+        }
+    };
+    let settings = cleanup::Settings {
+        machine: ctx.machine,
+        collection: ctx.collection.id(),
+        grace: SignedDuration::from_hours(i64::from(
+            ctx.collection.config().collection.grace_hours,
+        )),
+        keep: &keep,
+    };
+    let applied = ctx.remote.clock().and_then(|now| {
+        let mode = cleanup::Mode::Run {
+            lock: ctx.lock,
+            now,
+        };
+        let steps = cleanup::plan(ctx.remote, &settings, &mode)?;
+        cleanup::apply(ctx.remote, &settings, ctx.lock, now, &steps)
+    });
+    match applied {
+        Ok(applied) => {
+            report.cleanup.removed = applied.removed;
+            report.cleanup.skipped = applied.skipped;
+        }
+        Err(error) if ends_run(ctx.remote, &error) => return Err(error.into()),
+        Err(error) => {
+            report.cleanup.failed = true;
+            report
+                .warnings
+                .push(Warning::new(format!("cleaning the remote failed: {error}")));
+        }
+    }
     Ok(())
 }
 
@@ -283,6 +376,39 @@ pub(super) fn ends_run(remote: &dyn Remote, error: &RemoteError) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Runs `job` for every item on at most `workers` threads and returns the
+/// results in the order of the items.
+pub(super) fn run_bounded<T: Send, R: Send>(
+    workers: usize,
+    items: Vec<T>,
+    job: impl Fn(T) -> R + Sync,
+) -> Vec<R> {
+    let count = items.len();
+    let queue = Mutex::new(items.into_iter().enumerate());
+    let results = Mutex::new(Vec::with_capacity(count));
+    std::thread::scope(|scope| {
+        // At least one worker, so that a configuration of zero still runs.
+        for _ in 0..workers.clamp(1, count.max(1)) {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().expect("a job panicked").next();
+                    let Some((position, item)) = next else {
+                        break;
+                    };
+                    let result = job(item);
+                    results
+                        .lock()
+                        .expect("a job panicked")
+                        .push((position, result));
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().expect("a job panicked");
+    results.sort_by_key(|(position, _)| *position);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// The path of the piece an object belongs to, when its metadata reads.
@@ -394,7 +520,17 @@ mod tests {
         let report = done(sync_with(&ben.collection, &ben.clock, &remote, false));
 
         assert!(report.pulled.is_empty() && report.listings.is_empty());
-        assert_eq!(remote.count(Op::ReadFile), 0);
+        // Only the cleanup reads files, and it reads metadata versions.
+        let reads: Vec<String> = remote
+            .calls()
+            .into_iter()
+            .filter(|call| call.op == Op::ReadFile)
+            .map(|call| call.name)
+            .collect();
+        assert!(
+            reads.iter().all(|name| name.starts_with("meta.")),
+            "{reads:?}"
+        );
     }
 
     #[test]
@@ -809,5 +945,42 @@ mod tests {
             panic!("expected a plan");
         };
         assert!(plan.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn two_items_run_at_the_same_time_on_two_workers() {
+        let gate = crate::remote::testing::Gate::new();
+        let results = run_bounded(2, vec![1, 2], |item| {
+            gate.arrive(2);
+            item * 10
+        });
+        assert_eq!(results, vec![10, 20]);
+    }
+
+    #[test]
+    fn no_more_than_the_workers_run_at_once_and_results_keep_their_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let gate = crate::remote::testing::Gate::new();
+        let results = run_bounded(2, (0..6).collect(), |item| {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            // Two workers reach the gate together; the rest pass it.
+            gate.arrive(2);
+            running.fetch_sub(1, Ordering::SeqCst);
+            item
+        });
+        assert_eq!(results, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn no_items_or_no_workers_still_finish() {
+        assert_eq!(
+            run_bounded(4, Vec::<u8>::new(), |item| item),
+            Vec::<u8>::new()
+        );
+        assert_eq!(run_bounded(0, vec![7], |item| item), vec![7]);
     }
 }

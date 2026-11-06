@@ -8,10 +8,11 @@ mod support;
 
 use antiq::meta::Lifecycle;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use support::cmd::{Antiq, Run};
 use support::objects::{archive_with_members, hold_lock, id, metadata, put_meta};
-use support::tree::{COLLECTION_ID, TempCollection};
+use support::tree::{COLLECTION_ID, TempCollection, Tree};
 
 const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
 const OTHER_COLLECTION_ID: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
@@ -34,16 +35,44 @@ fn remote_root() -> tempfile::TempDir {
 
 /// A collection of the machine `name` attached to `remote`.
 fn attached(remote: &Path, name: &str) -> TempCollection {
+    attached_as(remote, name, OTHER_COLLECTION_ID)
+}
+
+fn attached_as(remote: &Path, name: &str, collection: &str) -> TempCollection {
     let mut temp = TempCollection::minimal();
     temp.tree().file(
         ".antiq/config.toml",
         format!(
-            "[collection]\nid = \"{OTHER_COLLECTION_ID}\"\n\n[machine]\nname = \"{name}\"\n\n\
+            "[collection]\nid = \"{collection}\"\n\n[machine]\nname = \"{name}\"\n\n\
              [[remote]]\nurl = \"{}\"\nid = \"{REMOTE_ID}\"\n",
             remote.display()
         ),
     );
     temp
+}
+
+/// Imports a zstd tar of a folder holding one file into `temp`.
+fn import_piece(temp: &mut TempCollection, at: &str) {
+    let mut tree = Tree::new();
+    tree.file_with("proj/a.txt", "hello", 0o644, 1_000_000_000);
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append_dir_all("proj", tree.path("proj"))
+        .expect("the folder is added");
+    let tar = builder.into_inner().expect("the tar ends");
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("an encoder");
+    encoder.include_checksum(true).expect("on");
+    encoder.write_all(&tar).expect("writes");
+    let package = temp
+        .tree()
+        .file("input.tar.zst", encoder.finish().expect("the frame ends"));
+    let run = Antiq::new()
+        .arg("-C")
+        .arg(temp.root())
+        .args(["import", "--path", at])
+        .arg(&package)
+        .run();
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
 }
 
 /// Puts an archived object with one member on the remote, as another
@@ -197,4 +226,44 @@ fn a_dry_run_says_who_holds_the_lock() {
     assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
     assert_eq!(run.stdout, "Nothing to do.\n");
     assert!(run.stderr.starts_with("note: "), "{}", run.stderr);
+}
+
+#[test]
+fn sync_uploads_commits_and_another_machine_pulls_it() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    import_piece(&mut anna, "notes");
+
+    let run = antiq_in(&anna, &["sync"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{}", run.stdout);
+    assert!(lines[0].starts_with("Uploaded "), "{}", run.stdout);
+    assert!(lines[1].starts_with("Uploaded "), "{}", run.stdout);
+    assert!(
+        lines[2].starts_with("Committed version 1 of "),
+        "{}",
+        run.stdout
+    );
+
+    let ben = attached(remote.path(), "ben");
+    let pulled = antiq_in(&ben, &["sync"]);
+    assert_eq!(pulled.code(), 0, "{}{}", pulled.stdout, pulled.stderr);
+    let found = antiq_in(&ben, &["find", "a.txt"]);
+    assert!(found.stdout.contains("notes"), "{}", found.stdout);
+}
+
+#[test]
+fn the_json_of_a_sync_lists_uploads_and_commits() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    import_piece(&mut anna, "notes");
+
+    let json = antiq_in(&anna, &["--json", "sync"]).json();
+
+    assert_eq!(json["uploaded"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["committed"][0]["version"], 1);
+    assert_eq!(json["cleanup"]["removed"], 0);
+    assert_eq!(json["skipped"], serde_json::json!([]));
 }

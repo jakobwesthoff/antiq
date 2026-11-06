@@ -19,7 +19,8 @@ use crate::id::ObjectId;
 use jiff::Timestamp;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// The ID the remote root of the test fixtures carries in its marker.
 pub const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
@@ -175,8 +176,61 @@ impl Call {
 
 type Callback = Arc<dyn Fn(&PathRemote) + Send + Sync>;
 
+/// A place where threads wait for each other, so that a test of
+/// concurrency needs no sleeps. A wait that nobody ends fails the test with
+/// a message instead of hanging it.
+pub struct Gate {
+    arrived: Mutex<usize>,
+    changed: Condvar,
+    patience: Duration,
+}
+
+impl Default for Gate {
+    fn default() -> Gate {
+        Gate::waiting(Duration::from_secs(10))
+    }
+}
+
+impl Gate {
+    pub fn new() -> Gate {
+        Gate::default()
+    }
+
+    /// A gate that gives up after `patience`.
+    pub fn waiting(patience: Duration) -> Gate {
+        Gate {
+            arrived: Mutex::new(0),
+            changed: Condvar::new(),
+            patience,
+        }
+    }
+
+    /// Counts the caller in and returns once `expected` callers have
+    /// arrived in total.
+    pub fn arrive(&self, expected: usize) {
+        let mut arrived = self
+            .arrived
+            .lock()
+            .expect("no test panics holding the gate");
+        *arrived += 1;
+        self.changed.notify_all();
+        let (arrived, timeout) = self
+            .changed
+            .wait_timeout_while(arrived, self.patience, |arrived| *arrived < expected)
+            .expect("no test panics holding the gate");
+        assert!(
+            !timeout.timed_out(),
+            "only {} of {expected} callers arrived at the gate",
+            *arrived
+        );
+    }
+}
+
 #[derive(Default)]
 struct State {
+    in_flight: BTreeMap<Op, usize>,
+    peak: BTreeMap<Op, usize>,
+    gates: BTreeMap<Op, (Arc<Gate>, usize)>,
     counts: BTreeMap<Op, usize>,
     calls: Vec<Call>,
     faults: Vec<(Op, usize, Fault)>,
@@ -187,6 +241,7 @@ struct State {
 
 /// What [`FaultRemote::enter`] found for one call.
 struct Entered {
+    gate: Option<(Arc<Gate>, usize)>,
     before: Vec<Callback>,
     after: Vec<Callback>,
     fault: Option<Fault>,
@@ -243,6 +298,19 @@ impl FaultRemote {
         self.lock().calls.clone()
     }
 
+    /// Makes every call of `op` wait at a gate until `expected` calls are in
+    /// it, so that a test can have that many operations running at once.
+    pub fn gate(&self, op: Op, expected: usize) {
+        self.lock()
+            .gates
+            .insert(op, (Arc::new(Gate::new()), expected));
+    }
+
+    /// The most calls of `op` that were running at the same time.
+    pub fn peak_in_flight(&self, op: Op) -> usize {
+        self.lock().peak.get(&op).copied().unwrap_or(0)
+    }
+
     /// How many calls of `op` there were.
     pub fn count(&self, op: Op) -> usize {
         self.lock().counts.get(&op).copied().unwrap_or(0)
@@ -260,6 +328,14 @@ impl FaultRemote {
             *count += 1;
             *count
         };
+        let running = {
+            let running = state.in_flight.entry(op).or_insert(0);
+            *running += 1;
+            *running
+        };
+        let peak = state.peak.entry(op).or_insert(0);
+        *peak = (*peak).max(running);
+        let gate = state.gates.get(&op).cloned();
         let matching = |hooks: &[(Op, usize, Callback)]| -> Vec<Callback> {
             hooks
                 .iter()
@@ -268,6 +344,7 @@ impl FaultRemote {
                 .collect()
         };
         Entered {
+            gate,
             before: matching(&state.before),
             after: matching(&state.after),
             fault: state
@@ -287,6 +364,10 @@ impl FaultRemote {
         call: impl FnOnce(&PathRemote) -> Result<T, RemoteError>,
     ) -> Result<T, RemoteError> {
         let entered = self.enter(op, name);
+        let _running = Running { remote: self, op };
+        if let Some((gate, expected)) = &entered.gate {
+            gate.arrive(*expected);
+        }
         for callback in &entered.before {
             callback(&self.inner);
         }
@@ -300,6 +381,20 @@ impl FaultRemote {
             }
         }
         outcome
+    }
+}
+
+/// Takes a call out of the in-flight count when it ends, however it ends.
+struct Running<'a> {
+    remote: &'a FaultRemote,
+    op: Op,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if let Some(running) = self.remote.lock().in_flight.get_mut(&self.op) {
+            *running -= 1;
+        }
     }
 }
 
@@ -396,6 +491,10 @@ impl Remote for FaultRemote {
     /// for it has no effect.
     fn finish(&self) {
         let entered = self.enter(Op::Finish, "");
+        let _running = Running {
+            remote: self,
+            op: Op::Finish,
+        };
         for callback in &entered.before {
             callback(&self.inner);
         }
@@ -430,6 +529,37 @@ mod tests {
             .into_iter()
             .map(|file| file.name)
             .collect()
+    }
+
+    #[test]
+    fn a_gate_holds_calls_until_enough_of_them_are_in_and_the_peak_counts_them() {
+        let (_root, remote) = faulty();
+        remote.gate(Op::Flush, 2);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| remote.flush().expect("flushes"));
+            }
+        });
+        assert_eq!(remote.peak_in_flight(Op::Flush), 2);
+        assert_eq!(remote.count(Op::Flush), 2);
+    }
+
+    #[test]
+    fn calls_one_after_the_other_peak_at_one() {
+        let (_root, remote) = faulty();
+        remote.flush().expect("flushes");
+        remote.flush().expect("flushes");
+        remote.finish();
+        assert_eq!(remote.peak_in_flight(Op::Flush), 1);
+        assert_eq!(remote.peak_in_flight(Op::Finish), 1);
+        assert_eq!(remote.peak_in_flight(Op::Clock), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only 1 of 2 callers arrived at the gate")]
+    fn a_gate_nobody_else_reaches_fails_with_a_message() {
+        let gate = Gate::waiting(Duration::from_millis(50));
+        gate.arrive(2);
     }
 
     #[test]
