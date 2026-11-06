@@ -72,7 +72,8 @@ impl Planned {
                     stamp,
                     path,
                 } => planned.trash.push(stamped(&Some(stamp.clone()), path)),
-                Repair::DeleteTemporary { .. }
+                Repair::CreateFolder { .. }
+                | Repair::DeleteTemporary { .. }
                 | Repair::DeleteDoomed { .. }
                 | Repair::RemoveEmptyChain { .. } => {}
             }
@@ -698,6 +699,9 @@ mod tests {
         fn repairs_that_remove_versions_folders_and_trash_trees_are_collected() {
             let collection = Collection::for_tests();
             let repairs = [
+                Repair::CreateFolder {
+                    folder: name("tmp"),
+                },
                 Repair::DeleteSidecars {
                     piece: path("projects/a"),
                     version: stamp(),

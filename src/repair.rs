@@ -4,7 +4,7 @@
 
 //! The repairs that open every run, after the lock is taken.
 
-use crate::collection::Collection;
+use crate::collection::{Collection, LAYOUT};
 use crate::filesystem::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of};
 use crate::filesystem::moves::move_dir;
 use crate::filesystem::remove::{remove_tree, remove_tree_at};
@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::error::Error as StdError;
 use std::ffi::OsStr;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -62,12 +63,18 @@ fn stamp_text<S: Serializer>(stamp: &Stamp, serializer: S) -> Result<S::Ok, S::E
 
 /// One repair of the start of a run (spec "Repairs at the start of a
 /// run"). In JSON it is `{"repair": "<snake_case variant>", ...fields}`.
+/// [`Repair::CreateFolder`] comes before the numbered repairs and has no
+/// number.
 /// A `piece` or `folder` is relative to `pieces/` (to the collection root
 /// for repair 5), a `tree` or `path` to `<area>/<stamp>/` (to `<area>/`
 /// where `stamp` is absent); all are escaped like a path of a listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "repair", rename_all = "snake_case")]
 pub enum Repair {
+    /// Before 1: the folder `folder` of the layout below `.antiq/`, which is
+    /// missing, as in a copy from the target that leaves out `tmp/`,
+    /// `trash/` and `doomed/`.
+    CreateFolder { folder: Name },
     /// 1: the sidecars of version `version` of the store folder `piece`,
     /// whose `.tar.zst` is still staged.
     DeleteSidecars {
@@ -121,6 +128,7 @@ impl Repair {
             None => format!(".antiq/{area}/{tree}"),
         };
         match self {
+            Repair::CreateFolder { folder } => format!("create the folder .antiq/{folder}"),
             Repair::DeleteSidecars { piece, version } => format!(
                 "delete the sidecars of {version} in .antiq/pieces/{piece} (the archive is not there)"
             ),
@@ -271,6 +279,7 @@ pub fn plan(collection: &Collection) -> Planned {
         given_back: Vec::new(),
         kept: BTreeSet::new(),
     };
+    planner.missing_folders();
     planner.scan_store();
     planner.interrupted_archives();
     planner.announce_kept();
@@ -320,6 +329,22 @@ impl Planner<'_> {
         source: impl StdError + Send + Sync + 'static,
     ) {
         self.warn(failure("read", place(area, rel), source));
+    }
+
+    /// The folders of the layout that are not there. A run needs them, and
+    /// `push` leaves three of them out of the target.
+    fn missing_folders(&mut self) {
+        for folder in LAYOUT {
+            match fs::symlink_metadata(self.collection.antiq_dir().join(folder)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.repairs.push(Repair::CreateFolder {
+                        folder: name_of(folder.as_bytes()),
+                    });
+                }
+                Err(error) => self.warn(failure("read", place(folder, &RelPath::root()), error)),
+            }
+        }
     }
 
     fn scan_store(&mut self) {
@@ -1179,6 +1204,10 @@ fn apply(
     durable: &dyn Durable,
 ) -> Result<Applied, RepairError> {
     let done = match repair {
+        Repair::CreateFolder { folder } => {
+            create_folder(collection, folder, durable)?;
+            Some(repair.clone())
+        }
         Repair::DeleteSidecars { piece, version } => {
             delete_sidecars(collection, piece, version)?.then(|| repair.clone())
         }
@@ -1211,6 +1240,21 @@ fn apply(
         }
     };
     Ok(Applied::of(done))
+}
+
+/// Creates the folder `folder` below `.antiq/` and makes it durable with
+/// its parent, so that what the run puts into it survives a crash.
+fn create_folder(
+    collection: &Collection,
+    folder: &Name,
+    durable: &dyn Durable,
+) -> Result<(), RepairError> {
+    let step = "create the run folder";
+    let here = place(&folder.to_string(), &RelPath::root());
+    let antiq = TreeRoot::open(&collection.antiq_dir())
+        .map_err(|error| failure(step, here.clone(), error))?;
+    create_dir_chain(durable, &antiq, &RelPath::root().join(folder))
+        .map_err(|error| failure(step, here, error))
 }
 
 /// Deletes what is left of the version a marker names, and only then drops
@@ -1466,6 +1510,9 @@ mod tests {
 
     fn every_repair() -> Vec<Repair> {
         vec![
+            Repair::CreateFolder {
+                folder: name("tmp"),
+            },
             Repair::DeleteSidecars {
                 piece: path("a/b"),
                 version: stamp("2026-11-04T090211"),
@@ -1531,6 +1578,7 @@ mod tests {
         assert_eq!(
             json,
             [
+                r#"{"repair":"create_folder","folder":"tmp"}"#,
                 r#"{"repair":"delete_sidecars","piece":"a/b","version":"2026-11-04T090211"}"#,
                 r#"{"repair":"delete_temporary","entry":"upload.part"}"#,
                 r#"{"repair":"delete_doomed","stamp":"2026-11-04T090211","tree":"a/b"}"#,
@@ -1565,6 +1613,7 @@ mod tests {
         assert_eq!(
             lines,
             [
+                "create the folder .antiq/tmp",
                 "delete the sidecars of 2026-11-04T090211 in .antiq/pieces/a/b (the archive is not there)",
                 "delete .antiq/tmp/upload.part",
                 "delete .antiq/doomed/2026-11-04T090211/a/b",
@@ -2264,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_recovered_folder_does_not_stop_a_give_back_to_a_free_live_path() {
+    fn a_missing_recovered_folder_is_created_and_a_give_back_to_a_free_live_path_still_happens() {
         let mut temp = TempCollection::minimal();
         lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
         trash_tree(&mut temp, S, "a");
@@ -2273,7 +2322,8 @@ mod tests {
         let outcome = repaired(&temp);
 
         assert_eq!(live_content(&temp, "a/f").as_deref(), Some("x"));
-        assert!(!exists(&temp, ".antiq/recovered"), "nothing needed it");
+        assert_eq!(created_folders(&outcome.done), ["recovered"]);
+        assert!(temp.root().join(".antiq/recovered").is_dir());
         assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
     }
 
@@ -2930,7 +2980,14 @@ mod tests {
         let mut temp = TempCollection::minimal();
         lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
         marker(&mut temp, "p", &marked(S));
-        fs::remove_dir(temp.root().join(".antiq/tmp")).expect("tmp is empty");
+        let tmp_dir = temp.root().join(".antiq/tmp");
+        assert_not_root();
+        fs::set_permissions(&tmp_dir, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let _restore = RestoreModes(vec![tmp_dir.clone()]);
+        assert!(
+            fs::write(tmp_dir.join("probe"), "").is_err(),
+            "the test needs a user that a read-only directory stops"
+        );
 
         let outcome = repaired(&temp);
 
@@ -2946,7 +3003,7 @@ mod tests {
             "{:?}",
             outcome.warnings
         );
-        fs::create_dir(temp.root().join(".antiq/tmp")).expect("tmp is back");
+        fs::set_permissions(&tmp_dir, fs::Permissions::from_mode(0o755)).expect("tmp is back");
         let second = repaired(&temp);
         assert_eq!(
             done_lines(&second),
@@ -3123,6 +3180,125 @@ mod tests {
             "the test needs a user that mode 000 locks out"
         );
         RestoreModes(paths)
+    }
+
+    // =====================================================
+    // The folders of the layout
+    // =====================================================
+
+    fn created_folders(repairs: &[Repair]) -> Vec<String> {
+        repairs
+            .iter()
+            .filter_map(|repair| match repair {
+                Repair::CreateFolder { folder } => Some(folder.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn missing_folders_are_planned_first_in_the_order_of_the_layout() {
+        let temp = TempCollection::minimal();
+        for folder in ["doomed", "tmp", "recovered"] {
+            fs::remove_dir(temp.root().join(".antiq").join(folder)).expect("empty");
+        }
+
+        let planned = plan(&collection(&temp));
+
+        assert_eq!(
+            planned.repairs,
+            [
+                Repair::CreateFolder {
+                    folder: name("tmp")
+                },
+                Repair::CreateFolder {
+                    folder: name("doomed")
+                },
+                Repair::CreateFolder {
+                    folder: name("recovered")
+                },
+            ]
+        );
+        assert!(planned.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_entry_that_is_no_directory_in_a_folders_place_is_not_planned() {
+        let mut temp = TempCollection::minimal();
+        fs::remove_dir(temp.root().join(".antiq/trash")).expect("empty");
+        temp.tree().file(".antiq/trash", "in the way");
+
+        let planned = plan(&collection(&temp));
+
+        assert!(created_folders(&planned.repairs).is_empty());
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_looked_up_is_a_warning() {
+        let temp = TempCollection::minimal();
+        let _restore = lock_out(&temp, &[".antiq"]);
+
+        let planned = plan(&collection(&temp));
+
+        assert!(created_folders(&planned.repairs).is_empty());
+        assert!(
+            messages(&planned)
+                .iter()
+                .any(|message| message.starts_with("cannot read .antiq/tmp: ")),
+            "{:?}",
+            messages(&planned)
+        );
+    }
+
+    #[test]
+    fn a_run_creates_the_missing_folders_and_names_them() {
+        let temp = TempCollection::minimal();
+        for folder in ["tmp", "trash"] {
+            fs::remove_dir(temp.root().join(".antiq").join(folder)).expect("empty");
+        }
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(created_folders(&outcome.done), ["tmp", "trash"]);
+        assert!(outcome.warnings.is_empty());
+        assert!(temp.root().join(".antiq/tmp").is_dir());
+        assert!(temp.root().join(".antiq/trash").is_dir());
+    }
+
+    #[test]
+    fn a_created_folder_is_flushed_with_the_folder_above() {
+        use crate::filesystem::atomic::recording::{Flush, Recording};
+        let temp = TempCollection::minimal();
+        fs::remove_dir(temp.root().join(".antiq/doomed")).expect("empty");
+        let recording = Recording::new();
+
+        create_folder(&collection(&temp), &name("doomed"), &recording).expect("created");
+
+        let dirs: Vec<PathBuf> = recording
+            .flushes()
+            .into_iter()
+            .filter_map(|flush| match flush {
+                Flush::Dir(path) => Some(path),
+                Flush::File(_) => None,
+            })
+            .collect();
+        assert_eq!(dirs, [PathBuf::from("doomed"), PathBuf::from(".")]);
+    }
+
+    #[test]
+    fn a_folder_cannot_be_created_below_a_missing_antiq_folder() {
+        let temp = TempCollection::minimal();
+        fs::remove_dir_all(temp.root().join(".antiq")).expect("removed");
+
+        let error = create_folder(&collection(&temp), &name("tmp"), &RealDurable)
+            .expect_err("there is no .antiq/");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("cannot create the run folder .antiq/tmp: "),
+            "{error}"
+        );
     }
 
     fn messages(planned: &Planned) -> Vec<&str> {
@@ -3347,9 +3523,10 @@ mod tests {
         let lines: Vec<String> = planned.repairs.iter().map(Repair::describe).collect();
         assert_eq!(
             lines,
-            [format!(
-                "drop the stamp {S} from the marker of p, which names no version"
-            )]
+            [
+                "create the folder .antiq/pieces".to_string(),
+                format!("drop the stamp {S} from the marker of p, which names no version")
+            ]
         );
         assert!(planned.warnings.is_empty(), "{:?}", messages(&planned));
     }
@@ -3457,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_run_directories_have_nothing_to_repair() {
+    fn missing_run_directories_are_created_and_have_nothing_else_to_repair() {
         let mut temp = TempCollection::minimal();
         stage(&mut temp, "a", S);
         for dir in ["pieces", "trash", "doomed"] {
@@ -3467,7 +3644,15 @@ mod tests {
         let planned = plan(&collection(&temp));
 
         let lines: Vec<String> = planned.repairs.iter().map(Repair::describe).collect();
-        assert_eq!(lines, ["delete .antiq/tmp/pack"]);
+        assert_eq!(
+            lines,
+            [
+                "create the folder .antiq/trash",
+                "create the folder .antiq/doomed",
+                "create the folder .antiq/pieces",
+                "delete .antiq/tmp/pack"
+            ]
+        );
         assert!(planned.warnings.is_empty(), "{:?}", messages(&planned));
     }
 }

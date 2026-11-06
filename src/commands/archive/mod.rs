@@ -1710,6 +1710,7 @@ mod tests {
         let mut world = world("");
         add(&mut world, "piece", 40);
         fs::remove_dir(antiq(&world, "pieces")).expect("pieces/ is empty");
+        fs::write(antiq(&world, "pieces"), "").expect("a file takes the place of pieces/");
 
         let report = execute_with(&world, &Target::Due, &RealSeams, 1).expect("the run ends");
 

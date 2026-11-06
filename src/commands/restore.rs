@@ -1336,6 +1336,17 @@ fn parent_of(path: &RelPath) -> RelPath {
     ancestors(path).pop().unwrap_or_else(RelPath::root)
 }
 
+/// The folder, relative to the collection root, whose volume the staging
+/// is judged on in a dry run: see [`Collection::measured_tmp_dir`].
+pub(crate) fn measured_tmp(collection: &Collection) -> RelPath {
+    let folder = if collection.measured_tmp_dir() == collection.tmp_dir() {
+        ".antiq/tmp"
+    } else {
+        ".antiq"
+    };
+    RelPath::parse(folder).expect("a layout folder is a valid path")
+}
+
 /// Refuses a destination whose nearest existing folder is on another
 /// volume than the staging, as the rename could not cross it.
 pub(crate) fn check_same_volume(
@@ -1368,6 +1379,17 @@ mod tests {
 
     fn errno(errno: Errno) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(errno.raw_os_error()))
+    }
+
+    #[test]
+    fn the_staging_is_judged_on_tmp_and_on_antiq_while_tmp_is_missing() {
+        let temp = crate::testing::tree::TempCollection::minimal();
+        let collection = Collection::find(temp.root()).expect("a collection");
+        assert_eq!(measured_tmp(&collection).to_string(), ".antiq/tmp");
+
+        std::fs::remove_dir(collection.tmp_dir()).expect("tmp is empty");
+
+        assert_eq!(measured_tmp(&collection).to_string(), ".antiq");
     }
 
     #[test]

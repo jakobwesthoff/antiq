@@ -8,7 +8,7 @@ use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::commands::restore::{
     Brought, Hooks, RealHooks, RestoreError, Skipped, Step, TargetProblem, bring_back,
-    check_destination, check_same_volume, choose_version,
+    check_destination, check_same_volume, choose_version, measured_tmp,
 };
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
@@ -330,15 +330,15 @@ impl Run<'_> {
                     }
                     .into());
                 }
-                let tmp = RelPath::parse(".antiq/tmp").expect("a valid path");
-                check_same_volume(self.root, hooks, &tmp, &chosen.piece, &missing)?;
+                let staging = measured_tmp(self.collection);
+                check_same_volume(self.root, hooks, &staging, &chosen.piece, &missing)?;
             }
             Err(error) if concerned(&chosen.piece.to_string()) => warnings.push(unjudged(&error)),
             Err(error) => return Err(error.into()),
         }
         let needed = chosen.listing.bytes;
         let available = hooks
-            .available_space(&self.collection.tmp_dir())
+            .available_space(&self.collection.measured_tmp_dir())
             .map_err(RestoreError::from)?;
         plan.push_command(UnearthAction {
             kind: "unearth",

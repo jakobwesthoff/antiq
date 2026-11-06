@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 /// The directory that marks a collection.
 const ANTIQ_DIR: &str = ".antiq";
 
+/// The directories below `.antiq/` that exist from the start, in the order
+/// `init` makes them. `lock` is made by the first run that needs it.
+pub(crate) const LAYOUT: [&str; 5] = ["tmp", "trash", "doomed", "recovered", "pieces"];
+
 /// A collection: the directory that holds `.antiq/`, with the config read
 /// from it.
 #[derive(Debug)]
@@ -92,6 +96,19 @@ impl Collection {
 
     pub fn pieces_dir(&self) -> PathBuf {
         self.antiq_dir().join("pieces")
+    }
+
+    /// The folder to measure the device and the free space of the staging
+    /// area on: `tmp/`, or `.antiq/` while `tmp/` is missing, since a run
+    /// creates `tmp/` there before it stages anything. A dry run asks this
+    /// before the run has created it.
+    pub fn measured_tmp_dir(&self) -> PathBuf {
+        let tmp = self.tmp_dir();
+        if fs::symlink_metadata(&tmp).is_ok() {
+            tmp
+        } else {
+            self.antiq_dir()
+        }
     }
 
     pub fn trash_dir(&self) -> PathBuf {
@@ -291,6 +308,17 @@ mod tests {
         assert_eq!(collection.doomed_dir(), antiq.join("doomed"));
         assert_eq!(collection.recovered_dir(), antiq.join("recovered"));
         assert_eq!(collection.pieces_dir(), antiq.join("pieces"));
+    }
+
+    #[test]
+    fn the_staging_area_is_measured_on_tmp_or_on_antiq_while_tmp_is_missing() {
+        let temp = TempCollection::minimal();
+        let collection = Collection::find(temp.root()).expect("a collection");
+        assert_eq!(collection.measured_tmp_dir(), collection.tmp_dir());
+
+        fs::remove_dir(collection.tmp_dir()).expect("tmp is empty");
+
+        assert_eq!(collection.measured_tmp_dir(), collection.antiq_dir());
     }
 
     #[test]

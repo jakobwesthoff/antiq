@@ -8,7 +8,7 @@ use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::commands::restore::{
     Brought, Hooks, Picked, Placement, RealHooks, RestoreError, Skipped, Source, TargetProblem,
-    bring_back_to, check_destination, check_same_volume, choose_version_to_fork,
+    bring_back_to, check_destination, check_same_volume, choose_version_to_fork, measured_tmp,
 };
 use crate::commands::unearth::{complete_stamps, concerns, gives_back_to};
 use crate::error::{ErrorKind, HasKind};
@@ -334,8 +334,8 @@ impl Run<'_> {
                         problem: TargetProblem::Taken,
                     }));
                 }
-                let tmp = RelPath::parse(".antiq/tmp").expect("a valid path");
-                check_same_volume(self.root, hooks, &tmp, &destination, &missing)
+                let staging = measured_tmp(self.collection);
+                check_same_volume(self.root, hooks, &staging, &destination, &missing)
                     .map_err(|error| self.refuse(error))?;
             }
             Err(error) if self.request.name.is_none() && concerned(&destination.to_string()) => {
@@ -349,7 +349,7 @@ impl Run<'_> {
         let skipped = match bytes {
             Some(needed) => {
                 let available = hooks
-                    .available_space(&self.collection.tmp_dir())
+                    .available_space(&self.collection.measured_tmp_dir())
                     .map_err(RestoreError::from)?;
                 (available < needed).then_some(SkippedNote {
                     reason: "no_space",

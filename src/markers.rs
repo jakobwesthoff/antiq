@@ -216,7 +216,9 @@ fn with_owner_write(
 /// Refuses a top on another device than `.antiq/tmp/` as a mount point.
 /// A marker is written in `tmp/` and renamed into place, which does not
 /// work across devices; `put` asks this before it writes anything, and a
-/// dry run asks it to refuse the same top.
+/// dry run asks it to refuse the same top. A dry run can ask before the
+/// run has created a missing `tmp/`: the device of `.antiq/` is the one
+/// the new folder lies on.
 pub(crate) fn ensure_same_device(
     root: &TreeRoot,
     top: &RelPath,
@@ -224,7 +226,15 @@ pub(crate) fn ensure_same_device(
 ) -> Result<(), MarkerError> {
     let tmp = RelPath::parse(TMP).expect("the temporary folder is a valid path");
     let device_of = |path: &RelPath| site.device(root, path).map_err(failure("stat", root, path));
-    if device_of(top)? != device_of(&tmp)? {
+    let antiq = RelPath::parse(".antiq").expect("the layout folder is a valid path");
+    let tmp_device = match site.device(root, &tmp) {
+        Ok(device) => device,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => site
+            .device(root, &antiq)
+            .map_err(|_| failure("stat", root, &tmp)(error))?,
+        Err(error) => return Err(failure("stat", root, &tmp)(error).into()),
+    };
+    if device_of(top)? != tmp_device {
         return Err(MarkerError::MountPoint {
             path: root.prefix().concat(top),
         });
@@ -862,6 +872,15 @@ mod tests {
 
         assert!(matches!(error, MarkerError::MountPoint { .. }), "{error}");
         assert!(temp_leftovers(&tree).is_empty());
+    }
+
+    #[test]
+    fn a_missing_tmp_is_measured_by_the_device_of_antiq() {
+        let tree = collection();
+        fs::remove_dir(tree.path(".antiq/tmp")).expect("tmp is empty");
+        let root = open(&tree);
+
+        ensure_same_device(&root, &path("p"), &Probe::default()).expect("one device");
     }
 
     #[test]

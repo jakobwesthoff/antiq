@@ -5,7 +5,7 @@
 //! The `init` command: making a directory a collection.
 
 use crate::clock::Clock;
-use crate::collection::Collection;
+use crate::collection::{Collection, LAYOUT};
 use crate::commands::survey::{Verdict, survey_with};
 use crate::config::{ConfigDoc, ConfigError};
 use crate::filesystem::atomic::{flush_dir, write_atomic};
@@ -116,10 +116,6 @@ pub struct InitRequest<'a> {
     pub patterns: &'a [String],
     pub dry_run: bool,
 }
-
-/// The directories of the local storage layout that exist from the start.
-/// `lock` is made by the first run that needs it.
-const LAYOUT: [&str; 5] = ["tmp", "trash", "doomed", "recovered", "pieces"];
 
 /// How many `.antiq-init-<pid>-<n>` names are tried before giving up.
 const STAGING_ATTEMPTS: u32 = 100;

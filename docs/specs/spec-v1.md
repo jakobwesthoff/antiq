@@ -734,6 +734,16 @@ runs these repairs, in this order; a dry run lists them instead. A repair
 that fails is a warning naming the path. Whenever a tree leaves `trash/`
 or `doomed/`, the parents that became empty go too. (ADR 0059)
 
+Before repair 1, the run creates every folder of `.antiq/` that "Store
+layout" names and that is missing: `tmp/`, `trash/`, `doomed/`,
+`recovered/` and `pieces/`. `push` leaves `tmp/`, `trash/` and `doomed/`
+out of the target, so a copy from the target lacks them. Each created
+folder is flushed together with its parent, like every directory antiq
+creates. A name that something other than a directory holds is left as it
+is. A folder that cannot be created is a warning naming its path. A dry
+run lists the creations first, and while `tmp/` is missing it judges
+the volume and the free space of the staging on `.antiq/`.
+
 1. **Interrupted archive step 4:** for each
    `.antiq/tmp/pack/<stamp>/<piece path>/` whose sidecars already lie in
    `.antiq/pieces/<path>/` without their `.tar.zst`: delete those
@@ -1809,6 +1819,7 @@ is a version stamp or the name of a stamp folder.
 
 | `repair` | Repair | Fields |
 |----------|--------|--------|
+| `create_folder` | before 1 | `folder` (name of the missing folder below `.antiq/`) |
 | `delete_sidecars` | 1 | `piece` (store folder), `version` (stamp) |
 | `delete_temporary` | 2 | `entry` (name in `tmp/`) |
 | `delete_doomed` | 3 | `stamp` (absent for an entry directly in `doomed/`), `tree` |
