@@ -17,15 +17,32 @@ use crate::idle::IdleError;
 use crate::listing::ListingError;
 use crate::lock::LockError;
 use crate::machine::MachineError;
+use crate::markers::MarkerError;
+use crate::ops::archive::ArchiveError;
+use crate::ops::forget::ForgetError;
+use crate::ops::fork::ForkError;
+use crate::ops::grep::GrepError;
+use crate::ops::import::ImportError;
 use crate::ops::init::InitError;
+use crate::ops::list::ListError;
+use crate::ops::pin::PinCommandError;
+use crate::ops::push::PushError;
+use crate::ops::rebuild::RebuildError;
+use crate::ops::restore::RestoreError;
+use crate::ops::status::StatusError;
+use crate::ops::survey::SurveyError;
+use crate::ops::unearth::UnearthError;
 use crate::pack::PackError;
 use crate::pin::PinError;
+use crate::query::QueryError;
 use crate::reference::ReferenceError;
 use crate::relpath::RelPathError;
 use crate::repair::RepairError;
+use crate::rules::RulesError;
 use crate::run::RunError;
 use crate::select::SelectError;
 use crate::sysmem::SysmemError;
+use crate::versions::VersionsError;
 use crate::walk::WalkError;
 use jiff::Timestamp;
 use serde_json::{Map, Value};
@@ -147,6 +164,40 @@ pub enum Error {
     #[error(transparent)]
     Sysmem(#[from] SysmemError),
     #[error(transparent)]
+    Archive(#[from] ArchiveError),
+    #[error(transparent)]
+    Forget(#[from] ForgetError),
+    #[error(transparent)]
+    Fork(#[from] ForkError),
+    #[error(transparent)]
+    Grep(#[from] GrepError),
+    #[error(transparent)]
+    Import(#[from] ImportError),
+    #[error(transparent)]
+    List(#[from] ListError),
+    #[error(transparent)]
+    PinCommand(#[from] PinCommandError),
+    #[error(transparent)]
+    Push(#[from] PushError),
+    #[error(transparent)]
+    Rebuild(#[from] RebuildError),
+    #[error(transparent)]
+    Restore(#[from] RestoreError),
+    #[error(transparent)]
+    Status(#[from] StatusError),
+    #[error(transparent)]
+    Survey(#[from] SurveyError),
+    #[error(transparent)]
+    Unearth(#[from] UnearthError),
+    #[error(transparent)]
+    Marker(#[from] MarkerError),
+    #[error(transparent)]
+    Query(#[from] QueryError),
+    #[error(transparent)]
+    Rules(#[from] RulesError),
+    #[error(transparent)]
+    Versions(#[from] VersionsError),
+    #[error(transparent)]
     Walk(#[from] WalkError),
 }
 
@@ -172,6 +223,23 @@ impl Error {
             Error::Run(e) => e.kind(),
             Error::Select(e) => e.kind(),
             Error::Sysmem(e) => e.kind(),
+            Error::Archive(e) => e.kind(),
+            Error::Forget(e) => e.kind(),
+            Error::Fork(e) => e.kind(),
+            Error::Grep(e) => e.kind(),
+            Error::Import(e) => e.kind(),
+            Error::List(e) => e.kind(),
+            Error::PinCommand(e) => e.kind(),
+            Error::Push(e) => e.kind(),
+            Error::Rebuild(e) => e.kind(),
+            Error::Restore(e) => e.kind(),
+            Error::Status(e) => e.kind(),
+            Error::Survey(e) => e.kind(),
+            Error::Unearth(e) => e.kind(),
+            Error::Marker(e) => e.kind(),
+            Error::Query(e) => e.kind(),
+            Error::Rules(e) => e.kind(),
+            Error::Versions(e) => e.kind(),
             Error::Walk(e) => e.kind(),
         }
     }
@@ -433,5 +501,32 @@ mod tests {
             serde_json::Value::Object(error.details()),
             json!({"pid": 4242, "started": "2026-11-03T10:00:00Z"})
         );
+    }
+
+    #[test]
+    fn every_module_and_command_error_converts_and_has_a_kind() {
+        fn wraps<E: Into<Error> + HasKind>() {}
+        wraps::<crate::versions::VersionsError>();
+        wraps::<crate::rules::RulesError>();
+        wraps::<crate::markers::MarkerError>();
+        wraps::<crate::query::QueryError>();
+        wraps::<crate::ops::archive::ArchiveError>();
+        wraps::<crate::ops::unearth::UnearthError>();
+        wraps::<crate::ops::fork::ForkError>();
+        wraps::<crate::ops::forget::ForgetError>();
+        wraps::<crate::ops::rebuild::RebuildError>();
+        wraps::<crate::ops::import::ImportError>();
+        wraps::<crate::ops::list::ListError>();
+        wraps::<crate::ops::grep::GrepError>();
+        wraps::<crate::ops::status::StatusError>();
+        wraps::<crate::ops::pin::PinCommandError>();
+        wraps::<crate::ops::push::PushError>();
+        wraps::<crate::ops::survey::SurveyError>();
+        wraps::<crate::ops::restore::RestoreError>();
+    }
+
+    #[test]
+    fn the_library_can_name_itself_by_its_crate_name() {
+        assert_eq!(antiq::error::ErrorKind::Usage, ErrorKind::Usage);
     }
 }

@@ -9,6 +9,11 @@
 #[path = "../../tests/support/tree.rs"]
 pub mod tree;
 
+// The binary tests use the same file; each test crate uses a part of it.
+#[allow(dead_code)]
+#[path = "../../tests/support/versions.rs"]
+pub mod versions;
+
 pub mod package;
 mod pool;
 pub use pool::shared_pool;

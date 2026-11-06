@@ -6,6 +6,10 @@
 //! `src/main.rs` parses arguments and reports errors; everything else
 //! lives here.
 
+// Lets a fixture shared with the binary tests through `#[path]` use `antiq::`
+// paths in both crates.
+extern crate self as antiq;
+
 pub mod clock;
 pub mod collection;
 pub mod config;
@@ -17,19 +21,23 @@ pub mod interact;
 pub mod listing;
 pub mod lock;
 pub mod machine;
+pub mod markers;
 pub mod ops;
 pub mod pack;
 pub mod pin;
 pub mod plan;
+pub mod query;
 pub mod reference;
 pub mod relpath;
 pub mod remote;
 pub mod repair;
 pub mod report;
+pub mod rules;
 pub mod run;
 pub mod select;
 pub mod sysmem;
 pub mod tree;
+pub mod versions;
 pub mod walk;
 
 pub use error::Error;
