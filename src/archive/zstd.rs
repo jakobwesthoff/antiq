@@ -126,6 +126,8 @@ fn encoder_with<W: Write>(
         fed: 0,
         #[cfg(test)]
         reads: 0,
+        #[cfg(test)]
+        output_only: (0, 0),
     };
     Ok(ProgressEncoder {
         writer: Writer::new(out, operation),
@@ -184,6 +186,10 @@ struct Counting {
     fed: u64,
     #[cfg(test)]
     reads: u64,
+    /// Calls of `run` that took no input and moved output, and how many of
+    /// them read the progression.
+    #[cfg(test)]
+    output_only: (u64, u64),
 }
 
 impl Counting {
@@ -224,8 +230,15 @@ impl Operation for Counting {
         // finishing, so it reports too, or the bar would stand still for a
         // whole job.
         let only_output = taken == 0 && output.pos() > output_before;
+        #[cfg(test)]
+        let reads_before = self.reads;
         if self.fed >= POLL_EVERY_BYTES || only_output {
             self.report();
+        }
+        #[cfg(test)]
+        if only_output {
+            self.output_only.0 += 1;
+            self.output_only.1 += self.reads - reads_before;
         }
         Ok(hint)
     }
@@ -497,38 +510,27 @@ mod tests {
     }
 
     #[test]
-    fn the_counter_moves_while_a_full_input_buffer_waits_for_a_job() {
+    fn the_progression_is_read_by_the_calls_that_only_move_output_out() {
         // Two workers on jobs of 1 MiB hold a few MiB of input. One write of
         // 32 MiB therefore spends most of its time with a full buffer, in
-        // calls that take no input and only move output out.
-        const JOB: u64 = 1 << 20;
+        // calls that take no input and only move compressed output out.
         let settings = ZstdSettings {
             preset: Preset::Fast,
             workers: 2,
         };
         let mut parameters = parameters(&settings);
-        parameters.push(CParameter::JobSize(JOB as u32));
+        parameters.push(CParameter::JobSize(1 << 20));
         parameters.push(CParameter::CompressionLevel(9));
         let counter = Counter::new();
-        let sink = Recording {
-            counter: counter.clone(),
-            seen: Vec::new(),
-        };
         let mut encoder =
-            encoder_with(sink, &parameters, Some(&counter), None).expect("an encoder");
+            encoder_with(Vec::new(), &parameters, Some(&counter), None).expect("an encoder");
         encoder
             .write_all(&sample(32 << 20))
-            .expect("the sink accepts");
+            .expect("a vec accepts the stream");
 
-        // The counter is read each time compressed output arrives, before
-        // the frame ends. Without a read in the calls that take no input, it
-        // stands still for two jobs or more and then jumps.
-        let seen = &encoder.writer.writer().seen;
-        let widest_jump = seen.windows(2).map(|pair| pair[1] - pair[0]).max();
-        assert!(
-            widest_jump.is_some_and(|jump| jump <= JOB),
-            "{widest_jump:?}"
-        );
+        let (calls, read) = encoder.writer.operation().output_only;
+        assert!(calls > 0, "the buffer filled up and waited for a job");
+        assert_eq!(read, calls, "each of those calls reads the progression");
     }
 
     #[test]
