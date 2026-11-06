@@ -1969,6 +1969,7 @@ path, name, created, size, sha256, payload_version}`; `skipped`, as `{file,
 id, reason}` where `reason` is `already_imported`, `entry_completed` or
 `same_archive_in_this_run` and `id` is left out for the last; `refused`, as
 `{file, reason}`; and `warnings`. `file` is the path as it was given. A
-`--dry-run` adds `dry_run` and `actions` (`{action: "import", file, path}`)
-before them, and `imported` is empty. A refused file makes the run exit 3,
+`--dry-run` adds `dry_run` and `actions` (`{action: "import", file, path}`,
+an empty list when nothing would be imported) before them, and `imported`
+is empty. A refused file makes the run exit 3,
 a skipped one does not.

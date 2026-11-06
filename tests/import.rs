@@ -369,6 +369,35 @@ fn a_dry_run_in_json_has_the_actions() {
     assert_eq!(world.objects(), 0);
 }
 
+const DRY_RUN_KEYS: [&str; 8] = [
+    "format", "command", "dry_run", "actions", "imported", "skipped", "refused", "warnings",
+];
+
+#[test]
+fn a_dry_run_in_json_has_an_empty_actions_list_when_everything_is_skipped() {
+    let mut world = World::new();
+    world.archive("proj.tar.zst", FILES);
+    world.import(&["proj.tar.zst"]);
+    let run = world.json_import(&["--dry-run", "proj.tar.zst"]);
+    assert_eq!(run.code(), 0);
+    let json = run.json();
+    let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
+    assert_eq!(keys, DRY_RUN_KEYS);
+    assert_eq!(json["actions"], json!([]));
+}
+
+#[test]
+fn a_dry_run_in_json_has_an_empty_actions_list_when_everything_is_refused() {
+    let mut world = World::new();
+    world.temp.tree().file("bad.tar.gz", [0x1F, 0x8B, 8]);
+    let run = world.json_import(&["--dry-run", "bad.tar.gz"]);
+    assert_eq!(run.code(), 3);
+    let json = run.json();
+    let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
+    assert_eq!(keys, DRY_RUN_KEYS);
+    assert_eq!(json["actions"], json!([]));
+}
+
 #[test]
 fn a_dry_run_says_what_it_would_skip() {
     let mut world = World::new();

@@ -176,9 +176,10 @@ pub struct Refused {
 pub struct ImportReport {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
-    /// What a dry run would do; empty after a real run.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub actions: Vec<ImportAction>,
+    /// What a dry run would do, an empty list included. A real run has
+    /// none, and the key is left out of its JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<ImportAction>>,
     pub imported: Vec<Imported>,
     pub skipped: Vec<Skipped>,
     pub refused: Vec<Refused>,
@@ -303,7 +304,7 @@ pub(crate) fn import_with(
     if prepared.candidates.is_empty() {
         return Ok(ImportReport {
             dry_run,
-            actions: Vec::new(),
+            actions: dry_run.then(Vec::new),
             imported: Vec::new(),
             skipped: Vec::new(),
             refused: prepared.refused,
@@ -767,7 +768,7 @@ fn finish(
     let collection = request.collection;
     let mut report = ImportReport {
         dry_run: matches!(started, Started::DryRun { .. }),
-        actions: Vec::new(),
+        actions: None,
         imported: Vec::new(),
         skipped: Vec::new(),
         refused: prepared.refused,
@@ -790,14 +791,16 @@ fn finish(
     }
 
     let Started::Guarded(guard) = started else {
-        report.actions = settled
-            .items
-            .iter()
-            .map(|item| ImportAction::Import {
-                file: item.shown.clone(),
-                path: item.path.clone(),
-            })
-            .collect();
+        report.actions = Some(
+            settled
+                .items
+                .iter()
+                .map(|item| ImportAction::Import {
+                    file: item.shown.clone(),
+                    path: item.path.clone(),
+                })
+                .collect(),
+        );
         return Ok(report);
     };
 
@@ -2188,9 +2191,10 @@ mod tests {
         let file = world.simple("proj.tar.zst");
         let report = world.dry(std::slice::from_ref(&file));
         assert!(report.dry_run);
-        assert_eq!(report.actions.len(), 1);
+        let actions = report.actions.as_deref().expect("a dry run has actions");
+        assert_eq!(actions.len(), 1);
         assert_eq!(
-            report.actions[0].describe(),
+            actions[0].describe(),
             format!("import {} as proj", file.display())
         );
         assert!(report.imported.is_empty());
@@ -2205,7 +2209,7 @@ mod tests {
         world.run(std::slice::from_ref(&file));
         let bad = world.input("bad.tar.gz", &[0x1F, 0x8B, 8]);
         let report = world.dry(&[file, bad]);
-        assert!(report.actions.is_empty());
+        assert_eq!(report.actions.as_deref(), Some(&[][..]));
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.refused.len(), 1);
     }

@@ -71,7 +71,7 @@ fn render(report: &ImportReport) -> Lines {
 
     if report.dry_run {
         let plan = Plan {
-            actions: report.actions.clone(),
+            actions: report.actions.clone().unwrap_or_default(),
             brake: None,
         };
         // The lines about skipped and refused files already say there is
@@ -146,7 +146,7 @@ mod tests {
     fn report() -> ImportReport {
         ImportReport {
             dry_run: false,
-            actions: Vec::new(),
+            actions: None,
             imported: Vec::new(),
             skipped: Vec::new(),
             refused: Vec::new(),
@@ -237,10 +237,10 @@ mod tests {
     fn a_dry_run_with_actions_prints_them_as_a_plan() {
         let lines = render(&ImportReport {
             dry_run: true,
-            actions: vec![ImportAction::Import {
+            actions: Some(vec![ImportAction::Import {
                 file: "a.tar.zst".into(),
                 path: RelPath::parse("p").expect("a path"),
-            }],
+            }]),
             ..report()
         });
         assert_eq!(lines.stdout, ["Would import a.tar.zst as p"]);
