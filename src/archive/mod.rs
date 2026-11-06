@@ -116,6 +116,9 @@ pub struct WalkRules {
     /// does the strict verify give such a directory owner access for the
     /// read and put its mode back, and only then do directory times count.
     pub staged: bool,
+    /// The folder stays where it is, so what only stops a removal is no
+    /// problem for it: locked entries, and the folder being a mount root.
+    pub kept: bool,
 }
 
 /// What the volume that receives an extraction can hold. Extraction
@@ -197,13 +200,6 @@ pub trait Packager {
         out: &mut dyn Write,
     ) -> Result<Packed, PackError>;
 
-    fn verify_strict(
-        &self,
-        package: &Path,
-        root: &TreeRoot,
-        rules: &WalkRules,
-    ) -> Result<Verified, PackError>;
-
     fn list(&self, package: &Path) -> Result<Vec<ListingEntry>, PackError>;
 
     fn unpack(
@@ -264,15 +260,6 @@ impl Packager for TarZstd {
             listing,
             notes,
         })
-    }
-
-    fn verify_strict(
-        &self,
-        package: &Path,
-        root: &TreeRoot,
-        rules: &WalkRules,
-    ) -> Result<Verified, PackError> {
-        verify::verify_strict(package, root, rules)
     }
 
     fn list(&self, package: &Path) -> Result<Vec<ListingEntry>, PackError> {

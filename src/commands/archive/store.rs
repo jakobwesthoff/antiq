@@ -13,6 +13,7 @@ use crate::archive::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Lease, Pool, workers_for_piece,
 };
 use crate::archive::tar_write::sparse_warning;
+use crate::archive::verify::verify_strict;
 use crate::archive::zstd::ZstdSettings;
 use crate::archive::{PackError, PackNote, PackSettings, Packager, TarZstd, Verified, WalkRules};
 use crate::clock::Clock;
@@ -55,18 +56,25 @@ pub(crate) struct StoreContext<'a> {
     pub zstd: &'a (dyn Fn(u32) -> ZstdSettings + Sync),
 }
 
+/// Where the folder of a piece lies.
+#[derive(Clone, Copy)]
+pub(crate) enum Folder<'a> {
+    /// In the collection, at this path in its live spelling. The folder is
+    /// removed once its version is stored.
+    Live(&'a RelPath),
+    /// Outside the collection, opened as a root. The folder stays where it
+    /// is.
+    Outside(&'a TreeRoot),
+}
+
 /// The piece to store.
 pub(crate) struct StoreRequest<'a> {
-    /// The folder as it lies in the collection, in its live spelling.
-    pub live: &'a RelPath,
+    pub folder: Folder<'a>,
     /// The path of the store folder, in its stored spelling.
     pub stored: &'a RelPath,
     pub tree: &'a PieceTree,
     pub rules: &'a PieceRules,
     pub imported: Option<Timestamp>,
-    /// The folder itself, opened as a root, when it lies outside the
-    /// collection. Without it the folder is `live` in the collection.
-    pub outside: Option<&'a TreeRoot>,
     /// The version time. Without it the version gets the time of the clock
     /// once the piece has its room and its workers.
     pub time: Option<Timestamp>,
@@ -261,20 +269,19 @@ fn stage_and_store(
     })?;
     let staging_path = tmp_dir.join(path_of(chain));
 
-    let collection_root = TreeRoot::open(context.collection.root()).map_err(|source| {
-        Abort::of(stage_error(io_error("open", context.collection.root())(
-            source,
-        )))
-    })?;
     let live_in_collection;
-    let live_root = match request.outside {
-        Some(folder) => folder,
-        None => {
-            live_in_collection = collection_root.sub(request.live).map_err(|source| {
-                Abort::of(stage_error(io_error(
-                    "open",
-                    Path::new(&request.live.to_string()),
-                )(source)))
+    let live_root = match request.folder {
+        Folder::Outside(root) => root,
+        Folder::Live(live) => {
+            let collection_root = TreeRoot::open(context.collection.root()).map_err(|source| {
+                Abort::of(stage_error(io_error("open", context.collection.root())(
+                    source,
+                )))
+            })?;
+            live_in_collection = collection_root.sub(live).map_err(|source| {
+                Abort::of(stage_error(io_error("open", Path::new(&live.to_string()))(
+                    source,
+                )))
             })?;
             &live_in_collection
         }
@@ -383,9 +390,9 @@ fn stage_and_store(
     let rules = WalkRules {
         rules: request.rules.clone(),
         staged: false,
+        kept: matches!(request.folder, Folder::Outside(_)),
     };
-    let verified = TarZstd
-        .verify_strict(&archive_path, live_root, &rules)
+    let verified = verify_strict(&archive_path, live_root, &rules, context.seams.walk_hooks())
         .map_err(|source| verify_abort(verify_error(source)))?;
     if verified.listing() != packed.listing.as_slice() {
         return Err(Abort::of(verify_error(PackError::Damaged(
@@ -486,7 +493,7 @@ pub(crate) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPa
 
 /// The sum of the sizes of the regular files that are packed, a file with
 /// several names counted once.
-fn apparent_size(tree: &PieceTree) -> u64 {
+pub(crate) fn apparent_size(tree: &PieceTree) -> u64 {
     let mut seen = HashSet::new();
     let mut sum = 0u64;
     for entry in tree.packed_entries() {
@@ -557,7 +564,7 @@ mod tests {
     use crate::select::Rules;
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
-    use crate::walk::walk_piece;
+    use crate::walk::{Call, Hooks, walk_piece};
     use std::fs;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
@@ -579,6 +586,18 @@ mod tests {
         full_disk: bool,
         before_read_back: Option<Change>,
         before_verify: Option<Change>,
+        /// The folder the verify walks reports that it is a mount root.
+        top_is_mount: bool,
+    }
+
+    impl Hooks for Probe {
+        fn fault(&self, _path: &RelPath, _call: Call) -> Option<io::Error> {
+            None
+        }
+
+        fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
+            reported || (self.top_is_mount && path.is_root())
+        }
     }
 
     struct FullDisk;
@@ -614,6 +633,10 @@ mod tests {
             } else {
                 sink
             }
+        }
+
+        fn walk_hooks(&self) -> &dyn Hooks {
+            self
         }
 
         fn before_read_back(&self, staging: &Path) {
@@ -681,12 +704,11 @@ mod tests {
             zstd: &zstd,
         };
         let request = StoreRequest {
-            live: &piece,
+            folder: Folder::Live(&piece),
             stored: &piece,
             tree: &tree,
             rules: &rules,
             imported: None,
-            outside: None,
             time: None,
         };
         store_version(&context, &request)
@@ -810,6 +832,15 @@ mod tests {
         source: &Path,
         time: Option<Timestamp>,
     ) -> Result<Stored, StoreFailure> {
+        store_outside_with(world, source, time, &RealSeams)
+    }
+
+    fn store_outside_with(
+        world: &World,
+        source: &Path,
+        time: Option<Timestamp>,
+        seams: &dyn Seams,
+    ) -> Result<Stored, StoreFailure> {
         let collection = Collection::find(world.temp.root()).expect("a collection");
         let rules = PieceRules::new(&[], &[]).expect("valid rules");
         let root = TreeRoot::open(source).expect("the source opens");
@@ -828,17 +859,16 @@ mod tests {
             clock: &world.clock,
             pool: shared_pool(),
             ledger: &world.ledger,
-            seams: &RealSeams,
+            seams,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
         };
         let request = StoreRequest {
-            live: &piece,
+            folder: Folder::Outside(&root),
             stored: &piece,
             tree: &tree,
             rules: &rules,
             imported: None,
-            outside: Some(&root),
             time,
         };
         store_version(&context, &request)
@@ -888,6 +918,40 @@ mod tests {
             })
             .collect();
         assert_eq!(members, ["folder/", "folder/a.txt"]);
+    }
+
+    #[test]
+    fn a_folder_outside_that_is_a_mount_root_is_verified_and_stored() {
+        let world = world();
+        let source = outside_source();
+        let probe = Probe {
+            top_is_mount: true,
+            ..Probe::default()
+        };
+
+        let stored = store_outside_with(&world, source.path(), None, &probe)
+            .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
+
+        assert_eq!(stored.files, 1);
+    }
+
+    #[test]
+    fn a_live_folder_that_is_a_mount_root_fails_the_verify_and_leaves_nothing() {
+        let world = world();
+        let probe = Probe {
+            top_is_mount: true,
+            ..Probe::default()
+        };
+
+        let failure = failure(&world, &probe);
+
+        assert!(
+            describe(&failure).contains("TreeHasProblems(MountPoint"),
+            "{}",
+            describe(&failure)
+        );
+        staging_is_gone(&world);
+        store_is_empty(&world);
     }
 
     #[test]

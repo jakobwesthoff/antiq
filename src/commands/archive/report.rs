@@ -57,7 +57,7 @@ pub struct SkippedPiece {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reason {
     pub kind: &'static str,
-    /// Relative to the collection root.
+    /// Relative to the collection root; for `import`, to the folder.
     pub path: String,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +66,7 @@ pub struct Reason {
 
 impl Reason {
     /// A piece named on the command line carries a pin.
-    pub(crate) fn pinned(pin: &RelPath) -> Reason {
+    pub(super) fn pinned(pin: &RelPath) -> Reason {
         Reason {
             kind: "pinned",
             path: pin.to_string(),
@@ -76,7 +76,7 @@ impl Reason {
     }
 
     /// A piece named on the command line has no file that counts.
-    pub(crate) fn empty(piece: &RelPath) -> Reason {
+    pub(super) fn empty(piece: &RelPath) -> Reason {
         Reason {
             kind: "empty",
             path: piece.to_string(),

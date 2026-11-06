@@ -54,7 +54,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
-use store::{StoreContext, StoreFailure, StoreRequest, store_version};
+use store::{Folder, StoreContext, StoreFailure, StoreRequest, store_version};
 
 /// Which pieces to archive.
 #[derive(Debug, Clone)]
@@ -438,12 +438,11 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
         zstd: env.zstd,
     };
     let request = StoreRequest {
-        live: piece,
+        folder: Folder::Live(piece),
         stored: &stored_path,
         tree: &tree,
         rules: &setup.piece_rules,
         imported: None,
-        outside: None,
         time: None,
     };
     let stored = match store_version(&store_context, &request) {

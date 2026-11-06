@@ -101,6 +101,51 @@ impl Hooks for RealFs {
     }
 }
 
+/// The hooks for the walk of a folder that stays where it is, as `import`
+/// and its verify walk it: the folder being the root of a mount does not
+/// make it a mount point, since nothing moves it. Mounts below it still do.
+pub(crate) struct KeptFolder<'a>(pub(crate) &'a dyn Hooks);
+
+impl Hooks for KeptFolder<'_> {
+    fn device(&self, path: &RelPath, reported: u64) -> u64 {
+        self.0.device(path, reported)
+    }
+
+    fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
+        !path.is_root() && self.0.mount_root(path, reported)
+    }
+
+    fn prefix_mount_root(&self, prefix: &RelPath, reported: bool) -> bool {
+        self.0.prefix_mount_root(prefix, reported)
+    }
+
+    fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+        self.0.fault(path, call)
+    }
+
+    fn owner(&self, path: &RelPath, reported: u32) -> u32 {
+        self.0.owner(path, reported)
+    }
+
+    fn listed_kind(&self, path: &RelPath, reported: EntryKind) -> EntryKind {
+        self.0.listed_kind(path, reported)
+    }
+
+    fn max_depth(&self) -> usize {
+        self.0.max_depth()
+    }
+}
+
+/// Whether `problem` only matters when the folder is removed or moved: a
+/// locked entry cannot be deleted, a locked parent cannot let the folder
+/// go. A folder that stays is not held back by either.
+pub(crate) fn only_blocks_removal(problem: &Problem) -> bool {
+    matches!(
+        problem,
+        Problem::Locked { .. } | Problem::LockedParent { .. }
+    )
+}
+
 /// Whether the process, or the system, has no file descriptor left. That
 /// is a problem of the run, not of the entry that happened to need one.
 pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {

@@ -12,8 +12,8 @@ use crate::filesystem::tree::{TreeError, TreeRoot};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::RelPath;
 use crate::select::Rules;
-use crate::tree::{EntryKind, TreeEntry};
-use crate::walk::{MAX_DEPTH, walk_piece};
+use crate::tree::{EntryKind, Problem, TreeEntry};
+use crate::walk::{Hooks, KeptFolder, MAX_DEPTH, RealFs, only_blocks_removal, walk_piece_with};
 use rustix::io::Errno;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -189,24 +189,26 @@ impl Compared {
 ///
 /// The package must be one antiq wrote in this run or one that passed the
 /// structure check of `extract`, as it is read with `read_package`.
-pub fn verify_strict(
+pub(crate) fn verify_strict(
     package: &Path,
     root: &TreeRoot,
     rules: &WalkRules,
+    hooks: &dyn Hooks,
 ) -> Result<Verified, PackError> {
-    verify_strict_observed(package, root, rules, &mut |_, _| {})
+    verify_strict_observed(package, root, rules, hooks, &mut |_, _| {})
 }
 
 fn verify_strict_observed(
     package: &Path,
     root: &TreeRoot,
     rules: &WalkRules,
+    hooks: &dyn Hooks,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Verified, PackError> {
     // The stream is read to its end first, so a damaged package never
     // reaches the folder.
     let package = read_package(package)?;
-    let (folder, moved) = read_folder_granted(root, rules, observe)?;
+    let (folder, moved) = read_folder_granted(root, rules, hooks, observe)?;
     let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
@@ -242,13 +244,14 @@ fn verify_strict_observed(
 fn read_folder_granted(
     root: &TreeRoot,
     rules: &WalkRules,
+    hooks: &dyn Hooks,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<(Folder, Vec<RelPath>), PackError> {
     let mut granted = Granted::new(root);
     if rules.staged {
         granted.grant();
     }
-    let mut folder = read_folder(root, rules, observe, &granted.modes())?;
+    let mut folder = read_folder(root, rules, hooks, observe, &granted.modes())?;
     let restored = granted.restore()?;
     // Restoring a mode changes the directory's ctime, so the record takes
     // the ctime from the directory as it is left. Anything else that
@@ -388,7 +391,7 @@ fn compare_with_listing_observed(
     rules: &WalkRules,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Compared, PackError> {
-    let (folder, moved) = read_folder_granted(root, rules, observe)?;
+    let (folder, moved) = read_folder_granted(root, rules, &RealFs, observe)?;
     let mut differences = differences_from(listing, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     differences.sort_by(|a, b| a.path().cmp(b.path()));
@@ -435,14 +438,18 @@ struct Folder {
 fn read_folder(
     root: &TreeRoot,
     rules: &WalkRules,
+    hooks: &dyn Hooks,
     observe: &mut dyn FnMut(Stage, &RelPath),
     modes: &HashMap<RelPath, u32>,
 ) -> Result<Folder, PackError> {
     let no_rules = Rules::new(&[], &[]).expect("no patterns are valid");
-    let walked = walk_piece(root, &RelPath::root(), &no_rules, &rules.rules)?;
+    let kept = KeptFolder(hooks);
+    let hooks: &dyn Hooks = if rules.kept { &kept } else { hooks };
+    let walked = walk_piece_with(root, &RelPath::root(), &no_rules, &rules.rules, hooks)?;
     // Packing refuses a walk with a problem, so no package holds such a
     // folder.
-    if let Some(problem) = walked.problems().first() {
+    let blocking = |problem: &&Problem| !(rules.kept && only_blocks_removal(problem));
+    if let Some(problem) = walked.problems().iter().find(blocking) {
         return Err(PackError::TreeHasProblems(problem.clone()));
     }
     let mut lines = Vec::new();
@@ -899,6 +906,7 @@ mod tests {
         WalkRules {
             rules: PieceRules::new(&[".DS_Store".to_string()], &[]).expect("valid rules"),
             staged: false,
+            ..WalkRules::default()
         }
     }
 
@@ -1265,7 +1273,7 @@ mod tests {
     fn verify_with(tree: &Tree, package: &[u8], rules: &WalkRules) -> Result<Verified, PackError> {
         let (_dir, file) = on_disk(package);
         let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
-        verify_strict(&file, &root, rules)
+        verify_strict(&file, &root, rules, &RealFs)
     }
 
     fn verify(tree: &Tree, package: &[u8]) -> Result<Verified, PackError> {
@@ -1420,7 +1428,8 @@ mod tests {
         std::fs::rename(tree.path("proj"), tree.path("renamed")).expect("renamed");
         let (_dir, file) = on_disk(&packaged.bytes);
         let root = TreeRoot::open(&tree.path("renamed")).expect("opens");
-        verify_strict(&file, &root, &WalkRules::default()).expect("the name does not count");
+        verify_strict(&file, &root, &WalkRules::default(), &RealFs)
+            .expect("the name does not count");
     }
 
     #[test]
@@ -1919,7 +1928,7 @@ mod tests {
                 std::fs::write(directory.join("g"), "new").expect("written");
             }
         };
-        let error = verify_strict_observed(&file, &root, &staged(), &mut observe)
+        let error = verify_strict_observed(&file, &root, &staged(), &RealFs, &mut observe)
             .expect_err("the directory changed");
         assert!(
             matches!(&error, PackError::Differs(found)

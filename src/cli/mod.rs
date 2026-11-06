@@ -246,7 +246,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Fork(args) => cmd::fork::run(&ctx, args, out),
         Command::Forget(args) => cmd::forget::run(&ctx, args, out),
         Command::Rebuild(args) => cmd::rebuild::run(&ctx, args, out),
-        Command::Import(args) => cmd::import::run(&ctx, args),
+        Command::Import(args) => cmd::import::run(&ctx, args, out),
         Command::List(args) => cmd::list::run(&ctx, args, out),
         Command::Grep(args) => cmd::grep::run(&ctx, args, out),
         Command::Pin(args) => cmd::pin::pin(&ctx, args, out),

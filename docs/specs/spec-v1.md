@@ -1168,7 +1168,10 @@ outside the collection directly as a version of `<path>` (default: the
 folder's name), with steps 1 to 4 of `archive`; the source folder is left
 in place.
 
-- The source must not lie inside the collection.
+- The source must not lie inside the collection, and must be a folder, not
+  a symlink to one. A relative `<folder>` and a relative `--as` start at
+  the directory `-C` names, else at the current directory. `--as` is
+  resolved as a piece reference path is (see "Piece references").
 - `<path>` must be one the patterns select, not excluded, not in
   `.antiq/` and not inside another piece. A pin on a live folder at
   `<path>` does not block the import.
@@ -1177,17 +1180,40 @@ in place.
   import, and a source without a countable file is refused as empty, also
   with `--time`.
 - The ignore and timeless rules of the collection and the folder's own
-  rule files apply, and so do the walk refusals.
+  rule files apply, and so do the walk refusals. The exceptions are those
+  that only matter when a folder is removed or moved, which import never
+  does: a locked entry and a locked parent directory are no refusal, and
+  neither is the folder being the root of a mount. A mount below the folder
+  still refuses. The exclude list of the collection names paths of the
+  collection and does not apply inside the folder. A refusal is an error
+  of kind `other` (exit 1) that names each reason, with paths relative to
+  the folder.
 - The version time is the newest counted modification time in the folder,
-  or `--time`. `--time` follows the rules for naming a version: with `T`
-  a UTC stamp, otherwise a local date-time with seconds
-  (`2026-11-04 10:02:11`) in the current zone; a date alone is refused. A
-  version time in the future is refused, naming the file.
+  or `--time`. `--time` is either a UTC version stamp without a counter
+  (`2026-11-04T090211`) or a local date-time with seconds
+  (`2026-11-04 10:02:11`) in the current zone. Anything else is refused as a
+  usage error (exit 2): a date alone, a prefix of a stamp, a stamp with a
+  counter, and a local time that daylight saving time repeats or skips. A
+  version time in the future is refused (exit 1): with the newest file's
+  time the error names that file, with `--time` it names the time. A future
+  file under a `--time` in the past is no obstacle.
 - The listing carries `imported <time>`, the real time of the import.
+- Packing, the verify and the move into the store are those of `archive`
+  steps 2 to 4, with the room measured as in "Free space". When they fail
+  the import is skipped, not refused: `skipped <piece>: <message>` with the
+  reason `differs`, `no_room` or `error` as for `archive`, and exit 3.
+  A version that is stored while its store folder may not be durable is
+  reported as skipped with a message that says it was stored. On success
+  the output is one line, `imported <piece>: version <stamp>`.
 - This is also the way to bring in old archive files: unpack them with
   their original timestamps somewhere temporary, then import each folder.
   (ADR 0009, ADR 0055)
-- `-n` names the version it would create and what it would leave out.
+- `-n` lists the repairs, then `Would import <folder> as <piece>, version
+  <stamp>` (the stamp with the counter the run would get), then `Would
+  leave out <path>` for each ignored entry (a folder once, with a trailing
+  `/`) and for `.antiq-restored`. When the import would not fit it prints
+  `Would skip <piece>: <message>` instead of the import line and exits 3.
+  Refusals are errors in a dry run too, with the same exit code.
 
 ### list
 
@@ -1794,7 +1820,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
@@ -1882,6 +1908,15 @@ A dry run has `actions` and `warnings`: the repair actions first, then
 `basis`, `archive`, `against` (the surviving file the archive is checked
 against; null for `readable_only`) and `write` (the names of the files it
 would write).
+
+`import` adds `imported` (null, or `piece`, `stamp` (the version stamp),
+`version` (its time in UTC, RFC 3339), `archive_bytes`, `files` and `bytes`),
+`skipped` (null, or `piece`, `reason` and `message` as for `archive`),
+`repairs` and `warnings`. A dry run has `actions` and `warnings`: the repair
+actions first, then `{"kind": "import", "source", "piece", "stamp",
+"version", "left_out"}` with `left_out` the list of paths the version leaves
+out, and, when the import would not fit, `skipped` as above in place of that
+action.
 
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
 collection root), `patterns`, `due` (the number of folders the next `archive`

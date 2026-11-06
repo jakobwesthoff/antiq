@@ -10,7 +10,6 @@ mod support;
 use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
-use support::tree::TempCollection;
 
 const COMMANDS: [&str; 13] = [
     "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "list", "grep",
@@ -86,44 +85,6 @@ fn init_takes_no_yes() {
     assert_eq!(run.error_message(), "unexpected argument '--yes' found");
 }
 
-/// For a command line: its arguments parse, outside a collection the run
-/// fails with the kind `not_a_collection`, and inside one with the kind
-/// `not_implemented`.
-macro_rules! command_line {
-    ($name:ident, $command:expr, [$($arg:expr),*]) => {
-        mod $name {
-            use super::*;
-
-            #[test]
-            fn needs_a_collection() {
-                let dir = tempfile::tempdir().expect("the temp dir is writable");
-                let run = Antiq::new()
-                    .args(["--json", "-C"])
-                    .arg(dir.path())
-                    .args([$($arg),*])
-                    .run();
-                assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-                assert_eq!(run.error_kind(), "not_a_collection");
-                assert_eq!(run.json()["command"], $command);
-            }
-
-            #[test]
-            fn is_not_implemented() {
-                let collection = TempCollection::minimal();
-                let run = Antiq::new()
-                    .args(["--json", "-C"])
-                    .arg(collection.root())
-                    .args([$($arg),*])
-                    .run();
-                assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-                assert_eq!(run.error_kind(), "not_implemented");
-                assert_eq!(run.error_message(), concat!($command, " is not implemented"));
-                assert_eq!(run.json()["command"], $command);
-            }
-        }
-    };
-}
-
 /// `status` is built: outside a collection it fails with `not_a_collection`.
 mod status {
     use super::*;
@@ -172,19 +133,37 @@ mod archive {
     }
 }
 
-command_line!(
-    import,
-    "import",
-    [
-        "import",
-        "dir",
-        "--as",
-        "proj",
-        "--time",
-        "2020-01-01",
-        "-n"
-    ]
-);
+/// `import` is built: outside a collection it fails with `not_a_collection`.
+mod import {
+    use super::*;
+
+    #[test]
+    fn needs_a_collection() {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args([
+                "import",
+                "dir",
+                "--as",
+                "proj",
+                "--time",
+                "2020-01-01",
+                "-n",
+            ])
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection");
+        assert_eq!(run.json()["command"], "import");
+    }
+}
 
 #[test]
 fn forget_needs_a_collection() {

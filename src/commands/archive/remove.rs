@@ -528,7 +528,9 @@ mod tests {
     use crate::archive::zstd::ZstdSettings;
     use crate::clock::FixedClock;
     use crate::commands::archive::seams::RealSeams;
-    use crate::commands::archive::store::{StoreContext, StoreRequest, Stored, store_version};
+    use crate::commands::archive::store::{
+        Folder, StoreContext, StoreRequest, Stored, store_version,
+    };
     use crate::filesystem::FilesystemError;
     use crate::filesystem::atomic::recording::Recording;
     use crate::filesystem::atomic::{Durable, RealDurable};
@@ -700,12 +702,11 @@ mod tests {
             zstd: &zstd,
         };
         let request = StoreRequest {
-            live: &piece,
+            folder: Folder::Live(&piece),
             stored: &piece,
             tree: &tree,
             rules: &rules,
             imported: None,
-            outside: None,
             time: None,
         };
         match store_version(&context, &request) {
