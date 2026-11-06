@@ -117,6 +117,22 @@ open, so the discussion survives without the conversation.
   real listings; its speed is still to be measured. The index research
   stays in `docs/research/search-index.md`.
 
+## Decided in round 6 (asqr 01M6K26GZBX00PR52WMGPP4YB5, 2026-11-04)
+
+- The one-way command is `push`. It makes the target an exact mirror,
+  and "backup" would promise to keep deleted data.
+- Listing comment format: the readable, aligned variant, but with the
+  exact byte size, not a rounded one. Columns get fixed generous
+  widths so they line up, and the mode may be octal (the user leans to
+  octal). The user asked why aligned columns should be harder to parse
+  than the column variant; answered in round 7.
+- `status`: no last push. The user wants the layout discussed at the
+  start of the project: every piece one row, sorted (for example by
+  path), a coloured state marker in the first column, then the state
+  details. No grouping by state. An ANSI mock-up was requested.
+- `grep`: measure an embedded search, using ripgrep's library crates
+  (or a comparable Rust crate) inside antiq, not the system `grep`.
+
 ## Earlier open points (round 4, now mostly decided above), asqr 01M6K12ZP94T9VNSDT80ZY080W)
 
 - `unearth` semantics. The user called "the archive stays and
