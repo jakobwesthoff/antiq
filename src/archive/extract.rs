@@ -250,6 +250,8 @@ fn classify<R: Read>(
 enum Placed {
     Directory,
     File,
+    /// A hard link member. Only a regular file member is a hard link target.
+    HardLink,
     Symlink,
 }
 
@@ -296,7 +298,7 @@ impl Placement {
                 if self.placed.get(target) != Some(&Placed::File) {
                     return Err(Refusal::LinkTarget);
                 }
-                Placed::File
+                Placed::HardLink
             }
         };
         self.placed.insert(member.path.clone(), placed);
@@ -1888,6 +1890,31 @@ mod tests {
             staged.lstat(&rel("first")).expect("exists").inode,
             staged.lstat(&rel("second")).expect("exists").inode
         );
+    }
+
+    #[test]
+    fn a_hard_link_to_a_hard_link_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .file("proj/first", 0o644, 1_000_000_000, b"shared")
+            .member(
+                b"proj/second",
+                b'1',
+                0o644,
+                1_000_000_000,
+                b"proj/first",
+                b"",
+            )
+            .member(
+                b"proj/third",
+                b'1',
+                0o644,
+                1_000_000_000,
+                b"proj/second",
+                b"",
+            );
+        sandbox.assert_refused_before_any_write(&archive, Refusal::LinkTarget);
     }
 
     #[test]
