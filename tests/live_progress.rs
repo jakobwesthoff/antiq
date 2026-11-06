@@ -54,6 +54,16 @@ fn has_colour(bytes: &str) -> bool {
     false
 }
 
+/// Whether `time` is an elapsed time as `m:ss` or `h:mm:ss`, whatever the
+/// machine made of it.
+fn is_elapsed(time: &str) -> bool {
+    let parts: Vec<&str> = time.split(':').collect();
+    let digits = |part: &&str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    (parts.len() == 2 || parts.len() == 3)
+        && parts.iter().all(digits)
+        && parts[1..].iter().all(|part| part.len() == 2)
+}
+
 fn is_summary(line: &str, words: &str) -> bool {
     let Some(rest) = line.strip_prefix(words) else {
         return false;
@@ -61,7 +71,7 @@ fn is_summary(line: &str, words: &str) -> bool {
     let Some(time) = rest.strip_prefix("   took ") else {
         return false;
     };
-    time.len() >= 4 && time.chars().all(|c| c.is_ascii_digit() || c == ':')
+    is_elapsed(time)
 }
 
 /// The stdout of a `--json` run on a terminal: one JSON object of the
@@ -268,13 +278,20 @@ fn a_named_pinned_piece_is_refused_with_the_command_that_releases_it() {
         .iter()
         .position(String::is_empty)
         .expect("a blank line");
-    let reason: Vec<&str> = lines[1..blank].iter().map(|line| line.trim()).collect();
+    // The hint wraps wherever the width ends, also inside a long path at a
+    // hyphen, so the words are compared without their blanks.
+    let reason: String = lines[1..blank]
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .collect();
+    let expected = format!(
+        "pinned, so it stays as it is. antiq -C {} unpin projects/antiq releases it",
+        root.display()
+    );
     assert_eq!(
-        reason.join(" "),
-        format!(
-            "pinned, so it stays as it is. antiq -C {} unpin projects/antiq releases it",
-            root.display()
-        )
+        reason,
+        expected.split_whitespace().collect::<String>(),
+        "{lines:#?}"
     );
     assert!(
         lines
