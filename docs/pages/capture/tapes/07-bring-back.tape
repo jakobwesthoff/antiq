@@ -1,0 +1,37 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Fork a version, archive a second one from the fork, list both.
+# Expects: three pieces archived. Leaves: scanner has two versions and is
+# not a folder any more.
+
+Output out/discard.txt
+Set Height 340
+Source common.tape
+
+# The run of fork ends in the line "Forked ..." or, where it shows progress
+# cards, in the closing line with the time.
+Type "antiq fork scanner"
+Enter
+Wait+Screen@120s /(Forked|took [0-9]+:[0-9][0-9])/
+Sleep 1s
+Screenshot ../assets/shots/fork.png
+
+Hide
+Type "clear && echo '// edited' >> scanner/src/main.rs"
+Enter
+Show
+Type "antiq archive scanner"
+Enter
+Wait+Screen@120s /took [0-9]+:[0-9][0-9]/
+Sleep 1s
+Hide
+Type "clear"
+Enter
+Show
+Type "antiq list scanner"
+Enter
+Sleep 1s
+Screenshot ../assets/shots/versions.png
+Sleep 1s

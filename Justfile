@@ -30,3 +30,12 @@ coverage base:
     mkdir -p target/llvm-cov
     cargo llvm-cov --all-targets --lcov --output-path target/llvm-cov/lcov.info
     scripts/uncovered-lines.sh {{ base }}
+
+# Render the images of the README and the project page from real runs.
+shots:
+    scripts/render.sh
+
+# Test the builder of the demo world that the images are rendered from.
+shots-test:
+    cargo build --release
+    scripts/world.test.sh
