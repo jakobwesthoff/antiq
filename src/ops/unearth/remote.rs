@@ -18,6 +18,7 @@ use crate::listing::{self, ListingEntry, ListingType};
 use crate::lock::RunLock;
 use crate::meta::FileName;
 use crate::pack::hashing::HashingReader;
+use crate::pack::live::check_stream;
 use crate::remote::{Remote, RemoteError};
 use crate::store::{Put, Store};
 use std::fs::File;
@@ -48,8 +49,10 @@ enum ListingOrigin {
 /// into the store once the tree is verified.
 pub(crate) struct Arrived {
     pub(crate) archive: PathBuf,
-    listing: Vec<ListingEntry>,
-    origin: ListingOrigin,
+    /// The members the listing names and where it came from. A live
+    /// package has none; the strict verification compares the tree with
+    /// the package itself.
+    listing: Option<(Vec<ListingEntry>, ListingOrigin)>,
     /// Fetched files, by their final names.
     fetched: Vec<(FileName, PathBuf)>,
     _parts: Parts,
@@ -82,8 +85,7 @@ impl Arrived {
     ) -> Result<Arrived, UnearthError> {
         Ok(Arrived {
             archive,
-            listing: held_listing(collection, plan)?,
-            origin: ListingOrigin::Store,
+            listing: Some((held_listing(collection, plan)?, ListingOrigin::Store)),
             fetched: Vec::new(),
             _parts: Parts::default(),
         })
@@ -95,15 +97,18 @@ impl Arrived {
         plan: &UnearthPlan,
         members: &[ListingEntry],
     ) -> Result<(), UnearthError> {
+        let Some((listing, origin)) = &self.listing else {
+            return Ok(());
+        };
         let by_path = |entries: &[ListingEntry]| {
             let mut sorted = entries.to_vec();
             sorted.sort_by(|a, b| a.path.cmp(&b.path));
             sorted
         };
-        if by_path(&self.listing) == by_path(members) {
+        if by_path(listing) == by_path(members) {
             return Ok(());
         }
-        let whose = match self.origin {
+        let whose = match origin {
             ListingOrigin::Store => "held on this machine",
             ListingOrigin::Remote => "fetched from the remote",
         };
@@ -271,15 +276,50 @@ pub(crate) fn fetch(
     fetched.push((file.clone(), part));
     Ok(Fetch::Arrived(Arrived {
         archive,
-        listing: entries,
-        origin,
+        listing: Some((entries, origin)),
         fetched,
         _parts: parts,
     }))
 }
 
+/// Fetches the live package of `plan` into `tmp/` and checks it: the file
+/// is the one the metadata describes and its zstd stream is whole.
+pub(crate) fn fetch_live(
+    collection: &Collection,
+    plan: &UnearthPlan,
+    remote: &dyn Remote,
+    free_space: &dyn Fn(&Path) -> Result<u64, FsxError>,
+) -> Result<Fetch, UnearthError> {
+    let staging_dir = collection.staging_dir();
+    let needed = plan.payload.size;
+    remote.begin_phase()?;
+    let available = free_space(&staging_dir)?;
+    if available < needed {
+        return Ok(Fetch::NoSpace { needed, available });
+    }
+
+    let file = &plan.payload.file;
+    let part = collection
+        .tmp_dir()
+        .join(format!("unearth-{}.{}.part", plan.id, file.as_str()));
+    let mut parts = Parts::default();
+    parts.0.push(part.clone());
+    if !copy_from_remote(remote, plan, file, &part)? {
+        let available = free_space(&staging_dir).unwrap_or(0);
+        return Ok(Fetch::NoSpace { needed, available });
+    }
+    check_archive(plan, &part)?;
+    check_stream(&part)?;
+    Ok(Fetch::Arrived(Arrived {
+        archive: part,
+        listing: None,
+        fetched: Vec::new(),
+        _parts: parts,
+    }))
+}
+
 #[cfg(test)]
-mod tests {
+pub(in crate::ops::unearth) mod tests {
     use super::*;
     use crate::error::HasKind;
     use crate::fsx::space::available_space;
@@ -667,9 +707,9 @@ mod tests {
     }
 
     /// A remote whose copy of one file fails with a full volume.
-    struct Full<'a> {
-        inner: &'a FaultRemote,
-        file: String,
+    pub(in crate::ops::unearth) struct Full<'a> {
+        pub(in crate::ops::unearth) inner: &'a FaultRemote,
+        pub(in crate::ops::unearth) file: String,
     }
 
     impl Remote for Full<'_> {

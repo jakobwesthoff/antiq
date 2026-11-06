@@ -126,6 +126,13 @@ fn render(report: &UnearthReport) -> Lines {
         (None, Some(version)) => {
             stdout.push(format!("Unearthed {path} (archive version {version})"))
         }
+        (None, None) if report.unearthed => stdout.push(match report.from {
+            Some(from) => format!(
+                "Unearthed {path} as a fork of {from} (new ID {})",
+                report.id
+            ),
+            None => format!("Unearthed {path} (from its live package)"),
+        }),
         (None, None) => stdout.push(format!("{} is already unearthed at {path}", report.id)),
     }
     stderr.extend(
@@ -158,6 +165,7 @@ mod tests {
             path: RelPath::parse("projects/a").expect("a path"),
             abs_path: "/work/projects/a".into(),
             payload_version: Some(2),
+            from: None,
             skipped: None,
             warnings: Vec::new(),
         }
@@ -168,6 +176,35 @@ mod tests {
         let lines = render(&report());
         assert_eq!(lines.stdout, ["Unearthed projects/a (archive version 2)"]);
         assert!(lines.stderr.is_empty());
+    }
+
+    const OTHER: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
+
+    #[test]
+    fn a_piece_restored_from_its_live_package_says_so() {
+        let lines = render(&UnearthReport {
+            payload_version: None,
+            ..report()
+        });
+        assert_eq!(
+            lines.stdout,
+            ["Unearthed projects/a (from its live package)"]
+        );
+    }
+
+    #[test]
+    fn a_fork_names_the_piece_it_came_from_and_its_new_id() {
+        let lines = render(&UnearthReport {
+            payload_version: None,
+            from: Some(OTHER.parse().expect("an ID")),
+            ..report()
+        });
+        assert_eq!(
+            lines.stdout,
+            [format!(
+                "Unearthed projects/a as a fork of {OTHER} (new ID {ID})"
+            )]
+        );
     }
 
     #[test]

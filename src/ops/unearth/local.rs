@@ -11,6 +11,7 @@
 //! entry leaves an `unearthing` entry that the repair of the next run
 //! finishes or drops.
 
+use super::live;
 use super::remote::{Arrived, Fetch, fetch};
 use super::{
     Skipped, TargetProblem, UnearthError, UnearthPlan, UnearthReport, UnearthSource, absolute,
@@ -26,6 +27,7 @@ use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::lock::RunLock;
 use crate::meta::PayloadKind;
+use crate::ops::fork::forked_new;
 use crate::pack::hashing::HashingReader;
 use crate::pack::names::{MemberName, check_members, fold_path};
 use crate::pack::{Packager, TarZstd, TargetRules, WalkRules};
@@ -36,6 +38,7 @@ use crate::report::Warning;
 use crate::select::Rules;
 use crate::store::{Source, Store};
 use crate::tracking::{self, EntryState, LocalPayload, TrackingEntry, VersionTakenOut};
+use jiff::Timestamp;
 use std::io;
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
@@ -76,7 +79,7 @@ const STAGING_MODE: u32 = 0o700;
 /// every folder the user makes.
 const PARENT_MODE: u32 = 0o777;
 
-fn taken_out(source: Source) -> VersionTakenOut {
+pub(super) fn taken_out(source: Source) -> VersionTakenOut {
     match source {
         Source::Pending => VersionTakenOut::Pending,
         Source::Committed(number) => VersionTakenOut::Committed(number),
@@ -111,7 +114,59 @@ pub(crate) fn unearth_archive(
             Arrived::held(collection, plan, package)?
         }
     };
+    carry_out(
+        collection,
+        plan,
+        lock,
+        clock,
+        env,
+        warnings,
+        &arrived,
+        Subject::Own,
+    )
+}
 
+/// Which object the unearth makes live.
+#[derive(Clone, Copy)]
+pub(super) enum Subject {
+    /// The object of the plan.
+    Own,
+    /// A new object, minted at `time`, that takes the plan's live package
+    /// as a copy of its own.
+    Fork { id: ObjectId, time: Timestamp },
+}
+
+impl Subject {
+    fn id(self, plan: &UnearthPlan) -> ObjectId {
+        match self {
+            Subject::Own => plan.id,
+            Subject::Fork { id, .. } => id,
+        }
+    }
+
+    /// The entry this machine had before the unearth: a fork's object is
+    /// new.
+    fn previous(self, plan: &UnearthPlan) -> Option<&TrackingEntry> {
+        match self {
+            Subject::Own => plan.entry.as_ref(),
+            Subject::Fork { .. } => None,
+        }
+    }
+}
+
+/// Extracts the tree of `arrived` and puts it in place, once the volume has
+/// room for it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn carry_out(
+    collection: &Collection,
+    plan: &UnearthPlan,
+    lock: &RunLock,
+    clock: &dyn Clock,
+    env: &Environment<'_>,
+    warnings: Vec<Warning>,
+    arrived: &Arrived,
+    subject: Subject,
+) -> Result<UnearthReport, UnearthError> {
     let staging_dir = collection.staging_dir();
     let available = (env.free_space)(&staging_dir)?;
     if available < plan.needed {
@@ -131,7 +186,8 @@ pub(crate) fn unearth_archive(
         lock,
         clock,
         env,
-        &arrived,
+        arrived,
+        subject,
         &staging_root,
         &staged_name,
     );
@@ -146,10 +202,12 @@ pub(crate) fn unearth_archive(
             warnings.append(&mut more);
             Ok(UnearthReport {
                 unearthed: true,
-                id: plan.id,
+                id: subject.id(plan),
                 path: plan.target.clone(),
                 abs_path: absolute(collection, &plan.target),
-                payload_version: Some(plan.payload.version),
+                payload_version: (plan.payload.kind == PayloadKind::Archive)
+                    .then_some(plan.payload.version),
+                from: matches!(subject, Subject::Fork { .. }).then_some(plan.id),
                 skipped: None,
                 warnings,
             })
@@ -162,7 +220,7 @@ pub(crate) fn unearth_archive(
 }
 
 /// The report of a piece that was left as it is for want of room.
-fn skipped(
+pub(super) fn skipped(
     collection: &Collection,
     plan: &UnearthPlan,
     needed: u64,
@@ -175,6 +233,7 @@ fn skipped(
         path: plan.target.clone(),
         abs_path: absolute(collection, &plan.target),
         payload_version: None,
+        from: None,
         skipped: Some(Skipped::NoSpace { needed, available }),
         warnings,
     }
@@ -222,11 +281,12 @@ fn place(
     clock: &dyn Clock,
     env: &Environment<'_>,
     arrived: &Arrived,
+    subject: Subject,
     staging_root: &TreeRoot,
     staged_name: &RelPath,
 ) -> Result<Placed, UnearthError> {
     let package = arrived.archive.as_path();
-    let id = plan.id;
+    let id = subject.id(plan);
     let target = &plan.target;
     let root = TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
     let staged = staging_root
@@ -245,7 +305,7 @@ fn place(
     let volume = (env.probe)(&staged).map_err(io_error("probe", &collection.staging_dir()))?;
     let missing = check_target_on_disk(&root, &rules, target)?;
     check_target_names(target, &missing, &volume)?;
-    check_entries_on_volume(collection, plan.id, target, &volume)?;
+    check_entries_on_volume(collection, id, target, &volume)?;
 
     let unpacked = match env.packager.unpack(package, &staged, &volume) {
         Ok(unpacked) => unpacked,
@@ -270,7 +330,7 @@ fn place(
 
     let machine = collection.machine_name()?;
     let stored = arrived.store(collection, lock, plan)?;
-    let mut entry = unearthing_entry(plan, clock);
+    let mut entry = unearthing_entry(plan, subject, clock);
     tracking::write(collection, lock, clock, &mut entry)?;
 
     let placed = move_into_place(&root, &rules, env, staging_root, staged_name, target);
@@ -278,19 +338,29 @@ fn place(
         Ok(mut warnings) => {
             // The entry's time is the unearthing time, here and in the
             // repair that finishes an interrupted unearth.
-            let changed = record_unearth(
-                &plan.current.metadata,
-                collection.id(),
-                &machine,
-                entry.written,
-                target,
-            );
+            let (changed, unearthed) = match subject {
+                Subject::Own => (
+                    record_unearth(
+                        &plan.current.metadata,
+                        collection.id(),
+                        &machine,
+                        entry.written,
+                        target,
+                    ),
+                    entry.written,
+                ),
+                Subject::Fork { id, time } => (
+                    forked_new(id, collection.id(), target, &machine, time),
+                    time,
+                ),
+            };
             Store::new(collection).write_pending(lock, &changed)?;
             entry.state = EntryState::Live;
-            entry.unearthed = Some(entry.written);
+            entry.unearthed = Some(unearthed);
             entry.version_taken_out = VersionTakenOut::Pending;
             tracking::write(collection, lock, clock, &mut entry)?;
             warnings.extend(Arrived::update_index(collection, lock, &stored));
+            warnings.extend(live::finish(collection, plan));
             Ok(Placed::Done { warnings })
         }
         Err(error) => {
@@ -298,7 +368,7 @@ fn place(
             // was. If that fails the next run's repair drops the
             // `unearthing` entry, which has no folder, and the files stay
             // because that entry lists the archive as held.
-            let restored = match &plan.entry {
+            let restored = match subject.previous(plan) {
                 Some(previous) => {
                     tracking::write(collection, lock, clock, &mut previous.clone()).is_ok()
                 }
@@ -313,7 +383,12 @@ fn place(
 }
 
 /// The entry that says the folder is arriving.
-fn unearthing_entry(plan: &UnearthPlan, clock: &dyn Clock) -> TrackingEntry {
+fn unearthing_entry(plan: &UnearthPlan, subject: Subject, clock: &dyn Clock) -> TrackingEntry {
+    match (subject, plan.source) {
+        (Subject::Fork { id, time }, _) => return live::fork_entry(id, &plan.target, time),
+        (Subject::Own, UnearthSource::LivePackage) => return live::restore_entry(plan),
+        (Subject::Own, _) => {}
+    }
     let version_taken_out = taken_out(plan.current.source);
     let mut entry = plan.entry.clone().unwrap_or_else(|| {
         TrackingEntry::new(

@@ -18,11 +18,13 @@ use crate::error::ErrorKind;
 use crate::fsx::FsxError;
 use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
-use crate::id::ObjectId;
+use crate::id::{IdSource, ObjectId, RandomIds};
 use crate::index::{Index, IndexError};
 use crate::listing::{self, ListingError, ListingType};
 use crate::machine::MachineError;
 use crate::meta::{self, Payload, PayloadKind};
+use crate::ops::fork::ForkError;
+use crate::pack::live::LiveError;
 use crate::pack::{PackError, PackageFormat};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
@@ -62,6 +64,10 @@ pub enum UnearthError {
     Pack(#[from] PackError),
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    #[error(transparent)]
+    Fork(#[from] ForkError),
+    #[error(transparent)]
+    Live(#[from] LiveError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -114,6 +120,8 @@ impl crate::error::HasKind for UnearthError {
             UnearthError::Store(error) => error.kind(),
             UnearthError::Listing(error) => error.kind(),
             UnearthError::Remote(error) => error.kind(),
+            UnearthError::Fork(error) => error.kind(),
+            UnearthError::Live(error) => error.kind(),
             UnearthError::UnreadableVersions { too_new: true, .. } => ErrorKind::FormatTooNew,
             _ => ErrorKind::Other,
         }
@@ -377,6 +385,9 @@ pub struct UnearthReport {
     pub abs_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_version: Option<u32>,
+    /// The ID of the other collection's piece this one was forked from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<ObjectId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<Skipped>,
     pub warnings: Vec<Warning>,
@@ -406,6 +417,7 @@ impl UnearthReport {
             abs_path: absolute(collection, &path),
             path,
             payload_version: None,
+            from: None,
             skipped: None,
             warnings,
         }
@@ -428,7 +440,7 @@ pub fn apply(
     guard: &RunGuard,
     clock: &dyn Clock,
 ) -> Result<UnearthReport, UnearthError> {
-    apply_with_remote(collection, plan, guard, clock, None)
+    apply_with_remote(collection, plan, guard, clock, &RandomIds, None)
 }
 
 /// Carries out a plan that may need `remote` for the archive. Without one,
@@ -438,6 +450,7 @@ pub fn apply_with_remote(
     plan: &UnearthPlan,
     guard: &RunGuard,
     clock: &dyn Clock,
+    ids: &dyn IdSource,
     remote: Option<&dyn Remote>,
 ) -> Result<UnearthReport, UnearthError> {
     match plan.source {
@@ -450,9 +463,16 @@ pub fn apply_with_remote(
             guard.warnings().to_vec(),
             remote,
         ),
-        UnearthSource::LivePackage | UnearthSource::Fork => Err(UnearthError::NoLocalArchive {
-            path: plan.current.metadata.path.clone(),
-        }),
+        UnearthSource::LivePackage | UnearthSource::Fork => live::unearth_live(
+            collection,
+            plan,
+            guard.lock(),
+            clock,
+            &local::Environment::real(),
+            guard.warnings().to_vec(),
+            ids,
+            remote,
+        ),
     }
 }
 
@@ -1562,6 +1582,21 @@ pub(crate) mod tests {
             matches!(error, UnearthError::UnreadableVersions { .. }),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_errors_of_a_fork_and_of_a_live_package_keep_their_kinds() {
+        let fork = UnearthError::Fork(ForkError::InvalidName {
+            name: "a/../b".to_string(),
+            reason: RelPath::parse("a/../b").expect_err("not a path"),
+        });
+        let live = UnearthError::Live(LiveError::StreamCheck {
+            path: "package".into(),
+            reason: "damaged".to_string(),
+        });
+
+        assert_eq!(fork.kind(), ErrorKind::Usage);
+        assert_eq!(live.kind(), ErrorKind::Other);
     }
 
     #[test]
