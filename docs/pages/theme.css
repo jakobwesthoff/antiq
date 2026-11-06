@@ -212,3 +212,7 @@
 .docs code.state-soon { color: #43c1be; }
 .docs code.state-pinned { color: #b49cff; }
 .docs code.state-refused { color: #ef6487; }
+
+/* antiq commands named in the documentation, in the blue of the console's
+   hints. */
+.docs code.command { color: #65aef7; }
