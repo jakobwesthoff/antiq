@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-06
+
 The first release of antiq: it keeps the idle folders of a collection as
 `tar.zst` archives, finds them again and mirrors the collection to one
 target.
@@ -49,3 +51,6 @@ target.
 - `antiq --version` shows Archie beside the version on an interactive
   terminal with 24-bit colour, and the plain version in a pipe
 - macOS and Linux
+
+[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jakobwesthoff/antiq/releases/tag/v1.0.0

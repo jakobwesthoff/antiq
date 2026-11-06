@@ -1,12 +1,27 @@
 [package]
 name = "antiq"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["Jakob Westhoff <jakob@westhoffswelt.de>"]
 license = "MPL-2.0"
 rust-version = "1.97"
 description = "Your idle folders, kept like antiques"
 repository = "https://github.com/jakobwesthoff/antiq"
+homepage = "https://antiq.westhoffswelt.de"
 readme = "README.md"
+keywords = ["archive", "backup", "rsync", "zstd", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+# The published crate carries what the build needs: the sources, the build
+# script and the terminal renderings of the emblem that it embeds. The tests,
+# the docs, the images and the repository tooling stay in the repository.
+include = [
+    "/src/",
+    "/build.rs",
+    "/assets/emblem/terminal/",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
 
 [dependencies]
 anstream = "1.0.0"
