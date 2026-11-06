@@ -822,6 +822,17 @@ mod tests {
     }
 
     #[test]
+    fn a_component_the_volume_cannot_look_at_is_an_error() {
+        let tree = Tree::new();
+        let recording = Recording::new();
+        let long = "n".repeat(300);
+        let error =
+            create_dir_chain(&recording, &root_of(&tree), &chain(&long)).expect_err("too long");
+        assert!(error.to_string().contains("cannot look at"), "{error}");
+        assert!(recording.flushes().is_empty());
+    }
+
+    #[test]
     fn a_failing_flush_of_the_new_directory_stops_the_chain() {
         let tree = Tree::new();
         let recording = Recording::new();

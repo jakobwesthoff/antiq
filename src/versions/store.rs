@@ -502,29 +502,24 @@ pub(crate) fn move_in_with(
     ] {
         match transfer(durable, &from, &to, names.of(kind), false) {
             Ok(()) => moved.push(kind),
-            Err(failed) => {
-                if failed.renamed {
-                    moved.push(kind);
-                }
-                if kind == VersionFile::Archive && failed.renamed {
-                    return match failed.error {
-                        VersionsError::Fsx(source) => Err(VersionsError::StoredNotDurable {
-                            piece: piece.to_string(),
-                            stamp: stamp.to_string(),
-                            source,
-                        }),
-                        other => Err(other),
-                    };
-                }
+            Err(Failure::After(source)) if kind == VersionFile::Archive => {
+                return Err(VersionsError::StoredNotDurable {
+                    piece: piece.to_string(),
+                    stamp: stamp.to_string(),
+                    source,
+                });
+            }
+            Err(failure) => {
+                let cause = match failure {
+                    Failure::Before(error) => error,
+                    // The file arrived, so it is among those to put back.
+                    Failure::After(source) => {
+                        moved.push(kind);
+                        source.into()
+                    }
+                };
                 return Err(undo(
-                    durable,
-                    &to,
-                    &from,
-                    names,
-                    &moved,
-                    piece,
-                    stamp,
-                    failed.error,
+                    durable, &to, &from, names, &moved, piece, stamp, cause,
                 ));
             }
         }
@@ -582,16 +577,19 @@ pub(crate) fn move_back_with(
         }
         match transfer(durable, &from, &to, name, true) {
             Ok(()) => any_moved = true,
-            Err(failed) => {
-                let moved_now = any_moved || failed.renamed;
-                return Err(if moved_now {
+            Err(failure) => {
+                let (arrived, error) = match failure {
+                    Failure::Before(error) => (any_moved, error),
+                    Failure::After(source) => (true, source.into()),
+                };
+                return Err(if arrived {
                     VersionsError::PartlyMoved {
                         piece: piece.to_string(),
                         stamp: stamp.to_string(),
-                        source: Box::new(failed.error),
+                        source: Box::new(error),
                     }
                 } else {
-                    failed.error
+                    error
                 });
             }
         }
@@ -631,10 +629,12 @@ struct Place<'a> {
     dir: &'a RelPath,
 }
 
-/// A failed [`transfer`], and whether the file had been renamed by then.
-struct Failed {
-    renamed: bool,
-    error: VersionsError,
+/// How a [`transfer`] failed.
+enum Failure {
+    /// Before the file was renamed: it is where it was.
+    Before(VersionsError),
+    /// After the rename: the file arrived, and making it durable failed.
+    After(FsxError),
 }
 
 /// Moves one file: flush it where it lies, rename it without replacing,
@@ -647,11 +647,8 @@ fn transfer(
     to: &Place<'_>,
     name: &str,
     flush_source: bool,
-) -> Result<(), Failed> {
-    let before = |error: VersionsError| Failed {
-        renamed: false,
-        error,
-    };
+) -> Result<(), Failure> {
+    let before = Failure::Before;
     let source = file_in(from.dir, name).map_err(before)?;
     let target = file_in(to.dir, name).map_err(before)?;
 
@@ -674,13 +671,9 @@ fn transfer(
             })
         })?;
 
-    let after = |error: FsxError| Failed {
-        renamed: true,
-        error: error.into(),
-    };
-    flush_dir_of(durable, to.root, to.dir).map_err(after)?;
+    flush_dir_of(durable, to.root, to.dir).map_err(Failure::After)?;
     if flush_source {
-        flush_dir_of(durable, from.root, from.dir).map_err(after)?;
+        flush_dir_of(durable, from.root, from.dir).map_err(Failure::After)?;
     }
     Ok(())
 }
@@ -1760,6 +1753,116 @@ mod tests {
         delete_version_with(&Recording::new(), &env.pieces(), &path("p"), &version)
             .expect("deleted");
         assert!(!env.tree.path("pieces/p").exists());
+    }
+
+    #[test]
+    fn a_destination_that_cannot_be_looked_at_is_an_error_and_moves_nothing() {
+        let env = Env::new();
+        let mut names = env.names.clone();
+        names.listing = "l".repeat(300);
+        let error = move_in_with(
+            &Recording::new(),
+            &env.staging(),
+            &env.pieces(),
+            &path("p"),
+            &path("p"),
+            &stamp(STAMP),
+            &names,
+        )
+        .expect_err("too long");
+        assert!(
+            matches!(
+                error,
+                VersionsError::Io {
+                    action: "look at",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(env.staged(), all_three());
+    }
+
+    #[test]
+    fn move_back_of_a_name_the_volume_cannot_look_at_is_an_error() {
+        let env = Env::new();
+        let mut names = env.names.clone();
+        names.archive = "a".repeat(300);
+        std::fs::create_dir(env.tree.path("pieces/p")).expect("folder");
+        let error = move_back_with(
+            &Recording::new(),
+            &env.pieces(),
+            &env.staging(),
+            &path("p"),
+            &path("p"),
+            &stamp(STAMP),
+            &names,
+        )
+        .expect_err("too long");
+        assert!(
+            matches!(
+                error,
+                VersionsError::Io {
+                    action: "look at",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_staging_path_that_cannot_be_opened_is_an_error() {
+        let mut env = Env::new();
+        env.tree.unreadable_dir("locked");
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let error = fresh_stamp(
+            &env.tree.path("pieces"),
+            &env.tree.path("locked/pack"),
+            &path("p"),
+            time(),
+        )
+        .expect_err("denied");
+        assert!(
+            matches!(error, VersionsError::Io { action: "open", .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_that_can_be_entered_but_not_listed_is_named_with_a_dot() {
+        let mut tree = Tree::new();
+        let pieces = tree.dir("pieces");
+        std::fs::set_permissions(&pieces, std::os::unix::fs::PermissionsExt::from_mode(0o100))
+            .expect("mode");
+        let _restore = RestoreModes(vec![pieces.clone()]);
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let error = scan(&pieces).expect_err("denied");
+        assert!(
+            matches!(&error, VersionsError::Io { action: "list", path, .. } if path == "."),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_entered_is_an_error() {
+        let mut tree = Tree::new();
+        let pieces = tree.unreadable_dir("pieces");
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let error = scan(&pieces).expect_err("denied");
+        assert!(matches!(error, VersionsError::Io { .. }), "{error:?}");
     }
 
     #[test]
