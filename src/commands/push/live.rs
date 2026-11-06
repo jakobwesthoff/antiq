@@ -305,11 +305,12 @@ impl<'a> Live<'a> {
         let expected = &self.forecast.pieces[at];
         let track = &mut self.tracks[at];
         track.phase = Phase::Done;
-        let created = track.created.min(expected.adds);
+        // Only the bar is held to the forecast. The finished line says what
+        // the run did, which is what the summary of the push adds up too.
         let outcome = Outcome::Changes {
-            created,
-            updated: track.updated.min(expected.adds - created),
-            deleted: track.seen_deletes.min(expected.deletes),
+            created: track.created,
+            updated: track.updated,
+            deleted: track.seen_deletes,
         };
         self.observer.event(Event::Finished {
             name: &expected.folder.to_string(),
@@ -496,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_stop_at_the_forecast_when_the_real_run_finds_more() {
+    fn the_bar_stops_at_the_forecast_but_the_finished_line_counts_what_the_run_did() {
         let recorder = Recorder::new();
         let mut live = Live::new(
             forecast(">f+++++++++ 10 projects/a/x\n"),
@@ -518,7 +519,7 @@ mod tests {
             recorder.lines()[2..],
             [
                 "projects/a Storing 1/1",
-                "finished projects/a 10 Changes { created: 1, updated: 0, deleted: 0 }",
+                "finished projects/a 10 Changes { created: 2, updated: 1, deleted: 0 }",
             ]
         );
     }

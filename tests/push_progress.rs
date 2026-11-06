@@ -59,11 +59,17 @@ struct World {
 }
 
 fn world() -> World {
-    let collection = Collection::build(&Clock::now())
-        .piece("projects/a", |piece| {
+    world_of(&["projects/a"])
+}
+
+fn world_of(pieces: &[&str]) -> World {
+    let mut builder = Collection::build(&Clock::now());
+    for name in pieces {
+        builder.piece(name, |piece| {
             piece.age_days(3).file("a.txt", "a");
-        })
-        .finish();
+        });
+    }
+    let collection = builder.finish();
     let target = Target::new();
     target.marker(&collection);
     let path = collection.path(".antiq/config.toml");
@@ -202,4 +208,49 @@ fn deletions_are_followed_in_the_first_pass_only_and_the_checks_after_it_tell_no
         ]
     );
     assert_eq!(transfers(&world.fake).len(), 3);
+}
+
+#[test]
+fn a_real_pass_that_differs_from_the_listing_reports_what_it_did_and_keeps_the_cards_whole() {
+    let world = world_of(&["alpha", "beta"]);
+    // The listing expects one file and one deletion for alpha, one file for
+    // beta. The real pass sends a second file for alpha while it waits for
+    // its deletions, a second one for beta after it finished, and a second
+    // deletion for alpha after it finished. A card never reopens for those.
+    world.fake.answer(
+        1,
+        ">f+++++++++ 5 alpha/x\n*deleting   0 alpha/gone\n>f+++++++++ 7 beta/z\n",
+        "",
+        0,
+    );
+    world.fake.answer(
+        2,
+        ">f+++++++++ alpha/x\n\
+         >f+++++++++ beta/z\n\
+         >f+++++++++ alpha/y\n\
+         *deleting   alpha/gone\n\
+         >f+++++++++ beta/w\n\
+         *deleting   alpha/more\n",
+        "",
+        0,
+    );
+    world.fake.answer(3, "", "", 0);
+    let seen = Lines::default();
+
+    push_with(&world, false, &seen);
+
+    assert_eq!(
+        seen.lines(),
+        [
+            "planned alpha beta",
+            "started alpha 5",
+            "alpha Storing total 1",
+            "paused alpha",
+            "started beta 7",
+            "beta Storing total 1",
+            "finished beta 7 Changes { created: 1, updated: 0, deleted: 0 }",
+            "alpha Removing total 1",
+            "finished alpha 5 Changes { created: 1, updated: 0, deleted: 1 }",
+        ]
+    );
 }
