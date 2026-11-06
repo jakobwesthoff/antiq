@@ -329,7 +329,14 @@ fn unescape_comment(bytes: &[u8]) -> Result<Vec<u8>, String> {
 // =========================================================
 
 fn io_error(source: io::Error) -> ListingError {
-    ListingError::Io { source }
+    let limit = source
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<LimitExceeded>())
+        .map(|exceeded| exceeded.limit);
+    match limit {
+        Some(limit) => ListingError::TooLarge { limit },
+        None => ListingError::Io { source },
+    }
 }
 
 /// Whether `text` is a SHA-256 in lower-case hex.
@@ -517,9 +524,74 @@ pub fn write<W: Write>(
 // Reading
 // =========================================================
 
+/// The most decoded bytes any reader of antiq takes from one listing.
+/// It bounds the decoded text only: the entries a full read
+/// builds from it take a multiple of that in memory.
+///
+/// A listing can be copied back from the target by hand, so a damaged or
+/// hostile one must not make antiq allocate without bound. The limit is
+/// 2^23 files (8.4 million) at 512 bytes each. One real tree measured
+/// 306 decoded bytes per file, checksum lines included (the 119,680 files
+/// of `~/.cargo/registry/src`, whose listing decodes to 36,668,911 bytes);
+/// 512 is that figure with room for longer paths. The product, 4 GiB, is
+/// about 117 times that listing. The length of a single entry is not limited
+/// on its own: it counts here.
+const MAX_DECODED_BYTES: u64 = 512 << 23;
+
+/// The marker inside the `io::Error` of [`Bounded`], so that a listing that
+/// is too large is told apart from a stream that fails.
+#[derive(Debug)]
+struct LimitExceeded {
+    limit: u64,
+}
+
+impl std::fmt::Display for LimitExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "more than {} decoded bytes", self.limit)
+    }
+}
+
+impl std::error::Error for LimitExceeded {}
+
+/// The decoded stream of a listing, which fails once it holds more than
+/// `limit` bytes. Every consumer reads through it, so the line reader and
+/// `read_to_end` stop at the same point, also inside a line that has no end.
+struct Bounded<R> {
+    inner: R,
+    limit: u64,
+    left: u64,
+}
+
+impl<R: Read> Bounded<R> {
+    fn new(inner: R, limit: u64) -> Bounded<R> {
+        Bounded {
+            inner,
+            limit,
+            left: limit,
+        }
+    }
+}
+
+impl<R: Read> Read for Bounded<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // One byte past what is left tells a stream that ends exactly at the
+        // limit from one that goes on, and no read ever takes more.
+        let room = usize::try_from(self.left.saturating_add(1)).unwrap_or(usize::MAX);
+        let ask = buf.len().min(room);
+        let read = self.inner.read(&mut buf[..ask])?;
+        match self.left.checked_sub(read as u64) {
+            Some(left) => {
+                self.left = left;
+                Ok(read)
+            }
+            None => Err(io::Error::other(LimitExceeded { limit: self.limit })),
+        }
+    }
+}
+
 /// The lines of a decoded listing, one at a time, without their newline.
 struct Lines<R: Read> {
-    inner: BufReader<Decoder<'static, BufReader<R>>>,
+    inner: BufReader<Bounded<Decoder<'static, BufReader<R>>>>,
     number: usize,
 }
 
@@ -528,9 +600,9 @@ impl<R: Read> Lines<R> {
     /// windows above the limit every reader of antiq has, which shows here
     /// or on a later read, depending on where the stream's first frame
     /// header ends.
-    fn open(input: R) -> Result<Lines<R>, ListingError> {
+    fn open(input: R, limit: u64) -> Result<Lines<R>, ListingError> {
         let mut lines = Lines {
-            inner: BufReader::new(decoder(input).map_err(io_error)?),
+            inner: BufReader::new(Bounded::new(decoder(input).map_err(io_error)?, limit)),
             number: 0,
         };
         let first = lines.next()?.ok_or(ListingError::InvalidHeader)?;
@@ -635,10 +707,20 @@ fn apply(head: &mut Head, key: &str, value: &[u8]) {
 /// not `# antiq listing <number>`, a newer format and an unreadable stream
 /// are errors.
 pub fn read_head<R: Read>(input: R) -> Result<Head, ListingError> {
-    let mut lines = Lines::open(input)?;
+    read_head_within(input, MAX_DECODED_BYTES)
+}
+
+fn read_head_within<R: Read>(input: R, limit: u64) -> Result<Head, ListingError> {
+    let mut lines = Lines::open(input, limit)?;
     let mut head = Head::default();
-    // A stream that fails inside the head leaves the fields found so far.
-    while let Ok(Some(line)) = lines.next() {
+    // A stream that fails inside the head leaves the fields found so far,
+    // unless it fails by the size limit, which says why the head is cut.
+    loop {
+        let line = match lines.next() {
+            Ok(Some(line)) => line,
+            Err(error @ ListingError::TooLarge { .. }) => return Err(error),
+            Ok(None) | Err(_) => break,
+        };
         if line == b"#" {
             head.closed = true;
             break;
@@ -828,7 +910,11 @@ fn parse_checksum_line(line: &[u8]) -> Result<(String, Vec<u8>), String> {
 /// line right after it, no path twice, and `files` and `bytes` equal to
 /// what the entries hold.
 pub fn read_full<R: Read>(input: R) -> Result<Listing, ListingError> {
-    let mut lines = Lines::open(input)?;
+    read_full_within(input, MAX_DECODED_BYTES)
+}
+
+fn read_full_within<R: Read>(input: R, limit: u64) -> Result<Listing, ListingError> {
+    let mut lines = Lines::open(input, limit)?;
     let (header, files, bytes) = read_strict_head(&mut lines)?;
     let mut entries: Vec<ListingEntry> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
@@ -880,14 +966,17 @@ pub fn read_full<R: Read>(input: R) -> Result<Listing, ListingError> {
 /// The decoded bytes of a whole listing, for a search that works on the
 /// text. The first line is checked, and the stream is read to its end.
 pub fn decode_all<R: Read>(input: R) -> Result<Vec<u8>, ListingError> {
-    let mut decoder = decoder(input).map_err(io_error)?;
+    decode_all_within(input, MAX_DECODED_BYTES)
+}
+
+fn decode_all_within<R: Read>(input: R, limit: u64) -> Result<Vec<u8>, ListingError> {
+    let mut reader = BufReader::new(Bounded::new(decoder(input).map_err(io_error)?, limit));
+    // The first line is checked before the rest is held, so a stream that
+    // is no listing is not decoded up to the limit first.
     let mut decoded = Vec::new();
-    decoder.read_to_end(&mut decoded).map_err(io_error)?;
-    let first = decoded
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
-    check_first_line(first)?;
+    reader.read_until(b'\n', &mut decoded).map_err(io_error)?;
+    check_first_line(decoded.strip_suffix(b"\n").unwrap_or(&decoded))?;
+    reader.read_to_end(&mut decoded).map_err(io_error)?;
     Ok(decoded)
 }
 
@@ -946,6 +1035,8 @@ pub enum ListingError {
     Line { number: usize, reason: String },
     #[error("the listing is not valid at its end: {reason}")]
     End { reason: String },
+    #[error("the listing decodes to more than {limit} bytes, the most antiq reads")]
+    TooLarge { limit: u64 },
     #[error("the head of the listing cannot be written: {reason}")]
     Header { reason: String },
     #[error("the entry {path} cannot be listed: {reason}")]
@@ -1359,6 +1450,120 @@ mod tests {
         assert_eq!(
             head.damage().as_deref(),
             Some("the `archived` line is missing or unparsable")
+        );
+    }
+
+    // =========================================================
+    // The size limit
+    // =========================================================
+
+    fn assert_too_large(error: ListingError, expected: u64) {
+        match error {
+            ListingError::TooLarge { limit } => assert_eq!(limit, expected),
+            other => panic!("expected the size limit to be met, got {other}"),
+        }
+    }
+
+    /// A first line, then one line of `length` bytes that never ends, so a
+    /// reader that waits for the newline holds all of it.
+    fn endless_line(length: usize) -> Vec<u8> {
+        let mut content = b"# antiq listing 1\n".to_vec();
+        content.resize(content.len() + length, b'x');
+        compressed(&content)
+    }
+
+    #[test]
+    fn read_full_accepts_a_listing_of_exactly_the_limit_and_refuses_one_byte_less() {
+        let bytes = encode(&header(), &small());
+        let size = decoded(&bytes).len() as u64;
+        assert!(read_full_within(&bytes[..], size).is_ok());
+        assert_too_large(
+            read_full_within(&bytes[..], size - 1).expect_err("one byte over"),
+            size - 1,
+        );
+    }
+
+    #[test]
+    fn read_head_refuses_a_head_that_runs_past_the_limit() {
+        let mut content = b"# antiq listing 1\n".to_vec();
+        for _ in 0..200 {
+            content.extend_from_slice(b"# piece         a\n");
+        }
+        assert_too_large(
+            read_head_within(&compressed(&content)[..], 1000).expect_err("a head of 4 KiB"),
+            1000,
+        );
+    }
+
+    #[test]
+    fn decode_all_refuses_a_listing_past_the_limit() {
+        let bytes = encode(&header(), &small());
+        let size = decoded(&bytes).len() as u64;
+        assert_eq!(
+            decode_all_within(&bytes[..], size).expect("exactly the limit"),
+            decoded(&bytes)
+        );
+        assert_too_large(
+            decode_all_within(&bytes[..], size - 1).expect_err("one byte over"),
+            size - 1,
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_newline_is_cut_off_at_the_limit() {
+        let bytes = endless_line(1 << 20);
+        assert_too_large(
+            read_full_within(&bytes[..], 4096).expect_err("a line of 1 MiB"),
+            4096,
+        );
+        assert_too_large(
+            read_head_within(&bytes[..], 4096).expect_err("a line of 1 MiB"),
+            4096,
+        );
+    }
+
+    /// Counts the bytes its reader is asked for.
+    struct Counting<R> {
+        inner: R,
+        asked: usize,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.asked += buf.len();
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn bounded_never_asks_for_more_than_one_byte_past_the_limit() {
+        let source = Counting {
+            inner: io::repeat(b'a'),
+            asked: 0,
+        };
+        let mut reader = BufReader::new(Bounded::new(source, 1000));
+        let error = reader
+            .read_until(b'\n', &mut Vec::new())
+            .expect_err("a line that never ends");
+        assert_too_large(io_error(error), 1000);
+        assert_eq!(reader.get_ref().inner.asked, 1001);
+    }
+
+    #[test]
+    fn decode_all_checks_the_first_line_before_it_holds_the_rest() {
+        let mut content = b"not a listing\n".to_vec();
+        content.resize(1 << 20, b'x');
+        assert!(matches!(
+            decode_all_within(&compressed(&content)[..], 1 << 16),
+            Err(ListingError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn the_error_names_the_limit() {
+        assert_eq!(
+            ListingError::TooLarge { limit: 1 << 32 }.to_string(),
+            "the listing decodes to more than 4294967296 bytes, the most antiq reads"
         );
     }
 

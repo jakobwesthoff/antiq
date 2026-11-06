@@ -417,7 +417,8 @@ them is deleted or rewritten automatically. (ADR 0062)
 - **Damaged version:** a `.tar.zst` whose listing or checksum file is
   missing; or whose size differs from the `archive-bytes` its listing
   records (archive files never change once stored); or whose listing does
-  not decode to its end (zstd checksum), does not parse to its end (a
+  not decode to its end (zstd checksum), decodes to more than 4 GiB (see
+  "Listing format"), does not parse to its end (a
   header or entry line out of the format, a file or hard line without its
   checksum line, a path twice, `files` or `bytes` that differ from the
   entries) or lacks a parsable `piece`, `archived` or `archive-bytes`
@@ -507,6 +508,12 @@ tools read it as part of the file name.
 - **Checksum lines:** every `file` and `hard` line is followed by a
   standard checksum line for its path, so `shasum -c` checks hard links
   like any file.
+- **Size limit:** a reader takes at most 4 GiB (2^32 bytes) of decoded
+  text from one listing, a head read as well as a full read. That is 2^23
+  files at 512 bytes, against 306 bytes per file measured on a real tree.
+  The limit counts the decoded bytes of the listing, not its entries, so
+  the length of a single line does not matter. A listing past it is
+  damaged, with the reason that it decodes to more than 4294967296 bytes.
 - **Escaping in checksum lines:** a path containing a newline or a
   backslash gets a leading `\` on the line, with newline written `\n` and
   backslash `\\`; nothing else is escaped, a carriage return or tab stays
@@ -1395,7 +1402,8 @@ listing, is searched as long as its listing reads.
 A version that cannot be searched is skipped with a warning naming the piece
 and the version, and the exit code stays 0. That is a version with no
 listing file or two, a listing that cannot be opened or read, one that does
-not decode, one of a newer format, and one with a line that is not an entry;
+not decode, one that decodes to more than the size limit (see "Listing
+format"), one of a newer format, and one with a line that is not an entry;
 a listing that fails part of the way through reports none of its hits. A
 doubled archive or checksum file does not stop the search.
 
