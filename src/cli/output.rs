@@ -326,7 +326,8 @@ impl Output {
     /// Writes the lines of a dry run to stdout and says how many of them
     /// were actions. A `Would <verb> <rest>` line gets the tag on a
     /// terminal, with the rests lined up; any other line is written as it
-    /// is.
+    /// is. A `Would skip` line is tagged but is no action: running again
+    /// would skip it too.
     pub fn dry_lines(&mut self, lines: &[String]) -> io::Result<usize> {
         let width = lines
             .iter()
@@ -340,7 +341,9 @@ impl Output {
                 self.stdout.write_line(line)?;
                 continue;
             };
-            actions += 1;
+            if verb != "skip" {
+                actions += 1;
+            }
             let shown = dryrun::line(&self.stdout_env, verb, width, rest);
             self.stdout.write_line(&shown)?;
         }
@@ -644,6 +647,36 @@ mod tests {
             capture.stdout(),
             "○ would archive  projects/scanner\n\n\
              Dry run: nothing was archived. Run again without -n to archive these pieces.\n"
+        );
+    }
+
+    #[test]
+    fn a_plan_that_only_skips_has_no_footer() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        let skip = "Would skip projects/scanner (version 2026-11-04): 5 MB needed, 2 MB free";
+        out.dry_plan(&[skip.to_string()], "unearthed", "unearth the piece")
+            .expect("memory accepts writes");
+        assert_eq!(
+            capture.stdout(),
+            "○ would skip  projects/scanner (version 2026-11-04): 5 MB needed, 2 MB free\n"
+        );
+    }
+
+    #[test]
+    fn a_plan_with_an_action_next_to_a_skip_has_the_footer() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        let lines = [
+            "Would skip a (version v): 5 MB needed, 2 MB free".to_string(),
+            "Would unearth b".to_string(),
+        ];
+        out.dry_plan(&lines, "unearthed", "unearth the piece")
+            .expect("memory accepts writes");
+        assert!(
+            capture.stdout().contains("Dry run: nothing was unearthed."),
+            "{:?}",
+            capture.stdout()
         );
     }
 

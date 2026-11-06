@@ -2037,7 +2037,9 @@ tables of `list`, `status`, `push` and the tables under an error.
 A dry run writes each action line behind a magenta tag `○ would <verb>`,
 with the text behind the longest verb of the run lined up, and ends with an
 empty line and "Dry run: nothing was <verb>. Run again without `-n` to
-<what it would do>." A dry run with no action has no footer.
+<what it would do>." A `Would skip` line is tagged like an action but is
+none: a dry run whose lines are all skips has no footer, and so has a dry
+run with no action.
 
 Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
 the dry-run footer. A stream that is not a terminal gets plain lines: on
