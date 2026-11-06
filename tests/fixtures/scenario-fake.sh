@@ -16,6 +16,8 @@
 #   badjson                     prints text even under --json
 #   tz                          prints $TZ
 #   tty                         prints "tty" or "pipe" for its stdout
+#   flood                       prints 20000 lines of "line", more than a
+#                               terminal buffer holds
 #   touchdir <dir>              creates a file in <dir> (relative to -C),
 #                               which changes the directory's mtime
 #
@@ -83,6 +85,13 @@ tz)
     ;;
 tty)
     if [ -t 1 ]; then answer stdout tty; else answer stdout pipe; fi
+    ;;
+flood)
+    i=0
+    while [ "$i" -lt 20000 ]; do
+        echo line
+        i=$((i + 1))
+    done
     ;;
 touchdir)
     dir=$1

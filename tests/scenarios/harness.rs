@@ -993,3 +993,29 @@ fn a_change_of_the_target_fails_the_unchanged_check() {
         world.run(&["put", target.to_str().expect("UTF-8"), "a.txt"]);
     });
 }
+
+// =========================================================
+// Running on a terminal
+// =========================================================
+
+#[test]
+fn a_piped_run_sees_no_terminal_and_a_tty_run_sees_one() {
+    let world = standin_world(Mode::Text);
+    assert_eq!(world.run(&["tty"]).stdout, "pipe\n");
+    assert_eq!(world.run_tty(&["tty"]).stdout, "tty\n");
+}
+
+#[test]
+fn a_tty_run_ignores_the_json_mode_and_returns_text_with_plain_newlines() {
+    let outcome = standin_world(Mode::Json).run_tty(&["tz"]);
+    assert_eq!(outcome.mode, Mode::Text);
+    assert_eq!(outcome.stdout, "Pacific/Auckland\n");
+    assert_eq!(outcome.code(), 0);
+}
+
+#[test]
+fn a_tty_run_collects_output_larger_than_the_terminal_buffer() {
+    let world = standin_world(Mode::Text);
+    let outcome = world.run_tty(&["flood"]);
+    assert_eq!(outcome.stdout, "line\n".repeat(20_000));
+}

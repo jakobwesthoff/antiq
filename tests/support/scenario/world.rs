@@ -11,7 +11,12 @@ use super::state::State;
 use super::target::Target;
 use crate::support::cmd::Antiq;
 use serde_json::Value;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::thread::JoinHandle;
 
 /// The time zone every command runs in, so that output which depends on
 /// the local time reads the same on every machine.
@@ -96,20 +101,32 @@ impl World {
 
     /// Runs the command against the world's collection (`-C <root>`).
     pub fn run(&self, args: &[&str]) -> Outcome {
-        self.execute(Some(&self.collection), None, args)
+        self.execute(Some(&self.collection), None, args, None)
     }
 
     /// Runs the command with `dir` as the current directory and no `-C`:
     /// a piece given as a path, or the collection found from where the
     /// command runs.
     pub fn run_in(&self, dir: &Path, args: &[&str]) -> Outcome {
-        self.execute(None, Some(dir), args)
+        self.execute(None, Some(dir), args, None)
     }
 
     /// Runs the command against another collection, such as a copy back
     /// from the target.
     pub fn run_as(&self, other: &Collection, args: &[&str]) -> Outcome {
-        self.execute(Some(other), None, args)
+        self.execute(Some(other), None, args, None)
+    }
+
+    /// Runs the command with stdout on a terminal, for output that differs
+    /// between a terminal and a pipe, such as local times. The run is in
+    /// text mode whatever the world's mode is, and nothing checks it as an
+    /// envelope. The terminal's `\r\n` line ends come back as `\n`.
+    pub fn run_tty(&self, args: &[&str]) -> Outcome {
+        let mut terminal = Terminal::open();
+        let slave = terminal.slave();
+        let mut outcome = self.execute(Some(&self.collection), None, args, Some(slave));
+        outcome.stdout = terminal.finish();
+        outcome
     }
 
     /// Runs `script` and fails when it changed the collection or the
@@ -157,7 +174,13 @@ impl World {
         collection: Option<&Collection>,
         current_dir: Option<&Path>,
         args: &[&str],
+        stdout: Option<Stdio>,
     ) -> Outcome {
+        let mode = if stdout.is_some() {
+            Mode::Text
+        } else {
+            self.mode
+        };
         let mut full: Vec<String> = Vec::new();
         if let Some(collection) = collection {
             full.push("-C".to_string());
@@ -169,7 +192,7 @@ impl World {
                     .to_string(),
             );
         }
-        if self.mode == Mode::Json {
+        if mode == Mode::Json {
             full.push("--json".to_string());
         }
         full.extend(args.iter().map(|arg| arg.to_string()));
@@ -179,6 +202,9 @@ impl World {
             None => Antiq::new(),
         };
         let mut antiq = antiq.args(&full).env("TZ", TIME_ZONE);
+        if let Some(stdout) = stdout {
+            antiq = antiq.stdout(stdout);
+        }
         if let Some(dir) = current_dir {
             antiq = antiq.current_dir(dir);
         }
@@ -191,7 +217,7 @@ impl World {
             collection.settle();
         }
 
-        let value = match self.mode {
+        let value = match mode {
             Mode::Text => None,
             Mode::Json => {
                 if let Err(reason) = envelope::check(&full, &run.stdout, run.code()) {
@@ -207,7 +233,7 @@ impl World {
             code: run.code(),
             stdout: run.stdout,
             stderr: run.stderr,
-            mode: self.mode,
+            mode,
             value,
         }
     }
@@ -294,4 +320,68 @@ pub fn both_modes(build: impl Fn(&Clock) -> Setup, script: impl Fn(&World)) {
         report.is_empty(),
         "the end states of the text run (first) and the JSON run (second) differ\n{report}"
     );
+}
+
+/// A pseudo-terminal pair. A reader thread drains the master end while the
+/// command runs, as a command that prints more than the terminal buffer
+/// holds would otherwise block.
+struct Terminal {
+    slave: Option<OwnedFd>,
+    reader: JoinHandle<Vec<u8>>,
+}
+
+impl Terminal {
+    fn open() -> Terminal {
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: both out-pointers refer to live integers, and the three
+        // optional arguments (name, termios, window size) are null.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, 0, "openpty failed");
+        // SAFETY: `openpty` returned two new descriptors that nothing else owns.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let mut master = File::from(master);
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // The read ends with end of file or, once every slave
+            // descriptor is closed, with an I/O error on some systems.
+            while let Ok(count) = master.read(&mut chunk) {
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            bytes
+        });
+        Terminal {
+            slave: Some(slave),
+            reader,
+        }
+    }
+
+    /// The slave end, to become the command's stdout. The command holds the
+    /// only copy, so the reader sees the end when the command is gone.
+    fn slave(&mut self) -> Stdio {
+        Stdio::from(self.slave.take().expect("the slave is taken once"))
+    }
+
+    /// What the command printed, with the terminal's `\r\n` as `\n`.
+    fn finish(self) -> String {
+        let bytes = self
+            .reader
+            .join()
+            .expect("the reader thread does not panic");
+        String::from_utf8(bytes)
+            .expect("the output is UTF-8")
+            .replace("\r\n", "\n")
+    }
 }
