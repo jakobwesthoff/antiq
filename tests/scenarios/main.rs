@@ -7,6 +7,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod archive;
 mod find;
 mod forget;
 mod grep;
