@@ -702,7 +702,9 @@ in pipes). The input's spelling decides how it is matched, and the two are
 never mixed:
 
 - an input containing `T` (`2026-11-04T090211`, optional `-N`) is matched
-  against the version stamps;
+  as a prefix of the version stamps, so `2026-11-04T09` names every
+  version stamped in that hour and `2026-11-04T090211` is a prefix of the
+  stamp `2026-11-04T090211-2` as well;
 - any other input (`2026-11-04 10:02:11`, or a date alone such as
   `2026-11-04`) is matched against each version's time rendered in the
   machine's current zone, as a prefix of that text. Near midnight a local
