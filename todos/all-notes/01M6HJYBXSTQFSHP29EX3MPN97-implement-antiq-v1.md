@@ -2677,6 +2677,23 @@ the same commit; the lead checks that at acceptance.
   the wording sits in one place and the user sees it rendered with the
   first command that uses it.
 
+### I24
+
+- 2026-11-04 (merged): for I23 and I28, `Session::new(SessionSettings)`
+  with `SessionSettings::from_config(machine, remote, Target)`, then
+  `begin_phase()` at the start of each remote phase and `run(&Script)`;
+  `run` returns `Output { status, stdout, stderr }` and a non-zero
+  script status is `Ok`; `SessionError` (`Away`, `Broken`,
+  `ControlPathTooLong`, `ControlDir`, `Script`, `Io`) is mapped by I28;
+  `take_warnings()` gives the master and refused-session warnings to
+  print; `rsh_argv()` is the argument list I25's `TransferSettings`
+  takes. Values travel as positional arguments, there is no stdin data
+  channel (I28 uploads bytes by rsync or inside the script). Scripts
+  never exit 255. rsync's own ssh child's keepalive timeout is not read
+  by this layer; I28 classifies it. "Could not resolve hostname" is
+  away, an unrecognised exit-255 text broken. The shim tests need perl;
+  the real-sshd tests are opt-in (`tests/ssh_session_real.rs`).
+
 ### I25
 
 - 2026-11-04 (merged): for I23, I28 and I30, `Rsync::from_machine`
