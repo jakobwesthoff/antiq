@@ -6,9 +6,24 @@
 
 use crate::fsx::tree::TreeRoot;
 use crate::pin::{self, PinError};
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, PieceTree};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use jiff::Timestamp;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+/// The ignore files of a piece.
+const IGNORE_FILE: &[u8] = b".antiqignore";
+
+/// Names whose changes are no activity, at any level of a piece.
+const MARKER_NAMES: [&[u8]; 2] = [IGNORE_FILE, pin::PIN_FILE.as_bytes()];
+
+/// A day, in nanoseconds. Idle time is counted in 24-hour days.
+const DAY_NS: i128 = 86_400_000_000_000;
 
 /// Errors of the idle check.
 #[derive(Debug, thiserror::Error)]
@@ -17,20 +32,49 @@ pub enum IdleError {
     Problems,
     #[error(transparent)]
     Pin(#[from] PinError),
+    #[error("cannot read the ignore file {path}: {source}")]
+    IgnoreFile {
+        path: RelPath,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the ignore file {path} is not UTF-8 text")]
+    NotUtf8 { path: RelPath },
+    #[error("{} line {line} is not a valid ignore rule: {message}", rule_source(.file))]
+    BadRule {
+        /// The ignore file, or `None` for the `collection.ignore` setting.
+        file: Option<RelPath>,
+        line: usize,
+        message: String,
+    },
 }
 
 impl crate::error::HasKind for IdleError {}
 
+fn rule_source(file: &Option<RelPath>) -> String {
+    match file {
+        Some(file) => file.to_string(),
+        None => "collection.ignore".to_string(),
+    }
+}
+
 /// What the idle check makes of a piece.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleVerdict {
+    /// The piece carries a pin; nothing else is looked at.
     Pinned,
+    /// No file counts, after the ignore rules, the marker files and the
+    /// junk list.
     Empty,
+    /// Files count only by name: all their times lie too far ahead.
     OnlyFuture,
+    /// Not old enough yet. `clock` is the later of the newest counted file
+    /// time and the unearthing time, `newest_file` the newest file time.
     Active {
         clock: Timestamp,
         newest_file: Timestamp,
     },
+    /// The idle clock is older than the configured days.
     Idle {
         clock: Timestamp,
         newest_file: Timestamp,
@@ -48,19 +92,43 @@ pub struct IdleCheck {
 #[derive(Debug, Clone)]
 pub struct Settings {
     idle_days: u32,
+    /// The `collection.ignore` rules, matched against paths relative to the
+    /// top of the piece.
+    config_rules: Gitignore,
 }
 
 impl Settings {
-    pub fn new(idle_days: u32) -> Settings {
-        Settings { idle_days }
+    /// `ignore_lines` are the lines of `collection.ignore`, in gitignore
+    /// syntax. A line that is no valid rule is an error.
+    pub fn new(idle_days: u32, ignore_lines: &[String]) -> Result<Settings, IdleError> {
+        let config_rules = compile(None, ignore_lines.iter().map(String::as_str))?;
+        Ok(Settings {
+            idle_days,
+            config_rules,
+        })
     }
 }
 
-/// A day, in nanoseconds. Idle time is counted in 24-hour days.
-const DAY_NS: i128 = 86_400_000_000_000;
-
-/// Names whose changes are no activity, at any level of a piece.
-const MARKER_NAMES: [&[u8]; 2] = [b".antiqignore", b".antiq-pin"];
+/// Builds one matcher from rule lines. Paths are matched relative to the
+/// directory the rules belong to, so the builder's root is `.`: any other
+/// root makes the matcher cut a byte prefix off the path it is given.
+fn compile<'a>(
+    file: Option<&RelPath>,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Gitignore, IdleError> {
+    let bad_rule = |line: usize, error: ignore::Error| IdleError::BadRule {
+        file: file.cloned(),
+        line,
+        message: error.to_string(),
+    };
+    let mut builder = GitignoreBuilder::new(".");
+    for (index, line) in lines.enumerate() {
+        builder
+            .add_line(None, line)
+            .map_err(|error| bad_rule(index + 1, error))?;
+    }
+    builder.build().map_err(|error| bad_rule(0, error))
+}
 
 /// Decides whether the piece in `tree` is pinned, empty, active or idle at
 /// `now`.
@@ -91,16 +159,25 @@ pub fn check(
     // lie outside what a `Timestamp` holds.
     let now_ns = now.as_nanosecond();
     let latest_counted = now_ns + DAY_NS;
+    let mut rules = Rules::new(collection, tree, settings);
     let mut candidates = 0usize;
     let mut future = Vec::new();
     let mut newest: Option<i128> = None;
     for entry in tree.entries() {
+        match entry.kind {
+            EntryKind::Directory => {
+                rules.enter_directory(&entry.path)?;
+                continue;
+            }
+            EntryKind::File => {}
+            _ => continue,
+        }
         let is_marker = entry
             .path
             .components()
             .last()
             .is_some_and(|name| MARKER_NAMES.contains(&name));
-        if entry.kind != EntryKind::File || is_marker {
+        if is_marker || rules.ignores(&entry.path, false) {
             continue;
         }
         candidates += 1;
@@ -144,6 +221,134 @@ fn timestamp(ns: i128) -> Timestamp {
     Timestamp::from_nanosecond(ns).unwrap_or(Timestamp::MIN)
 }
 
+// =========================================================
+// Ignore rules
+// =========================================================
+
+/// The rules that apply while the entries of a piece are walked top down.
+///
+/// A directory comes before everything below it, so by the time an entry is
+/// judged its ancestors are decided: an ignored directory ignores
+/// everything below it, whatever the rules inside say, and the
+/// `.antiqignore` of a directory is read only once the directory is known
+/// not to be ignored.
+struct Rules<'a> {
+    collection: &'a TreeRoot,
+    top: &'a RelPath,
+    config: &'a Gitignore,
+    /// Directories, as path bytes, that hold a regular `.antiqignore`.
+    with_ignore_file: HashSet<&'a [u8]>,
+    /// The rules read so far, by the directory they belong to.
+    loaded: HashMap<&'a [u8], Gitignore>,
+    ignored_directories: HashSet<Vec<u8>>,
+}
+
+impl<'a> Rules<'a> {
+    fn new(collection: &'a TreeRoot, tree: &'a PieceTree, settings: &'a Settings) -> Rules<'a> {
+        let with_ignore_file = tree
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+            .filter_map(|entry| {
+                let bytes = entry.path.as_bytes();
+                let (parent, name) = split_last(bytes);
+                (name == IGNORE_FILE).then_some(parent)
+            })
+            .collect();
+        Rules {
+            collection,
+            top: tree.top(),
+            config: &settings.config_rules,
+            with_ignore_file,
+            loaded: HashMap::new(),
+            ignored_directories: HashSet::new(),
+        }
+    }
+
+    /// Notes whether the directory at `path` is ignored and, if it is not,
+    /// reads its `.antiqignore`.
+    fn enter_directory(&mut self, path: &'a RelPath) -> Result<(), IdleError> {
+        // The top of the piece is never ignored.
+        if !path.is_root() && self.ignores(path, true) {
+            self.ignored_directories.insert(path.as_bytes().to_vec());
+            return Ok(());
+        }
+        let bytes = path.as_bytes();
+        if let Some(&directory) = self.with_ignore_file.get(bytes) {
+            let rules = self.read_ignore_file(path)?;
+            self.loaded.insert(directory, rules);
+        }
+        Ok(())
+    }
+
+    /// Whether the entry at `path` is ignored: by an ignored directory above
+    /// it, else by the first rule that has a say, looking at the
+    /// `.antiqignore` files from the nearest directory outwards and last at
+    /// the config.
+    fn ignores(&self, path: &RelPath, is_dir: bool) -> bool {
+        let bytes = path.as_bytes();
+        let (parent, _) = split_last(bytes);
+        if self.ignored_directories.contains(parent) {
+            return true;
+        }
+        let mut directory = parent;
+        loop {
+            if let Some(rules) = self.loaded.get(directory) {
+                let below = if directory.is_empty() {
+                    bytes
+                } else {
+                    &bytes[directory.len() + 1..]
+                };
+                match rules.matched(Path::new(OsStr::from_bytes(below)), is_dir) {
+                    ignore::Match::Ignore(_) => return true,
+                    ignore::Match::Whitelist(_) => return false,
+                    ignore::Match::None => {}
+                }
+            }
+            if directory.is_empty() {
+                break;
+            }
+            directory = split_last(directory).0;
+        }
+        self.config
+            .matched(Path::new(OsStr::from_bytes(bytes)), is_dir)
+            .is_ignore()
+    }
+
+    /// Reads and compiles the `.antiqignore` in the directory at `directory`.
+    fn read_ignore_file(&self, directory: &RelPath) -> Result<Gitignore, IdleError> {
+        let name = Name::from_bytes(IGNORE_FILE.to_vec()).expect("the ignore file name is valid");
+        let path = directory.join(&name);
+        let read = || -> io::Result<Vec<u8>> {
+            let mut content = Vec::new();
+            self.collection
+                .sub(self.top)?
+                .open_read(&path)?
+                .read_to_end(&mut content)?;
+            Ok(content)
+        };
+        let content = read().map_err(|source| IdleError::IgnoreFile {
+            path: path.clone(),
+            source,
+        })?;
+        let text =
+            String::from_utf8(content).map_err(|_| IdleError::NotUtf8 { path: path.clone() })?;
+        // Editors on some systems put a byte order mark in front of the first
+        // rule, which would turn that rule into one that matches nothing.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        compile(Some(&path), text.split('\n'))
+    }
+}
+
+/// The part of `bytes` before its last `/`, and the part after it. A path
+/// without a `/` has the top of the piece, the empty path, as its parent.
+fn split_last(bytes: &[u8]) -> (&[u8], &[u8]) {
+    match bytes.iter().rposition(|byte| *byte == b'/') {
+        Some(slash) => (&bytes[..slash], &bytes[slash + 1..]),
+        None => (&bytes[..0], bytes),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +359,7 @@ mod tests {
     use crate::walk::walk_piece;
     use filetime::FileTime;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     const DAY: i64 = 86_400;
     const NOW: i64 = 2_000_000_000;
@@ -172,6 +378,10 @@ mod tests {
         tree.file_with(&format!("piece/{relative}"), "x", 0o644, NOW + offset)
     }
 
+    fn settings(idle_days: u32) -> Settings {
+        Settings::new(idle_days, &[]).expect("no rules to refuse")
+    }
+
     fn walk(root: &TreeRoot) -> PieceTree {
         let rules = Rules::new(&[], &[])
             .expect("no patterns")
@@ -183,14 +393,8 @@ mod tests {
 
     fn run_with(tree: &Tree, unearthed: Option<Timestamp>, idle_days: u32) -> IdleCheck {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
-        check(
-            &root,
-            &walk(&root),
-            unearthed,
-            &Settings::new(idle_days),
-            at(0),
-        )
-        .expect("the check succeeds")
+        check(&root, &walk(&root), unearthed, &settings(idle_days), at(0))
+            .expect("the check succeeds")
     }
 
     fn run(tree: &Tree) -> IdleCheck {
@@ -288,7 +492,7 @@ mod tests {
         );
 
         let checked =
-            check(&root, &walked, None, &Settings::new(14), at(0)).expect("the check succeeds");
+            check(&root, &walked, None, &settings(14), at(0)).expect("the check succeeds");
 
         assert_eq!(checked, only(IdleVerdict::Pinned));
     }
@@ -304,7 +508,7 @@ mod tests {
         );
         let root = TreeRoot::open(tree.root()).expect("the root opens");
 
-        let refused = check(&root, &walk(&root), None, &Settings::new(14), at(0))
+        let refused = check(&root, &walk(&root), None, &settings(14), at(0))
             .expect_err("a piece with problems has no verdict");
 
         assert!(matches!(refused, IdleError::Problems), "{refused}");
@@ -418,7 +622,7 @@ mod tests {
         let root = TreeRoot::open(tree.root()).expect("the root opens");
 
         let checked =
-            check(&root, &walk(&root), None, &Settings::new(14), now).expect("the check succeeds");
+            check(&root, &walk(&root), None, &settings(14), now).expect("the check succeeds");
 
         let old = Timestamp::from_second(old).expect("in range");
         let expected = IdleCheck {
@@ -512,7 +716,7 @@ mod tests {
         let walked = PieceTree::new(path("piece"), vec![ancient], vec![]);
 
         let checked =
-            check(&root, &walked, None, &Settings::new(14), at(0)).expect("the check succeeds");
+            check(&root, &walked, None, &settings(14), at(0)).expect("the check succeeds");
 
         let expected = IdleCheck {
             verdict: IdleVerdict::Idle {
@@ -596,7 +800,7 @@ mod tests {
         let walked = PieceTree::new(path("piece"), vec![far], vec![]);
 
         let checked =
-            check(&root, &walked, None, &Settings::new(14), at(0)).expect("the check succeeds");
+            check(&root, &walked, None, &settings(14), at(0)).expect("the check succeeds");
 
         let expected = IdleCheck {
             verdict: IdleVerdict::OnlyFuture,
@@ -683,5 +887,391 @@ mod tests {
             future: vec![],
         };
         assert_eq!(run_with(&tree, Some(at(10 * DAY)), 14), expected);
+    }
+
+    // =========================================================
+    // Ignore rules
+    // =========================================================
+
+    fn lines(rules: &[&str]) -> Vec<String> {
+        rules.iter().map(|rule| rule.to_string()).collect()
+    }
+
+    /// Runs the check with `collection.ignore` set to `rules`.
+    fn run_ruled(tree: &Tree, rules: &[&str]) -> Result<IdleCheck, IdleError> {
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let settings = Settings::new(14, &lines(rules))?;
+        check(&root, &walk(&root), None, &settings, at(0))
+    }
+
+    fn ignore_file(tree: &mut Tree, relative: &str, content: impl AsRef<[u8]>) {
+        tree.file_with(
+            &format!("piece/{relative}"),
+            content,
+            0o644,
+            NOW - 100 * DAY,
+        );
+    }
+
+    #[test]
+    fn a_config_rule_hides_what_is_below_an_ignored_directory() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "target/debug/new", -DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["target/"]).expect("checks"),
+            idle(-100 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_piece_whose_only_files_are_ignored_is_empty() {
+        let mut tree = Tree::new();
+        file(&mut tree, "target/a", -DAY);
+        file(&mut tree, "target/b", -100 * DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["target/"]).expect("checks"),
+            only(IdleVerdict::Empty)
+        );
+    }
+
+    #[test]
+    fn a_config_rule_hides_matching_files_at_any_depth() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "new.log", -DAY);
+        file(&mut tree, "sub/deeper/new.log", -DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["*.log"]).expect("checks"),
+            idle(-100 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_config_rule_with_a_leading_slash_means_the_top_of_the_piece() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "build/new", -DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["/build"]).expect("checks"),
+            idle(-100 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_config_rule_with_a_leading_slash_leaves_deeper_names_alone() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "build/top", -DAY);
+        file(&mut tree, "sub/build/deeper", -2 * DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["/build"]).expect("checks"),
+            active(-2 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_directory_rule_does_not_hide_a_file_of_that_name() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "b/data/inner", -DAY);
+        file(&mut tree, "a/data", -2 * DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["data/"]).expect("checks"),
+            active(-2 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_negated_config_rule_keeps_a_file_visible() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        file(&mut tree, "b.log", -DAY);
+        file(&mut tree, "keep.log", -2 * DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["*.log", "!keep.log"]).expect("checks"),
+            active(-2 * DAY)
+        );
+    }
+
+    #[test]
+    fn an_ignore_file_hides_with_its_anchored_rules_and_its_negation() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "sub/*.log\n!sub/keep.log\n");
+        file(&mut tree, "sub/b.log", -DAY);
+        file(&mut tree, "sub/keep.log", -40 * DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-40 * DAY));
+    }
+
+    #[test]
+    fn a_nested_ignore_file_hides_with_the_same_rules_relative_to_its_directory() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "sub/.antiqignore", "*.log\n!keep.log\n");
+        file(&mut tree, "sub/b.log", -DAY);
+        file(&mut tree, "sub/keep.log", -40 * DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-40 * DAY));
+    }
+
+    #[test]
+    fn a_nested_ignore_file_does_not_reach_its_siblings() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "sub/.antiqignore", "*.tmp\n");
+        file(&mut tree, "sub/x.tmp", -DAY);
+        file(&mut tree, "top.tmp", -2 * DAY);
+        file(&mut tree, "other/y.tmp", -3 * DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), active(-2 * DAY));
+    }
+
+    #[test]
+    fn a_nested_negation_overrides_an_outer_rule_for_files() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "*.log\n");
+        ignore_file(&mut tree, "sub/.antiqignore", "!keep.log\n");
+        file(&mut tree, "sub/keep.log", -2 * DAY);
+        file(&mut tree, "sub/other.log", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), active(-2 * DAY));
+    }
+
+    #[test]
+    fn an_ignore_file_ranks_above_the_config_rules() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "sub/.antiqignore", "!keep.log\n");
+        file(&mut tree, "sub/keep.log", -2 * DAY);
+        file(&mut tree, "sub/other.log", -DAY);
+
+        assert_eq!(
+            run_ruled(&tree, &["*.log"]).expect("checks"),
+            active(-2 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_directory_that_an_outer_rule_ignores_stays_ignored_whatever_is_inside() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "vendor/\n");
+        ignore_file(&mut tree, "vendor/.antiqignore", "!new\n");
+        file(&mut tree, "vendor/new", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn a_negation_cannot_bring_back_a_file_below_an_ignored_directory() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "vendor/\n!vendor/new\n");
+        file(&mut tree, "vendor/new", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn an_ignore_file_does_not_reach_a_directory_whose_name_starts_like_its_own() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "sub/.antiqignore", "*.log\n");
+        file(&mut tree, "sub/y.log", -DAY);
+        file(&mut tree, "subway/x.log", -2 * DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), active(-2 * DAY));
+    }
+
+    #[test]
+    fn a_percent_in_a_name_is_matched_as_it_is() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "100%.log\n");
+        file(&mut tree, "100%.log", -DAY);
+        file(&mut tree, "100%25.log", -2 * DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), active(-2 * DAY));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_matched_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "*.log\n");
+        let name = std::ffi::OsStr::from_bytes(b"\xff.log");
+        let odd = tree.path("piece").join(name);
+        fs::write(&odd, "x").expect("the file is written");
+        filetime::set_file_mtime(&odd, FileTime::from_unix_time(NOW - DAY, 0))
+            .expect("the time is set");
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn an_ignore_file_with_a_byte_order_mark_applies_its_first_rule() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "\u{feff}*.log\n");
+        file(&mut tree, "new.log", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn an_ignore_file_with_windows_line_ends_applies_every_rule() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "*.log\r\n*.tmp\r\n");
+        file(&mut tree, "new.log", -DAY);
+        file(&mut tree, "new.tmp", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), idle(-100 * DAY));
+    }
+
+    #[test]
+    fn a_symlink_named_like_an_ignore_file_is_not_read() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "rules", "*.log\n");
+        tree.symlink("piece/.antiqignore", "rules");
+        file(&mut tree, "new.log", -DAY);
+
+        assert_eq!(run_ruled(&tree, &[]).expect("checks"), active(-DAY));
+    }
+
+    #[test]
+    fn a_broken_ignore_file_under_an_ignored_directory_is_never_read() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "vendor/.antiqignore", "broken\\\n");
+
+        assert_eq!(
+            run_ruled(&tree, &["vendor/"]).expect("checks"),
+            idle(-100 * DAY)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_ignore_file_under_an_ignored_directory_is_never_read() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "vendor/.antiqignore", "*.log\n");
+        let locked = tree.path("piece/vendor/.antiqignore");
+        fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("the mode is set");
+        assert!(
+            fs::read(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        assert_eq!(
+            run_ruled(&tree, &["vendor/"]).expect("checks"),
+            idle(-100 * DAY)
+        );
+    }
+
+    #[test]
+    fn a_bad_rule_in_an_ignore_file_is_reported_with_its_line() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, "sub/.antiqignore", "fine\nbroken\\\n");
+
+        let error = run_ruled(&tree, &[]).expect_err("the rule is refused");
+
+        assert!(
+            matches!(&error, IdleError::BadRule { file: Some(file), line: 2, .. } if file.to_string() == "sub/.antiqignore"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_bad_rule_in_the_config_is_reported_with_its_line() {
+        let mut tree = Tree::new();
+        tree.dir("piece");
+
+        let error = run_ruled(&tree, &["fine", "broken\\"]).expect_err("the rule is refused");
+
+        assert!(
+            matches!(
+                &error,
+                IdleError::BadRule {
+                    file: None,
+                    line: 2,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_ignore_file_that_is_not_text_is_reported() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", b"*.log\n\xff\xfe\n");
+
+        let error = run_ruled(&tree, &[]).expect_err("the file is refused");
+
+        assert!(
+            matches!(&error, IdleError::NotUtf8 { path } if path.to_string() == ".antiqignore"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_ignore_file_that_cannot_be_read_is_reported() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        ignore_file(&mut tree, ".antiqignore", "*.log\n");
+        let locked = tree.path("piece/.antiqignore");
+        fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("the mode is set");
+        assert!(
+            fs::read(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let error = run_ruled(&tree, &[]).expect_err("the file is refused");
+
+        assert!(
+            matches!(&error, IdleError::IgnoreFile { path, .. } if path.to_string() == ".antiqignore"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_bad_rule_names_where_it_came_from() {
+        let from_config = IdleError::BadRule {
+            file: None,
+            line: 2,
+            message: "dangling".to_string(),
+        };
+        let from_file = IdleError::BadRule {
+            file: Some(path("sub/.antiqignore")),
+            line: 7,
+            message: "dangling".to_string(),
+        };
+
+        assert_eq!(
+            from_config.to_string(),
+            "collection.ignore line 2 is not a valid ignore rule: dangling"
+        );
+        assert_eq!(
+            from_file.to_string(),
+            "sub/.antiqignore line 7 is not a valid ignore rule: dangling"
+        );
     }
 }

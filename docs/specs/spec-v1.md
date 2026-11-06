@@ -183,6 +183,19 @@ Ignore rules in gitignore syntax, from the config and from
 Changes to `.antiqignore` and `.antiq-pin` files do not count as
 activity. (ADR 0013, ADR 0029)
 
+The rules follow gitignore semantics. The lines of `collection.ignore` apply inside
+every piece, anchored at the piece's top: a leading `/` means the top.
+A `.antiqignore` applies to its own directory and everything below it,
+anchored at that directory. Where several files have a rule for a path,
+the nearest `.antiqignore` wins, then those further out, then the config;
+within one file the last matching rule wins. A directory that an ignore
+rule excludes hides everything below it, and a `!` rule cannot bring back
+a path inside it. An excluded directory's `.antiqignore` is not read. Only
+a regular file named `.antiqignore` is read. A rule that is not valid, a
+file that is not UTF-8 text and a file that cannot be read each make the
+check fail with the file and line named, so a piece with broken rules is
+never called idle.
+
 A junk list, by default `.DS_Store`, is left out of the idle check,
 packages, listings and verification. Junk files are not packed into
 archives or live packages. Only entries that are not directories are
@@ -504,7 +517,7 @@ remotes; version 1 accepts exactly one.
 | `collection.id` | minted at `init` | collection ULID |
 | `collection.patterns` | `["*"]` | selection patterns |
 | `collection.exclude` | `[]` | literal paths that are never pieces, in the escaped form of the metadata |
-| `collection.ignore` | `[]` | gitignore lines for the idle check |
+| `collection.ignore` | `[]` | gitignore lines for the idle check, anchored at each piece's top |
 | `collection.junk` | `[".DS_Store"]` | junk list |
 | `collection.idle_days` | 14 | archive tier |
 | `collection.remote_only_days` | 180 | remote-only tier, from the archive's commit |
