@@ -1000,7 +1000,8 @@ checks it would make. (ADR 0061)
   `--version` that has no archive is refused with the same hint.
 - A damaged version is refused, naming `fork` (which extracts it with a
   warning and keeps it), `rebuild` and copying the missing file back from
-  the target.
+  the target. A version with two files in one slot is refused naming
+  the files and `forget`, as `fork` refuses it too.
 - A version whose top holds a non-file with a marker's name is refused.
 - The destination is the piece's stored path. It is refused, and nothing
   changes, when it is not one the patterns select, is excluded or lies
@@ -1086,7 +1087,9 @@ working copy of a version, which stays unchanged. Without `--name` the
 copy goes to the original path. The same destination rules and staging as for
 `unearth` apply; when the original path is taken, the refusal names
 `--name` as the way out. A damaged version is extracted with a warning and
-without the comparison against the listing. `fork` writes
+without the comparison against the listing; a version without an archive,
+one with a listing of a newer format and one with two files in a slot are
+refused. `fork` writes
 `.antiq-restored` with the time alone (no version stamp, so the repairs
 never treat it as an unearth). Archived later, the copy becomes a new
 version (same path) or a new piece (new path); without edits that is an

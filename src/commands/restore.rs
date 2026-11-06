@@ -271,6 +271,23 @@ fn pick(
             });
         }
         Condition::Damaged(damages) => {
+            // Two files in one slot cannot be extracted by either command.
+            let doubled: Vec<String> = damages
+                .iter()
+                .filter_map(|damage| match damage {
+                    Damage::Doubled { files, .. } => Some(files),
+                    _ => None,
+                })
+                .flatten()
+                .map(|file| file.to_string_lossy().into_owned())
+                .collect();
+            if !doubled.is_empty() {
+                return Err(RestoreError::Doubled {
+                    piece: piece_text,
+                    stamp: stamp_text,
+                    files: doubled,
+                });
+            }
             if policy == Policy::Sound {
                 // A listing of a newer format is refused as such, whatever
                 // else is damaged beside it.
@@ -288,22 +305,6 @@ fn pick(
                     piece: piece_text,
                     stamp: stamp_text,
                     reasons: damages.iter().map(ToString::to_string).collect(),
-                });
-            }
-            let doubled: Vec<String> = damages
-                .iter()
-                .filter_map(|damage| match damage {
-                    Damage::Doubled { files, .. } => Some(files),
-                    _ => None,
-                })
-                .flatten()
-                .map(|file| file.to_string_lossy().into_owned())
-                .collect();
-            if !doubled.is_empty() {
-                return Err(RestoreError::Doubled {
-                    piece: piece_text,
-                    stamp: stamp_text,
-                    files: doubled,
                 });
             }
             damages.iter().map(ToString::to_string).collect()
@@ -1888,13 +1889,26 @@ mod choice_tests {
     }
 
     #[test]
-    fn a_doubled_slot_names_every_file() {
-        let mut twin = None;
-        assert_damaged(
-            |v| twin = Some(v.add_twin(VersionFile::Archive, "other")),
-            "2 files for the archive",
+    fn a_doubled_slot_names_every_file_and_forget() {
+        let mut world = World::new();
+        let version = world.add("projects/scanner", NEW);
+        let twin = version.add_twin(VersionFile::Archive, "other");
+        let error = world.choose("scanner", None).expect_err("doubled");
+        let RestoreError::Doubled { files, .. } = &error else {
+            panic!("expected a doubled slot, got {error:?}");
+        };
+        assert_eq!(files.len(), 2, "{files:?}");
+        let twin = twin
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(files.contains(&twin), "{files:?}");
+        let text = error.to_string();
+        assert!(
+            text.contains("`forget`") && !text.contains("`fork`"),
+            "{text}"
         );
-        assert!(twin.is_some());
     }
 
     #[test]
@@ -3743,6 +3757,24 @@ mod fork_choice_tests {
             Error::from(crate::commands::unearth::UnearthError::from(error)).kind(),
             ErrorKind::FormatTooNew
         );
+    }
+
+    #[test]
+    fn unearth_refuses_a_doubled_slot_naming_the_files_and_forget_not_fork() {
+        let (world, version) = World::scanner();
+        let twin = version.add_twin(VersionFile::Archive, "other");
+        let error = world
+            .unearth_picks()
+            .expect_err("a doubled slot is refused");
+        assert!(matches!(error, RestoreError::Doubled { .. }), "{error:?}");
+        let text = error.to_string();
+        let twin = twin
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(text.contains(&twin) && text.contains("forget"), "{text}");
+        assert!(!text.contains("fork"), "{text}");
     }
 
     #[test]
