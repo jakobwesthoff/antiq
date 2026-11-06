@@ -961,6 +961,7 @@ mod tests {
     use crate::id::SeqIds;
     use crate::remote::marker::Marker;
     use crate::run;
+    use crate::testing::rerun_while_lock_unattributed;
     use crate::testing::tree::{COLLECTION_ID, TempCollection};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
@@ -1036,7 +1037,9 @@ mod tests {
         ) -> Result<AddReport, RemoteOpError> {
             let collection = self.collection();
             let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-            let started = run::start(&collection, &clock, dry_run).expect("the run starts");
+            let started =
+                rerun_while_lock_unattributed(|| run::start(&collection, &clock, dry_run))
+                    .expect("the run starts");
             let request = AddRequest {
                 url,
                 init,
@@ -1722,7 +1725,9 @@ mod tests {
         fn remove(&self, dry_run: bool) -> Result<RemoveReport, RemoteOpError> {
             let collection = self.collection();
             let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-            let started = run::start(&collection, &clock, dry_run).expect("the run starts");
+            let started =
+                rerun_while_lock_unattributed(|| run::start(&collection, &clock, dry_run))
+                    .expect("the run starts");
             remove(&collection, &started)
         }
 

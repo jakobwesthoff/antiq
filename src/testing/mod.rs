@@ -25,8 +25,137 @@ pub fn deep_path(levels: usize) -> RelPath {
     RelPath::parse(&names.join("/")).expect("the names are valid")
 }
 
+/// An error that can say the run lock was found held with no holder
+/// recorded.
+pub trait LockHeldWithoutHolder {
+    fn is_lock_held_without_holder(&self) -> bool;
+}
+
+impl LockHeldWithoutHolder for crate::run::RunError {
+    fn is_lock_held_without_holder(&self) -> bool {
+        matches!(
+            self,
+            crate::run::RunError::Lock(crate::lock::LockError::HeldUnknown)
+        )
+    }
+}
+
+impl LockHeldWithoutHolder for crate::ops::archive::ArchiveError {
+    fn is_lock_held_without_holder(&self) -> bool {
+        matches!(self, crate::ops::archive::ArchiveError::Run(error) if error.is_lock_held_without_holder())
+    }
+}
+
+impl LockHeldWithoutHolder for crate::error::Error {
+    fn is_lock_held_without_holder(&self) -> bool {
+        match self {
+            crate::error::Error::Run(error) => error.is_lock_held_without_holder(),
+            crate::error::Error::Archive(error) => error.is_lock_held_without_holder(),
+            crate::error::Error::Lock(error) => {
+                matches!(error, crate::lock::LockError::HeldUnknown)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// How often [`rerun_while_lock_unattributed`] runs an operation again.
+const LOCK_RETRIES: usize = 100_000;
+
+/// Runs `operation` again while it fails with `LockError::HeldUnknown`,
+/// at most [`LOCK_RETRIES`] times.
+///
+/// Test threads fork processes while other threads hold a lock. The child
+/// keeps the descriptor of the lock file until it has executed, so a lock
+/// that was released a moment ago is still held, and its file is empty.
+/// An operation takes the lock before it does anything, so running it
+/// again is safe. Any other error, including a lock held by a recorded
+/// holder, is returned at once.
+pub fn rerun_while_lock_unattributed<T, E: LockHeldWithoutHolder>(
+    mut operation: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut reruns = 0;
+    loop {
+        match operation() {
+            Err(error) if error.is_lock_held_without_holder() && reruns < LOCK_RETRIES => {
+                reruns += 1;
+                std::thread::yield_now();
+            }
+            result => return result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{LOCK_RETRIES, rerun_while_lock_unattributed};
+    use crate::lock::LockError;
+    use crate::run::RunError;
+
+    fn unattributed() -> RunError {
+        RunError::Lock(LockError::HeldUnknown)
+    }
+
+    #[test]
+    fn an_operation_that_finds_the_lock_held_without_a_holder_runs_again() {
+        let mut calls = 0;
+        let result = rerun_while_lock_unattributed(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(unattributed())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(result.expect("the third run succeeds"), 3);
+    }
+
+    #[test]
+    fn the_errors_that_wrap_a_run_error_pass_the_lock_state_on() {
+        use super::LockHeldWithoutHolder;
+        use crate::error::Error;
+        use crate::ops::archive::ArchiveError;
+
+        assert!(ArchiveError::Run(unattributed()).is_lock_held_without_holder());
+        assert!(Error::Run(unattributed()).is_lock_held_without_holder());
+        assert!(Error::Archive(ArchiveError::Run(unattributed())).is_lock_held_without_holder());
+        assert!(Error::Lock(LockError::HeldUnknown).is_lock_held_without_holder());
+        let holder = LockError::Held {
+            pid: 7,
+            started: "2026-11-03T10:00:00Z".parse().expect("a time"),
+        };
+        assert!(!Error::Lock(holder).is_lock_held_without_holder());
+        assert!(!Error::Usage("x".into()).is_lock_held_without_holder());
+    }
+
+    #[test]
+    fn a_lock_held_by_a_recorded_holder_is_returned_at_once() {
+        let mut calls = 0;
+        let result: Result<(), RunError> = rerun_while_lock_unattributed(|| {
+            calls += 1;
+            Err(RunError::Lock(LockError::Held {
+                pid: 7,
+                started: "2026-11-03T10:00:00Z".parse().expect("a time"),
+            }))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn an_operation_stops_after_the_retry_cap_with_its_error() {
+        let mut calls = 0;
+        let result: Result<(), RunError> = rerun_while_lock_unattributed(|| {
+            calls += 1;
+            Err(unattributed())
+        });
+        assert!(matches!(
+            result,
+            Err(RunError::Lock(LockError::HeldUnknown))
+        ));
+        assert_eq!(calls, LOCK_RETRIES + 1);
+    }
+
     use super::tree::{COLLECTION_ID, TempCollection, Tree};
     use std::fs;
     use std::os::unix::fs::{FileTypeExt, MetadataExt};

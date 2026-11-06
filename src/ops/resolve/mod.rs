@@ -393,7 +393,7 @@ mod tests {
     use crate::ops::archive::unearthed::tests::{At, FILE_TIME, PIECE, Scene, TITLE, asker, scene};
     use crate::ops::archive::{RealSeams, SkipReason, Step};
     use crate::ops::unearth::tests::{ID, id, path};
-    use crate::testing::shared_pool;
+    use crate::testing::{rerun_while_lock_unattributed, shared_pool};
     use crate::tracking::PendingDecision;
     use std::ffi::OsString;
     use std::fs;
@@ -430,19 +430,21 @@ mod tests {
     fn answer_with(scene: &Scene, answer: Answer, seams: &dyn Seams) -> Result<Resolved, Error> {
         let ids = SeqIds::new(1);
         let piece = OsString::from(PIECE);
-        resolve_with(
-            &request(
-                scene,
-                &ids,
-                None,
-                Task::Answer {
-                    piece: &piece,
-                    answer,
-                },
-                false,
-            ),
-            seams,
-        )
+        rerun_while_lock_unattributed(|| {
+            resolve_with(
+                &request(
+                    scene,
+                    &ids,
+                    None,
+                    Task::Answer {
+                        piece: &piece,
+                        answer,
+                    },
+                    false,
+                ),
+                seams,
+            )
+        })
     }
 
     fn done(resolved: Result<Resolved, Error>) -> ResolveReport {
@@ -464,18 +466,20 @@ mod tests {
     ) -> Result<Resolved, Error> {
         let ids = SeqIds::new(1);
         let piece = piece.map(OsString::from);
-        resolve_with(
-            &request(
-                scene,
-                &ids,
-                interaction,
-                Task::Walk {
-                    piece: piece.as_deref(),
-                },
-                dry_run,
-            ),
-            &RealSeams,
-        )
+        rerun_while_lock_unattributed(|| {
+            resolve_with(
+                &request(
+                    scene,
+                    &ids,
+                    interaction,
+                    Task::Walk {
+                        piece: piece.as_deref(),
+                    },
+                    dry_run,
+                ),
+                &RealSeams,
+            )
+        })
     }
 
     fn kind_of(error: Error) -> ErrorKind {
@@ -928,19 +932,21 @@ mod tests {
     fn planned(scene: &Scene, answer: Answer) -> Vec<ResolveAction> {
         let ids = SeqIds::new(1);
         let piece = OsString::from(PIECE);
-        let resolved = resolve_with(
-            &request(
-                scene,
-                &ids,
-                None,
-                Task::Answer {
-                    piece: &piece,
-                    answer,
-                },
-                true,
-            ),
-            &RealSeams,
-        )
+        let resolved = rerun_while_lock_unattributed(|| {
+            resolve_with(
+                &request(
+                    scene,
+                    &ids,
+                    None,
+                    Task::Answer {
+                        piece: &piece,
+                        answer,
+                    },
+                    true,
+                ),
+                &RealSeams,
+            )
+        })
         .expect("the plan is made");
         match resolved {
             Resolved::Planned { plan, .. } => plan.actions,

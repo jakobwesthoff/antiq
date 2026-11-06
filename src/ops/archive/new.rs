@@ -1155,7 +1155,7 @@ mod tests {
     use crate::relpath::RelPath;
     use crate::repair::{Effects, RealEffects};
     use crate::store::{Source, Store};
-    use crate::testing::shared_pool;
+    use crate::testing::{rerun_while_lock_unattributed, shared_pool};
     use crate::tracking::{self, EntryState, LocalPayload, TrackingEntry, VersionTakenOut};
     use crate::tree::{EntryKind, TreeEntry};
     use sha2::{Digest, Sha256};
@@ -1382,18 +1382,20 @@ mod tests {
 
     fn run_from(world: &World, seams: &dyn Seams, first_id: u64) -> ArchiveReport {
         let ids = SeqIds::new(first_id);
-        archive_with(
-            &ArchiveRequest {
-                collection: &world.collection,
-                clock: &clock(),
-                ids: &ids,
-                pool: shared_pool(),
-                interaction: crate::ops::archive::nobody(),
-                workers: 1,
-                dry_run: false,
-            },
-            seams,
-        )
+        rerun_while_lock_unattributed(|| {
+            archive_with(
+                &ArchiveRequest {
+                    collection: &world.collection,
+                    clock: &clock(),
+                    ids: &ids,
+                    pool: shared_pool(),
+                    interaction: crate::ops::archive::nobody(),
+                    workers: 1,
+                    dry_run: false,
+                },
+                seams,
+            )
+        })
         .expect("the run finishes")
     }
 
@@ -2412,7 +2414,8 @@ mod tests {
 
     fn repaired(world: &World) {
         let started =
-            crate::run::start(&world.collection, &clock(), false).expect("the repairs run");
+            rerun_while_lock_unattributed(|| crate::run::start(&world.collection, &clock(), false))
+                .expect("the repairs run");
         drop(started);
     }
 
@@ -2549,7 +2552,8 @@ mod tests {
         use crate::error::{ErrorKind, HasKind};
         let world = lone_piece("a");
         let _holder =
-            crate::run::start(&world.collection, &clock(), false).expect("the lock is free");
+            rerun_while_lock_unattributed(|| crate::run::start(&world.collection, &clock(), false))
+                .expect("the lock is free");
         let (ids, now) = (SeqIds::new(1), clock());
         let error =
             crate::ops::archive::archive(&request(&world, &ids, &now, shared_pool(), false))
@@ -2698,10 +2702,12 @@ mod tests {
         let world = lone_piece("a");
         let (ids, now) = (SeqIds::new(1), clock());
         let tiny = Pool::new(1, 1);
-        let report = archive_with(
-            &request(&world, &ids, &now, &tiny, false),
-            &Scripted::real(),
-        )
+        let report = rerun_while_lock_unattributed(|| {
+            archive_with(
+                &request(&world, &ids, &now, &tiny, false),
+                &Scripted::real(),
+            )
+        })
         .expect("the run finishes");
         assert_eq!(archived(&report).len(), 1);
         assert!(
@@ -3996,13 +4002,15 @@ mod tests {
         workers: usize,
     ) -> ArchiveReport {
         let (ids, now) = (SeqIds::new(1), clock());
-        archive_with(
-            &ArchiveRequest {
-                workers,
-                ..request(world, &ids, &now, pool, false)
-            },
-            seams,
-        )
+        rerun_while_lock_unattributed(|| {
+            archive_with(
+                &ArchiveRequest {
+                    workers,
+                    ..request(world, &ids, &now, pool, false)
+                },
+                seams,
+            )
+        })
         .expect("the run finishes")
     }
 
@@ -4122,7 +4130,8 @@ mod tests {
             workers: 2,
             ..request(&world, &ids, &now, &pool, false)
         };
-        let report = archive_with(&request, &seams).expect("the run reports");
+        let report = rerun_while_lock_unattributed(|| archive_with(&request, &seams))
+            .expect("the run reports");
         let paths: Vec<String> = skipped(&report)
             .iter()
             .map(|row| row.path.to_string())
@@ -4146,8 +4155,10 @@ mod tests {
             Ok(())
         });
         let (ids, now, pool) = (SeqIds::new(1), clock(), big_pool(1));
-        let report = archive_with(&request(&world, &ids, &now, &pool, false), &seams)
-            .expect("the run reports");
+        let report = rerun_while_lock_unattributed(|| {
+            archive_with(&request(&world, &ids, &now, &pool, false), &seams)
+        })
+        .expect("the run reports");
         assert_eq!(walks.load(Ordering::SeqCst), 1);
         let messages: Vec<&str> = skipped(&report)
             .iter()

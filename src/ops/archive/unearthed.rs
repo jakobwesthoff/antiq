@@ -748,20 +748,18 @@ pub(crate) mod tests {
     use crate::clock::{Clock, FixedClock};
     use crate::id::{IdSource, SeqIds};
     use crate::interact::{Choice, Interaction, Question, ScriptedInteraction};
-    use crate::lock::LockError;
     use crate::meta::PayloadKind;
     use crate::ops::archive::{
-        ArchiveAction, ArchiveError, ArchiveReport, ArchiveRequest, Asker, RealSeams, Seams,
-        archive_with, plan_with,
+        ArchiveAction, ArchiveReport, ArchiveRequest, Asker, RealSeams, Seams, archive_with,
+        plan_with,
     };
     use crate::ops::archive::{Forked, Lost, NeedsDecision};
     use crate::ops::status;
     use crate::ops::unearth::tests::{FILES, Fixture, ID, id, path, time};
     use crate::pack::verify::Field;
     use crate::relpath::RelPath;
-    use crate::run::RunError;
-    use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
+    use crate::testing::{rerun_while_lock_unattributed, shared_pool};
     use crate::tracking::{Answer, PendingDecision};
     use serde_json::{Value, json};
     use std::fs;
@@ -854,18 +852,20 @@ pub(crate) mod tests {
             clock: &FixedClock,
         ) -> ArchiveReport {
             let ids = SeqIds::new(1);
-            archive_with(
-                &ArchiveRequest {
-                    collection: &self.collection,
-                    clock,
-                    ids: &ids,
-                    pool: shared_pool(),
-                    interaction: asker,
-                    workers: 1,
-                    dry_run: false,
-                },
-                seams,
-            )
+            rerun_while_lock_unattributed(|| {
+                archive_with(
+                    &ArchiveRequest {
+                        collection: &self.collection,
+                        clock,
+                        ids: &ids,
+                        pool: shared_pool(),
+                        interaction: asker,
+                        workers: 1,
+                        dry_run: false,
+                    },
+                    seams,
+                )
+            })
             .expect("the run finishes")
         }
 
@@ -890,7 +890,12 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn repair(&self) {
-            drop(crate::run::start(&self.collection, &self.clock, false).expect("the repairs run"));
+            drop(
+                rerun_while_lock_unattributed(|| {
+                    crate::run::start(&self.collection, &self.clock, false)
+                })
+                .expect("the repairs run"),
+            );
         }
 
         pub(crate) fn entry(&self) -> TrackingEntry {
@@ -2339,17 +2344,8 @@ pub(crate) mod tests {
                 workers: 4,
                 dry_run: false,
             };
-            // A run that finds the lock held without a holder has done
-            // nothing, so it is tried again. The lock the fixture released
-            // was found held in full test runs under load.
-            let report = loop {
-                match archive_with(&request, &RealSeams) {
-                    Err(ArchiveError::Run(RunError::Lock(LockError::HeldUnknown))) => {
-                        std::thread::yield_now();
-                    }
-                    other => break other.unwrap_or_else(|error| panic!("round {round}: {error}")),
-                }
-            };
+            let report = rerun_while_lock_unattributed(|| archive_with(&request, &RealSeams))
+                .unwrap_or_else(|error| panic!("round {round}: {error}"));
 
             assert_eq!(most.load(Ordering::SeqCst), 1, "round {round}");
             let archived: Vec<String> = archived_rows(&report)
