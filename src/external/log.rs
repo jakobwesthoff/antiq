@@ -677,6 +677,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn control_characters_are_written_out_and_the_tab_stays() {
+        assert_eq!(escape(b"a\tb\rc\nd\x1b[0m"), "a\tb\\rc\\nd\\x1b[0m");
+    }
+
+    #[test]
+    fn a_call_that_ended_without_code_or_signal_says_so_and_a_log_shows_its_path_when_printed() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let logs = Logs::at(root.path());
+        let log = logs.open("push", Path::new("/c"), now());
+        log.start_call("x").end(None, None, Duration::ZERO);
+        let path = log.path().expect("a path");
+        assert!(format!("{log:?}").contains(&path.display().to_string()));
+        drop(log);
+        assert!(read_log(&path).contains("# unknown end\n"));
+    }
+
+    #[test]
+    fn marking_a_run_without_a_log_changes_nothing() {
+        let log = RunLog::discard();
+        log.mark_failed();
+        assert_eq!(log.path(), None);
+    }
+
+    #[test]
     fn a_discarded_log_writes_nothing_and_reports_nothing() {
         let log = RunLog::discard();
         let call = log.start_call("rsync --version");

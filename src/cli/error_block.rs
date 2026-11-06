@@ -573,6 +573,15 @@ mod tests {
     }
 
     #[test]
+    fn the_note_of_the_log_reads_as_a_step_where_a_chain_is_printed_whole() {
+        let note = LogNote {
+            path: None,
+            warning: None,
+        };
+        assert_eq!(note.to_string(), "keep the log of the run");
+    }
+
+    #[test]
     fn the_note_of_the_log_is_no_step_of_the_run() {
         let error = PushError::Target {
             problem: "x".into(),

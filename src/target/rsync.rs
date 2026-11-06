@@ -1384,6 +1384,17 @@ mod tests {
     }
 
     #[test]
+    fn a_status_is_told_as_the_exit_status_of_std_does() {
+        let mut outcome = Outcome::finished(Some(3), "", "");
+        assert_eq!(status_text(&outcome), "exit status: 3");
+        outcome.code = None;
+        outcome.signal = Some(9);
+        assert_eq!(status_text(&outcome), "signal: 9");
+        outcome.signal = None;
+        assert_eq!(status_text(&outcome), "an unknown end");
+    }
+
+    #[test]
     fn exit_0_returns_the_output() {
         let (fake, rsync) = probed_fake();
         fake.answer_all("listing\n", "", 0);

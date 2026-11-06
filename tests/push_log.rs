@@ -317,6 +317,31 @@ fn the_log_of_the_last_failed_push_stays_beyond_ten_later_pushes() {
 }
 
 #[test]
+fn a_failed_push_whose_log_cannot_be_written_says_why_in_the_error() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target);
+    fake.answer_all("", "rsync: oops\n", 1);
+    let home = tempfile::tempdir().expect("a temp dir");
+    let blocker = home.path().join("not-a-directory");
+    fs::write(&blocker, "a file").expect("writable");
+
+    let run = push_at(&collection, &blocker);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    let error = &run.json()["error"];
+    assert!(error["log"].is_null(), "{error}");
+    let warning = error["log_warning"].as_str().expect("a warning");
+    assert!(warning.starts_with("no log was written to"), "{warning}");
+
+    let text = push_text_at(&collection, &blocker);
+    assert!(
+        text.stderr.contains("No log was written to"),
+        "{}",
+        text.stderr
+    );
+}
+
+#[test]
 fn a_push_that_fails_before_any_program_starts_has_no_log_to_name() {
     let collection = Collection::build(&Clock::now())
         .piece("projects/a", |piece| {
