@@ -197,9 +197,12 @@ lie in the future is not empty and not idle. (ADR 0038)
 ### Pins
 
 A piece with a `.antiq-pin` file at its top is pinned: it is never
-archived, still backed up, and shown as pinned. `pin` and `unpin`
-create and remove the file and refuse on a piece whose folder is not
-present. The pin is checked before the idle and empty tests. (ADR 0024)
+archived, still backed up, and shown as pinned. Any entry of that name
+that is not a directory pins the piece, a dangling symlink included; a
+directory of that name is not a pin, and `unpin` refuses to remove it.
+`pin` and `unpin` create and remove the file and refuse on a piece whose
+folder is not present. The pin is checked before the idle and empty
+tests. (ADR 0024)
 
 ## Objects
 
