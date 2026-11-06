@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The message blocks: error, warning, info and hint.
+//! The message blocks: error, warning, info, hint and the dry-run line.
 
 use super::rich::Rich;
 
@@ -12,6 +12,8 @@ pub enum Kind {
     Warning,
     Info,
     Hint,
+    /// The closing line of a dry run.
+    DryRun,
 }
 
 /// One paragraph of a block section.
@@ -81,6 +83,10 @@ impl Block {
 
     pub fn hint(text: Rich) -> Block {
         Block::new(Kind::Hint, text)
+    }
+
+    pub fn dry_run(text: Rich) -> Block {
+        Block::new(Kind::DryRun, text)
     }
 
     /// The one line a pipe gets for this block, whatever the kind. Scripts

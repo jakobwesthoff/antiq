@@ -175,7 +175,7 @@ fn a_push_dry_run_on_a_terminal_tags_its_actions_and_ends_with_the_footer() {
     );
     assert!(
         rest.ends_with(
-            "\nDry run: nothing was pushed. Run again without -n to push to the target.\n"
+            "\n\x20○ DRY RUN  Nothing was pushed. Run again without -n to push to the target.\n"
         ),
         "{:?}",
         run.stdout

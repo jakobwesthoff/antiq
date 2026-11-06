@@ -95,7 +95,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "archive", "--everything"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unexpected argument '--everything' found",
                 "▌",
                 "▌ How to fix it",
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "archive", "--dryrun"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unexpected argument '--dryrun' found",
                 "▌",
                 "▌ How to fix it",
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "unerth"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unrecognized subcommand 'unerth'",
                 "▌",
                 "▌ How to fix it",
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "status", "--x"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unexpected argument '--x' found",
                 "▌",
                 "▌ How to fix it",
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "list", "a", "b"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unexpected argument 'b' found",
                 "▌",
                 "▌ How to fix it",
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "frobnicate"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Unrecognized subcommand 'frobnicate'",
                 "▌",
                 "▌ How to fix it",
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "unearth"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ The following required arguments were not provided: <PIECE>",
                 "▌",
                 "▌ How to fix it",
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "push", "--init", "--if-reachable"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ The argument '--init' cannot be used with '--if-reachable'",
                 "▌",
                 "▌ How to fix it",
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(
             rich(&["antiq", "import", "dir", "--time"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ A value is required for '--time <TIME>' but none was supplied"
             ]
         );
@@ -280,7 +280,7 @@ mod tests {
         );
         assert_eq!(
             block_for(&error).render(&Env::new(true, false, true, 100)),
-            [" ✖ ERROR", "▌ Unrecognized subcommand 'x'"]
+            ["▌ ✖ ERROR", "▌ Unrecognized subcommand 'x'"]
         );
     }
 

@@ -99,7 +99,7 @@ fn an_error_has_a_badge_line_a_bar_and_labelled_sections() {
     assert_eq!(
         push_error().render(&bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌ No push target is configured",
             "▌",
             "▌ How to fix it",
@@ -119,7 +119,7 @@ fn a_path_in_a_title_keeps_its_spaces() {
     assert_eq!(
         Block::error(title).render(&bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌  notes/two  spaces  is not an antiq collection"
         ]
     );
@@ -143,7 +143,7 @@ fn an_error_leaves_out_sections_without_content() {
     assert_eq!(
         block.render(&bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌ Broken",
             "▌",
             "▌ What antiq was doing",
@@ -152,7 +152,7 @@ fn an_error_leaves_out_sections_without_content() {
     );
     assert_eq!(
         Block::error(rich("Broken")).render(&bare(80)),
-        [" ✖ ERROR", "▌ Broken"]
+        ["▌ ✖ ERROR", "▌ Broken"]
     );
 }
 
@@ -165,7 +165,7 @@ fn preformatted_lines_and_blank_lines_are_not_wrapped() {
     assert_eq!(
         block.render(&bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌ No target",
             "▌",
             "▌ How to fix it",
@@ -180,7 +180,7 @@ fn preformatted_lines_and_blank_lines_are_not_wrapped() {
 fn an_error_in_ascii_uses_ascii_symbols() {
     assert_eq!(
         Block::error(rich("Broken")).render(&ascii()),
-        [" x ERROR", "| Broken"]
+        ["| x ERROR", "| Broken"]
     );
 }
 
@@ -189,31 +189,62 @@ fn an_error_in_ascii_uses_ascii_symbols() {
 // =========================================================
 
 #[test]
-fn a_warning_puts_badge_and_title_on_one_line_above_the_bar() {
+fn a_warning_has_the_badge_alone_then_the_title_and_an_empty_bar_line_before_each_section() {
     let block = Block::warning(rich("Refused projects/dotfiles"))
         .text(rich("The piece is pinned."))
         .fix(rich("`antiq unpin projects/dotfiles`, then archive again."));
     assert_eq!(
         block.render(&bare(80)),
         [
-            " ⚠ WARNING  Refused projects/dotfiles",
+            "▌ ⚠ WARNING",
+            "▌ Refused projects/dotfiles",
+            "▌",
             "▌   The piece is pinned.",
+            "▌",
             "▌ → antiq unpin projects/dotfiles, then archive again.",
         ]
     );
 }
 
 #[test]
-fn a_title_only_info_is_one_line() {
+fn a_title_only_info_is_the_badge_and_the_title_without_an_empty_line() {
     assert_eq!(
         Block::info(rich("Nothing was deleted.")).render(&bare(80)),
-        [" ℹ INFO  Nothing was deleted."]
+        ["▌ ℹ INFO", "▌ Nothing was deleted."]
+    );
+}
+
+#[test]
+fn listed_items_and_explanation_are_set_apart_and_a_missing_section_adds_no_line() {
+    let block = Block::warning(rich("Two trees"))
+        .text(Para::pre("trash/a"))
+        .text(Para::pre("trash/b"))
+        .text(rich("Explanation."))
+        .text(rich("More."));
+    assert_eq!(
+        block.render(&bare(80)),
+        [
+            "▌ ⚠ WARNING",
+            "▌ Two trees",
+            "▌",
+            "▌   trash/a",
+            "▌   trash/b",
+            "▌",
+            "▌   Explanation.",
+            "▌   More.",
+        ]
+    );
+    assert_eq!(
+        Block::info(rich("Title"))
+            .fix(rich("Do it."))
+            .render(&bare(80)),
+        ["▌ ℹ INFO", "▌ Title", "▌", "▌ → Do it."]
     );
 }
 
 #[test]
 fn a_block_with_an_empty_title_is_its_badge_alone() {
-    assert_eq!(Block::info(Rich::new()).render(&bare(80)), [" ℹ INFO"]);
+    assert_eq!(Block::info(Rich::new()).render(&bare(80)), ["▌ ℹ INFO"]);
 }
 
 #[test]
@@ -233,6 +264,30 @@ fn a_hint_is_inline_and_wrapped_text_hangs_under_the_text() {
     );
 }
 
+#[test]
+fn the_hint_is_blue_and_the_dry_run_line_magenta() {
+    assert_eq!(
+        Block::hint(rich("Run `x`.")).render(&colored()),
+        ["\x1b[30m\x1b[44m → HINT \x1b[0m Run \x1b[1mx\x1b[0m."]
+    );
+    assert_eq!(
+        Block::dry_run(rich("Nothing was archived.")).render(&colored()),
+        ["\x1b[30m\x1b[45m ○ DRY RUN \x1b[0m Nothing was archived."]
+    );
+    assert_eq!(
+        Block::dry_run(rich("Nothing was archived.")).render(&bare(80)),
+        [" ○ DRY RUN  Nothing was archived."]
+    );
+}
+
+#[test]
+fn without_colour_the_badge_row_of_every_block_has_the_bar_in_ascii_too() {
+    assert_eq!(
+        Block::warning(rich("Title")).render(&ascii()),
+        ["| ! WARNING", "| Title"]
+    );
+}
+
 // =========================================================
 // Wrapping
 // =========================================================
@@ -244,14 +299,16 @@ fn body_text_wraps_at_the_width_and_not_below_forty_columns() {
     assert_eq!(
         block.render(&bare(40)),
         [
-            " ⚠ WARNING  Title",
+            "▌ ⚠ WARNING",
+            "▌ Title",
+            "▌",
             "▌   aaaaaaaaaa bbbbbbbbbb cccccccccc",
             "▌   dddddddddd",
         ]
     );
     assert_eq!(
         block.render(&bare(39)),
-        [" ⚠ WARNING  Title", &format!("▌   {words}")]
+        ["▌ ⚠ WARNING", "▌ Title", "▌", &format!("▌   {words}")]
     );
 }
 
@@ -267,8 +324,11 @@ fn colour_is_named_ansi_and_applies_to_badge_bar_title_and_markup() {
     assert_eq!(
         block.render(&colored()),
         [
-            "\x1b[30m\x1b[43m ⚠ WARNING \x1b[0m \x1b[1mRefused\x1b[0m",
+            "\x1b[30m\x1b[43m ⚠ WARNING \x1b[0m",
+            "\x1b[1m\x1b[33m▌\x1b[0m \x1b[1mRefused\x1b[0m",
+            "\x1b[1m\x1b[33m▌\x1b[0m",
             "\x1b[1m\x1b[33m▌\x1b[0m   Run \x1b[1mx\x1b[0m now.",
+            "\x1b[1m\x1b[33m▌\x1b[0m",
             "\x1b[1m\x1b[33m▌\x1b[0m \x1b[1m\x1b[33m→\x1b[0m Do it.",
         ]
     );
@@ -296,7 +356,7 @@ fn a_space_between_two_styles_stays_unstyled() {
     let block = Block::warning(rich("Title")).text(rich("Run `a b` now, `c` or `d e`."));
     let lines = block.render(&colored());
     assert_eq!(
-        lines[1],
+        lines[3],
         "\x1b[1m\x1b[33m▌\x1b[0m   Run \x1b[1ma b\x1b[0m now, \x1b[1mc\x1b[0m or \x1b[1md e\x1b[0m."
     );
 }
@@ -352,7 +412,7 @@ fn blocks_are_separated_by_an_empty_line_when_rich_and_not_in_a_pipe() {
     let blocks = [Block::warning(rich("One")), Block::warning(rich("Two"))];
     assert_eq!(
         render_blocks(&blocks, &bare(80)),
-        [" ⚠ WARNING  One", "", " ⚠ WARNING  Two"]
+        ["▌ ⚠ WARNING", "▌ One", "", "▌ ⚠ WARNING", "▌ Two"]
     );
     assert_eq!(
         render_blocks(&blocks, &Env::new(false, false, true, 80)),
@@ -387,7 +447,7 @@ fn a_rich_error_lists_every_step_under_the_heading() {
     assert_eq!(
         block.render(&bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌ Broken",
             "▌",
             "▌ What antiq was doing",
@@ -402,7 +462,7 @@ fn a_rich_error_leaves_its_candidates_to_the_table_under_it() {
     let block = Block::error(rich("Ambiguous"))
         .candidate("projects/scanner")
         .candidate("tools/scan-old");
-    assert_eq!(block.render(&bare(80)), [" ✖ ERROR", "▌ Ambiguous"]);
+    assert_eq!(block.render(&bare(80)), ["▌ ✖ ERROR", "▌ Ambiguous"]);
 }
 
 #[test]
@@ -415,13 +475,14 @@ fn a_group_is_its_parts_with_an_empty_line_between_them_on_a_terminal() {
     assert_eq!(
         render_parts(&parts, &bare(80)),
         [
-            " ✖ ERROR",
+            "▌ ✖ ERROR",
             "▌ Ambiguous",
             "",
             "The 2 pieces",
             "PIECE",
             "",
-            " ℹ INFO  Nothing was unearthed.",
+            "▌ ℹ INFO",
+            "▌ Nothing was unearthed.",
         ]
     );
 }
@@ -479,14 +540,14 @@ fn the_title_of_a_block_starts_with_a_capital_in_the_rich_form_only() {
     assert_eq!(block.render(&bare(80))[1], "▌ Cannot read a.toml");
     assert_eq!(block.render_plain()[0], "error: cannot read a.toml");
     let warning = Block::warning(Rich::new().text("unknown key"));
-    assert_eq!(warning.render(&bare(80))[0], " ⚠ WARNING  Unknown key");
+    assert_eq!(warning.render(&bare(80))[1], "▌ Unknown key");
     assert_eq!(warning.render_plain()[0], "warning: unknown key");
     let info = Block::info(Rich::new().text("repaired: x"));
-    assert_eq!(info.render(&bare(80))[0], " ℹ INFO  Repaired: x");
+    assert_eq!(info.render(&bare(80))[1], "▌ Repaired: x");
     let command = Block::info(Rich::new().cmd("forget").text(" deletes nothing"));
     assert_eq!(
-        command.render(&bare(80))[0],
-        " ℹ INFO  forget deletes nothing",
+        command.render(&bare(80))[1],
+        "▌ forget deletes nothing",
         "a title that starts with a code span keeps its case"
     );
     assert_eq!(Rich::new().capitalised(), Rich::new());

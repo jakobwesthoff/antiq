@@ -432,7 +432,7 @@ fn an_error_on_a_stderr_terminal_is_a_block_coloured_unless_no_color_is_set() {
     plain.expect_code(1);
     assert_eq!(
         plain.stderr,
-        " ✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ No piece matches no-such-piece, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
@@ -441,7 +441,8 @@ fn an_error_on_a_stderr_terminal_is_a_block_coloured_unless_no_color_is_set() {
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to pin.\n\
          \n\
-         \x20ℹ INFO  Nothing was pinned.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was pinned.\n"
     );
 }
 
@@ -467,7 +468,7 @@ fn a_usage_error_on_a_stderr_terminal_is_an_error_block_with_the_usage_as_fix() 
     run.expect_code(2);
     assert_eq!(
         run.stderr,
-        " ✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ Unexpected argument '--to' found\n\
          ▌\n\
          ▌ How to fix it\n\

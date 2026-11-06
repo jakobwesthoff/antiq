@@ -1409,7 +1409,8 @@ tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
 
 The header row is dim and has no rule under it. The header of a column of
-numbers sits at the right edge of the column, over its right-aligned values. Without a terminal there is
+numbers sits at the right edge of the column, over its right-aligned values.
+Without a terminal there is
 no header and a row is one line of tab-separated
 fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
 and the numbers unformatted. A control character in a piece path is written
@@ -1612,7 +1613,8 @@ severity warning); leftovers in `doomed/` and spelling differences have no
 fix. The fix for exactly one damaged or incomplete version names the
 command that repairs it, written to paste: with the `-C` of the run and
 with each word quoted for a shell where it needs that. When a piece is due, a hint `Run antiq archive -n to see what the next
-run would archive.` follows. A pipe gets the lines above and no hint.
+run would archive.` follows. It is the last thing the command prints, after
+the notices on stderr. A pipe gets the lines above and no hint.
 
 Damaged and newer-format versions are shown by their local time with
 seconds, with the UTC offset added where two of a piece render alike. An
@@ -2115,25 +2117,30 @@ badges. Symbols are Unicode when the first non-empty one of `LC_ALL`,
 `LC_CTYPE` and `LANG` names UTF-8, and ASCII stand-ins otherwise.
 
 A message to a person is a block of one of four kinds. Each has a badge
-with a symbol and a word:
+with a symbol and a word. In an error, a warning and an info, the badge
+stands alone on its line and the title follows on the next line in bold.
+Without colour, the bar of the block stands in front of the badge row as
+well, so the row reads as part of the block:
 
 | Kind | Badge | Colour | Form |
 |------|-------|--------|------|
 | error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out. The first letter of the title is upper case, unless it starts with a command or path |
-| warning | `⚠ WARNING` | yellow | badge and bold title on one line, then a bar with the text and a `→` line that says how to fix it. The first letter of the title is upper case |
-| info | `ℹ INFO` | cyan | the form of a warning; one line when there is only a title |
-| hint | `→ HINT` | cyan | badge and text on one line, wrapped text hangs under the text, no bar |
+| warning | `⚠ WARNING` | yellow | badge on its own line, then a bar with the bold title, the listed items, the explanation text and a `→` line that says how to fix it. An empty bar line separates the title from the content and each of these sections from the next; a section the block lacks adds no line. The first letter of the title is upper case |
+| info | `ℹ INFO` | cyan | the form of a warning; the badge and the title only when there is no more |
+| hint | `→ HINT` | blue | badge and text on one line, wrapped text hangs under the text, no bar |
 
 Every warning is its own block. Blocks are separated by an empty line, and
 no bar runs past the last line of text.
 
-Tables have a dim header row and no rule under it. This holds for the
+Tables have a dim header row and no rule under it. The header of a column
+of numbers is right-aligned over its values. This holds for the
 tables of `list`, `status`, `push` and the tables under an error.
 
 A dry run writes each action line behind a magenta tag `○ would <verb>`,
 with the text behind the longest verb of the run lined up, and ends with an
-empty line and "Dry run: nothing was <verb>. Run again without `-n` to
-<what it would do>." A `Would skip` line is tagged like an action but is
+empty line and a one-line block like the hint: the badge `○ DRY RUN` in the
+colour of the tag, magenta, and beside it "Nothing was <verb>. Run again
+without `-n` to <what it would do>." A `Would skip` line is tagged like an action but is
 none: a dry run whose lines are all skips has no footer, and so has a dry
 run with no action.
 

@@ -41,7 +41,9 @@ fn a_warning_on_a_stderr_terminal_is_a_block_after_an_empty_line() {
     run.expect_code(0);
     assert_eq!(
         run.stderr,
-        "\n ⚠ WARNING  Unknown setting bogus under [collection], which antiq ignores\n\
+        "\n▌ ⚠ WARNING\n\
+         ▌ Unknown setting bogus under [collection], which antiq ignores\n\
+         ▌\n\
          ▌ → Correct the name or remove the line in .antiq/config.toml.\n"
     );
 }
@@ -77,7 +79,7 @@ fn status_shows_its_findings_as_blocks_and_a_hint_on_a_stdout_terminal() {
     run.expect_code(0);
     let shown = anstream::adapter::strip_str(&run.stdout).to_string();
     assert!(
-        shown.contains("\n\n ⚠ WARNING  1 damaged version: projects/scanner "),
+        shown.contains("\n\n ⚠ WARNING \n▌ 1 damaged version: projects/scanner "),
         "{shown:?}"
     );
     // The harness starts every run with `-C`, which the command to copy

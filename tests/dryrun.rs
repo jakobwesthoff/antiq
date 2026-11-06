@@ -46,12 +46,12 @@ fn an_archive_dry_run_on_a_terminal_tags_each_action_and_ends_with_a_footer() {
          ○ would archive  projects/scanner\n\
          ○ would archive  tools/scan-old\n\
          \n\
-         Dry run: nothing was archived. Run again without -n to archive these pieces.\n"
+         \x20○ DRY RUN  Nothing was archived. Run again without -n to archive these pieces.\n"
     );
 }
 
 #[test]
-fn a_dry_run_on_a_terminal_colours_the_tag_magenta_and_the_footer_label() {
+fn a_dry_run_on_a_terminal_colours_the_tag_and_the_footer_badge_magenta() {
     let world = world(due_pieces);
     let run = world.run_tty_env(&["archive", "-n", "alpha"], &[]);
     run.expect_code(0);
@@ -59,7 +59,7 @@ fn a_dry_run_on_a_terminal_colours_the_tag_magenta_and_the_footer_label() {
         run.stdout,
         "\x1b[1m\x1b[35m○ would archive\x1b[0m  projects/alpha\n\
          \n\
-         \x1b[1m\x1b[35mDry run\x1b[0m: nothing was archived. Run again without \x1b[1m-n\x1b[0m to archive the piece.\n"
+         \x1b[30m\x1b[45m ○ DRY RUN \x1b[0m Nothing was archived. Run again without \x1b[1m-n\x1b[0m to archive the piece.\n"
     );
 }
 
@@ -98,10 +98,12 @@ fn a_forget_dry_run_lists_the_files_of_the_version_and_says_the_deletion_is_fina
          \x20 listing    projects-scanner--2026-11-04T090211.sha256.zst\n\
          \x20 checksum   projects-scanner--2026-11-04T090211.tar.zst.sha256\n\
          \n\
-         \x20ℹ INFO  forget deletes a version for good.\n\
+         ▌ ℹ INFO\n\
+         ▌ forget deletes a version for good.\n\
+         ▌\n\
          ▌   unearth and fork cannot bring it back afterwards.\n\
          \n\
-         Dry run: nothing was deleted. Run again without -n to delete the version.\n"
+         \x20○ DRY RUN  Nothing was deleted. Run again without -n to delete the version.\n"
     );
 }
 
@@ -138,7 +140,7 @@ fn an_init_dry_run_does_not_print_the_id_a_real_run_would_mint() {
     );
     assert!(
         shown.ends_with(
-            "\nDry run: nothing was written. Run again without -n to create the antiq\n         collection.\n"
+            "\n\x20○ DRY RUN  Nothing was written. Run again without -n to create the antiq\n            collection.\n"
         ),
         "{shown}"
     );
@@ -188,11 +190,13 @@ fn a_rebuild_dry_run_names_what_is_checked_and_written_and_explains_rebuild() {
          \x20 against  projects-scanner--2026-11-04T090211.tar.zst.sha256\n\
          \x20 write    projects-scanner--2026-11-04T090211.sha256.zst\n\
          \n\
-         \x20ℹ INFO  rebuild repairs a damaged version by writing only what is missing.\n\
+         ▌ ℹ INFO\n\
+         ▌ rebuild repairs a damaged version by writing only what is missing.\n\
+         ▌\n\
          ▌   It checks the archive against what survives first and runs only when asked,\n\
          ▌   never as a repair.\n\
          \n\
-         Dry run: nothing was rebuilt. Run again without -n to rebuild the version.\n"
+         \x20○ DRY RUN  Nothing was rebuilt. Run again without -n to rebuild the version.\n"
     );
 }
 
@@ -225,11 +229,13 @@ fn an_unearth_dry_run_lists_the_checks_and_explains_unearth() {
          \x20 the member names fit the volume (not run by -n)\n\
          \x20 the extracted tree equals the listing (not run by -n)\n\
          \n\
-         \x20ℹ INFO  unearth brings a stored version back as a live folder.\n\
+         ▌ ℹ INFO\n\
+         ▌ unearth brings a stored version back as a live folder.\n\
+         ▌\n\
          ▌   It removes the version from the store once the folder is complete and\n\
          ▌   verified.\n\
          \n\
-         Dry run: nothing was unearthed. Run again without -n to unearth the version.\n"
+         \x20○ DRY RUN  Nothing was unearthed. Run again without -n to unearth the version.\n"
     );
 }
 
@@ -251,10 +257,12 @@ fn a_fork_dry_run_lists_the_checks_and_explains_fork() {
          \x20 the member names fit the volume (not run by -n)\n\
          \x20 the extracted tree equals the listing (not run by -n)\n\
          \n\
-         \x20ℹ INFO  fork extracts a working copy of a stored version.\n\
+         ▌ ℹ INFO\n\
+         ▌ fork extracts a working copy of a stored version.\n\
+         ▌\n\
          ▌   The version stays in the store unchanged.\n\
          \n\
-         Dry run: nothing was forked. Run again without -n to fork the version.\n"
+         \x20○ DRY RUN  Nothing was forked. Run again without -n to fork the version.\n"
     );
 }
 

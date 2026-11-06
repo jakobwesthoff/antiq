@@ -677,7 +677,7 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     run.expect_code(2);
     assert_eq!(
         run.stderr,
-        " ✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ forget --all-versions needs --force, as it deletes every stored version of\n\
          ▌ projects/scanner, damaged and incomplete ones included, and that cannot be\n\
          ▌ undone\n\
@@ -689,8 +689,9 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to forget all versions of projects/scanner.\n\
-         \n \
-         ℹ INFO  Nothing was deleted.\n"
+         \n\
+         ▌ ℹ INFO\n\
+         ▌ Nothing was deleted.\n"
     );
     assert!(exists(&world, "projects/scanner", SCANNER_NEW));
 }

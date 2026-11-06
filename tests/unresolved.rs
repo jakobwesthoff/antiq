@@ -86,7 +86,7 @@ fn an_ambiguous_word_lists_the_list_table_of_the_store_pieces() {
     let world = world(stored_pieces);
     assert_eq!(
         plain(&world, &["unearth", "scan"]),
-        "\x20✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
@@ -101,7 +101,8 @@ fn an_ambiguous_word_lists_the_list_table_of_the_store_pieces() {
          projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
          tools/scan-old     2026-11-04 22:02:11   NNN B       1\n\
          \n\
-         \x20ℹ INFO  Nothing was unearthed.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was unearthed.\n"
     );
 }
 
@@ -110,7 +111,7 @@ fn an_ambiguous_word_for_a_live_piece_counts_the_versions() {
     let world = world(live_pieces);
     assert_eq!(
         plain(&world, &["pin", "scan"]),
-        "\x20✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
@@ -124,7 +125,8 @@ fn an_ambiguous_word_for_a_live_piece_counts_the_versions() {
          projects/scanner          1\n\
          tools/scan-old            0\n\
          \n\
-         \x20ℹ INFO  Nothing was pinned.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was pinned.\n"
     );
 }
 
@@ -142,7 +144,7 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
             &world,
             &["unearth", "projects/scanner", "--version", "2025-06"]
         ),
-        "\x20✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ 2025-06 names no single version of projects/scanner, as 2 versions match it:\n\
          ▌ 2025-06-18T154509, 2025-06-01T103000\n\
          ▌\n\
@@ -161,7 +163,8 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
          ▸ projects/scanner   2025-06-19 03:45:09   NNN B       1\n\
          ▸ projects/scanner   2025-06-01 22:30:00   NNN B       1\n\
          \n\
-         \x20ℹ INFO  Nothing was unearthed.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was unearthed.\n"
     );
 }
 
@@ -170,7 +173,7 @@ fn an_unknown_word_offers_the_closest_pieces_in_a_table() {
     let world = world(stored_pieces);
     assert_eq!(
         plain(&world, &["unearth", "scnaer"]),
-        "\x20✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ No piece matches scnaer, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
@@ -184,7 +187,8 @@ fn an_unknown_word_offers_the_closest_pieces_in_a_table() {
          projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
          projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
          \n\
-         \x20ℹ INFO  Nothing was unearthed.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was unearthed.\n"
     );
 }
 
@@ -203,7 +207,7 @@ fn a_word_that_fits_one_piece_is_offered_in_a_table_and_nothing_is_done() {
             "unearthed"
         };
         let expected = format!(
-            "\x20✖ ERROR\n\
+            "▌ ✖ ERROR\n\
              ▌ scaner is not the path of a piece, and this command acts only on a path\n\
              ▌\n\
              ▌ How to fix it\n\
@@ -217,7 +221,8 @@ fn a_word_that_fits_one_piece_is_offered_in_a_table_and_nothing_is_done() {
              projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
              projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
              \n\
-             \x20ℹ INFO  Nothing was {done}.\n"
+             ▌ ℹ INFO\n\
+             ▌ Nothing was {done}.\n"
         );
         assert_eq!(plain(&world, &args), expected);
     }
@@ -228,7 +233,7 @@ fn an_unknown_word_with_nothing_near_offers_no_piece() {
     let world = world(stored_pieces);
     assert_eq!(
         plain(&world, &["unearth", "zzzzzzzz"]),
-        "\x20✖ ERROR\n\
+        "▌ ✖ ERROR\n\
          ▌ No piece matches zzzzzzzz, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
@@ -237,7 +242,8 @@ fn an_unknown_word_with_nothing_near_offers_no_piece() {
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to unearth.\n\
          \n\
-         \x20ℹ INFO  Nothing was unearthed.\n"
+         ▌ ℹ INFO\n\
+         ▌ Nothing was unearthed.\n"
     );
 }
 
@@ -279,7 +285,7 @@ fn a_version_that_does_not_exist_is_an_error_without_a_table_or_an_info() {
         &world,
         &["unearth", "projects/scanner", "--version", "1999"],
     );
-    assert!(text.starts_with("\x20✖ ERROR\n"), "{text}");
+    assert!(text.starts_with("▌ ✖ ERROR\n"), "{text}");
     assert!(!text.contains("Nothing was"), "{text}");
     assert!(!text.contains("VERSION  "), "{text}");
 }

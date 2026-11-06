@@ -34,9 +34,12 @@ fn unpinning_a_piece_that_is_not_pinned_is_an_info_and_exits_0() {
     run.expect_code(0);
     assert_eq!(
         run.stdout,
-        " ℹ INFO  Nothing to unpin: projects/alpha is not pinned.\n\
+        "▌ ℹ INFO\n\
+         ▌ Nothing to unpin: projects/alpha is not pinned.\n\
+         ▌\n\
          ▌   A pin is the file .antiq-pin at the top of a piece, and this piece has none.\n\
          ▌   Nothing was changed.\n\
+         ▌\n\
          ▌ → antiq status shows which pieces are pinned.\n"
     );
 }
@@ -49,9 +52,12 @@ fn pinning_a_piece_that_is_pinned_is_an_info_and_exits_0() {
     run.expect_code(0);
     assert_eq!(
         run.stdout,
-        " ℹ INFO  Nothing to pin: projects/alpha is already pinned.\n\
+        "▌ ℹ INFO\n\
+         ▌ Nothing to pin: projects/alpha is already pinned.\n\
+         ▌\n\
          ▌   The file .antiq-pin at the top of the piece pins it, and this piece has it.\n\
          ▌   Nothing was changed.\n\
+         ▌\n\
          ▌ → antiq status shows which pieces are pinned.\n"
     );
 }
@@ -65,9 +71,12 @@ fn a_pin_says_what_it_does_under_the_result() {
         run.stdout,
         "Pinned projects/alpha\n\
          \n\
-         \x20ℹ INFO  A pinned piece is never archived.\n\
+         ▌ ℹ INFO\n\
+         ▌ A pinned piece is never archived.\n\
+         ▌\n\
          ▌   The file projects/alpha/.antiq-pin marks it. push still mirrors the piece,\n\
          ▌   and status shows it as pinned.\n\
+         ▌\n\
          ▌ → antiq unpin projects/alpha removes the file again.\n"
     );
 }
@@ -82,7 +91,9 @@ fn an_unpin_says_what_it_does_under_the_result() {
         run.stdout,
         "Unpinned projects/alpha\n\
          \n\
-         \x20ℹ INFO  The piece can be archived again.\n\
+         ▌ ℹ INFO\n\
+         ▌ The piece can be archived again.\n\
+         ▌\n\
          ▌   The file projects/alpha/.antiq-pin is removed. The piece is archived once it\n\
          ▌   has been idle long enough.\n"
     );
@@ -97,11 +108,13 @@ fn a_pin_dry_run_says_what_pinning_would_do_before_the_footer() {
         run.stdout,
         "○ would pin  projects/alpha\n\
          \n\
-         \x20ℹ INFO  A pinned piece is never archived.\n\
+         ▌ ℹ INFO\n\
+         ▌ A pinned piece is never archived.\n\
+         ▌\n\
          ▌   Pinning creates the file projects/alpha/.antiq-pin. push still mirrors a\n\
          ▌   pinned piece, and status shows it as pinned.\n\
          \n\
-         Dry run: nothing was pinned. Run again without -n to pin the piece.\n"
+         \x20○ DRY RUN  Nothing was pinned. Run again without -n to pin the piece.\n"
     );
 }
 
@@ -115,11 +128,13 @@ fn an_unpin_dry_run_says_what_unpinning_would_do_before_the_footer() {
         run.stdout,
         "○ would unpin  projects/alpha\n\
          \n\
-         \x20ℹ INFO  An unpinned piece can be archived again.\n\
+         ▌ ℹ INFO\n\
+         ▌ An unpinned piece can be archived again.\n\
+         ▌\n\
          ▌   Unpinning removes the file projects/alpha/.antiq-pin. The piece is archived\n\
          ▌   once it has been idle long enough.\n\
          \n\
-         Dry run: nothing was unpinned. Run again without -n to unpin the piece.\n"
+         \x20○ DRY RUN  Nothing was unpinned. Run again without -n to unpin the piece.\n"
     );
 }
 

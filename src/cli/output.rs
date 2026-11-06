@@ -610,7 +610,7 @@ mod tests {
         let mut out = capture.output_with(terminal(), Env::pipe());
         out.info_result(&Block::info(Rich::parse("Nothing was deleted.")))
             .expect("memory accepts writes");
-        assert_eq!(capture.stdout(), "\n ℹ INFO  Nothing was deleted.\n");
+        assert_eq!(capture.stdout(), "\n▌ ℹ INFO\n▌ Nothing was deleted.\n");
         assert_eq!(capture.stderr(), "");
     }
 
@@ -644,7 +644,10 @@ mod tests {
         let capture = Capture::default();
         let mut out = capture.output_with(terminal(), Env::pipe());
         out.result_blocks(&blocks).expect("memory accepts writes");
-        assert_eq!(capture.stdout(), "\n ⚠ WARNING  One\n\n ⚠ WARNING  Two\n");
+        assert_eq!(
+            capture.stdout(),
+            "\n▌ ⚠ WARNING\n▌ One\n\n▌ ⚠ WARNING\n▌ Two\n"
+        );
         assert_eq!(capture.stderr(), "");
 
         let capture = Capture::default();
@@ -664,7 +667,7 @@ mod tests {
         .expect("memory accepts writes");
         assert_eq!(
             capture.stderr(),
-            "\n ⚠ WARNING  Clock skew\n\n ℹ INFO  Repaired: x\n"
+            "\n▌ ⚠ WARNING\n▌ Clock skew\n\n▌ ℹ INFO\n▌ Repaired: x\n"
         );
         assert_eq!(capture.stdout(), "");
     }
@@ -694,7 +697,7 @@ mod tests {
         .expect("memory accepts writes");
         assert_eq!(
             capture.stderr(),
-            "\nerror: could not delete x\n ⚠ WARNING  Clock skew\nerror: could not delete y\n"
+            "\nerror: could not delete x\n▌ ⚠ WARNING\n▌ Clock skew\nerror: could not delete y\n"
         );
     }
 
@@ -717,7 +720,7 @@ mod tests {
         .expect("memory accepts writes");
         assert_eq!(
             capture.stderr(),
-            " ⚠ WARNING  Clock skew\n\n ℹ INFO  Nothing was pushed.\n"
+            "▌ ⚠ WARNING\n▌ Clock skew\n\n▌ ℹ INFO\n▌ Nothing was pushed.\n"
         );
         assert_eq!(capture.stdout(), "");
     }
@@ -745,8 +748,8 @@ mod tests {
             .expect("memory accepts writes");
         assert_eq!(
             capture.stdout(),
-            "○ would archive  projects/scanner\n\n\
-             Dry run: nothing was archived. Run again without -n to archive these pieces.\n"
+            "○ would archive  projects/scanner\n\n\x20○ DRY RUN  Nothing was archived. \
+             Run again without -n to archive these pieces.\n"
         );
     }
 
@@ -774,7 +777,9 @@ mod tests {
         out.dry_plan(&lines, "unearthed", "unearth the piece")
             .expect("memory accepts writes");
         assert!(
-            capture.stdout().contains("Dry run: nothing was unearthed."),
+            capture
+                .stdout()
+                .contains("○ DRY RUN  Nothing was unearthed."),
             "{:?}",
             capture.stdout()
         );

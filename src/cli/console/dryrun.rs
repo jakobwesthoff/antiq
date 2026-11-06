@@ -5,12 +5,12 @@
 //! The lines of a dry run (`-n`): a tag in front of each action and a
 //! footer that says nothing happened.
 
+use super::block::Block;
 use super::env::Env;
-use super::render::{available, flow, paint};
+use super::render::paint;
 use super::rich::Rich;
 use super::symbols::Symbols;
 use super::theme;
-use anstyle::Style;
 use unicode_width::UnicodeWidthStr;
 
 /// Verbs of two words, which `split` keeps together.
@@ -47,30 +47,18 @@ pub fn line(env: &Env, verb: &str, verb_width: usize, rest: &str) -> String {
     format!("{tag}{fill}  {rest}")
 }
 
-/// The closing lines of a dry run: an empty line, then "Dry run: nothing
-/// was `nothing_was`. Run again without -n to `rerun`." A pipe gets
-/// none, since the "Would" lines already say it. `rerun` is markup as
-/// `Rich::parse` reads it.
+/// The closing lines of a dry run: an empty line, then a one-line badge
+/// block that reads "Nothing was `nothing_was`. Run again without -n to
+/// `rerun`." A pipe gets none, since the "Would" lines already say it.
+/// `rerun` is markup as `Rich::parse` reads it.
 pub fn footer(env: &Env, nothing_was: &str, rerun: &str) -> Vec<String> {
     if !env.rich {
         return Vec::new();
     }
-    let label = "Dry run";
-    let hang = label.width() + 2;
-    let body = Rich::parse(&format!(
-        "nothing was {nothing_was}. Run again without `-n` to {rerun}."
+    let text = Rich::parse(&format!(
+        "Nothing was {nothing_was}. Run again without `-n` to {rerun}."
     ));
     let mut lines = vec![String::new()];
-    for (index, text) in flow(env, &body, Style::new(), available(env, hang))
-        .iter()
-        .enumerate()
-    {
-        if index == 0 {
-            let head = paint(env, theme::MAGENTA.bold(), label);
-            lines.push(format!("{head}: {text}"));
-        } else {
-            lines.push(format!("{}{text}", " ".repeat(hang)));
-        }
-    }
+    lines.extend(Block::dry_run(text).render(env));
     lines
 }

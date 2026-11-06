@@ -646,7 +646,7 @@ mod tests {
         assert_eq!(
             render_parts(&parts, &plain_env()),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ No unique piece matches scan, as it fits the paths of 2 pieces",
                 "▌",
                 "▌ How to fix it",
@@ -659,7 +659,8 @@ mod tests {
                 "▌ What antiq was doing",
                 "▌   Attempting to find the piece to pin.",
                 "",
-                " ℹ INFO  Nothing was pinned.",
+                "▌ ℹ INFO",
+                "▌ Nothing was pinned.",
             ]
         );
     }
@@ -791,7 +792,10 @@ mod tests {
         );
         let lines = render_parts(&parts, &plain_env());
         assert!(lines.iter().all(|line| !line.contains("HINT")), "{lines:?}");
-        assert_eq!(lines[lines.len() - 1], " ℹ INFO  Nothing was unearthed.");
+        assert_eq!(
+            lines[lines.len() - 2..],
+            ["▌ ℹ INFO", "▌ Nothing was unearthed."]
+        );
     }
 
     #[test]
@@ -819,7 +823,7 @@ mod tests {
         assert_eq!(
             render_parts(&parts, &plain_env()),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ scaner is not the path of a piece, and this command acts only on a path",
                 "▌",
                 "▌ How to fix it",
@@ -831,7 +835,8 @@ mod tests {
                 "▌ What antiq was doing",
                 "▌   Attempting to find the piece to forget.",
                 "",
-                " ℹ INFO  Nothing was deleted.",
+                "▌ ℹ INFO",
+                "▌ Nothing was deleted.",
             ]
         );
     }
@@ -862,7 +867,7 @@ mod tests {
             &TimeZone::UTC,
         );
         let lines = render_parts(&parts, &plain_env());
-        assert_eq!(lines[0], " ✖ ERROR");
+        assert_eq!(lines[0], "▌ ✖ ERROR");
         assert!(
             lines[1].starts_with(
                 "▌ 2025-06 names no single version of projects/scanner, as 11 versions match it:"
@@ -876,7 +881,10 @@ mod tests {
             ),
             "{lines:?}"
         );
-        assert_eq!(lines[lines.len() - 1], " ℹ INFO  Nothing was forked.");
+        assert_eq!(
+            lines[lines.len() - 2..],
+            ["▌ ℹ INFO", "▌ Nothing was forked."]
+        );
     }
 
     #[test]

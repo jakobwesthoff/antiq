@@ -164,6 +164,7 @@ fn badge_word(kind: Kind) -> &'static str {
         Kind::Warning => "WARNING",
         Kind::Info => "INFO",
         Kind::Hint => "HINT",
+        Kind::DryRun => "DRY RUN",
     }
 }
 
@@ -173,6 +174,7 @@ fn badge_text(kind: Kind, symbols: &Symbols) -> String {
         Kind::Warning => symbols.warning,
         Kind::Info => symbols.info,
         Kind::Hint => symbols.hint,
+        Kind::DryRun => symbols.dry_run,
     };
     format!(" {symbol} {} ", badge_word(kind))
 }
@@ -205,11 +207,7 @@ impl Block {
 
         match self.kind {
             Kind::Error => {
-                lines.push(if env.color {
-                    paint(env, theme::badge(self.kind), &badge)
-                } else {
-                    badge.trim_end().to_string()
-                });
+                lines.push(self.badge_row(env, &bar, &badge));
                 for line in flow(
                     env,
                     &self.title.clone().capitalised(),
@@ -227,26 +225,38 @@ impl Block {
                     .collect();
                 self.section(env, &bar, "What antiq was doing", &steps, &mut lines);
             }
-            Kind::Hint => {
+            Kind::Hint | Kind::DryRun => {
                 let hang = badge.width() + 1;
                 let first = paint(env, theme::badge(self.kind), &badge);
                 let body = flow(env, &self.title, Style::new(), available(env, hang));
                 self.push_hanging(&mut lines, &first, hang, &body);
             }
             Kind::Warning | Kind::Info => {
-                let hang = badge.width() + 1;
-                let first = paint(env, theme::badge(self.kind), &badge);
-                let title = flow(
+                lines.push(self.badge_row(env, &bar, &badge));
+                for line in flow(
                     env,
                     &self.title.clone().capitalised(),
                     theme::BOLD,
-                    available(env, hang),
-                );
-                self.push_hanging(&mut lines, &first, hang, &title);
+                    available(env, 2),
+                ) {
+                    lines.push(bar.line(&line));
+                }
+                // The sections of the block (listed items, explanation, fix)
+                // are set apart by an empty bar line, and only the ones the
+                // block has.
+                let mut previous: Option<bool> = None;
                 for paragraph in &self.text {
+                    let listed = matches!(paragraph, Para::Pre(_));
+                    if !matches!(paragraph, Para::Blank) {
+                        if previous != Some(listed) {
+                            lines.push(bar.line(""));
+                        }
+                        previous = Some(listed);
+                    }
                     self.push_paragraph(env, &bar, paragraph, &mut lines);
                 }
                 if let Some(fix) = &self.fix {
+                    lines.push(bar.line(""));
                     let arrow = paint(env, theme::bar(self.kind), symbols.hint);
                     // Later lines of the fix start under the text after the arrow.
                     let hang = symbols.hint.width() + 1;
@@ -262,6 +272,17 @@ impl Block {
             }
         }
         lines
+    }
+
+    /// The row that holds the badge alone. Without colour the badge has no
+    /// background to set it apart, so the bar of the block stands in front
+    /// of it and the row reads as part of the block.
+    fn badge_row(&self, env: &Env, bar: &Bar, badge: &str) -> String {
+        if env.color {
+            paint(env, theme::badge(self.kind), badge)
+        } else {
+            bar.line(badge.trim())
+        }
     }
 
     /// `body` lines after `first`, the later ones indented by `hang`.
@@ -346,7 +367,7 @@ impl Block {
                     lines.push(format!("  fix: {}", fix.to_plain()));
                 }
             }
-            Kind::Info | Kind::Hint => {}
+            Kind::Info | Kind::Hint | Kind::DryRun => {}
         }
         lines
     }

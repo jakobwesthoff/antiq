@@ -120,7 +120,7 @@ mod tests {
         let notice = Notice::Warning(Warning::new("cannot open notes/a: denied"));
         assert_eq!(
             rich(notice.clone()),
-            [" ⚠ WARNING  Cannot open notes/a: denied"]
+            ["▌ ⚠ WARNING", "▌ Cannot open notes/a: denied",]
         );
         assert_eq!(pipe(notice), ["warning: cannot open notes/a: denied"]);
     }
@@ -133,7 +133,7 @@ mod tests {
         ));
         assert_eq!(
             rich(marked.clone()),
-            [" ⚠ WARNING  beta/notes: its files add up to 9 bytes"]
+            ["▌ ⚠ WARNING", "▌ beta/notes: its files add up to 9 bytes",]
         );
         assert_eq!(
             pipe(marked),
@@ -142,7 +142,7 @@ mod tests {
         let plain = Notice::Warning(Warning::new("beta/notes: its files add up to 9 bytes"));
         assert_eq!(
             rich(plain),
-            [" ⚠ WARNING  Beta/notes: its files add up to 9 bytes"]
+            ["▌ ⚠ WARNING", "▌ Beta/notes: its files add up to 9 bytes",]
         );
     }
 
@@ -151,7 +151,7 @@ mod tests {
         let marked = Notice::Warning(Warning::marked("a`b", ": cannot read `x` or `y`"));
         assert_eq!(
             rich(marked.clone()),
-            [" ⚠ WARNING  a`b: cannot read `x` or `y`"]
+            ["▌ ⚠ WARNING", "▌ a`b: cannot read `x` or `y`",]
         );
         assert_eq!(pipe(marked), ["warning: ``a`b``: cannot read `x` or `y`"]);
     }
@@ -161,7 +161,9 @@ mod tests {
         assert_eq!(
             rich(unknown_key()),
             [
-                " ⚠ WARNING  Unknown setting idle_dyas under [collection], which antiq ignores",
+                "▌ ⚠ WARNING",
+                "▌ Unknown setting idle_dyas under [collection], which antiq ignores",
+                "▌",
                 "▌ → Correct the name or remove the line in .antiq/config.toml.",
             ]
         );
@@ -176,7 +178,7 @@ mod tests {
         let notice = Notice::Warning(Warning::of(WarningKind::NetworkMount { filesystem: "SMB" }));
         assert_eq!(
             rich(notice),
-            [" ⚠ WARNING  The antiq collection is on an SMB mount"]
+            ["▌ ⚠ WARNING", "▌ The antiq collection is on an SMB mount",]
         );
     }
 
@@ -188,8 +190,8 @@ mod tests {
         assert_eq!(
             rich(filesystem),
             [
-                " ⚠ WARNING  Cannot tell what kind of filesystem the antiq collection is on: cannot stat /work:",
-                "            denied",
+                "▌ ⚠ WARNING",
+                "▌ Cannot tell what kind of filesystem the antiq collection is on: cannot stat /work: denied",
             ]
         );
         let lock = Notice::Warning(Warning::of(WarningKind::LockUnreadable {
@@ -197,7 +199,7 @@ mod tests {
         }));
         assert_eq!(
             rich(lock),
-            [" ⚠ WARNING  Cannot read the lock file: denied"]
+            ["▌ ⚠ WARNING", "▌ Cannot read the lock file: denied",]
         );
     }
 
@@ -209,8 +211,8 @@ mod tests {
         assert_eq!(
             rich(filesystem),
             [
-                " ⚠ WARNING  Cannot tell what kind of filesystem the antiq collection is on: cannot stat",
-                "            /work/`a`/`b`: denied",
+                "▌ ⚠ WARNING",
+                "▌ Cannot tell what kind of filesystem the antiq collection is on: cannot stat /work/`a`/`b`: denied",
             ]
         );
         let lock = Notice::Warning(Warning::of(WarningKind::LockUnreadable {
@@ -218,7 +220,7 @@ mod tests {
         }));
         assert_eq!(
             rich(lock),
-            [" ⚠ WARNING  Cannot read the lock file: `a` and `b`"]
+            ["▌ ⚠ WARNING", "▌ Cannot read the lock file: `a` and `b`",]
         );
     }
 
@@ -232,8 +234,9 @@ mod tests {
         assert_eq!(
             rich(notice.clone()),
             [
-                " ℹ INFO  Another antiq run holds the lock: its pid is 4711 on machine imperius, started",
-                "         2026-11-04T09:00:00Z",
+                "▌ ℹ INFO",
+                "▌ Another antiq run holds the lock: its pid is 4711 on machine imperius, started",
+                "▌ 2026-11-04T09:00:00Z",
             ]
         );
         assert_eq!(
@@ -249,7 +252,7 @@ mod tests {
         let notice = Notice::Note("repaired: removed an empty folder".into());
         assert_eq!(
             rich(notice.clone()),
-            [" ℹ INFO  Repaired: removed an empty folder"]
+            ["▌ ℹ INFO", "▌ Repaired: removed an empty folder",]
         );
         assert_eq!(pipe(notice), ["note: repaired: removed an empty folder"]);
     }

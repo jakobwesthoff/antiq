@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(
             rich(error, &["find the antiq collection"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ /Users/jakob/Downloads is not inside an antiq collection, which has an .antiq/ folder and none of",
                 "▌ its parent directories has one",
                 "▌",
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(
             rich(PushError::NoTarget, &["push the antiq collection"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ No push target is configured, so push has nowhere to mirror the antiq collection to",
                 "▌",
                 "▌ How to fix it",
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(
             rich(held, &[]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Another antiq run holds the lock (pid 4242, started 2026-11-03T10:00:00Z), and runs that change an",
                 "▌ antiq collection take turns",
                 "▌",
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(
             rich(LockError::HeldUnknown, &[]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Another antiq run holds the lock but has not written who it is yet, and runs that change an antiq",
                 "▌ collection take turns",
                 "▌",
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(
             rich(ListingError::FormatTooNew { found: 2 }, &[]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ The listing has format 2, which this antiq cannot read",
                 "▌",
                 "▌ How to fix it",
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(
             rich(error, &["pin the piece"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ /elsewhere/proj is outside the antiq collection at /home/jakob/projects",
                 "▌",
                 "▌ How to fix it",
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(
             rich(error, &[]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ The target's marker .antiq-target names another host or path: it names host imperius and path",
                 "▌ /home/a/coll, and this run is host workbench and path /home/b/coll",
                 "▌",
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(
             rich(error, &["push the antiq collection"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Push is refused: the antiq collection holds versions that are damaged or incomplete, and push",
                 "▌ copies them as they are",
                 "▌",
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(
             rich(error, &["push the antiq collection"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ The mirror failed: the target does not let rsync set file modes (rsync exit 23)",
                 "▌",
                 "▌ How to fix it",
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(
             rich(error, &["read the config file"]),
             [
-                " ✖ ERROR",
+                "▌ ✖ ERROR",
                 "▌ Bad input",
                 "▌",
                 "▌ What antiq was doing",

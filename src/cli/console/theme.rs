@@ -24,7 +24,9 @@ const fn accent(kind: Kind) -> AnsiColor {
     match kind {
         Kind::Error => AnsiColor::Red,
         Kind::Warning => AnsiColor::Yellow,
-        Kind::Info | Kind::Hint => AnsiColor::Cyan,
+        Kind::Info => AnsiColor::Cyan,
+        Kind::Hint => AnsiColor::Blue,
+        Kind::DryRun => AnsiColor::Magenta,
     }
 }
 

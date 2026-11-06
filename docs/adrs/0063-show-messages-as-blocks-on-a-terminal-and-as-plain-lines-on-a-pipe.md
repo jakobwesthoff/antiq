@@ -16,8 +16,10 @@ lines scripts read must stay as they are.
 
 Messages to a person are blocks of four kinds: error, warning, info and
 hint. They are written once, in one module, and every command uses it.
-A terminal shows a block with a badge, a coloured bar and, for an error,
-the labelled sections "How to fix it" and "What antiq was doing".
+A terminal shows a block with a badge on its own line, a coloured bar and,
+for an error, the labelled sections "How to fix it" and "What antiq was
+doing". A hint and the dry-run footer are one line with the text beside the
+badge.
 
 A stream is rich when it is a terminal, decided for stdout and stderr
 separately. A rich stream gets blocks, symbols, info, hints and the
