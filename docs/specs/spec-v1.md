@@ -171,9 +171,12 @@ through the full path.
 ### Idle
 
 A piece is idle when the newest modification time of any regular file
-in it is older than the configured number of days. Directory times do
-not count. Modification times more than one day in the future do not
-count either; `status` lists such files. (ADR 0013)
+in it is older than the configured number of days. A day is 24 hours,
+and a file exactly that many days old is not yet old enough. Directory
+times do not count, nor do those of symlinks and special files.
+Modification times more than one day in the future do not count either;
+a time exactly one day ahead still counts. `status` lists the files with
+a time too far ahead. (ADR 0013)
 
 Ignore rules in gitignore syntax, from the config and from
 `.antiqignore` files at any level, exclude paths from this check only.
@@ -187,12 +190,15 @@ junk: a directory with a junk name is walked like any other. The junk list is se
 rules.
 
 For an unearthed piece, the idle clock starts at the later of its newest
-file modification time and the time it was unearthed. (ADR 0037)
+file modification time and the time it was unearthed. An unearthing time
+more than one day in the future is taken as one day ahead. (ADR 0037)
 
 A piece in which the idle check finds no file to take a time from (no
 regular files after the ignore rules, marker files and the junk list) is
 empty: never idle and never archived. A piece whose only countable files
-lie in the future is not empty and not idle. (ADR 0038)
+lie in the future is not empty and not idle, and the unearthing time
+does not change that. A piece that the walk could not read completely
+has no verdict. (ADR 0038)
 
 ### Pins
 
