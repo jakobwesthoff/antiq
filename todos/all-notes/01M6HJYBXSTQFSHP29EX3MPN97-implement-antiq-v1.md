@@ -2694,6 +2694,16 @@ Notes for the items that call the strict verify and the listing comparison
 - 2026-11-04 (O13): Linux cannot set a symlink's mode, so the strict
   verify and the listing comparison do not compare symlink modes on any
   platform (I12 writes it into spec "Verifying").
+- 2026-11-04 (merged, after review E): `TargetRules::probe` also finds
+  whether the volume stores names decomposed (`decomposes`, then the
+  length counts the decomposed form), has hard links and symlinks, and
+  its symlink-target limit (macOS 1023, Linux 4095 bytes); `unpack`
+  refuses such members up front with the name problems. For I19 and
+  I21: `names::check_members(&[MemberName], rules)` and
+  `portability_warnings(&[MemberName])`, `MemberName::plain(path)` for
+  the common case. For I20: `PackError::NoMembers` and
+  `UnholdableNames`. Lost modes and rounded times on exFAT and FAT wait
+  for the user (todo 01M6HWBHSHV10VT2QM12V5ES41).
 
 ### I07
 
