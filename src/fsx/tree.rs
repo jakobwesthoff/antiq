@@ -64,8 +64,9 @@ const SEARCH: OFlags = OFlags::RDONLY
 /// symlinks in the path to the root itself are followed.
 const ROOT: OFlags = SEARCH.difference(OFlags::NOFOLLOW);
 
-/// How a directory is opened to list it, which does need permission to
-/// read it.
+/// How a directory is opened to list it or to flush it, which do need
+/// permission to read it: Linux refuses `fsync` on the `O_PATH` descriptor
+/// that `SEARCH` gives.
 const LISTING: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -211,9 +212,10 @@ impl TreeRoot {
     }
 
     /// The directory at `path`, relative to this root, as an open file, so
-    /// that the entries it holds can be made durable.
+    /// that the entries it holds can be made durable. It is opened for
+    /// reading, as flushing needs.
     pub(crate) fn open_dir_file(&self, path: &RelPath) -> io::Result<File> {
-        Ok(File::from(self.open_dir(path, SEARCH)?))
+        Ok(File::from(self.open_dir(path, LISTING)?))
     }
 
     /// Creates the directory `path`, relative to this root.
@@ -711,7 +713,7 @@ mod tests {
     use crate::testing::deep_path;
     use crate::testing::tree::Tree;
     use rustix::io::Errno;
-    use std::fs::Permissions;
+    use std::fs::{self, Permissions};
     use std::io::{Read, Write};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1138,6 +1140,46 @@ mod tests {
             .expect("the file opens");
         let flags = rustix::fs::fcntl_getfl(&file).expect("the flags are read");
         assert!(!flags.contains(OFlags::NONBLOCK), "{flags:?}");
+    }
+
+    #[test]
+    fn a_directory_opened_for_flushing_can_be_flushed() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let directory = root_of(&tree)
+            .open_dir_file(&path("a"))
+            .expect("the directory opens");
+        crate::fsx::atomic::flush_file(&directory, Path::new("a"))
+            .expect("the directory is flushed");
+    }
+
+    #[test]
+    fn a_directory_opened_for_flushing_is_not_reached_through_a_symlink() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        tree.symlink("link", "a");
+        root_of(&tree)
+            .open_dir_file(&path("link"))
+            .expect_err("a symlink is not followed");
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_read_is_not_opened_for_flushing() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let directory = tree.path("a");
+        let _restore = crate::fsx::RestoreModes(vec![directory.clone()]);
+        fs::set_permissions(&directory, Permissions::from_mode(0o300))
+            .expect("the directory loses read permission");
+        assert!(
+            File::open(&directory).is_err(),
+            "the test needs a user that a directory without read permission stops"
+        );
+
+        let error = root_of(&tree)
+            .open_dir_file(&path("a"))
+            .expect_err("flushing needs read permission");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     fn raw(mode: u32, inode: u64, ctime_ns: i128) -> RawStat {
