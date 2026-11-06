@@ -203,12 +203,17 @@ impl Screen {
             self.grid.push(Vec::new());
             self.continued.push(false);
         }
-        while self.grid.len() > rows {
+        // A shorter window scrolls the top away only as far as the cursor's
+        // row needs to stay on the screen; the blank rows below are dropped.
+        let scrolled = (self.row + 1).saturating_sub(rows);
+        for _ in 0..scrolled {
             let top = self.grid.remove(0);
             let continued = self.continued.remove(0);
             self.scrollback.push((raw_text_of(&top), continued));
-            self.row = self.row.saturating_sub(1);
+            self.row -= 1;
         }
+        self.grid.truncate(rows);
+        self.continued.truncate(rows);
         self.row = self.row.min(rows - 1);
     }
 

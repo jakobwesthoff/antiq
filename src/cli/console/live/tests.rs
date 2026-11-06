@@ -309,6 +309,19 @@ fn spaces_at_the_end_of_a_row_are_kept_when_the_rows_join_again() {
 }
 
 #[test]
+fn a_shorter_window_scrolls_only_as_far_as_the_cursor_needs() {
+    let mut screen = Screen::new(10, 10);
+    screen.feed(b"a\nb\nc\n");
+    screen.resize(10, 2, false);
+    // The cursor row (the empty one below "c") stays on the screen with the
+    // line above it; "a" and "b" are in the scrollback, nothing is lost.
+    assert_eq!(screen.visible(), ["c"]);
+    assert_eq!(screen.lines(), ["a", "b", "c"]);
+    screen.feed(b"d");
+    assert_eq!(screen.visible(), ["c", "d"]);
+}
+
+#[test]
 fn a_wide_character_cut_by_a_narrowing_without_rewrap_is_dropped() {
     let mut screen = fed(10, "ab世\n");
     screen.resize(3, 10, false);
