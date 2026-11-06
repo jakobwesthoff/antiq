@@ -385,3 +385,30 @@ impl Collection {
         );
     }
 }
+
+impl Collection {
+    /// The collection around a tree that already holds one, such as a copy
+    /// back from a target.
+    pub(super) fn around(tree: Tree, clock: Clock) -> Collection {
+        Collection { tree, clock }
+    }
+
+    /// Adds \`[target] url\` for the path target to the config.
+    pub fn use_target(&self, url: &Path) {
+        let path = self.path(".antiq/config.toml");
+        let mut text = fs::read_to_string(&path).expect("the config exists");
+        let url = serde_json::to_string(url.to_str().expect("the path is UTF-8"))
+            .expect("a string serialises");
+        text.push_str(&format!("\n[target]\nurl = {url}\n"));
+        fs::write(&path, text).expect("the config can be written");
+    }
+
+    /// The ID in the config.
+    pub fn id(&self) -> String {
+        antiq::config::Config::read(&self.path(".antiq/config.toml"))
+            .expect("the config can be read")
+            .collection
+            .id
+            .to_string()
+    }
+}

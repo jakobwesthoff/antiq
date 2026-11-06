@@ -5,3 +5,4 @@
 //! Scenario harness (documentation follows with the last commit).
 
 pub mod collection;
+pub mod target;

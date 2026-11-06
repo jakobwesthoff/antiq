@@ -209,3 +209,94 @@ fn links_rule_files_exclude_and_outside_files_are_written() {
     let found = Library::find(&collection.root()).expect("the collection is found");
     assert_eq!(found.config().collection.exclude.len(), 1);
 }
+
+// =========================================================
+// The path target
+// =========================================================
+
+use crate::support::scenario::target::Target;
+
+#[test]
+fn the_marker_is_the_line_the_spec_describes() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    let target = Target::new();
+    target.marker(&collection);
+    let text = fs::read_to_string(target.path().join(".antiq-target")).expect("the marker exists");
+    assert_eq!(
+        text,
+        format!(
+            "{{\"format\":1,\"id\":\"{COLLECTION_ID}\",\"host\":{},\"path\":{}}}\n",
+            serde_json::to_string(&antiq::machine::detect().expect("a name")).expect("json"),
+            serde_json::to_string(collection.root().to_str().expect("UTF-8")).expect("json"),
+        )
+    );
+}
+
+#[test]
+fn a_marker_can_name_another_machine_and_path() {
+    let target = Target::new();
+    target.marker_with(COLLECTION_ID, "laptop", "/elsewhere/projects");
+    let text = fs::read_to_string(target.path().join(".antiq-target")).expect("the marker exists");
+    assert_eq!(
+        text,
+        format!(
+            "{{\"format\":1,\"id\":\"{COLLECTION_ID}\",\"host\":\"laptop\",\"path\":\"/elsewhere/projects\"}}\n"
+        )
+    );
+}
+
+#[test]
+fn the_config_names_the_target_path() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    let target = Target::new();
+    collection.use_target(&target.path());
+    let found = Library::find(&collection.root()).expect("the collection is found");
+    assert_eq!(
+        found.config().target.url.as_deref(),
+        Some(target.path().to_str().expect("UTF-8"))
+    );
+}
+
+#[test]
+fn a_removed_target_does_not_exist_and_keeps_its_name() {
+    let target = Target::new();
+    let path = target.path();
+    target.remove();
+    assert!(!path.exists());
+    assert_eq!(target.path(), path);
+}
+
+#[test]
+fn copying_back_keeps_content_and_hard_links() {
+    let clock = Clock::now();
+    let mut target = Target::new();
+    let tree = target.tree_mut();
+    tree.file("a/one", "same");
+    tree.hard_link("a/one", "a/two");
+    target.marker_with(COLLECTION_ID, "laptop", "/elsewhere");
+    let copy = target.copy_back(&clock);
+    let one = fs::metadata(copy.path("a/one")).expect("one is copied");
+    let two = fs::metadata(copy.path("a/two")).expect("two is copied");
+    assert_eq!(one.ino(), two.ino());
+    assert_eq!(
+        fs::read_to_string(copy.path("a/one")).expect("reads"),
+        "same"
+    );
+    assert!(copy.path(".antiq-target").is_file());
+}
+
+#[test]
+#[should_panic(expected = "cannot run rsync")]
+fn a_missing_rsync_is_named() {
+    let clock = Clock::now();
+    Target::new().copy_back_using("antiq-no-such-rsync", &clock);
+}
+
+#[test]
+#[should_panic(expected = "rsync failed")]
+fn a_failing_rsync_is_named() {
+    let clock = Clock::now();
+    Target::new().copy_back_using("false", &clock);
+}
