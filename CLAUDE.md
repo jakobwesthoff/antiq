@@ -52,6 +52,10 @@ license text lives.
 
 - `assets/social/fonts/Inter-Variable.ttf`: Inter, SIL Open Font License
   1.1, text in `assets/social/fonts/Inter-OFL.txt`.
+- `docs/pages/capture/fonts/CascadiaMono.ttf`: Cascadia Mono 2407.24, SIL
+  Open Font License 1.1, text in
+  `docs/pages/capture/fonts/OFL-CascadiaMono.txt`. The demo tape draws the
+  sextants of the version screen with it.
 - `assets/social/fonts/VictorMono-Variable.ttf`: Victor Mono, SIL Open
   Font License 1.1, text in `assets/social/fonts/VictorMono-OFL.txt`.
 

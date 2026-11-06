@@ -22,7 +22,7 @@ find it again by the name of the folder or by the path of a file it held,
 and bring it back. The whole collection, live folders and versions, can be
 mirrored to one target with rsync.
 
-![antiq in a terminal: status lists three due folders, archive packs them with a progress card each, grep finds server.py in the archive of recipe-api, and unearth brings the folder back](docs/pages/assets/shots/demo.gif)
+![antiq in a terminal: status lists three due folders, archive packs them with a progress card each, grep finds server.py in the archive of recipe-api, unearth brings the folder back, and the version screen shows Archie](docs/pages/assets/shots/demo.gif)
 
 antiq runs on macOS and Linux. Everything it writes can be read without it:
 archives are `tar.zst` files, and a listing is a checksum list that
@@ -651,8 +651,9 @@ in the todo vault at `todos/`.
 The images of this README and of the project page are rendered from real
 runs of antiq in a demo world. `just shots` renders them again into
 `docs/pages/assets/shots/`; it needs `vhs`, `ttyd`, `ffmpeg`, `oxipng` and
-an rsync of 3.2.4 or newer. `just shots-test` tests the script that builds
-the demo world.
+an rsync of 3.2.4 or newer. `just demo` renders only the demo video
+(`docs/pages/assets/demo.webm` and `demo.mp4`) and the GIF of the top of
+this README. `just shots-test` tests the script that builds the demo world.
 
 ## About the name
 

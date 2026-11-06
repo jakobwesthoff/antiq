@@ -35,6 +35,10 @@ coverage base:
 shots:
     scripts/render.sh
 
+# Render only the demo video of the page and the GIF of the README.
+demo:
+    scripts/render.sh --demo
+
 # Render the social preview image from assets/social/og.html with Chrome.
 og:
     scripts/og.sh

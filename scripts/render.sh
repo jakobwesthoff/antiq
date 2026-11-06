@@ -6,7 +6,9 @@
 # Renders the images of the README and the project page into
 # docs/pages/assets/shots/ from real runs of antiq in the demo world.
 #
-# Usage: scripts/render.sh        (or: just shots)
+# Usage: scripts/render.sh          (or: just shots)
+#        scripts/render.sh --demo   (or: just demo) renders only the demo video
+#                                   and the GIF of the README
 #
 # It builds antiq in release mode, builds the world with scripts/world.sh,
 # runs the tapes of docs/pages/capture/tapes in their numbered order with vhs
@@ -18,6 +20,14 @@
 # scripts/world.sh.
 
 set -euo pipefail
+
+case ${1:-all} in
+    all | --demo) mode=${1:-all} ;;
+    *)
+        echo "usage: render.sh [--demo]" >&2
+        exit 2
+        ;;
+esac
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
@@ -33,7 +43,7 @@ expected_columns=105
 # =========================================================
 
 missing=""
-for tool in vhs ttyd ffmpeg oxipng openssl cargo; do
+for tool in vhs ttyd ffmpeg oxipng openssl cargo fc-list; do
     command -v "$tool" > /dev/null || missing="$missing $tool"
 done
 if [ -n "$missing" ]; then
@@ -117,23 +127,33 @@ if [ "$columns" != "$expected_columns" ]; then
     exit 1
 fi
 
-for tape in tapes/0[1-9]-*.tape; do
-    echo "rendering $tape"
-    run_tape "$tape"
-done
+if [ "$mode" = all ]; then
+    for tape in tapes/0[1-9]-*.tape; do
+        echo "rendering $tape"
+        run_tape "$tape"
+    done
 
-# A Screenshot that vhs could not take is no error for vhs, so every image
-# that the README and the page use has to be there.
-for image in init status keep dry-run archive-live archive-done find fork versions push error-damaged rebuild; do
-    if [ ! -s "$shots/$image.png" ]; then
-        echo "render.sh: the tapes wrote no $image.png" >&2
-        exit 1
-    fi
-done
+    # A Screenshot that vhs could not take is no error for vhs, so every image
+    # that the README and the page use has to be there.
+    for image in init status keep dry-run archive-live archive-done find fork versions push error-damaged rebuild; do
+        if [ ! -s "$shots/$image.png" ]; then
+            echo "render.sh: the tapes wrote no $image.png" >&2
+            exit 1
+        fi
+    done
+fi
 
 # The demo video starts from a collection that does not exist yet, which the
-# numbered tapes have used up, so it gets a fresh world.
-"$here/world.sh"
+# numbered tapes have used up, so after them it gets a fresh world.
+if [ "$mode" = all ]; then
+    "$here/world.sh"
+fi
+# vhs draws with the fonts installed on the machine, and the sextants of the
+# version screen come out as boxes in any font that lacks them.
+if ! fc-list : family | grep 'Cascadia Mono' > /dev/null; then
+    echo "render.sh: the font Cascadia Mono is not installed; install $capture/fonts/CascadiaMono.ttf" >&2
+    exit 1
+fi
 echo "rendering tapes/10-demo.tape"
 run_tape tapes/10-demo.tape
 for video in demo.webm demo.mp4; do
