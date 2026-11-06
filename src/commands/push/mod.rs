@@ -14,7 +14,7 @@ use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
 use crate::target::marker::{self, MarkerError};
-use crate::target::rsync::{Rsync, RsyncError};
+use crate::target::rsync::{Options, Rsync, RsyncError, quiet_option};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
 use serde::Serialize;
@@ -67,6 +67,10 @@ pub enum PushError {
     NameClash { first: RelPath, second: RelPath },
     #[error(".antiq/trash/ still holds {}, which a repair could not put back", .path.display())]
     TrashNotEmpty { path: PathBuf },
+    #[error(
+        "`[target] rsync_args` holds `{option}`, which silences the listing that tells antiq what the target holds; remove it"
+    )]
+    QuietRsyncArgs { option: String },
     /// The target cannot be used; the text says what is wrong with it.
     #[error("{problem}")]
     Target { problem: String },
@@ -85,6 +89,12 @@ pub enum PushError {
     },
     #[error("cannot use the target's marker")]
     MarkerFormat(#[source] MarkerError),
+    #[error("cannot make a directory for the target's marker in {}", .path.display())]
+    Scratch {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("cannot name this machine")]
     Machine(#[source] MachineError),
     /// The steps after the ones built so far.
@@ -104,6 +114,7 @@ impl HasKind for PushError {
             PushError::Unfinished => ErrorKind::NotImplemented,
             PushError::Url(_)
             | PushError::RootNotUtf8 { .. }
+            | PushError::QuietRsyncArgs { .. }
             | PushError::Versions(_)
             | PushError::Select(_)
             | PushError::Root { .. }
@@ -112,6 +123,7 @@ impl HasKind for PushError {
             | PushError::NameClash { .. }
             | PushError::TrashNotEmpty { .. }
             | PushError::Target { .. }
+            | PushError::Scratch { .. }
             | PushError::MarkerMismatch { .. }
             | PushError::MarkerFormat(MarkerError::Invalid { .. }) => ErrorKind::Other,
         }
@@ -171,6 +183,11 @@ pub fn push(
     // a usable target says so also while another run holds the lock.
     let url = target_url(collection)?;
     utf8_root(collection.root())?;
+    if let Some(option) = quiet_option(&collection.config().target.rsync_args) {
+        return Err(PushError::QuietRsyncArgs {
+            option: option.to_string(),
+        });
+    }
 
     let started = run::start(collection, clock, request.dry_run).map_err(PushError::Run)?;
     // The guard, when there is one, holds the lock until push returns.
@@ -186,32 +203,52 @@ pub fn push(
         }
     };
 
-    let _rsync = local_rsync(collection)?;
+    let rsync = local_rsync(collection)?;
 
     let warnings = guard
         .as_ref()
         .map_or_else(Vec::new, |guard| guard.warnings().to_vec());
-    let TargetUrl::Path { root } = &url else {
-        // The pre-check of an ssh target.
-        return Err(PushError::Unfinished);
-    };
     let identity = identity(collection, crate::machine::detect())?;
     let flags = precheck::Flags {
         init: request.init,
         force: request.force,
     };
-    let (probe, _canonical) = precheck::inspect_path(root, collection.root())?;
-    match precheck::decide(probe, false, &identity, flags, &root.display().to_string()) {
+    let shown = collection
+        .config()
+        .target
+        .url
+        .clone()
+        .expect("the url parsed before");
+    let probe = match &url {
+        TargetUrl::Path { root } => precheck::inspect_path(root, collection.root())?.0,
+        TargetUrl::Ssh { .. } => {
+            let options = Options::from_config(&collection.config().target);
+            // A dry run changes nothing in the collection, so the fetched
+            // marker goes to the system's temp directory.
+            let scratch = if request.dry_run {
+                std::env::temp_dir()
+            } else {
+                collection.tmp_dir()
+            };
+            precheck::inspect_ssh(
+                &precheck::Remote {
+                    rsync: &rsync,
+                    options: &options,
+                    url: &url,
+                    shown: &shown,
+                    scratch: &scratch,
+                },
+                &|call| call.run(),
+            )?
+        }
+    };
+    let ssh = matches!(url, TargetUrl::Ssh { .. });
+    match precheck::decide(probe, ssh, &identity, flags, &shown) {
         precheck::Decision::Unreachable(reason) if request.if_reachable => {
             Ok(PushOutcome::Unreachable(UnreachableReport {
                 dry_run: request.dry_run,
                 result: "unreachable",
-                target: collection
-                    .config()
-                    .target
-                    .url
-                    .clone()
-                    .expect("the url parsed before"),
+                target: shown,
                 reason,
                 warnings,
             }))

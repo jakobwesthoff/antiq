@@ -226,8 +226,11 @@ impl Rsync {
     pub fn fetch_marker(&self, options: &Options, target: &TargetUrl, into: &Path) -> Call {
         let mut marker = target.dir_arg();
         marker.push(marker::FILE_NAME);
+        // rsync skips a larger file without an error, which the pre-check
+        // reads as "the fetch left no file". The bound matches the limit
+        // the marker is read with.
         self.finish(
-            Vec::new(),
+            vec!["--max-size=64K".into()],
             options,
             true,
             [marker, with_trailing_slash(into.as_os_str())],
@@ -304,6 +307,42 @@ impl Options {
             rsync_args: target.rsync_args.clone(),
         }
     }
+}
+
+/// The short options of rsync that take a value; the rest of their cluster,
+/// or else the next argument, is that value.
+const SHORT_OPTIONS_WITH_VALUE: &str = "BefMT";
+
+/// The first option of `rsync_args` that makes rsync quiet, if there is one.
+///
+/// A quiet rsync prints no `--list-only` listing, which the pre-check of an
+/// ssh target could not tell from an empty directory.
+pub fn quiet_option(args: &[String]) -> Option<&str> {
+    let mut value_follows = false;
+    for arg in args {
+        if std::mem::take(&mut value_follows) {
+            continue;
+        }
+        if arg == "--quiet" {
+            return Some(arg);
+        }
+        let Some(letters) = arg.strip_prefix('-') else {
+            continue;
+        };
+        if letters.is_empty() || !letters.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            continue;
+        }
+        for (index, letter) in letters.char_indices() {
+            if letter == 'q' {
+                return Some(arg);
+            }
+            if SHORT_OPTIONS_WITH_VALUE.contains(letter) {
+                value_follows = index + 1 == letters.len();
+                break;
+            }
+        }
+    }
+    None
 }
 
 /// One prepared rsync call.
@@ -973,6 +1012,51 @@ mod tests {
         assert_eq!(argv(&call), expected);
     }
 
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn q_alone_or_in_a_cluster_and_quiet_make_rsync_quiet() {
+        for list in [
+            &["-q"][..],
+            &["--quiet"],
+            &["--bwlimit=100", "-aq"],
+            &["-qa"],
+            &["-vqz"],
+            &["-Hxq"],
+        ] {
+            let owned = args(list);
+            let found = quiet_option(&owned);
+            assert!(found.is_some(), "{list:?}");
+            assert!(list.contains(&found.expect("found")), "{list:?}");
+        }
+    }
+
+    #[test]
+    fn a_q_that_is_the_value_of_an_option_or_no_option_at_all_is_no_quiet() {
+        for list in [
+            &["-eq"][..],
+            &["-aeq"],
+            &["-Bq"],
+            &["-fq"],
+            &["-Mq"],
+            &["-Tq"],
+            &["-e", "ssh -q"],
+            &["--bwlimit", "100"],
+            &["-e", "-q"],
+            &["-ae", "-q"],
+            &["--rsync-path=quiet"],
+            &["--no-perms", "-a", "-vv"],
+            &["--exclude=-q"],
+            &["-"],
+            &["-q1"],
+            &[],
+        ] {
+            assert_eq!(quiet_option(&args(list)), None, "{list:?}");
+        }
+    }
+
     #[test]
     fn rsync_args_follow_antiqs_options_and_precede_the_paths() {
         let (_fake, rsync) = probed_fake();
@@ -1045,6 +1129,7 @@ mod tests {
         assert_eq!(
             argv(&call),
             [
+                "--max-size=64K",
                 "--timeout=300",
                 "--fsync",
                 "-e",

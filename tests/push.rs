@@ -885,3 +885,246 @@ fn the_root_of_a_mounted_volume_is_refused_with_every_flag() {
         assert!(message.contains("mount"), "{args:?}: {message}");
     }
 }
+
+// =========================================================
+// Step 4: the pre-check of an ssh target
+// =========================================================
+
+const SSH_URL: &str = "backup@nas:/srv/antiq";
+const DOT: &str = "drwxr-xr-x          4,096 2026/11/04 20:07:08 .\n";
+
+/// A collection that pushes to an ssh target whose rsync is a stand-in.
+fn ssh_targeted() -> (Collection, FakeRsync) {
+    let collection = collection();
+    set_url(&collection, SSH_URL);
+    let fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+    (collection, fake)
+}
+
+fn ssh_text(name: &str) -> String {
+    fs::read_to_string(format!(
+        "{}/tests/fixtures/ssh-texts/{name}.txt",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("the fixture text exists")
+}
+
+#[test]
+fn ssh_texts_of_a_host_that_cannot_be_reached_are_unreachable() {
+    for name in ["connect-refused", "resolve", "timeout"] {
+        let (collection, fake) = ssh_targeted();
+        fake.answer_all("", &ssh_text(name), 255);
+
+        let reason = unreachable_reason(&push(&collection, &[]));
+
+        assert!(reason.contains(SSH_URL), "{name}: {reason}");
+        assert!(reason.contains("ssh:"), "{name}: {reason}");
+        let run = push(&collection, &["--if-reachable"]);
+        assert_eq!(run.code(), 0, "{name}: {}", run.stdout);
+    }
+}
+
+#[test]
+fn other_ssh_failures_are_refused_with_the_line() {
+    for (name, line) in [
+        ("host-key-changed", "Host key verification failed."),
+        ("host-key-unknown", "Host key verification failed."),
+        ("permission-denied", "Permission denied"),
+    ] {
+        let (collection, fake) = ssh_targeted();
+        fake.answer_all("", &ssh_text(name), 255);
+
+        for args in [&[][..], &["--if-reachable"][..], &["--init"][..]] {
+            let message = refused_message(&push(&collection, args));
+            assert!(message.contains(line), "{name} {args:?}: {message}");
+        }
+    }
+}
+
+#[test]
+fn a_missing_ssh_directory_is_refused_unless_init_creates_it() {
+    let missing =
+        "rsync: [sender] change_dir \"/srv/antiq\" failed: No such file or directory (2)\n";
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all("", missing, 23);
+
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("does not exist"), "{message}");
+    let message = refused_message(&push(&collection, &["--force"]));
+    assert!(message.contains("does not exist"), "{message}");
+    passes_the_precheck(&push(&collection, &["--init"]));
+}
+
+#[test]
+fn another_exit_23_of_the_listing_is_refused_even_with_init() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all(
+        "",
+        "rsync: [sender] change_dir \"/srv\" failed: Permission denied (13)\n",
+        23,
+    );
+
+    for args in [&[][..], &["--init"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(message.contains("Permission denied"), "{args:?}: {message}");
+    }
+}
+
+#[test]
+fn an_empty_ssh_directory_is_unreachable_with_a_hint_and_init_takes_it() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all(DOT, "", 0);
+
+    let reason = unreachable_reason(&push(&collection, &[]));
+    assert!(reason.contains("push --init"), "{reason}");
+    passes_the_precheck(&push(&collection, &["--init"]));
+}
+
+#[test]
+fn a_silent_listing_is_no_empty_directory_and_init_marks_nothing() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all("", "", 0);
+
+    for args in [&[][..], &["--init"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(
+            message.contains("not list the directory"),
+            "{args:?}: {message}"
+        );
+    }
+    assert!(
+        fake.calls()
+            .iter()
+            .all(|call| !call.contains(&"--chmod=F644".to_string())),
+        "no marker run: {:?}",
+        fake.calls()
+    );
+}
+
+#[test]
+fn a_quiet_option_in_rsync_args_is_refused_before_any_rsync_runs() {
+    for option in ["-q", "--quiet", "-aq"] {
+        let (collection, fake) = ssh_targeted();
+        add_target_key(&collection, &format!("rsync_args = [\"{option}\"]"));
+        fake.answer_all(DOT, "", 0);
+
+        for args in [
+            &[][..],
+            &["--init"][..],
+            &["-n"][..],
+            &["--if-reachable"][..],
+        ] {
+            let message = refused_message(&push(&collection, args));
+            assert!(
+                message.contains("rsync_args") && message.contains(option),
+                "{option} {args:?}: {message}"
+            );
+        }
+        assert!(
+            !fake.dir().join("calls.log").exists(),
+            "{option}: rsync was called"
+        );
+    }
+}
+
+#[test]
+fn an_ssh_directory_with_files_and_no_marker_is_refused_also_with_init() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all(
+        &format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 stray file.txt\n"),
+        "",
+        0,
+    );
+
+    for args in [&[][..], &["--init"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(message.contains("not empty"), "{args:?}: {message}");
+    }
+}
+
+#[test]
+fn a_marker_that_is_a_directory_on_the_ssh_target_is_not_readable() {
+    let (collection, fake) = ssh_targeted();
+    fake.answer_all(
+        &format!("{DOT}drwxr-xr-x  64 2026/11/04 20:07:08 .antiq-target\n"),
+        "",
+        0,
+    );
+
+    let message = refused_message(&push(&collection, &[]));
+
+    assert!(message.contains("not readable"), "{message}");
+    assert_eq!(
+        fake.calls().len(),
+        2,
+        "the version probe and the listing only"
+    );
+}
+
+#[test]
+fn a_marker_that_cannot_be_fetched_is_not_readable_and_leaves_no_directory() {
+    let marker = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+    let (collection, fake) = ssh_targeted();
+    fake.answer(1, &marker, "", 0);
+    fake.answer(2, "", "rsync: link_stat failed\n", 23);
+
+    let message = refused_message(&push(&collection, &["--force"]));
+
+    assert!(message.contains("not readable"), "{message}");
+    let leftovers: Vec<_> = fs::read_dir(collection.path(".antiq/tmp"))
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_dry_run_fetches_the_marker_without_touching_the_collection() {
+    let marker = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+    let (collection, fake) = ssh_targeted();
+    fake.answer(1, &marker, "", 0);
+    fake.answer(2, "", "", 0);
+    let before = snapshot(&collection.root());
+
+    let message = refused_message(&push(&collection, &["-n"]));
+
+    assert!(message.contains("not readable"), "{message}");
+    assert_eq!(snapshot(&collection.root()), before);
+}
+
+#[test]
+fn the_listing_and_the_fetch_are_run_in_the_c_locale_with_the_options_of_the_mirror() {
+    let marker = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+    let (collection, fake) = ssh_targeted();
+    add_target_key(&collection, "rsync_path = \"/opt/bin/rsync\"");
+    add_target_key(&collection, "rsync_args = [\"--bwlimit=100\"]");
+    fake.answer(1, &marker, "", 0);
+    fake.answer(2, "", "", 0);
+
+    refused_message(&push(&collection, &[]));
+
+    let calls = fake.calls();
+    let list = &calls[1];
+    assert_eq!(list[0], "transfer");
+    assert!(list.contains(&"--list-only".to_string()), "{list:?}");
+    assert!(list.contains(&"--timeout=300".to_string()), "{list:?}");
+    assert!(
+        list.contains(&"--rsync-path=/opt/bin/rsync".to_string()),
+        "{list:?}"
+    );
+    assert!(list.contains(&"--bwlimit=100".to_string()), "{list:?}");
+    assert!(!list.contains(&"--fsync".to_string()), "{list:?}");
+    assert_eq!(list.last().expect("a target"), "backup@nas:/srv/antiq/");
+    let fetch = &calls[2];
+    assert!(fetch.contains(&"--fsync".to_string()), "{fetch:?}");
+    assert!(fetch.contains(&"--max-size=64K".to_string()), "{fetch:?}");
+    assert_eq!(
+        fetch[fetch.len() - 2],
+        "backup@nas:/srv/antiq/.antiq-target"
+    );
+    let env = String::from_utf8(fake.read("env.log")).expect("UTF-8");
+    assert!(
+        env.lines()
+            .filter(|l| l.starts_with("LC_ALL="))
+            .all(|l| l == "LC_ALL=C")
+    );
+}

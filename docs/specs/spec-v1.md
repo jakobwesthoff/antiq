@@ -1472,14 +1472,18 @@ target. `--init` and `--force` are each refused together with
    | `.antiq-target` of this collection, with `--init` | exit 1 |
 
    `.antiq-target` is not readable when it is not a regular file (a link
-   counts as not regular), cannot be opened, or does not parse. An error
+   counts as not regular, also in an ssh listing), cannot be opened, or does
+   not parse. An error
    other than the five above, while reading a path target, is exit 1 with
    the system's message.
 
    When the listing shows `.antiq-target` on an ssh target, it is fetched
-   with one rsync run of `<target>/.antiq-target` into `.antiq/tmp/`, with
-   the same options as the marker run below; a fetch that fails, or
-   content that does not parse, is "not readable". `--force` changes
+   with one rsync run of `<target>/.antiq-target` into a directory of its
+   own in `.antiq/tmp/` (a dry run uses the system's temp directory, since
+   it changes nothing in the collection), with the same options as the
+   marker run below plus `--max-size=64K`; a marker that the listing shows
+   larger than 64 KiB is not fetched, and a fetch that fails, or content
+   that does not parse, is "not readable". `--force` changes
    nothing in the other rows: no marker still needs `--init`, another
    collection's marker is still exit 1, and with a matching marker it is a
    plain push, noted in the output.
@@ -1491,7 +1495,9 @@ target. `--init` and `--force` are each refused together with
    255 (a changed host key, a refused key) is exit 1 with the line. Exit
    23 counts as "does not exist" only when the failing `change_dir` or
    `link_stat` line ends in `(2)`, or openrsync's `(l)stat:` line ends in
-   `No such file or directory`; any other 23 is exit 1.
+   `No such file or directory`; any other 23 is exit 1. A listing counts
+   only when it holds the entry `.` of kind `d`, which is the directory
+   itself; a listing without it is exit 1, never an empty directory.
 
    Unreachable means exit 0 under `--if-reachable`, otherwise exit 4, and
    the reason is printed in text and `--json` every time. A missing
@@ -1642,6 +1648,12 @@ expanded on the target, so that the pre-check and `--delete` could reach
 different directories. An IPv6 host is
 written in brackets, `[::1]:path`. Unknown keys under `[collection]` or
 `[target]` are ignored, and each one is reported in a warning.
+
+`rsync_args` holds neither `-q`, `--quiet` nor a cluster of short options
+with a `q` in it (`-aq`; the letter after an option that takes a value,
+such as `-e`, does not count). A quiet rsync prints no listing, which the
+pre-check of an ssh target needs. `push` refuses it with exit 1 before it
+runs rsync.
 
 The keys of the earlier design are refused with all their names in one
 error: `junk`, `remote_only_days`, `backup_live`, `live_exclude`,

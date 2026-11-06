@@ -9,10 +9,13 @@ use super::PushError;
 use crate::filesystem::device;
 use crate::id::ObjectId;
 use crate::target::marker::{FILE_NAME, Marker, MarkerError};
+use crate::target::rsync::{Call, Options, Outcome, Rsync, RsyncError};
+use crate::target::url::TargetUrl;
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// What was found at the target.
 #[derive(Debug)]
@@ -274,11 +277,12 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<(Probe, PathBuf), 
     // cannot be listed is reported as such and not as a marker that is
     // missing.
     let empty = (io.is_empty)(&canonical).map_err(|error| failed(&error, &canonical))?;
-    let probe = match read_marker(&canonical)? {
-        Some(probe) => probe,
-        None if empty => Probe::Empty,
-        None => Probe::NotEmpty,
-    };
+    let probe =
+        match read_marker(&canonical, &canonical.display().to_string()).map_err(Stop::Refuse)? {
+            Some(probe) => probe,
+            None if empty => Probe::Empty,
+            None => Probe::NotEmpty,
+        };
     Ok((probe, canonical))
 }
 
@@ -337,18 +341,14 @@ fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(), Stop>
 /// The most of a marker file that is read; a real one is a line of JSON.
 const MARKER_LIMIT: u64 = 64 * 1024;
 
-/// Reads `.antiq-target` of the directory `dir`, `None` when there is none.
+/// Reads `.antiq-target` of the directory `dir`, which `shown` names in
+/// messages, `None` when there is none.
 /// The file is looked at without following links, so that a link cannot
 /// stand in for a marker.
-fn read_marker(dir: &Path) -> Result<Option<Probe>, Stop> {
+fn read_marker(dir: &Path, shown: &str) -> Result<Option<Probe>, PushError> {
     let path = dir.join(FILE_NAME);
-    let unreadable = |error: io::Error| {
-        Stop::Refuse(PushError::Target {
-            problem: format!(
-                "the marker {FILE_NAME} in {} is not readable: {error}",
-                dir.display()
-            ),
-        })
+    let unreadable = |error: io::Error| PushError::Target {
+        problem: format!("the marker {FILE_NAME} in {shown} is not readable: {error}"),
     };
     let meta = match fs::symlink_metadata(&path) {
         Ok(meta) => meta,
@@ -369,6 +369,217 @@ fn read_marker(dir: &Path) -> Result<Option<Probe>, Stop> {
         Err(MarkerError::TooNew { found }) => Probe::MarkerTooNew(found),
         Err(MarkerError::Invalid { reason }) => Probe::MarkerUnreadable(reason),
     }))
+}
+
+// =========================================================
+// An ssh target
+// =========================================================
+
+/// Runs an rsync call. The real one is [`Call::run`]; a test hands in one
+/// that answers.
+pub(super) type Runner<'a> = &'a dyn Fn(&Call) -> Result<Outcome, RsyncError>;
+
+/// What the inspection of an ssh target needs.
+pub(super) struct Remote<'a> {
+    pub rsync: &'a Rsync,
+    pub options: &'a Options,
+    pub url: &'a TargetUrl,
+    /// The target as the messages name it.
+    pub shown: &'a str,
+    /// The directory in which the fetched marker gets a directory of its own.
+    pub scratch: &'a Path,
+}
+
+/// One entry of an `rsync --list-only` listing.
+#[derive(Debug, PartialEq, Eq)]
+struct Entry {
+    /// The first character of the permissions: `-`, `d`, `l`, ...
+    kind: char,
+    /// The size in bytes; `None` when the listing prints it in a form that
+    /// is not a plain number (`-h`).
+    size: Option<u64>,
+    name: String,
+}
+
+/// The entries of a listing. A line that does not have the shape of an
+/// entry counts as an entry of unknown kind, so that it cannot make a
+/// directory look empty.
+fn parse_listing(stdout: &[u8]) -> Vec<Entry> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let unknown = || Entry {
+                kind: '?',
+                size: None,
+                name: line.to_string(),
+            };
+            // permissions, size, date and time, each padded with spaces;
+            // the name follows after one more space and may hold spaces.
+            let mut rest = line;
+            let mut size = None;
+            for field in 0..4 {
+                rest = rest.trim_start();
+                match rest.find(char::is_whitespace) {
+                    Some(end) => {
+                        // Thousands separators are rsync's; a `-h` listing
+                        // prints `1.50K`, which stays unparsed.
+                        if field == 1 {
+                            size = rest[..end].replace(',', "").parse().ok();
+                        }
+                        rest = &rest[end..];
+                    }
+                    None => return unknown(),
+                }
+            }
+            let Some(name) = rest.strip_prefix(' ') else {
+                return unknown();
+            };
+            let name = name.split(" -> ").next().unwrap_or(name);
+            Entry {
+                kind: line.chars().next().unwrap_or('?'),
+                size,
+                name: name.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Lists the target over ssh and, when it holds a marker, fetches it.
+pub(super) fn inspect_ssh(remote: &Remote, run: Runner) -> Result<Probe, PushError> {
+    let listing = run(&remote.rsync.list(remote.options, remote.url)).map_err(PushError::Rsync)?;
+    let stderr = String::from_utf8_lossy(&listing.stderr);
+    match listing.code {
+        Some(0) => {}
+        Some(255) => {
+            let gone = stderr.lines().any(|line| {
+                line.starts_with("ssh: connect to host")
+                    || line.starts_with("ssh: Could not resolve hostname")
+                    || line.contains("timed out")
+            });
+            return if gone {
+                Ok(Probe::Unreachable(format!(
+                    "the target {} cannot be reached: {}",
+                    remote.shown,
+                    stderr.trim()
+                )))
+            } else {
+                Err(listing_failed(remote, &listing))
+            };
+        }
+        Some(23) if says_missing(&stderr) => return Ok(Probe::Missing),
+        _ => return Err(listing_failed(remote, &listing)),
+    }
+
+    let entries = parse_listing(&listing.stdout);
+    // The entry of the directory itself proves that rsync listed it. A
+    // listing without one, such as the empty output of a quiet rsync, is
+    // not an empty directory.
+    let listed_itself = entries
+        .iter()
+        .filter(|entry| entry.kind == 'd' && entry.name == ".")
+        .count();
+    if listed_itself != 1 {
+        return Err(PushError::Target {
+            problem: format!(
+                "the listing of the target {} did not list the directory itself, so antiq cannot tell what it holds",
+                remote.shown
+            ),
+        });
+    }
+    let marker = entries.iter().find(|entry| entry.name == FILE_NAME);
+    match marker {
+        Some(entry) if entry.kind == '-' && entry.size.is_some_and(|size| size > MARKER_LIMIT) => {
+            Ok(Probe::MarkerUnreadable("it is larger than 64 KiB".into()))
+        }
+        Some(entry) if entry.kind == '-' => fetch_marker(remote, run),
+        Some(_) => Ok(Probe::MarkerUnreadable("it is not a regular file".into())),
+        None if entries.iter().all(|entry| entry.name == ".") => Ok(Probe::Empty),
+        None => Ok(Probe::NotEmpty),
+    }
+}
+
+/// Whether the failing line of an exit 23 says that the directory is not
+/// there: rsync's `change_dir` and `link_stat` lines end in `(2)`, the
+/// `stat:` line of openrsync in `No such file or directory`.
+fn says_missing(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        let line = line.trim_end();
+        ((line.contains("change_dir") || line.contains("link_stat")) && line.ends_with("(2)"))
+            || (line.contains("stat:") && line.ends_with("No such file or directory"))
+    })
+}
+
+fn listing_failed(remote: &Remote, outcome: &Outcome) -> PushError {
+    let how = match outcome.code {
+        Some(code) => format!("ended with exit {code}"),
+        None => "was ended by a signal".to_string(),
+    };
+    PushError::Target {
+        problem: format!(
+            "listing the target {} {how}: {}",
+            remote.shown,
+            String::from_utf8_lossy(&outcome.stderr).trim()
+        ),
+    }
+}
+
+/// Fetches the marker of the ssh target into a directory of its own and
+/// reads it there.
+fn fetch_marker(remote: &Remote, run: Runner) -> Result<Probe, PushError> {
+    let scratch = Scratch::create(remote.scratch)?;
+    let outcome = run(&remote
+        .rsync
+        .fetch_marker(remote.options, remote.url, scratch.path()))
+    .map_err(PushError::Rsync)?;
+    if outcome.code != Some(0) {
+        return Ok(Probe::MarkerUnreadable(format!(
+            "fetching it failed: {}",
+            String::from_utf8_lossy(&outcome.stderr).trim()
+        )));
+    }
+    Ok(read_marker(scratch.path(), remote.shown)?
+        .unwrap_or_else(|| Probe::MarkerUnreadable("the fetch left no file".into())))
+}
+
+static SCRATCH_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// A directory that exists for one inspection and is removed after it.
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn create(parent: &Path) -> Result<Scratch, PushError> {
+        let scratch_error = |source| PushError::Scratch {
+            path: parent.to_path_buf(),
+            source,
+        };
+        fs::create_dir_all(parent).map_err(scratch_error)?;
+        let name = format!(
+            "push-{}-{}",
+            std::process::id(),
+            SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = parent.join(name);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(scratch_error)?;
+        Ok(Scratch { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // What stays behind in `.antiq/tmp/` is removed by the next run's
+        // repairs.
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 #[cfg(test)]
@@ -590,13 +801,13 @@ mod tests {
 
     /// An `Io` that sees an existing, empty, ordinary directory, with
     /// single parts replaced by the test.
-    type Call<T> = Box<dyn Fn(&Path) -> io::Result<T>>;
+    type Seam<T> = Box<dyn Fn(&Path) -> io::Result<T>>;
 
     struct Seen {
-        canonicalize: Call<PathBuf>,
-        identity: Call<(u64, u64)>,
-        mount_root: Call<bool>,
-        is_empty: Call<bool>,
+        canonicalize: Seam<PathBuf>,
+        identity: Seam<(u64, u64)>,
+        mount_root: Seam<bool>,
+        is_empty: Seam<bool>,
     }
 
     impl Seen {
@@ -752,5 +963,441 @@ mod tests {
         let mut seen = Seen::plain();
         seen.mount_root = Box::new(|_| Ok(true));
         assert!(refused(seen.inspect("/mnt/nas")).contains("mount"));
+    }
+
+    // -----------------------------------------------------
+    // An ssh target
+    // -----------------------------------------------------
+
+    use crate::target::fake::Fake;
+    use crate::target::rsync::{Options, Outcome};
+    use std::cell::RefCell;
+
+    const RSYNC_3_5_1: &str =
+        "rsync  version 3.5.1  protocol version 33\nCopyright (C) 1996-2026\n";
+    const DOT: &str = "drwxr-xr-x          4,096 2026/11/04 20:07:08 .\n";
+
+    fn entry(kind: char, size: Option<u64>, name: &str) -> Entry {
+        Entry {
+            kind,
+            size,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_listing_is_taken_apart_into_kind_and_name() {
+        let listing = format!(
+            "{DOT}-rw-r--r--             12 2026/11/04 20:07:08 .antiq-target\n\
+             drwxr-xr-x             64 2026/11/04 20:07:08 my folder\n\
+             lrwxr-xr-x              5 2026/11/04 20:07:08 link -> elsewhere\n\
+             -rw-r--r--      1,234,567 2026/11/04 20:07:08  odd  name \n\
+             -rw-r--r--          1.50K 2026/11/04 20:07:08 human\n"
+        );
+        assert_eq!(
+            parse_listing(listing.as_bytes()),
+            [
+                entry('d', Some(4096), "."),
+                entry('-', Some(12), ".antiq-target"),
+                entry('d', Some(64), "my folder"),
+                entry('l', Some(5), "link"),
+                entry('-', Some(1_234_567), " odd  name "),
+                entry('-', None, "human"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_of_another_shape_counts_as_an_entry() {
+        assert_eq!(
+            parse_listing(b"surprise\n\n"),
+            [entry('?', None, "surprise")]
+        );
+        assert_eq!(parse_listing(b"a b c d"), [entry('?', None, "a b c d")]);
+        assert_eq!(parse_listing(b""), []);
+    }
+
+    #[test]
+    fn exit_23_says_missing_only_for_the_lines_of_the_spec() {
+        for line in [
+            "rsync: [sender] change_dir \"/srv/antiq\" failed: No such file or directory (2)",
+            "rsync: [sender] link_stat \"/srv/antiq/.\" failed: No such file or directory (2)",
+            "openrsync: (l)stat: /srv/antiq: No such file or directory",
+        ] {
+            assert!(says_missing(&format!("{line}\n")), "{line}");
+        }
+        for line in [
+            "rsync: [sender] change_dir \"/srv\" failed: Permission denied (13)",
+            "rsync: [sender] some other failure (2) happened",
+            "rsync error: some files/attrs were not transferred (code 23) at main.c(1)",
+        ] {
+            assert!(!says_missing(&format!("{line}\n")), "{line}");
+        }
+    }
+
+    /// What the stand-in runner is told to answer, by call.
+    struct Script {
+        answers: Vec<Outcome>,
+        calls: RefCell<Vec<Vec<String>>>,
+        /// Written as the marker when a call fetches one.
+        fetched: Option<&'static str>,
+    }
+
+    fn outcome(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
+        Outcome {
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    impl Script {
+        fn new(answers: Vec<Outcome>) -> Script {
+            Script {
+                answers,
+                calls: RefCell::new(Vec::new()),
+                fetched: None,
+            }
+        }
+
+        fn run(&self, call: &Call) -> Result<Outcome, RsyncError> {
+            let args: Vec<String> = call
+                .args()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let number = self.calls.borrow().len();
+            if let (Some(text), true) = (
+                self.fetched,
+                args.iter().any(|a| a.ends_with("/.antiq-target")),
+            ) {
+                let into = args.last().expect("the directory comes last");
+                fs::write(Path::new(into).join(".antiq-target"), text).expect("written");
+            }
+            self.calls.borrow_mut().push(args);
+            Ok(self.answers[number.min(self.answers.len() - 1)].clone())
+        }
+    }
+
+    struct Ssh {
+        _fake: Fake,
+        rsync: Rsync,
+        url: TargetUrl,
+        scratch: tempfile::TempDir,
+    }
+
+    fn ssh() -> Ssh {
+        let fake = Fake::new(RSYNC_3_5_1);
+        let rsync = Rsync::probe(&fake.path()).expect("the stand-in passes");
+        Ssh {
+            _fake: fake,
+            rsync,
+            url: TargetUrl::parse("backup@nas:/srv/antiq").expect("a target"),
+            scratch: tempfile::tempdir().expect("a temp dir"),
+        }
+    }
+
+    impl Ssh {
+        fn inspect(&self, script: &Script) -> Result<Probe, PushError> {
+            let options = Options {
+                fsync: true,
+                rsync_path: None,
+                rsync_args: Vec::new(),
+            };
+            inspect_ssh(
+                &Remote {
+                    rsync: &self.rsync,
+                    options: &options,
+                    url: &self.url,
+                    shown: "backup@nas:/srv/antiq",
+                    scratch: self.scratch.path(),
+                },
+                &|call| script.run(call),
+            )
+        }
+    }
+
+    fn unreachable_text(result: Result<Probe, PushError>) -> String {
+        match result {
+            Ok(Probe::Unreachable(reason)) => reason,
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_lines_of_a_target_that_cannot_be_reached_are_unreachable() {
+        for line in [
+            "ssh: connect to host nas port 22: Connection refused",
+            "ssh: Could not resolve hostname nas: Name or service not known",
+            "ssh: connect to host nas port 22: Operation timed out",
+            "Connection timed out during banner exchange",
+        ] {
+            let script = Script::new(vec![outcome(Some(255), "", &format!("{line}\n"))]);
+            let reason = unreachable_text(ssh().inspect(&script));
+            assert!(reason.contains(line), "{reason}");
+            assert!(reason.contains("backup@nas:/srv/antiq"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn any_other_255_is_a_refusal_with_the_line() {
+        for line in [
+            "Host key verification failed.",
+            "someone@nas: Permission denied (publickey).",
+        ] {
+            let script = Script::new(vec![outcome(Some(255), "", &format!("{line}\n"))]);
+            match ssh().inspect(&script) {
+                Err(PushError::Target { problem }) => {
+                    assert!(problem.contains(line), "{problem}");
+                    assert!(problem.contains("255"), "{problem}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn exit_23_is_a_missing_directory_only_with_the_not_found_line() {
+        let missing =
+            "rsync: [sender] change_dir \"/srv/antiq\" failed: No such file or directory (2)\n";
+        let script = Script::new(vec![outcome(Some(23), "", missing)]);
+        assert!(matches!(ssh().inspect(&script), Ok(Probe::Missing)));
+
+        let denied = "rsync: [sender] change_dir \"/srv\" failed: Permission denied (13)\n";
+        let script = Script::new(vec![outcome(Some(23), "", denied)]);
+        match ssh().inspect(&script) {
+            Err(PushError::Target { problem }) => assert!(problem.contains("Permission denied")),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_timeout_or_a_signal_of_the_listing_is_a_refusal() {
+        for (code, expected) in [(Some(30), "exit 30"), (None, "signal")] {
+            let script = Script::new(vec![outcome(code, "", "Timeout in data send/receive\n")]);
+            match ssh().inspect(&script) {
+                Err(PushError::Target { problem }) => {
+                    assert!(problem.contains(expected), "{problem}");
+                    assert!(problem.contains("Timeout in data"), "{problem}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_rsync_that_cannot_start_is_the_rsync_error() {
+        let ssh = ssh();
+        let options = Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: Vec::new(),
+        };
+        let result = inspect_ssh(
+            &Remote {
+                rsync: &ssh.rsync,
+                options: &options,
+                url: &ssh.url,
+                shown: "x",
+                scratch: ssh.scratch.path(),
+            },
+            &|_| {
+                Err(RsyncError::Spawn {
+                    path: "rsync".into(),
+                    cause: io::Error::other("gone"),
+                })
+            },
+        );
+        assert!(matches!(result, Err(PushError::Rsync(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_listing_with_only_the_dot_is_empty_and_one_with_files_is_not() {
+        let script = Script::new(vec![outcome(Some(0), DOT, "")]);
+        assert!(matches!(ssh().inspect(&script), Ok(Probe::Empty)));
+        let more = format!("{DOT}-rw-r--r--  1 2026/11/04 20:07:08 stray.txt\n");
+        let script = Script::new(vec![outcome(Some(0), &more, "")]);
+        assert!(matches!(ssh().inspect(&script), Ok(Probe::NotEmpty)));
+    }
+
+    #[test]
+    fn a_listing_without_the_directory_itself_is_a_refusal_and_never_empty() {
+        // Without the entry of the directory, silence (rsync's `-q` in the
+        // user's options) cannot be told from an empty directory.
+        for stdout in [
+            "",
+            "\n",
+            "-rw-r--r--  12 2026/11/04 20:07:08 stray.txt\n",
+            "-rw-r--r--  12 2026/11/04 20:07:08 .\n",
+            "not a listing line\n",
+        ] {
+            let script = Script::new(vec![outcome(Some(0), stdout, "")]);
+            match ssh().inspect(&script) {
+                Err(PushError::Target { problem }) => {
+                    assert!(problem.contains("backup@nas:/srv/antiq"), "{problem}");
+                    assert!(problem.contains("not list the directory"), "{problem}");
+                }
+                other => panic!("expected a refusal for {stdout:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_calls_list_the_directory_and_fetch_the_marker_into_a_directory_of_their_own() {
+        let listing = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+        let mut script = Script::new(vec![
+            outcome(Some(0), &listing, ""),
+            outcome(Some(0), "", ""),
+        ]);
+        script.fetched = Some(
+            "{\"format\":1,\"id\":\"01BX5ZZKBKACTAV9WEVGEMMVRY\",\"host\":\"Studio\",\"path\":\"/srv/coll\"}\n",
+        );
+        let ssh = ssh();
+
+        let probe = ssh.inspect(&script).expect("inspected");
+
+        assert!(matches!(probe, Probe::Marker(_)), "{probe:?}");
+        let calls = script.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls[0].contains(&"--list-only".to_string()),
+            "{:?}",
+            calls[0]
+        );
+        assert_eq!(calls[0].last().expect("a target"), "backup@nas:/srv/antiq/");
+        assert!(!calls[0].contains(&"--fsync".to_string()), "{:?}", calls[0]);
+        assert_eq!(
+            calls[1][calls[1].len() - 2],
+            "backup@nas:/srv/antiq/.antiq-target"
+        );
+        let into = calls[1].last().expect("a directory");
+        assert!(
+            into.starts_with(ssh.scratch.path().to_str().expect("UTF-8")),
+            "{into}"
+        );
+        assert!(!Path::new(into).exists(), "the directory is removed again");
+    }
+
+    #[test]
+    fn a_marker_over_64_kib_in_the_listing_is_not_fetched() {
+        let listing = format!("{DOT}-rw-r--r--  65,537 2026/11/04 20:07:08 .antiq-target\n");
+        let script = Script::new(vec![outcome(Some(0), &listing, "")]);
+        match ssh().inspect(&script).expect("inspected") {
+            Probe::MarkerUnreadable(why) => assert!(why.contains("64 KiB"), "{why}"),
+            other => panic!("expected an unreadable marker, got {other:?}"),
+        }
+        assert_eq!(script.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_marker_of_64_kib_or_of_a_size_that_does_not_parse_is_fetched() {
+        for size in ["65,536", "1.50K", "12"] {
+            let listing = format!("{DOT}-rw-r--r--  {size} 2026/11/04 20:07:08 .antiq-target\n");
+            let script = Script::new(vec![
+                outcome(Some(0), &listing, ""),
+                outcome(Some(0), "", ""),
+            ]);
+            ssh().inspect(&script).expect("inspected");
+            assert_eq!(script.calls.borrow().len(), 2, "{size}");
+        }
+    }
+
+    #[test]
+    fn a_marker_that_is_not_a_regular_file_in_the_listing_is_not_fetched() {
+        let listing = format!("{DOT}drwxr-xr-x  64 2026/11/04 20:07:08 .antiq-target\n");
+        let script = Script::new(vec![outcome(Some(0), &listing, "")]);
+        let probe = ssh().inspect(&script).expect("inspected");
+        assert!(matches!(probe, Probe::MarkerUnreadable(_)), "{probe:?}");
+        assert_eq!(script.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_fetch_that_fails_or_leaves_nothing_usable_is_an_unreadable_marker() {
+        let listing = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+        let cases = [
+            (
+                outcome(Some(23), "", "rsync: link_stat failed\n"),
+                None,
+                "failed: rsync: link_stat",
+            ),
+            (outcome(Some(0), "", ""), None, "left no file"),
+            (outcome(Some(0), "", ""), Some("not json\n"), ""),
+        ];
+        for (fetch, written, expected) in cases {
+            let mut script = Script::new(vec![outcome(Some(0), &listing, ""), fetch]);
+            script.fetched = written;
+            match ssh().inspect(&script).expect("inspected") {
+                Probe::MarkerUnreadable(why) => {
+                    assert!(!why.is_empty() && why.contains(expected), "{why}");
+                }
+                other => panic!("expected an unreadable marker, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_of_a_newer_format_is_told_apart_when_fetched() {
+        let listing = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+        let mut script = Script::new(vec![
+            outcome(Some(0), &listing, ""),
+            outcome(Some(0), "", ""),
+        ]);
+        script.fetched = Some("{\"format\":2}\n");
+        assert!(matches!(ssh().inspect(&script), Ok(Probe::MarkerTooNew(2))));
+    }
+
+    #[test]
+    fn a_fetch_that_cannot_start_is_the_rsync_error() {
+        let listing = format!("{DOT}-rw-r--r--  12 2026/11/04 20:07:08 .antiq-target\n");
+        let ssh = ssh();
+        let options = Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: Vec::new(),
+        };
+        let first = RefCell::new(true);
+        let result = inspect_ssh(
+            &Remote {
+                rsync: &ssh.rsync,
+                options: &options,
+                url: &ssh.url,
+                shown: "x",
+                scratch: ssh.scratch.path(),
+            },
+            &|_| {
+                if first.replace(false) {
+                    Ok(outcome(Some(0), &listing, ""))
+                } else {
+                    Err(RsyncError::Spawn {
+                        path: "rsync".into(),
+                        cause: io::Error::other("gone"),
+                    })
+                }
+            },
+        );
+        assert!(matches!(result, Err(PushError::Rsync(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_scratch_directory_that_cannot_be_made_is_an_error() {
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let file = temp.path().join("file");
+        fs::write(&file, "x").expect("written");
+        match Scratch::create(&file.join("below")) {
+            Err(PushError::Scratch { path, .. }) => assert_eq!(path, file.join("below")),
+            other => panic!("expected a scratch error, got {:?}", other.map(|_| ())),
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        let locked = temp.path().join("locked");
+        fs::create_dir(&locked).expect("made");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("locked");
+        assert!(
+            fs::File::create(locked.join("probe")).is_err(),
+            "the test runs as a user who cannot write there"
+        );
+        let result = Scratch::create(&locked);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlocked");
+        assert!(matches!(result, Err(PushError::Scratch { .. })));
     }
 }
