@@ -392,7 +392,8 @@ antiq push --init
 
 `--init` wrote the **marker** `.antiq-target` at the target's root. It
 holds the collection ID, the machine name and the collection path, and
-keeps another collection from pushing there by mistake. From then on,
+keeps another collection from pushing there by mistake. `push --take-over`
+rewrites its machine name and path (see the FAQ). From then on,
 `antiq push` mirrors the collection, and `push -n` lists what would change
 without changing anything.
 
@@ -649,10 +650,14 @@ volume's root, and must not lie inside the collection.
 
 **`push` refuses after I renamed the machine or moved the collection.**
 The marker on the target records the machine name and the collection
-path, and `push` refuses when either differs, naming both. Edit `host` or
-`path` in the target's `.antiq-target` by hand, or push with `--force`
-each time, which leaves the marker as it is. A target whose marker
-belongs to another collection is refused.
+path, and `push` refuses when either differs, naming both. `antiq push
+--take-over` rewrites the marker to this machine and this path and then
+pushes; the next `push` needs no flag. Pushing with `--force` each time
+works too and leaves the marker as it is. A target whose marker belongs to
+another collection is refused, also with `--take-over`. After a take-over
+the machine or path the marker named before is refused, a scheduled `push
+--if-reachable` included, and any copy of the collection with the same ID
+can take the target over.
 
 **I renamed a folder only in case.** On a case-insensitive target the
 renamed folder is copied in a second pass. The target must be as strict

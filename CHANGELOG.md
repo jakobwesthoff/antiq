@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `push --take-over` rewrites the marker of the target to this machine and
+  this collection path when it names this collection on another machine or
+  at another path, and pushes. A marker of another collection stays
+  refused
+
 ## [1.1.0] - 2026-11-06
 
 ### Added

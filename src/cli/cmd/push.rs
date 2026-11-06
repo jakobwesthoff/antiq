@@ -17,7 +17,7 @@ use crate::cli::table::{numeric_header, pad, sanitize, thousands};
 use crate::cli::{Context, LogNote, PushArgs};
 use antiq::clock::{Clock, SystemClock};
 use antiq::collection::Collection;
-use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push, push_observed};
+use antiq::commands::push::{Mismatch, PushOutcome, PushReport, PushRequest, push, push_observed};
 use antiq::external::Logs;
 use antiq::progress::Operation;
 use antiq::report::Warning;
@@ -62,7 +62,13 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         .context("find the antiq collection")?;
     let request = PushRequest {
         init: args.init,
-        force: args.force,
+        on_mismatch: if args.force {
+            Mismatch::Force
+        } else if args.take_over {
+            Mismatch::TakeOver
+        } else {
+            Mismatch::Refuse
+        },
         if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };

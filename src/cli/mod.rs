@@ -221,6 +221,9 @@ pub struct PushArgs {
     /// Push although the target's marker names another host or path
     #[arg(long, conflicts_with = "if_reachable")]
     pub force: bool,
+    /// Point the target's marker at this host and path when it names another host or path of this collection
+    #[arg(long, conflicts_with_all = ["init", "force", "if_reachable"])]
+    pub take_over: bool,
     /// Exit 0 when the target cannot be reached
     #[arg(long)]
     pub if_reachable: bool,
@@ -925,6 +928,10 @@ mod tests {
         let cli = parse(&["push", "--init", "--force"]);
         assert!(
             matches!(&cli.command, Command::Push(args) if args.init && args.force && !args.if_reachable)
+        );
+        let cli = parse(&["push", "--take-over"]);
+        assert!(
+            matches!(&cli.command, Command::Push(args) if args.take_over && !args.init && !args.force && !args.if_reachable)
         );
         let cli = parse(&["push", "--if-reachable"]);
         assert!(matches!(&cli.command, Command::Push(args) if args.if_reachable));

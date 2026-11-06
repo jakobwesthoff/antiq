@@ -137,7 +137,7 @@ fn push_result(
         antiq::collection::Collection::find(&world.collection.root()).expect("a collection");
     let request = PushRequest {
         init: false,
-        force: false,
+        on_mismatch: antiq::commands::push::Mismatch::Refuse,
         if_reachable: false,
         dry_run,
     };

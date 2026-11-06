@@ -6,6 +6,8 @@ Date: 2026-11-03
 
 Accepted
 
+Amended by [68. Let push take over the target of its own collection](0068-let-push-take-over-the-target-of-its-own-collection.md)
+
 ## Context
 
 A path target on an unmounted share can point at an empty local

@@ -282,13 +282,16 @@ impl Rsync {
 
     /// The call that sends the content of the directory `from`, which holds
     /// only the marker, to the target. Without `-a`, `-p` and `-t` the
-    /// target's root keeps its mode and time.
+    /// target's root keeps its mode and time. The marker may replace an
+    /// older one of the same size whose time rsync cannot tell apart, so
+    /// `--checksum` decides, after the `rsync_args` that could ask for
+    /// `--size-only`.
     pub fn send_marker(&self, options: &Options, from: &Path, target: &TargetUrl) -> Call {
         self.finish(
             vec!["-r".into(), "--chmod=F644".into()],
             options,
             true,
-            &[],
+            &["--checksum"],
             [with_trailing_slash(from.as_os_str()), target.dir_arg()],
         )
     }
@@ -1309,6 +1312,7 @@ mod tests {
                 "--fsync",
                 "-e",
                 SSH,
+                "--checksum",
                 "/c/.antiq/tmp/x/",
                 "nas.local:/volume1/antiq/"
             ]

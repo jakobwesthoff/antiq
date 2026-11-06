@@ -2265,3 +2265,331 @@ fn a_claim_that_sends_nothing_has_the_headline_and_the_marker_sentence_but_no_ta
     assert!(stdout.starts_with("✔ Claimed the push target "), "{stdout}");
     assert!(!stdout.contains("CREATED"), "{stdout}");
 }
+
+// =========================================================
+// `--take-over`
+// =========================================================
+
+const MOVED_HOST: &str = "Some Other Mac";
+const MOVED_PATH: &str = "/Users/jakob/playground-antiq";
+
+/// A collection pushing to `target` with the real rsync, whose marker names
+/// the same collection on another machine and at another place.
+fn moved_collection(target: &Target) -> Collection {
+    let collection = with_real_rsync(&target.path());
+    target.marker_with(&collection.id(), MOVED_HOST, MOVED_PATH);
+    collection
+}
+
+fn marker_bytes(target: &Target) -> Vec<u8> {
+    fs::read(target.path().join(".antiq-target")).expect("the marker exists")
+}
+
+/// How many marker runs a fake rsync saw.
+fn marker_sends(fake: &FakeRsync) -> usize {
+    fake.calls()
+        .iter()
+        .filter(|call| call.contains(&"--chmod=F644".to_string()))
+        .count()
+}
+
+#[test]
+fn take_over_rewrites_the_marker_of_this_collection_and_pushes_on() {
+    let target = Target::new();
+    let collection = moved_collection(&target);
+
+    let run = push(&collection, &["--take-over"]);
+
+    goes_on(&run);
+    assert_eq!(marker_bytes(&target), expected_marker(&collection));
+    let json = run.json();
+    assert_eq!(json["took_over"], true, "{json}");
+    assert_eq!(json["initialized"], false, "{json}");
+    assert_eq!(json["forced"], false, "{json}");
+    let notes = json["notes"].to_string();
+    assert!(
+        notes.contains(MOVED_HOST) && notes.contains(MOVED_PATH),
+        "{notes}"
+    );
+    let own_host = support::cmd::machine_name();
+    let own_path = collection.root().to_str().expect("UTF-8").to_string();
+    assert!(
+        notes.contains(&own_host) && notes.contains(&own_path),
+        "{notes}"
+    );
+    assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn take_over_in_text_prints_the_note_on_stderr_and_no_claim() {
+    let target = Target::new();
+    let collection = moved_collection(&target);
+
+    let run = push_text(&collection, &["--take-over"]);
+
+    assert_eq!(run.code(), 0, "{} {}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("note: "), "{}", run.stderr);
+    assert!(run.stderr.contains(MOVED_HOST), "{}", run.stderr);
+    assert!(!run.stdout.contains("Claimed"), "{}", run.stdout);
+    assert!(!run.stderr.contains("Claimed"), "{}", run.stderr);
+}
+
+#[test]
+fn take_over_with_only_another_host_names_only_the_host() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    let own_path = collection.root().to_str().expect("UTF-8").to_string();
+    target.marker_with(&collection.id(), MOVED_HOST, &own_path);
+
+    let run = push(&collection, &["--take-over"]);
+
+    goes_on(&run);
+    assert_eq!(marker_bytes(&target), expected_marker(&collection));
+    let notes = run.json()["notes"].to_string();
+    assert!(notes.contains(MOVED_HOST), "{notes}");
+    assert!(!notes.contains("path"), "{notes}");
+}
+
+#[test]
+fn take_over_with_only_another_path_names_only_the_path() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    target.marker_with(&collection.id(), &support::cmd::machine_name(), MOVED_PATH);
+
+    let run = push(&collection, &["--take-over"]);
+
+    goes_on(&run);
+    assert_eq!(marker_bytes(&target), expected_marker(&collection));
+    let notes = run.json()["notes"].to_string();
+    assert!(notes.contains(MOVED_PATH), "{notes}");
+    assert!(!notes.contains("host"), "{notes}");
+}
+
+#[test]
+fn take_over_rewrites_a_marker_that_a_size_only_check_would_skip() {
+    let target = Target::new();
+    let collection = with_real_rsync(&target.path());
+    add_target_key(&collection, "rsync_args = [\"--size-only\"]");
+    let own_path = collection.root().to_str().expect("UTF-8").to_string();
+    // Same size as the new marker: the old host has the length of this
+    // machine's name.
+    let old_host = "x".repeat(support::cmd::machine_name().len());
+    target.marker_with(&collection.id(), &old_host, &own_path);
+    assert_eq!(
+        marker_bytes(&target).len(),
+        expected_marker(&collection).len()
+    );
+
+    let run = push(&collection, &["--take-over"]);
+
+    goes_on(&run);
+    assert_eq!(marker_bytes(&target), expected_marker(&collection));
+}
+
+#[test]
+fn take_over_on_a_marker_of_another_collection_is_refused_as_without_it() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker_with(
+        "01BX5ZZKBKACTAV9WEVGEMMVRY",
+        &support::cmd::machine_name(),
+        "/elsewhere",
+    );
+    let before = marker_bytes(&target);
+
+    let without = refused_message(&push(&collection, &[]));
+    let with = refused_message(&push(&collection, &["--take-over"]));
+
+    assert_eq!(without, with);
+    assert_eq!(marker_bytes(&target), before);
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_on_a_matching_marker_is_a_plain_push_without_a_note() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+
+    let run = push(&collection, &["--take-over"]);
+
+    passes_the_precheck(&run);
+    let json = run.json();
+    assert_eq!(json["notes"], serde_json::json!([]), "{json}");
+    assert_eq!(json["took_over"], false, "{json}");
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_does_not_claim_a_missing_path_target() {
+    let gone = Target::new();
+    let (collection, fake) = targeted(&gone.path().join("not-there"));
+
+    let reason = unreachable_reason(&push(&collection, &["--take-over"]));
+
+    assert!(reason.contains("not-there"), "{reason}");
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_does_not_claim_an_empty_directory() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+
+    let reason = unreachable_reason(&push(&collection, &["--take-over"]));
+
+    assert!(reason.contains("push --init"), "{reason}");
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_does_not_claim_a_directory_with_files_and_no_marker() {
+    let target = Target::new();
+    fs::write(target.path().join("file"), "x").expect("written");
+    let (collection, fake) = targeted(&target.path());
+
+    let message = refused_message(&push(&collection, &["--take-over"]));
+
+    assert!(message.contains("not empty"), "{message}");
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_does_not_replace_a_marker_that_cannot_be_read() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    fs::write(target.path().join(".antiq-target"), "not json").expect("written");
+
+    let message = refused_message(&push(&collection, &["--take-over"]));
+
+    assert!(message.contains("not readable"), "{message}");
+    assert_eq!(marker_bytes(&target), b"not json");
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_does_not_replace_a_marker_of_a_newer_format() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    let text = format!(
+        "{{\"format\":2,\"id\":\"{}\",\"host\":\"h\",\"path\":\"/p\"}}\n",
+        collection.id()
+    );
+    fs::write(target.path().join(".antiq-target"), &text).expect("written");
+
+    let run = push(&collection, &["--take-over"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "format_too_new");
+    assert_eq!(marker_bytes(&target), text.as_bytes());
+    assert_eq!(marker_sends(&fake), 0);
+}
+
+#[test]
+fn take_over_is_a_usage_error_with_init() {
+    let run = push_text(&collection(), &["--take-over", "--init"]);
+    assert_eq!(run.code(), 2, "{}", run.stderr);
+    assert!(run.stderr.contains("cannot be used with"), "{}", run.stderr);
+    assert!(run.stderr.contains("--take-over"), "{}", run.stderr);
+}
+
+#[test]
+fn take_over_is_a_usage_error_with_force() {
+    let run = push_text(&collection(), &["--take-over", "--force"]);
+    assert_eq!(run.code(), 2, "{}", run.stderr);
+    assert!(run.stderr.contains("cannot be used with"), "{}", run.stderr);
+    assert!(run.stderr.contains("--take-over"), "{}", run.stderr);
+}
+
+#[test]
+fn take_over_is_a_usage_error_with_if_reachable() {
+    let run = push_text(&collection(), &["--take-over", "--if-reachable"]);
+    assert_eq!(run.code(), 2, "{}", run.stderr);
+    assert!(run.stderr.contains("cannot be used with"), "{}", run.stderr);
+    assert!(run.stderr.contains("--take-over"), "{}", run.stderr);
+}
+
+#[test]
+fn a_dry_run_of_a_take_over_lists_it_and_writes_nothing() {
+    let target = Target::new();
+    let collection = moved_collection(&target);
+    let before = marker_bytes(&target);
+
+    let text = push_text(&collection, &["--take-over", "-n"]);
+
+    assert_eq!(text.code(), 0, "{} {}", text.stdout, text.stderr);
+    let own_host = support::cmd::machine_name();
+    let own_path = collection.root().to_str().expect("UTF-8").to_string();
+    let expected = format!(
+        "Would take over the target: host {MOVED_HOST} -> {own_host}, path {MOVED_PATH} -> {own_path}"
+    );
+    assert!(text.stdout.contains(&expected), "{}", text.stdout);
+    assert!(!text.stderr.contains("note:"), "{}", text.stderr);
+    assert_eq!(marker_bytes(&target), before);
+
+    let json = push(&collection, &["--take-over", "-n"]).json();
+    let kinds: Vec<&str> = json["actions"]
+        .as_array()
+        .expect("actions")
+        .iter()
+        .map(|action| action["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(kinds, ["take_over", "mirror"], "{json}");
+    assert_eq!(marker_bytes(&target), before);
+}
+
+#[test]
+fn the_refusal_of_a_moved_collection_names_take_over_and_force() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    target.marker_with(&collection.id(), MOVED_HOST, MOVED_PATH);
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    let fix = run.json()["error"]["fix"].to_string();
+    assert!(fix.contains("--take-over"), "{fix}");
+    assert!(fix.contains("--force"), "{fix}");
+}
+
+#[test]
+fn a_push_that_fails_after_a_take_over_has_sent_the_marker_first() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker_with(&collection.id(), MOVED_HOST, MOVED_PATH);
+    fake.answer(
+        2,
+        "",
+        "rsync error: some files could not be transferred\n",
+        23,
+    );
+
+    let run = push(&collection, &["--take-over"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    let calls = fake.calls();
+    let send = calls
+        .iter()
+        .position(|call| call.contains(&"--chmod=F644".to_string()))
+        .expect("the marker was sent");
+    let mirror = calls
+        .iter()
+        .position(|call| call.contains(&"--delete".to_string()))
+        .expect("the mirror ran");
+    assert!(send < mirror, "{calls:?}");
+}
+
+#[test]
+fn every_marker_run_compares_checksums() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+
+    goes_on(&push(&collection, &["--init"]));
+
+    let calls = fake.calls();
+    let send = calls
+        .iter()
+        .find(|call| call.contains(&"--chmod=F644".to_string()))
+        .expect("the marker was sent");
+    assert!(send.contains(&"--checksum".to_string()), "{send:?}");
+}

@@ -1672,13 +1672,15 @@ fails with `EXDEV` in the real run cannot be foreseen.
 
 ## Push
 
-`push [--init] [--force] [--if-reachable]` mirrors the collection to the
-target. `--init` and `--force` are each refused together with
-`--if-reachable`. The steps run in this order.
+`push [--init] [--force] [--take-over] [--if-reachable]` mirrors the
+collection to the target. `--init`, `--force` and `--take-over` are each
+refused together with `--if-reachable`, and `--take-over` is also refused
+together with `--init` and with `--force`. The steps run in this order.
 
-0. **Before the lock.** A missing target url, an invalid url, a collection
-   root that is not UTF-8 and `rsync_args` that make rsync quiet (`-q`,
-   `--quiet`) are refused first, also while another run holds the lock.
+0. **Before the lock.** A command line with a refused combination of flags,
+   a missing target url, an invalid url, a collection root that is not
+   UTF-8 and `rsync_args` that make rsync quiet (`-q`, `--quiet`) are
+   refused first, also while another run holds the lock.
 1. **Repairs** run first, under the lock (see "Operations").
 2. **Check the store.** While a damaged or incomplete version exists,
    `push` refuses with exit 1 and prints the exact `forget` or `rebuild`
@@ -1720,7 +1722,7 @@ target. `--init` and `--force` are each refused together with
    | directory present, no `.antiq-target`, empty | unreachable with a warning naming `push --init`, unless `--init` |
    | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
    | `.antiq-target` of another collection, or not readable | exit 1 |
-   | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is |
+   | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is; `--take-over` rewrites the marker and pushes |
    | `.antiq-target` of this collection, with `--init` | exit 1 |
 
    `.antiq-target` is not readable when it is not a regular file (a link
@@ -1738,7 +1740,9 @@ target. `--init` and `--force` are each refused together with
    that does not parse, is "not readable". `--force` changes
    nothing in the other rows: no marker still needs `--init`, another
    collection's marker is still exit 1, and with a matching marker it is a
-   plain push, noted in the output.
+   plain push, noted in the output. `--take-over` changes nothing in the
+   other rows either, and with a marker that names this host and path it is
+   a plain push without a note.
 
    rsync runs with `LC_ALL=C` and without any `RSYNC_*` variable or
    `CVSIGNORE` of the environment. The listing carries the mirror's `-e`,
@@ -1769,29 +1773,46 @@ target. `--init` and `--force` are each refused together with
    the hostname elsewhere), never a network-dependent host name; the path
    is the canonical collection root, compared byte for byte. Unknown keys
    are ignored, a higher `format` is refused as written by a newer antiq.
-   The marker is created only by `push --init` and never rewritten by
-   antiq; after a renamed machine or a moved collection the user edits its
-   `host` or `path` by hand, or pushes with `--force` each time. `--init`
-   is the user's statement that this empty target is the right one;
-   `--force` that this copy may overwrite the target once, after the user
-   made sure the target holds nothing newer. A forced push leaves the
-   marker as it was, so the machine it names pushes on as before. It adds
-   a note that names the host and path of the marker: an entry of `notes`
-   in `--json`, a `note:` line on stderr in text.
+   The marker is created only by `push --init`. It is rewritten only by
+   `push --take-over`; after a renamed machine or a moved collection the
+   user takes the target over, edits the `host` or `path` of the marker by
+   hand, or pushes with `--force` each time. `--init` is the user's
+   statement that this empty target is the right one; `--force` that this
+   copy may overwrite the target once, after the user made sure the target
+   holds nothing newer. A forced push leaves the marker as it was, so the
+   machine it names pushes on as before. It adds a note that names the host
+   and path of the marker: an entry of `notes` in `--json`, a `note:` line
+   on stderr in text.
+
+   `--take-over` acts only on a marker that names this collection's ID and
+   another host or path. It writes the marker anew, as `--init` does, with
+   this collection's ID, this machine's name and this collection's path, so
+   keys that this antiq does not know are not kept, and then mirrors. Every
+   collection with this ID can take the target over, a copy of the folder
+   included; the host and path the marker named before are refused by every
+   push from then on, `--if-reachable` included, and a push from the copy
+   mirrors the copy's state. Its note names the host and path the marker
+   named and the ones it names now, and only the part that changes: an
+   entry of `notes` in `--json`, a `note:` line on stderr in text. The note
+   comes after the marker run succeeded. A push that fails after the marker
+   run leaves the rewritten marker, so the next push is a plain one.
    `--init` is refused where a marker exists, whoever's it is. The
    marker is sent by its own rsync run, as a temp directory in
    `.antiq/tmp/` holding only `.antiq-target`, sent to `<target>/` with
    `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so rsync
    sets neither mode nor time of the target root from the temp directory)
    plus the same `-e`,
-   `--rsync-path`, `--timeout`, fsync setting and `rsync_args` as the mirror; the
+   `--rsync-path`, `--timeout`, fsync setting and `rsync_args` as the mirror,
+   and `--checksum` after them, so that a marker of the same size whose time
+   matches is still replaced (an `--ignore-existing` in `rsync_args` keeps
+   the old marker, as it does for the mirror); the
    marker arrives with mode 0644 masked by the receiving side's umask. For
    an ssh target that creates the last missing directory level, and a
    deeper missing path is exit 1 with rsync's mkdir line. A failing marker
    run is exit 1 with rsync's text; where the target's rsync does not know
    `--fsync` it carries the same advice as the mirror (step 8). Just before it, a path target's
    directory is checked to be the one that was inspected.
-   `push -n` never writes it. (ADR 0031)
+   `push -n` never writes it. (ADR 0031, ADR 0068)
 6. **Mirror.** One rsync run, antiq's options first, then the options of
    `[target] rsync_args` verbatim, then the listing options, then the two
    paths:
@@ -1880,7 +1901,9 @@ target. `--init` and `--force` are each refused together with
    set `[target] rsync_path` to a 3.2.4+ rsync there, or `fsync = false`.
 9. `-n` runs steps 1 to 4 and the mirror with `-n`. It lists the repairs
    without running them, and judges step 2 as those repairs would leave
-   the store. It sends no marker and runs no second pass, since a dry run
+   the store. It sends no marker, lists `Would take over the target: host
+   <old> -> <new>, path <old> -> <new>` for a take-over (only the parts that
+   change), and runs no second pass, since a dry run
    cannot see the effect of the first deletions. rsync's
    `--itemize-changes` output is summarized per piece: the files, links
    and other non-directory entries `created`, `updated` and `deleted`;
@@ -1892,10 +1915,10 @@ target. `--init` and `--force` are each refused together with
    updated, N deleted` line per piece that changed and `  other files:
    ...` where other paths changed; where nothing changed it is `Pushed to
    <target>. Nothing changed.` (`The target <target> is up to date.` in a
-   dry run). A written marker adds `Claimed the push target <target> for this
-   antiq collection.` before it. These lines are for a pipe. On a terminal a
+   dry run). A marker created by `--init` adds `Claimed the push target <target> for this
+   antiq collection.` before it; a take-over prints only its note. These lines are for a pipe. On a terminal a
    push that changed pieces shows one card while it runs and ends with a
-   table of the pieces and the summary (see "Progress cards"). On a terminal a push that wrote the marker and
+   table of the pieces and the summary (see "Progress cards"). On a terminal a push that created the marker and
    changed no piece prints `✔ Claimed the push target <target>: N created, N
    updated, N deleted`, a sentence that says the marker now records this
    antiq collection and host, and a table with the columns PIECE, CREATED,
@@ -2039,7 +2062,7 @@ error naming the key, exit 1.
 | `list [<query>]` | lists the versions |
 | `grep <pattern>` | searches the paths of all archived files |
 | `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
-| `push [--init] [--force] [--if-reachable] [-n]` | mirrors the collection to the target |
+| `push [--init] [--force] [--take-over] [--if-reachable] [-n]` | mirrors the collection to the target |
 
 (ADR 0023)
 
@@ -2364,8 +2387,8 @@ The last line of the run follows the finished lines after an empty line. Its
 mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
 
 - `archive`: `4 archived · 0 skipped · 1 refused`.
-- `push`: `4 pieces pushed · 9 files changed`, where a push that wrote the
-  marker starts with `Claimed <target> ·` and is followed by the sentence
+- `push`: `4 pieces pushed · 9 files changed`, where a push that created the
+  marker with `--init` starts with `Claimed <target> ·` and is followed by the sentence
   that says what the marker is for.
 - `unearth`: `Unearthed to ./projects/recipe-api`, the path from the
   directory the command runs in, or `Skipped <piece>` with a `⚠`.
@@ -2508,7 +2531,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `--init` or `--force` is given with `--if-reachable`, or `forget --all-versions` is given without `--force` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `--init`, `--force` or `--take-over` is given with `--if-reachable`, `--take-over` is given with `--init` or `--force`, or `forget --all-versions` is given without `--force` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `inexact_reference` | 1 | `unearth` or `forget` is given a search word that matches exactly one candidate | `candidates`: list of one `{path}` |
@@ -2543,16 +2566,19 @@ be told or the lock adds `code` (`antiq::config::unknown_key`,
 
 `push` has `result`, `target` (the `[target] url` as written) and
 `warnings`; `dry_run` comes first in a dry run only. `result` is `"pushed"` in a real run and in a dry run, `"unreachable"` for an unreachable target. In a real run `initialized` (the
-marker was written), `forced`, `pieces` (each `{piece, created, updated,
+marker was created by `--init`), `forced`, `took_over` (the marker was
+rewritten by `--take-over`), `pieces` (each `{piece, created, updated,
 deleted}`, only pieces that changed, by path), `other` (the same counts for
 paths outside every piece), `vanished` (the paths of the `file has vanished`
 lines, as rsync prints them: with the collection root in front and not
 escaped), `second_pass` and `notes` come between `target` and `warnings`,
 followed by `repairs` (the repairs of the start of the run, each as
 `{"kind": "repair", "repair": ...}`) before `warnings`. A dry run has `actions` after `dry_run`: the repairs, then `{"kind":
-"write_marker"}` where `--init` would write it, then `{"kind": "mirror",
+"write_marker"}` where `--init` would write it, or `{"kind": "take_over",
+"host": {"from", "to"}, "path": {"from", "to"}}` where `--take-over` would
+rewrite it (a part that does not change is left out), then `{"kind": "mirror",
 "pieces": ..., "other": ...}`, and has none of `initialized`, `forced`,
-`pieces`, `other`, `vanished`, `second_pass`, `notes` and `repairs`. A dry
+`took_over`, `pieces`, `other`, `vanished`, `second_pass`, `notes` and `repairs`. A dry
 run that finds the lock held has `dry_run`, `lock_held` (`pid`, `started`)
 and an empty `actions`. A target that cannot be reached under
 `--if-reachable` exits 0 with `result` `"unreachable"` and `reason` in place

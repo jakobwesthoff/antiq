@@ -373,7 +373,8 @@ mod tests {
                 "▌ /home/a/coll, and this run is host workbench and path /home/b/coll",
                 "▌",
                 "▌ How to fix it",
-                "▌   Push with antiq push --force to overwrite the target once, or edit the marker.",
+                "▌   Push with antiq push --take-over to point the marker at this host and path, or with",
+                "▌   antiq push --force to overwrite the target once and leave the marker as it is.",
             ]
         );
     }

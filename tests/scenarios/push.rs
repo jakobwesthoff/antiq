@@ -19,13 +19,14 @@ const STORED: &str = "2025-02-11T184007";
 /// collection, which `push` excludes.
 const NOT_MIRRORED: [&str; 3] = [".antiq/tmp", ".antiq/trash", ".antiq/doomed"];
 
-const REAL_KEYS: [&str; 13] = [
+const REAL_KEYS: [&str; 14] = [
     "format",
     "command",
     "result",
     "target",
     "initialized",
     "forced",
+    "took_over",
     "pieces",
     "other",
     "vanished",
@@ -556,6 +557,67 @@ fn a_copy_used_elsewhere_is_refused_and_force_pushes_without_taking_the_target_o
             plain.expect_code(0);
             plain.json_only(|json| {
                 assert_eq!(json["forced"], false);
+                assert_eq!(json["notes"], serde_json::json!([]));
+            });
+            assert_mirrors(world);
+        },
+    );
+}
+
+#[test]
+fn a_moved_collection_is_refused_until_it_takes_its_target_over() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .patterns(&["*/*"])
+                .piece("projects/scanner", |piece| {
+                    piece.age_days(10).file("src/main.rs", "fn main() {}\n");
+                })
+                .finish();
+            Setup::new(collection)
+                .with_target(Target::new())
+                .with_real_rsync()
+        },
+        |world| {
+            let target = world.target().expect("a target");
+            let marker = target.path().join(".antiq-target");
+            let machine = target.machine_name();
+            let root = world.collection().root();
+            let root = root.to_str().expect("UTF-8");
+            world.run(&["push", "--init"]).expect_code(0);
+            target.marker_with(&world.collection().id(), &machine, "/before/the/move");
+
+            world.assert_unchanged(|| {
+                let refused = world.run(&["push"]);
+                refused.expect_code(1);
+                let text = said(&refused);
+                assert!(text.contains("--take-over"), "{text}");
+            });
+
+            let dry = world.run(&["push", "--take-over", "-n"]);
+            dry.expect_code(0);
+            assert!(
+                fs::read_to_string(&marker)
+                    .expect("the marker exists")
+                    .contains("/before/the/move")
+            );
+
+            let taken = world.run(&["push", "--take-over"]);
+            taken.expect_code(0);
+            taken.keys(&REAL_KEYS);
+            taken.json_only(|json| {
+                assert_eq!(json["took_over"], true);
+                assert_eq!(json["initialized"], false);
+                let notes = json["notes"].to_string();
+                assert!(notes.contains("/before/the/move") && notes.contains(root));
+            });
+            let written = fs::read_to_string(&marker).expect("the marker exists");
+            assert!(written.contains(root) && !written.contains("/before/the/move"));
+
+            let plain = world.run(&["push"]);
+            plain.expect_code(0);
+            plain.json_only(|json| {
+                assert_eq!(json["took_over"], false);
                 assert_eq!(json["notes"], serde_json::json!([]));
             });
             assert_mirrors(world);

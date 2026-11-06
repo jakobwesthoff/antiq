@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use live::Progress;
 use observed::plain_listing;
-pub use outcome::{PushAction, PushOutcome, PushReport};
+pub use outcome::{PushAction, PushOutcome, PushReport, Replacement, TakeOver};
 pub use store::VersionCommand;
 use summary::Changes;
 
@@ -134,7 +134,9 @@ pub enum PushError {
     Unreachable { reason: String },
     #[diagnostic(
         code(antiq::push::marker_mismatch),
-        help("Push with `antiq push --force` to overwrite the target once, or edit the marker.")
+        help(
+            "Push with `antiq push --take-over` to point the marker at this host and path, or with `antiq push --force` to overwrite the target once and leave the marker as it is."
+        )
     )]
     #[error(
         "the target's marker {} names another host or path: it names host {} and path {}, and this run is host {} and path {}",
@@ -228,14 +230,25 @@ impl HasKind for PushError {
     }
 }
 
+/// What `push` does when the target's marker names this collection on
+/// another host or at another path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mismatch {
+    /// Refuse the push.
+    Refuse,
+    /// Push anyway and leave the marker as it is.
+    Force,
+    /// Send a marker with this host and path, then push.
+    TakeOver,
+}
+
 /// What the command line asked `push` to do.
 #[derive(Debug, Clone, Copy)]
 pub struct PushRequest {
     /// The target is an empty directory that is the right one: write its
     /// marker.
     pub init: bool,
-    /// Push although the marker names another host or path.
-    pub force: bool,
+    pub on_mismatch: Mismatch,
     /// A target that cannot be reached is no failure.
     pub if_reachable: bool,
     pub dry_run: bool,
@@ -317,7 +330,7 @@ fn push_watched(
     let identity = identity(collection, crate::machine::detect())?;
     let flags = precheck::Flags {
         init: request.init,
-        force: request.force,
+        on_mismatch: request.on_mismatch,
     };
     let shown = collection
         .config()
@@ -358,7 +371,8 @@ fn push_watched(
         reason: None,
         target: shown.clone(),
         initialized: false,
-        forced: request.force,
+        forced: request.on_mismatch == Mismatch::Force,
+        took_over: false,
         changes: Changes::default(),
         vanished: Vec::new(),
         second_pass: false,
@@ -387,7 +401,7 @@ fn push_watched(
     report.notes.extend(proceed.note);
     report.initialized = proceed.write_marker;
 
-    if proceed.write_marker && !request.dry_run {
+    if (proceed.write_marker || proceed.take_over.is_some()) && !request.dry_run {
         let marker = Marker::new(identity.id, identity.host, identity.path);
         mirror::send_marker(
             &mirror::Sender {
@@ -401,6 +415,11 @@ fn push_watched(
             &marker,
             &|call| call.run(log),
         )?;
+        // The note says what was done, so it waits for the marker run.
+        if let Some(take_over) = &proceed.take_over {
+            report.took_over = true;
+            report.notes.push(take_over.note());
+        }
     }
 
     recheck_directory(&call_url, directory)?;
@@ -441,6 +460,9 @@ fn push_watched(
     if let Some(plan) = report.plan.as_mut() {
         if proceed.write_marker {
             plan.push_command(PushAction::WriteMarker);
+        }
+        if let Some(take_over) = proceed.take_over {
+            plan.push_command(PushAction::TakeOver(take_over));
         }
         plan.push_command(PushAction::Mirror {
             changes: report.changes.clone(),

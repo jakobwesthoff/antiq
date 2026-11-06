@@ -25,6 +25,8 @@ pub enum PushOutcome {
 pub enum PushAction {
     /// The marker `.antiq-target` is sent to the target.
     WriteMarker,
+    /// The marker is sent again, with this host and collection path in it.
+    TakeOver(TakeOver),
     /// The mirror run, with the changes `rsync -n` itemized.
     Mirror {
         #[serde(flatten)]
@@ -36,8 +38,49 @@ impl PlanAction for PushAction {
     fn describe(&self) -> String {
         match self {
             PushAction::WriteMarker => "write the marker .antiq-target to the target".to_string(),
+            PushAction::TakeOver(take_over) => {
+                format!("take over the target: {}", take_over.changes())
+            }
             PushAction::Mirror { .. } => "mirror the collection to the target".to_string(),
         }
+    }
+}
+
+/// A host or path of a marker and the one that replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Replacement {
+    pub from: String,
+    pub to: String,
+}
+
+/// What a take-over changes in the marker. A part that is the same in the
+/// marker and in this run is `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TakeOver {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<Replacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<Replacement>,
+}
+
+impl TakeOver {
+    /// `host A -> B, path P -> Q`, naming only the parts that change.
+    fn changes(&self) -> String {
+        let part = |name: &str, replacement: &Option<Replacement>| {
+            replacement
+                .as_ref()
+                .map(|r| format!("{name} {} -> {}", r.from, r.to))
+        };
+        [part("host", &self.host), part("path", &self.path)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// What the output tells once the marker has been rewritten.
+    pub fn note(&self) -> String {
+        format!("took over the target: {}", self.changes())
     }
 }
 
@@ -49,9 +92,11 @@ pub struct PushReport {
     pub reason: Option<String>,
     /// The `[target] url` as written.
     pub target: String,
-    /// The marker was written (in a dry run: would be).
+    /// The marker was created by `--init` (in a dry run: would be).
     pub initialized: bool,
     pub forced: bool,
+    /// The marker was rewritten to this host and path by `--take-over`.
+    pub took_over: bool,
     pub changes: Changes,
     /// The paths of the `file has vanished` lines.
     pub vanished: Vec<String>,
@@ -94,6 +139,7 @@ impl PushReport {
         if self.reason.is_none() && !self.dry_run {
             object.insert("initialized".into(), json!(self.initialized));
             object.insert("forced".into(), json!(self.forced));
+            object.insert("took_over".into(), json!(self.took_over));
             object.insert(
                 "pieces".into(),
                 serde_json::to_value(&self.changes.pieces).expect("pieces serialise"),
@@ -228,6 +274,7 @@ mod tests {
             target: "backup@nas:/srv".into(),
             initialized: true,
             forced: false,
+            took_over: false,
             changes: changes(),
             vanished: vec!["/c/x".into()],
             second_pass: true,
@@ -257,6 +304,7 @@ mod tests {
                 "target",
                 "initialized",
                 "forced",
+                "took_over",
                 "pieces",
                 "other",
                 "vanished",
@@ -308,6 +356,54 @@ mod tests {
         assert_eq!(value["actions"][1]["kind"], "mirror");
         assert_eq!(value["actions"][1]["other"]["deleted"], 3);
         assert_eq!(value["actions"][1]["pieces"][0]["piece"], "work");
+    }
+
+    fn replacement(from: &str, to: &str) -> Option<Replacement> {
+        Some(Replacement {
+            from: from.into(),
+            to: to.into(),
+        })
+    }
+
+    #[test]
+    fn a_take_over_names_only_the_parts_it_changes() {
+        let both = TakeOver {
+            host: replacement("Laptop", "Studio"),
+            path: replacement("/old", "/new"),
+        };
+        let host = TakeOver {
+            host: replacement("Laptop", "Studio"),
+            path: None,
+        };
+        let path = TakeOver {
+            host: None,
+            path: replacement("/old", "/new"),
+        };
+        assert_eq!(
+            PushAction::TakeOver(both.clone()).describe(),
+            "take over the target: host Laptop -> Studio, path /old -> /new"
+        );
+        assert_eq!(
+            PushAction::TakeOver(host.clone()).describe(),
+            "take over the target: host Laptop -> Studio"
+        );
+        assert_eq!(
+            PushAction::TakeOver(path.clone()).describe(),
+            "take over the target: path /old -> /new"
+        );
+        assert_eq!(path.note(), "took over the target: path /old -> /new");
+    }
+
+    #[test]
+    fn a_take_over_action_serialises_the_parts_it_changes() {
+        let action = PushAction::TakeOver(TakeOver {
+            host: None,
+            path: replacement("/old", "/new"),
+        });
+        assert_eq!(
+            serde_json::to_value(action).expect("serialises"),
+            json!({"kind": "take_over", "path": {"from": "/old", "to": "/new"}})
+        );
     }
 
     #[test]

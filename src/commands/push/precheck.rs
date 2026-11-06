@@ -5,7 +5,8 @@
 //! Step 4 of `push`: what the target holds decides whether the push goes
 //! on, stops as unreachable, or is refused.
 
-use super::PushError;
+use super::outcome::{Replacement, TakeOver};
+use super::{Mismatch, PushError};
 use crate::external::summary::Said;
 use crate::filesystem::device;
 use crate::id::ObjectId;
@@ -48,7 +49,7 @@ pub(super) struct Identity {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Flags {
     pub init: bool,
-    pub force: bool,
+    pub on_mismatch: Mismatch,
 }
 
 /// What the table says to do.
@@ -61,8 +62,11 @@ pub(super) enum Decision {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Proceed {
-    /// The marker is to be sent before the mirror.
+    /// The marker is to be created before the mirror.
     pub write_marker: bool,
+    /// The marker of this collection names another host or path and is to
+    /// be sent again before the mirror.
+    pub take_over: Option<TakeOver>,
     /// What the output tells about the way the push was cleared.
     pub note: Option<String>,
 }
@@ -87,6 +91,7 @@ pub(super) fn decide(
         )),
         Probe::Missing if flags.init => Decision::Proceed(Proceed {
             write_marker: true,
+            take_over: None,
             note: None,
         }),
         Probe::Missing => refuse(format!(
@@ -94,6 +99,7 @@ pub(super) fn decide(
         )),
         Probe::Empty if flags.init => Decision::Proceed(Proceed {
             write_marker: true,
+            take_over: None,
             note: None,
         }),
         Probe::Empty => Decision::Unreachable(format!(
@@ -129,23 +135,44 @@ fn decide_marker(marker: &Marker, this: &Identity, flags: Flags, shown: &str) ->
         });
     }
     let same_place = marker.host == this.host && marker.path == this.path;
-    match (same_place, flags.force) {
-        (true, false) => Decision::Proceed(Proceed {
+    match (same_place, flags.on_mismatch) {
+        (true, Mismatch::Force) => Decision::Proceed(Proceed {
             write_marker: false,
-            note: None,
-        }),
-        (true, true) => Decision::Proceed(Proceed {
-            write_marker: false,
+            take_over: None,
             note: Some("--force changes nothing here: the marker names this host and path".into()),
         }),
-        (false, true) => Decision::Proceed(Proceed {
+        (true, _) => Decision::Proceed(Proceed {
             write_marker: false,
+            take_over: None,
+            note: None,
+        }),
+        (false, Mismatch::Force) => Decision::Proceed(Proceed {
+            write_marker: false,
+            take_over: None,
             note: Some(format!(
                 "pushing although the marker names host `{}` and path `{}`; the marker stays as it is",
                 marker.host, marker.path
             )),
         }),
-        (false, false) => Decision::Refuse(PushError::MarkerMismatch {
+        // The marker names this collection (the ID was compared above), so
+        // the machine or the place is the only thing that differs.
+        (false, Mismatch::TakeOver) => {
+            let replace = |from: &str, to: &str| {
+                (from != to).then(|| Replacement {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                })
+            };
+            Decision::Proceed(Proceed {
+                write_marker: false,
+                take_over: Some(TakeOver {
+                    host: replace(&marker.host, &this.host),
+                    path: replace(&marker.path, &this.path),
+                }),
+                note: None,
+            })
+        }
+        (false, Mismatch::Refuse) => Decision::Refuse(PushError::MarkerMismatch {
             marker_host: marker.host.clone(),
             marker_path: marker.path.clone(),
             host: this.host.clone(),
@@ -648,15 +675,19 @@ mod tests {
 
     const NONE: Flags = Flags {
         init: false,
-        force: false,
+        on_mismatch: Mismatch::Refuse,
     };
     const INIT: Flags = Flags {
         init: true,
-        force: false,
+        on_mismatch: Mismatch::Refuse,
     };
     const FORCE: Flags = Flags {
         init: false,
-        force: true,
+        on_mismatch: Mismatch::Force,
+    };
+    const TAKE_OVER: Flags = Flags {
+        init: false,
+        on_mismatch: Mismatch::TakeOver,
     };
 
     fn decided(probe: Probe, ssh: bool, flags: Flags) -> Decision {
@@ -709,6 +740,7 @@ mod tests {
             proceeds(decided(Probe::Missing, true, INIT)),
             Proceed {
                 write_marker: true,
+                take_over: None,
                 note: None
             }
         );
@@ -795,12 +827,90 @@ mod tests {
             plain,
             Proceed {
                 write_marker: false,
+                take_over: None,
                 note: None
             }
         );
         let forced = proceeds(decided(marker(ID, "Studio", "/srv/coll"), true, FORCE));
         assert!(!forced.write_marker);
         assert!(forced.note.is_some_and(|note| note.contains("--force")));
+    }
+
+    fn replacement(from: &str, to: &str) -> Option<Replacement> {
+        Some(Replacement {
+            from: from.into(),
+            to: to.into(),
+        })
+    }
+
+    #[test]
+    fn a_take_over_replaces_the_host_and_the_path_that_differ() {
+        let cases = [
+            (
+                ("Laptop", "/old/coll"),
+                replacement("Laptop", "Studio"),
+                replacement("/old/coll", "/srv/coll"),
+            ),
+            (
+                ("Laptop", "/srv/coll"),
+                replacement("Laptop", "Studio"),
+                None,
+            ),
+            (
+                ("Studio", "/old/coll"),
+                None,
+                replacement("/old/coll", "/srv/coll"),
+            ),
+        ];
+        for ((host, path), host_change, path_change) in cases {
+            let proceed = proceeds(decided(marker(ID, host, path), false, TAKE_OVER));
+            assert!(!proceed.write_marker);
+            assert_eq!(proceed.note, None);
+            assert_eq!(
+                proceed.take_over,
+                Some(TakeOver {
+                    host: host_change,
+                    path: path_change
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_take_over_of_a_marker_that_names_this_place_changes_nothing() {
+        let proceed = proceeds(decided(marker(ID, "Studio", "/srv/coll"), false, TAKE_OVER));
+        assert_eq!(proceed.take_over, None);
+        assert_eq!(proceed.note, None);
+    }
+
+    #[test]
+    fn a_take_over_never_replaces_the_marker_of_another_collection() {
+        let other = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+        let message = refusal(decided(marker(other, "Laptop", "/old"), false, TAKE_OVER));
+        assert!(message.contains("another collection"), "{message}");
+    }
+
+    #[test]
+    fn a_take_over_does_not_make_up_for_a_missing_marker() {
+        let reason = unreachable(decided(Probe::Empty, false, TAKE_OVER));
+        assert!(reason.contains("push --init"), "{reason}");
+        let reason = unreachable(decided(Probe::Missing, false, TAKE_OVER));
+        assert!(reason.contains("does not exist"), "{reason}");
+        let refused = refusal(decided(Probe::NotEmpty, false, TAKE_OVER));
+        assert!(refused.contains("not empty"), "{refused}");
+        let unreadable = Probe::MarkerUnreadable("x".into());
+        let refused = refusal(decided(unreadable, false, TAKE_OVER));
+        assert!(refused.contains("not readable"), "{refused}");
+    }
+
+    #[test]
+    fn init_is_refused_over_an_existing_marker_also_with_a_take_over() {
+        let both = Flags {
+            init: true,
+            on_mismatch: Mismatch::TakeOver,
+        };
+        let message = refusal(decided(marker(ID, "Laptop", "/old"), false, both));
+        assert!(message.contains("already"), "{message}");
     }
 
     fn error(errno: rustix::io::Errno) -> io::Error {
