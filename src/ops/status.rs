@@ -8,9 +8,11 @@
 //! `.antiq/`, so it can run while another run holds the collection.
 
 #![allow(unused)]
+use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
+use crate::idle::{self, IdleError, IdleVerdict};
 use crate::meta::{Lifecycle, Metadata};
 use crate::relpath::{Name, RelPath, escape};
 use crate::remote::{self, RemoteState};
@@ -18,6 +20,9 @@ use crate::report::{CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
 use crate::store::{Current, Store, StoreError};
 use crate::tracking::{self, EntryState, PieceState, TrackingEntry, TrackingError, derive_state};
+use crate::tree::{PieceTree, Problem};
+use crate::walk;
+use jiff::Timestamp;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
@@ -40,6 +45,8 @@ pub enum StatusError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Tracking(#[from] TrackingError),
+    #[error(transparent)]
+    Walk(#[from] walk::WalkError),
 }
 
 impl crate::error::HasKind for StatusError {}
@@ -72,6 +79,22 @@ pub enum PieceKind {
     Error,
 }
 
+impl Piece {
+    fn new(id: Option<ObjectId>, path: RelPath, name: Name, state: PieceKind) -> Piece {
+        Piece {
+            id,
+            path,
+            name,
+            state,
+            flags: Vec::new(),
+            age_days: None,
+            detail: Detail::default(),
+            unearthed: None,
+            diverged: false,
+        }
+    }
+}
+
 impl From<PieceState> for PieceKind {
     fn from(state: PieceState) -> PieceKind {
         match state {
@@ -87,7 +110,7 @@ impl From<PieceState> for PieceKind {
 }
 
 /// The conditions `status` shows on a piece.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Flag {
     Pinned,
@@ -122,6 +145,23 @@ pub struct Detail {
     /// The machine that backs up a live piece of another collection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// The first entry that could not be read, relative to the collection
+    /// root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable_first: Option<RelPath>,
+    /// Where other devices are mounted inside the piece. A top directory on
+    /// another device counts as a mount point at the piece's own path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mount_points: Vec<RelPath>,
+    /// Exclude entries inside the piece.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub excluded_paths: Vec<RelPath>,
+    /// Files with a modification time too far in the future to count.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub future_files: Vec<RelPath>,
+    /// The time the idle clock counts from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_clock: Option<Timestamp>,
 }
 
 impl Detail {
@@ -139,8 +179,17 @@ pub struct Piece {
     pub name: Name,
     pub state: PieceKind,
     pub flags: Vec<Flag>,
+    /// Whole days since the idle clock, where the piece has a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<i64>,
     #[serde(skip_serializing_if = "Detail::is_empty")]
     pub detail: Detail,
+    /// The time the piece was last unearthed, for the idle clock.
+    #[serde(skip)]
+    unearthed: Option<Timestamp>,
+    /// A diverged folder is neither archived nor synced.
+    #[serde(skip)]
+    diverged: bool,
 }
 
 /// A tracking file or an object that cannot be used.
@@ -216,6 +265,10 @@ impl CommandReport for StatusReport {
 /// unprivileged test cannot create.
 pub(crate) trait Probes {
     fn remote_state(&self, collection: &Collection) -> RemoteState;
+
+    /// The filesystem calls the walk makes, so that a test can put a
+    /// second device inside a piece.
+    fn walk_hooks(&self) -> &dyn walk::Hooks;
 }
 
 struct RealProbes;
@@ -224,17 +277,23 @@ impl Probes for RealProbes {
     fn remote_state(&self, collection: &Collection) -> RemoteState {
         remote::probe_state(collection)
     }
+
+    fn walk_hooks(&self) -> &dyn walk::Hooks {
+        &walk::RealFs
+    }
 }
 
 pub(crate) struct StatusRequest<'a> {
     pub collection: &'a Collection,
+    pub clock: &'a dyn Clock,
     pub probes: &'a dyn Probes,
 }
 
-/// Shows every piece of `collection`.
-pub fn status(collection: &Collection) -> Result<StatusReport, StatusError> {
+/// Shows every piece of `collection` as of `clock`'s now.
+pub fn status(collection: &Collection, clock: &dyn Clock) -> Result<StatusReport, StatusError> {
     status_with(&StatusRequest {
         collection,
+        clock,
         probes: &RealProbes,
     })
 }
@@ -337,14 +396,14 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
                 if claims(entry, current, own) {
                     claimed.insert(entry.path.clone());
                 }
-                let mut piece = Piece {
-                    id: Some(entry.id),
-                    path: entry.path.clone(),
-                    name: current.map_or_else(|| last_name(&entry.path), |m| m.name.clone()),
-                    state: state.into(),
-                    flags: Vec::new(),
-                    detail: Detail::default(),
-                };
+                let mut piece = Piece::new(
+                    Some(entry.id),
+                    entry.path.clone(),
+                    current.map_or_else(|| last_name(&entry.path), |m| m.name.clone()),
+                    state.into(),
+                );
+                piece.unearthed = entry.unearthed;
+                piece.diverged = entry.diverged;
                 piece.detail.removal_unfinished =
                     entry.state == EntryState::Removing && presence == Presence::Present;
                 if let Presence::Below(directory) = presence {
@@ -378,19 +437,18 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
         }
         let known = &current.metadata;
         match derive_state(None, Some(known), false, own) {
-            Ok(state) => pieces.push(Piece {
-                id: Some(*object),
-                path: known.path.clone(),
-                name: known.name.clone(),
-                state: state.into(),
-                flags: Vec::new(),
-                detail: Detail {
-                    machine: (state == PieceState::LiveOnAnotherMachine)
-                        .then(|| machine_of(known))
-                        .flatten(),
-                    ..Detail::default()
-                },
-            }),
+            Ok(state) => {
+                let mut piece = Piece::new(
+                    Some(*object),
+                    known.path.clone(),
+                    known.name.clone(),
+                    state.into(),
+                );
+                if state == PieceState::LiveOnAnotherMachine {
+                    piece.detail.machine = machine_of(known);
+                }
+                pieces.push(piece);
+            }
             Err(error) => {
                 claimed.insert(known.path.clone());
                 pieces.push(error_piece(
@@ -404,15 +462,44 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
 
     for new in selection.pieces() {
         if !claimed.contains(new) {
-            pieces.push(Piece {
-                id: None,
-                path: new.clone(),
-                name: last_name(new),
-                state: PieceKind::New,
-                flags: Vec::new(),
-                detail: Detail::default(),
-            });
+            pieces.push(Piece::new(
+                None,
+                new.clone(),
+                last_name(new),
+                PieceKind::New,
+            ));
         }
+    }
+
+    // =====================================================
+    // What the folders hold
+    // =====================================================
+
+    let now = request.clock.now();
+    let junk = junk_names(&config.junk, &mut warnings);
+    let idle_settings = match idle::Settings::new(config.idle_days, &config.ignore) {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            warnings.push(Warning::new(format!(
+                "{error}, so no piece has an idle verdict"
+            )));
+            None
+        }
+    };
+    let walk_hooks = request.probes.walk_hooks();
+    for piece in &mut pieces {
+        let has_folder = matches!(
+            piece.state,
+            PieceKind::New | PieceKind::Live | PieceKind::Unearthed
+        );
+        // A piece below a directory selection could not read is neither
+        // walked nor judged.
+        if has_folder && piece.detail.below_unreadable.is_none() {
+            let tree = walk::walk_piece_with(&root, &piece.path, &junk, &rules, walk_hooks)?;
+            judge(piece, &tree, &root, idle_settings.as_ref(), now)?;
+        }
+        piece.flags.sort();
+        piece.flags.dedup();
     }
     pieces.sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
     damaged.sort_by(|a, b| a.id.cmp(&b.id).then(a.path.cmp(&b.path)));
@@ -449,6 +536,105 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     })
 }
 
+/// The junk list as names. An entry that is no file name cannot match
+/// anything and gives a warning.
+fn junk_names(junk: &[String], warnings: &mut Vec<Warning>) -> Vec<Name> {
+    junk.iter()
+        .filter_map(|entry| match Name::from_bytes(entry.clone().into_bytes()) {
+            Ok(name) => Some(name),
+            Err(_) => {
+                warnings.push(Warning::new(format!(
+                    "collection.junk entry `{entry}` is not a file name and is ignored"
+                )));
+                None
+            }
+        })
+        .collect()
+}
+
+/// Sets the flags, details and age a walk and the idle check give a piece.
+fn judge(
+    piece: &mut Piece,
+    tree: &PieceTree,
+    root: &TreeRoot,
+    settings: Option<&idle::Settings>,
+    now: Timestamp,
+) -> Result<(), StatusError> {
+    // The walk reports paths relative to the piece's top, which is the
+    // piece's own path for the top itself.
+    for problem in tree.problems() {
+        match problem {
+            Problem::Unreadable { first } => {
+                piece.flags.push(Flag::Unreadable);
+                piece.detail.unreadable_first = Some(piece.path.concat(first));
+            }
+            Problem::MountPoint { other } => {
+                piece.flags.push(Flag::MountPoint);
+                piece.detail.mount_points.push(piece.path.concat(other));
+            }
+            Problem::Excluded { path } => {
+                piece.flags.push(Flag::Excluded);
+                piece.detail.excluded_paths.push(piece.path.concat(path));
+            }
+            // Until `status` has a row of its own for it, a collection
+            // inside a piece shows as a mount point at its marker.
+            Problem::NestedCollection { root } => {
+                piece.flags.push(Flag::MountPoint);
+                piece.detail.mount_points.push(piece.path.concat(root));
+            }
+        }
+    }
+    let Some(settings) = settings else {
+        return Ok(());
+    };
+    let check = match idle::check(root, tree, piece.unearthed, settings, now) {
+        Ok(check) => check,
+        // A piece the walk could not read completely has no verdict.
+        Err(IdleError::Problems) => return Ok(()),
+        // Running out of file descriptors fails the run, as in a walk.
+        Err(IdleError::IgnoreFile { path, source }) if walk::is_out_of_descriptors(&source) => {
+            return Err(StatusError::Io {
+                action: "read",
+                path: path.to_string(),
+                source,
+            });
+        }
+        Err(error) => {
+            piece.flags.push(Flag::Error);
+            piece.detail.error = Some(error.to_string());
+            return Ok(());
+        }
+    };
+    if !check.future.is_empty() {
+        piece.flags.push(Flag::FutureMtime);
+        piece.detail.future_files = check
+            .future
+            .iter()
+            .map(|file| piece.path.concat(file))
+            .collect();
+    }
+    match check.verdict {
+        IdleVerdict::Pinned => piece.flags.push(Flag::Pinned),
+        IdleVerdict::Empty => piece.flags.push(Flag::Empty),
+        IdleVerdict::OnlyFuture => {}
+        IdleVerdict::Active { clock, .. } => note_age(piece, clock, now),
+        IdleVerdict::Idle { clock, .. } => {
+            note_age(piece, clock, now);
+            // A diverged folder waits for a decision, not for archiving.
+            if !piece.diverged {
+                piece.flags.push(Flag::Idle);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn note_age(piece: &mut Piece, clock: Timestamp, now: Timestamp) {
+    let seconds = (now.as_second() - clock.as_second()).max(0);
+    piece.age_days = Some(seconds / 86_400);
+    piece.detail.idle_clock = Some(clock);
+}
+
 /// A path below the collection root, in the escaped form.
 fn relative_to_collection(collection: &Collection, path: &Path) -> String {
     let relative = path.strip_prefix(collection.root()).unwrap_or(path);
@@ -465,17 +651,10 @@ fn last_name(path: &RelPath) -> Name {
 }
 
 fn error_piece(id: Option<ObjectId>, path: RelPath, message: String) -> Piece {
-    Piece {
-        id,
-        name: last_name(&path),
-        path,
-        state: PieceKind::Error,
-        flags: vec![Flag::Error],
-        detail: Detail {
-            error: Some(message),
-            ..Detail::default()
-        },
-    }
+    let mut piece = Piece::new(id, path.clone(), last_name(&path), PieceKind::Error);
+    piece.flags.push(Flag::Error);
+    piece.detail.error = Some(message);
+    piece
 }
 
 /// Whether the folder at the entry's path is this entry's piece, so that
@@ -613,6 +792,7 @@ fn exists_exact(root: &TreeRoot, path: &RelPath) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::FixedClock;
     use crate::meta::{Checksum, CreatedSource, FileName, Payload, PayloadKind};
     use crate::testing::tree::{COLLECTION_ID, TempCollection};
     use crate::tracking::{LocalPayload, VersionTakenOut};
@@ -644,6 +824,76 @@ mod tests {
         fn remote_state(&self, _: &Collection) -> RemoteState {
             self.0
         }
+
+        fn walk_hooks(&self) -> &dyn walk::Hooks {
+            &walk::RealFs
+        }
+    }
+
+    /// Probes whose walk sees another device at some paths or fails.
+    struct Hooked(Box<dyn walk::Hooks>);
+
+    impl Probes for Hooked {
+        fn remote_state(&self, _: &Collection) -> RemoteState {
+            RemoteState::None
+        }
+
+        fn walk_hooks(&self) -> &dyn walk::Hooks {
+            self.0.as_ref()
+        }
+    }
+
+    /// A second device below the piece at `path`, relative to its top.
+    struct OtherDevice(&'static str);
+
+    impl walk::Hooks for OtherDevice {
+        fn device(&self, path: &RelPath, reported: u64) -> u64 {
+            if path.to_string() == self.0 {
+                reported + 1
+            } else {
+                reported
+            }
+        }
+
+        fn fault(&self, _: &RelPath, _: walk::Call) -> Option<io::Error> {
+            None
+        }
+    }
+
+    /// A walk that runs out of file descriptors.
+    struct OutOfDescriptors;
+
+    impl walk::Hooks for OutOfDescriptors {
+        fn fault(&self, _: &RelPath, call: walk::Call) -> Option<io::Error> {
+            (call == walk::Call::List).then(|| io::Error::from_raw_os_error(24))
+        }
+    }
+
+    const NOW: &str = "2026-11-01T12:00:00Z";
+
+    fn now() -> Timestamp {
+        NOW.parse().expect("a time")
+    }
+
+    fn clock() -> FixedClock {
+        FixedClock::new(now())
+    }
+
+    /// Seconds since the epoch, `days` days before now.
+    fn days_ago(days: i64) -> i64 {
+        now().as_second() - days * 86_400
+    }
+
+    fn run(collection: &Collection) -> StatusReport {
+        run_with(collection, &Probed(RemoteState::None)).expect("status runs")
+    }
+
+    fn run_with(collection: &Collection, probes: &dyn Probes) -> Result<StatusReport, StatusError> {
+        status_with(&StatusRequest {
+            collection,
+            clock: &clock(),
+            probes,
+        })
     }
 
     /// A collection with folders, objects and entries written the way the
@@ -748,11 +998,7 @@ mod tests {
         }
 
         fn report(&self) -> StatusReport {
-            status_with(&StatusRequest {
-                collection: &self.collection,
-                probes: &Probed(RemoteState::None),
-            })
-            .expect("status runs")
+            run(&self.collection)
         }
     }
 
@@ -783,7 +1029,7 @@ mod tests {
     fn status_asks_the_real_remote_and_reports_the_same_pieces() {
         let mut world = world();
         world.dir("scratch");
-        let report = status(&world.collection).expect("status runs");
+        let report = status(&world.collection, &clock()).expect("status runs");
         assert_eq!(report, world.report());
     }
 
@@ -1186,11 +1432,7 @@ mod tests {
             fs::read_dir(&blocked).is_err(),
             "the test needs a directory that cannot be read; it must not run as root"
         );
-        let report = status_with(&StatusRequest {
-            collection: &collection,
-            probes: &Probed(RemoteState::None),
-        })
-        .expect("status runs");
+        let report = run(&collection);
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("a mode");
 
         assert_eq!(states(&report), [("group/work".into(), PieceKind::Live)]);
@@ -1265,11 +1507,7 @@ mod tests {
         )
         .expect("a config");
         let collection = Collection::find(world.temp.root()).expect("a collection");
-        let report = status_with(&StatusRequest {
-            collection: &collection,
-            probes: &Probed(RemoteState::None),
-        })
-        .expect("status runs");
+        let report = run(&collection);
         assert_eq!(states(&report), [("outside/work".into(), PieceKind::Live)]);
     }
 
@@ -1295,11 +1533,7 @@ mod tests {
         )
         .expect("a config");
         let collection = Collection::find(world.temp.root()).expect("a collection");
-        let report = status_with(&StatusRequest {
-            collection: &collection,
-            probes: &Probed(RemoteState::None),
-        })
-        .expect("status runs");
+        let report = run(&collection);
         assert_eq!(states(&report), [("work".into(), PieceKind::Live)]);
     }
 
@@ -1325,11 +1559,7 @@ mod tests {
         )
         .expect("a config");
         let collection = Collection::find(world.temp.root()).expect("a collection");
-        let report = status_with(&StatusRequest {
-            collection: &collection,
-            probes: &Probed(RemoteState::None),
-        })
-        .expect("status runs");
+        let report = run(&collection);
         assert_eq!(states(&report), [("work".into(), PieceKind::Gone)]);
     }
 
@@ -1339,7 +1569,8 @@ mod tests {
 
     #[test]
     fn a_collection_root_that_cannot_be_opened_fails_the_run() {
-        let error = status(&Collection::for_tests()).expect_err("the root does not exist");
+        let error =
+            status(&Collection::for_tests(), &clock()).expect_err("the root does not exist");
         assert!(
             matches!(error, StatusError::Io { action: "open", .. }),
             "{error:?}"
@@ -1397,7 +1628,7 @@ mod tests {
             pieces[1],
             serde_json::json!({
                 "id": null, "path": "scratch", "name": "scratch",
-                "state": "new", "flags": [],
+                "state": "new", "flags": ["empty"],
             })
         );
         assert_eq!(json["remote"], serde_json::json!({"state": "none"}));
@@ -1405,6 +1636,282 @@ mod tests {
             json["skipped"],
             serde_json::json!({"symlinks": 0, "dot_entries": 0})
         );
+    }
+
+    // =========================================================
+    // What the folders hold
+    // =========================================================
+
+    impl World {
+        /// Rewrites the config with extra `[collection]` lines.
+        fn configure(&mut self, lines: &str) {
+            fs::write(
+                self.temp.root().join(".antiq/config.toml"),
+                format!("[collection]\nid = \"{COLLECTION_ID}\"\n{lines}\n"),
+            )
+            .expect("a config can be written");
+            self.collection = Collection::find(self.temp.root()).expect("a collection");
+        }
+
+        fn file(&mut self, relative: &str, age_days: i64) {
+            self.temp
+                .tree()
+                .file_with(relative, "x", 0o644, days_ago(age_days));
+        }
+
+        fn only(&self) -> Piece {
+            let report = self.report();
+            assert_eq!(report.pieces.len(), 1, "{:?}", states(&report));
+            report.pieces[0].clone()
+        }
+
+        fn live_entry_of(&self, at: &str, archive: bool) -> TrackingEntry {
+            let lifecycle = Lifecycle::Live;
+            let payloads = if archive {
+                vec![archive_payload()]
+            } else {
+                vec![payload(PayloadKind::Live, 1, "0123456789abcdef-a.tar.zst")]
+            };
+            self.put_meta(&metadata(1, at, lifecycle, COLLECTION_ID, payloads));
+            TrackingEntry::new(
+                id(1),
+                path(at),
+                EntryState::Live,
+                VersionTakenOut::Committed(1),
+                when(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_piece_with_a_pin_is_pinned_and_has_no_age() {
+        let mut world = world();
+        world.file("p/.antiq-pin", 90);
+        world.file("p/note.txt", 90);
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::Pinned]);
+        assert_eq!(piece.age_days, None);
+    }
+
+    #[test]
+    fn a_piece_without_counted_files_is_empty() {
+        let mut world = world();
+        world.dir("e/sub");
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::Empty]);
+        assert_eq!(piece.age_days, None);
+    }
+
+    #[test]
+    fn a_new_piece_older_than_the_idle_days_is_idle() {
+        let mut world = world();
+        world.file("old/note.txt", 30);
+        let piece = world.only();
+        assert_eq!(piece.state, PieceKind::New);
+        assert_eq!(piece.flags, [Flag::Idle]);
+        assert_eq!(piece.age_days, Some(30));
+        assert_eq!(
+            piece.detail.idle_clock,
+            Some(Timestamp::from_second(days_ago(30)).expect("a time"))
+        );
+    }
+
+    #[test]
+    fn a_piece_younger_than_the_idle_days_only_has_an_age() {
+        let mut world = world();
+        world.file("busy/note.txt", 3);
+        let piece = world.only();
+        assert_eq!(piece.flags, []);
+        assert_eq!(piece.age_days, Some(3));
+    }
+
+    #[test]
+    fn an_idle_live_piece_is_idle() {
+        let mut world = world();
+        world.file("work/note.txt", 20);
+        let entry = world.live_entry_of("work", false);
+        world.write_entry(&entry);
+        let piece = world.only();
+        assert_eq!(piece.state, PieceKind::Live);
+        assert_eq!(piece.flags, [Flag::Idle]);
+    }
+
+    #[test]
+    fn an_unearthed_piece_counts_from_the_unearthing() {
+        let mut world = world();
+        world.file("work/note.txt", 20);
+        let mut entry = world.live_entry_of("work", true);
+        entry.unearthed = Some(Timestamp::from_second(days_ago(1)).expect("a time"));
+        world.write_entry(&entry);
+        let piece = world.only();
+        assert_eq!(piece.state, PieceKind::Unearthed);
+        assert_eq!(piece.flags, []);
+        assert_eq!(piece.age_days, Some(1));
+    }
+
+    #[test]
+    fn a_diverged_folder_is_not_called_idle_but_keeps_its_age() {
+        let mut world = world();
+        world.file("work/note.txt", 20);
+        let mut entry = world.live_entry_of("work", true);
+        entry.diverged = true;
+        world.write_entry(&entry);
+        let piece = world.only();
+        assert_eq!(piece.flags, []);
+        assert_eq!(piece.age_days, Some(20));
+    }
+
+    #[test]
+    fn an_unreadable_entry_has_no_verdict_and_names_the_first_one() {
+        let mut world = world();
+        world.file("u/note.txt", 30);
+        world.temp.tree().unreadable_dir("u/sub");
+        let blocked = world.temp.root().join("u/sub");
+        assert!(
+            fs::read_dir(&blocked).is_err(),
+            "the test needs a directory that cannot be read; it must not run as root"
+        );
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::Unreadable]);
+        assert_eq!(piece.age_days, None);
+        assert_eq!(piece.detail.unreadable_first, Some(path("u/sub")));
+        assert_eq!(piece.detail.error, None);
+    }
+
+    #[test]
+    fn a_top_directory_on_another_device_is_a_mount_point_at_the_pieces_own_path() {
+        let mut world = world();
+        world.dir("m");
+        let piece = run_with(&world.collection, &Hooked(Box::new(OtherDevice(""))))
+            .expect("status runs")
+            .pieces
+            .remove(0);
+        assert_eq!(piece.flags, [Flag::MountPoint]);
+        assert_eq!(piece.detail.mount_points, [path("m")]);
+    }
+
+    #[test]
+    fn a_mount_point_inside_a_piece_is_named_relative_to_the_collection() {
+        let mut world = world();
+        world.file("m/note.txt", 30);
+        world.dir("m/sub");
+        let piece = run_with(&world.collection, &Hooked(Box::new(OtherDevice("sub"))))
+            .expect("status runs")
+            .pieces
+            .remove(0);
+        assert_eq!(piece.detail.mount_points, [path("m/sub")]);
+    }
+
+    #[test]
+    fn a_pinned_piece_with_a_mount_point_has_both_flags() {
+        let mut world = world();
+        world.file("m/.antiq-pin", 30);
+        world.dir("m/sub");
+        let piece = run_with(&world.collection, &Hooked(Box::new(OtherDevice("sub"))))
+            .expect("status runs")
+            .pieces
+            .remove(0);
+        assert_eq!(piece.flags, [Flag::Pinned, Flag::MountPoint]);
+    }
+
+    #[test]
+    fn a_piece_holding_an_exclude_entry_names_its_path() {
+        let mut world = world();
+        world.configure("exclude = [\"x/skip\"]");
+        world.file("x/note.txt", 30);
+        world.dir("x/skip");
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::Excluded]);
+        assert_eq!(piece.detail.excluded_paths, [path("x/skip")]);
+    }
+
+    #[test]
+    fn files_too_far_ahead_are_listed_and_do_not_count() {
+        let mut world = world();
+        world.file("f/old.txt", 30);
+        world.file("f/new.txt", -5);
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::FutureMtime, Flag::Idle]);
+        assert_eq!(piece.detail.future_files, [path("f/new.txt")]);
+    }
+
+    #[test]
+    fn a_piece_with_only_future_files_is_not_idle() {
+        let mut world = world();
+        world.file("f/new.txt", -5);
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::FutureMtime]);
+        assert_eq!(piece.age_days, None);
+    }
+
+    #[test]
+    fn broken_ignore_rules_of_a_piece_are_an_error_of_that_piece() {
+        let mut world = world();
+        world.file("b/note.txt", 30);
+        world.temp.tree().file("b/.antiqignore", "fine\nbroken\\\n");
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::Error]);
+        let message = piece.detail.error.expect("a message");
+        assert!(message.contains(".antiqignore"), "{message}");
+        assert_eq!(piece.age_days, None);
+    }
+
+    #[test]
+    fn broken_ignore_rules_in_the_config_give_one_warning_and_no_verdicts() {
+        let mut world = world();
+        world.configure("ignore = [\"broken\\\\\"]");
+        world.file("a/note.txt", 30);
+        world.file("b/note.txt", 30);
+        let report = world.report();
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].message.contains("collection.ignore"),
+            "{:?}",
+            report.warnings
+        );
+        for piece in &report.pieces {
+            assert_eq!(piece.flags, []);
+            assert_eq!(piece.age_days, None);
+        }
+    }
+
+    #[test]
+    fn a_junk_entry_that_is_no_file_name_is_ignored_with_a_warning() {
+        let mut world = world();
+        world.configure("junk = [\"a/b\"]");
+        world.file("a/note.txt", 30);
+        let report = world.report();
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].message.contains("collection.junk"));
+        assert_eq!(report.pieces[0].flags, [Flag::Idle]);
+    }
+
+    #[test]
+    fn running_out_of_file_descriptors_fails_the_run() {
+        let mut world = world();
+        world.file("a/note.txt", 30);
+        let error = run_with(&world.collection, &Hooked(Box::new(OutOfDescriptors)))
+            .expect_err("no descriptors left");
+        assert!(matches!(error, StatusError::Walk(_)), "{error:?}");
+    }
+
+    #[test]
+    fn pieces_below_an_unreadable_directory_are_not_walked() {
+        let mut world = world();
+        world.dir("group/work");
+        let entry = world.live_entry_of("group/work", false);
+        world.write_entry(&entry);
+        world.configure("patterns = [\"group/*\"]");
+        let blocked = world.temp.root().join("group");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("a mode");
+        assert!(
+            fs::read_dir(&blocked).is_err(),
+            "the test needs a directory that cannot be read; it must not run as root"
+        );
+        let piece = world.only();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("a mode");
+        assert_eq!(piece.flags, []);
+        assert_eq!(piece.age_days, None);
     }
 
     // =========================================================
@@ -1453,7 +1960,7 @@ mod tests {
     #[test]
     fn the_counts_follow_the_states() {
         let mut world = world();
-        world.dir("scratch");
+        world.temp.tree().file("scratch/.antiq-pin", "");
         world.dir("work");
         world.dir("unearthed");
         world.put_meta(&metadata(
@@ -1514,8 +2021,8 @@ mod tests {
                 live: 3,
                 archived: 2,
                 remote_only: 1,
-                pinned: 0,
-                empty: 0
+                pinned: 1,
+                empty: 2
             }
         );
     }

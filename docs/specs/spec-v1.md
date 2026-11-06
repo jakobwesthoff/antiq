@@ -1446,8 +1446,17 @@ a state or flag needs to say and leaves out the keys that do not apply:
 `error` (the message), `removal_unfinished` (a `removing` entry whose
 folder is still in place), `below_unreadable` (the directory above a
 piece that selection could not read, which is neither walked nor judged)
-and `machine` (the machine that backs up a live piece of another
-collection). `status` also adds `recovered`, the names below
+`machine` (the machine that backs up a live piece of another
+collection), `unreadable_first`, `mount_points`, `excluded_paths` and
+`future_files` (paths relative to the collection root, the top directory of
+a piece being the piece's own path) and `idle_clock` (the time the idle
+clock counts from). `age_days` is the whole days from the idle clock to
+now; it is left out for a piece without a verdict. The flags `empty`,
+`excluded` and `idle` also exist: `idle` marks a new, live or unearthed
+piece that is not diverged and that the next `archive` archives. A piece
+the walk could not read completely has no verdict. A `junk` entry that is
+no file name and a `collection.ignore` line that is no valid rule each give
+a warning; with such a line no piece has a verdict. `status` also adds `recovered`, the names below
 `.antiq/recovered/`; `damaged`, a list of `{id, path, error}` for tracking
 files and objects that cannot be used, with the path relative to the
 collection root; `unreadable_directories`, the directories selection could
