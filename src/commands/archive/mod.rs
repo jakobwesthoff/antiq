@@ -2506,6 +2506,24 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_linked_file_is_counted_once_in_the_verify_and_per_name_in_the_packing() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        world.tree().hard_link("piece/a.txt", "piece/link.txt");
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+            .expect("the run ends");
+
+        // a.txt, link.txt and sub/b.txt are packed; the link is a member
+        // that the verify does not read again.
+        assert_eq!(
+            recorder.lines_of("piece")[1..3],
+            ["piece Packing 3/3", "piece Verifying 2/2"]
+        );
+    }
+
+    #[test]
     fn pieces_are_planned_without_the_ones_that_are_not_due() {
         let mut world = world("");
         add(&mut world, "due", 40);
