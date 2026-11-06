@@ -188,7 +188,8 @@ impl<'a> Tracker<'a> {
         Tracker { observer, name }
     }
 
-    /// For the callers that nobody watches.
+    /// For the tests of the steps that nobody watches.
+    #[cfg(test)]
     pub(crate) const fn silent() -> Tracker<'static> {
         Tracker {
             observer: &Silent,

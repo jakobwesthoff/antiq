@@ -23,7 +23,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::markers::RESTORED_FILE;
 use crate::pin::{self, PIN_FILE, PinError};
 use crate::plan::{HeldDryRun, PlanAction, Step};
-use crate::progress::Tracker;
+use crate::progress::{Observer, Outcome as Progress, Silent, Tracker};
 use crate::reference::{ReferenceError, resolve_path};
 use crate::relpath::{Name, RelPath, RelPathError};
 use crate::repair::Repair;
@@ -81,6 +81,8 @@ pub(crate) struct Env<'a> {
     pub pool: &'a Pool,
     /// The compression for the number of workers the pool granted.
     pub zstd: &'a (dyn Fn(u32) -> ZstdSettings + Sync),
+    /// Told what the run does, when someone watches it.
+    pub observer: Option<&'a dyn Observer>,
 }
 
 /// A version in the store.
@@ -331,6 +333,26 @@ pub fn import(
     clock: &dyn Clock,
     request: &Request,
 ) -> Result<Outcome, ImportError> {
+    run_import(collection, clock, request, None)
+}
+
+/// [`import`], telling `observer` what a real run does. A dry run has
+/// nothing to tell.
+pub fn import_observed(
+    collection: &Collection,
+    clock: &dyn Clock,
+    request: &Request,
+    observer: &dyn Observer,
+) -> Result<Outcome, ImportError> {
+    run_import(collection, clock, request, Some(observer))
+}
+
+fn run_import(
+    collection: &Collection,
+    clock: &dyn Clock,
+    request: &Request,
+    observer: Option<&dyn Observer>,
+) -> Result<Outcome, ImportError> {
     let given = request
         .time
         .as_deref()
@@ -354,6 +376,7 @@ pub fn import(
                 seams: &RealSeams,
                 pool: &pool,
                 zstd: &zstd,
+                observer,
             };
             execute(collection, clock, request, given, &guard, &env).map(Outcome::Imported)
         }
@@ -434,6 +457,11 @@ pub(crate) fn execute(
     let prepared = prepare(collection, clock, request, given, env.seams.walk_hooks())?;
     let stored = stored_spelling_of(collection, &prepared.piece)?;
     let piece = stored.to_string();
+    // A separate string, as `piece` moves into the report while the tracker
+    // still names the item.
+    let name = piece.clone();
+    let tracker = Tracker::new(env.observer.unwrap_or(&Silent), &name);
+    let bytes = apparent_size(&prepared.packed);
     let run_dirs = Mutex::new(());
     let ledger = SpaceLedger::new();
     let context = StoreContext {
@@ -444,7 +472,7 @@ pub(crate) fn execute(
         seams: env.seams,
         run_dirs: &run_dirs,
         zstd: env.zstd,
-        tracker: Tracker::silent(),
+        tracker,
     };
     let store = StoreRequest {
         folder: Folder::Outside(&prepared.root),
@@ -467,6 +495,7 @@ pub(crate) fn execute(
         reason,
         message,
     };
+    tracker.started(Some(bytes), None, &[]);
     match store_version(&context, &store) {
         Ok(stored_version) => {
             // The staging stays, empty, after a successful store: the folder
@@ -486,6 +515,7 @@ pub(crate) fn execute(
                 files: stored_version.files,
                 bytes: stored_version.bytes,
             });
+            tracker.finished(bytes, &Progress::Files(stored_version.files));
         }
         Err(StoreFailure::NoRoom(error)) => {
             report.skipped = Some(skip(SkipReason::NoRoom, chain_text(error.as_ref())));
@@ -505,6 +535,9 @@ pub(crate) fn execute(
         Err(StoreFailure::OutOfDescriptors(error) | StoreFailure::Failed(error)) => {
             report.skipped = Some(skip(SkipReason::Error, chain_text(error.as_ref())));
         }
+    }
+    if let Some(skipped) = &report.skipped {
+        tracker.finished(bytes, &Progress::Skipped(skipped.message.clone()));
     }
     Ok(report)
 }
@@ -825,6 +858,7 @@ pub(crate) fn parse_time(text: &str, zone: &TimeZone) -> Result<Timestamp, Impor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::recording::Recorder;
 
     #[test]
     fn an_unreported_physical_memory_is_an_error_of_the_kind_other_with_the_cause_in_the_text() {
@@ -1029,6 +1063,14 @@ mod tests {
     }
 
     fn execute_with(world: &World, seams: &dyn Seams) -> Result<ImportReport, ImportError> {
+        execute_observed(world, seams, None)
+    }
+
+    fn execute_observed(
+        world: &World,
+        seams: &dyn Seams,
+        observer: Option<&dyn Observer>,
+    ) -> Result<ImportReport, ImportError> {
         let collection = collection(world);
         let clock = FixedClock::new(Timestamp::now());
         let Started::Guarded(guard) = run::start(&collection, &clock, false).expect("starts")
@@ -1039,6 +1081,7 @@ mod tests {
             seams,
             pool: shared_pool(),
             zstd: &fast,
+            observer,
         };
         execute(
             &collection,
@@ -1123,6 +1166,46 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(entries(world.source.path()), ["a.txt", "sub"]);
+    }
+
+    #[test]
+    fn an_observed_import_tells_the_start_the_three_operations_and_the_finish() {
+        let world = world();
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &RealSeams, Some(&recorder)).expect("the import ends");
+
+        assert_eq!(
+            recorder.lines_of("piece"),
+            [
+                "started piece 9",
+                "piece Packing 9/9",
+                "piece Verifying 18/18",
+                "piece Storing 0/0",
+                "finished piece 9 Files(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_observed_import_that_is_skipped_finishes_with_the_message() {
+        let world = world();
+        let probe = Probe {
+            free: Some(1),
+            ..Probe::default()
+        };
+        let recorder = Recorder::new();
+
+        let report = execute_observed(&world, &probe, Some(&recorder)).expect("the import ends");
+
+        let message = report.skipped.expect("skipped").message;
+        assert_eq!(
+            recorder.lines_of("piece"),
+            [
+                "started piece 9".to_string(),
+                format!("finished piece 9 Skipped({message:?})"),
+            ]
+        );
     }
 
     #[test]
