@@ -133,6 +133,19 @@ open, so the discussion survives without the conversation.
 - `grep`: measure an embedded search, using ripgrep's library crates
   (or a comparable Rust crate) inside antiq, not the system `grep`.
 
+## Pending presentations to the user
+
+- After round 7 (asqr 01M6K2MRX043QTZTSTCP22HKR9: listing variant,
+  status layout, the soon threshold), present the grep study in asqr
+  (`docs/research/listing-grep.md`, main e2002a9):
+  - the method: generated data, the read path, what is measured and
+    what is extrapolated;
+  - the engines compared;
+  - choices: the engine (`regex::bytes` over the whole decoded listing
+    is recommended), compressed or plain listings (zst about 3 times
+    the search time, about 0.2-0.26 s for 300 versions in parallel),
+    the thread count, and whether line numbers are reported.
+
 ## Earlier open points (round 4, now mostly decided above), asqr 01M6K12ZP94T9VNSDT80ZY080W)
 
 - `unearth` semantics. The user called "the archive stays and
