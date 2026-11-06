@@ -35,6 +35,24 @@ one source. Decided with Jakob on 2026-11-05 in several asqr rounds.
 - An own derive crate (`#[explain(why, fix)]`) was considered and is not
   needed once the why lives in the message.
 
+## Command-line errors and the forget rule (decided 2026-11-05)
+
+The same principle applies to clap: the data comes from its source, antiq
+only renders it.
+
+- `src/cli/usage.rs` stops rewording clap errors per kind. The block takes
+  clap's first line as its title and puts clap's own suggestions and tips
+  (read from the error's context, never matched against clap's text) and
+  the `Usage:` line under "How to fix it". Today it recognises the `--`
+  tip by the words clap starts it with, which breaks silently when clap
+  changes its wording.
+- The rule that `forget --all-versions` needs `--force` becomes an error
+  of `forget` in the library (e.g. `ForgetError::AllVersionsNeedForce`)
+  with its message and help on the variant, and goes through the normal
+  error path. `refuse_all_versions_without_force` in `cli::run` goes away.
+- The colours of clap's help come from antiq's theme through clap's
+  `styles()`; the help itself stays clap's.
+
 ## Open points
 
 - How the code (`antiq::push::no_target`) maps to today's JSON `kind`
