@@ -235,7 +235,13 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         .collect();
     let longest = names.iter().map(|name| name.width()).max().unwrap_or(0);
     let wide = style.width >= WIDE_FROM;
-    let fixed = STATE_WIDTH + GAP + GAP + IDLE_WIDTH + GAP;
+    // Idle times of a thousand days or more are wider than the header.
+    let idles: Vec<String> = rows.iter().map(|row| idle_text(row.piece, now)).collect();
+    let idle_width = idles
+        .iter()
+        .map(|idle| idle.width())
+        .fold(IDLE_WIDTH, usize::max);
+    let fixed = STATE_WIDTH + GAP + GAP + idle_width + GAP;
     let piece_width = if wide {
         longest.max("PIECE".len())
     } else {
@@ -260,11 +266,11 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         spaces(GAP),
         heading(pad("PIECE", piece_width)),
         spaces(GAP),
-        heading(numeric_header("IDLE", IDLE_WIDTH)),
+        heading(numeric_header("IDLE", idle_width)),
         spaces(GAP),
         heading("WHAT".to_string())
     )];
-    for (row, name) in rows.iter().zip(&names) {
+    for ((row, name), idle) in rows.iter().zip(&names).zip(&idles) {
         let shown = if wide {
             name.clone()
         } else {
@@ -276,7 +282,7 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
             spaces(STATE_WIDTH - row.state.len() + GAP),
             pad(&shown, piece_width),
             spaces(GAP),
-            pad_left(&idle_text(row.piece, now), IDLE_WIDTH),
+            pad_left(idle, idle_width),
             spaces(GAP),
         );
         let mut wrapped = if wide {
@@ -815,6 +821,37 @@ mod tests {
     // =========================================================
     // The table
     // =========================================================
+
+    #[test]
+    fn the_idle_column_grows_to_its_widest_cell_and_its_header_follows() {
+        // Four-digit days make the cell `1087d`, five-digit days `12345d`.
+        let four = render(
+            &one(piece("a", Verdict::Due, Some(1087))),
+            wide(),
+            &TimeZone::UTC,
+            now(),
+        );
+        let five = render(
+            &one(piece("a", Verdict::Due, Some(12345))),
+            wide(),
+            &TimeZone::UTC,
+            now(),
+        );
+        assert_eq!(
+            lines(&four)[2..4],
+            [
+                "STATE    PIECE   IDLE  WHAT",
+                "due      a      1087d  archives next run"
+            ]
+        );
+        assert_eq!(
+            lines(&five)[2..4],
+            [
+                "STATE    PIECE    IDLE  WHAT",
+                "due      a      12345d  archives next run"
+            ]
+        );
+    }
 
     fn one(piece: SurveyedPiece) -> StatusReport {
         StatusReport {

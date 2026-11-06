@@ -1545,7 +1545,8 @@ and empty tests (see "Pins").
 The columns are STATE, PIECE, IDLE and WHAT. IDLE is the whole days since
 the idle clock, `0d` for a clock in the future, and `-` when the clock
 cannot be told: the piece has no file that counts, the walk could not read
-all of it, or its marker cannot be read. WHAT is `archives next run`,
+all of it, or its marker cannot be read. The column is as wide as its widest
+cell, at least four columns. WHAT is `archives next run`,
 `archives in N days` (the started days until the piece is due, at least
 one), `kept by .antiq-pin`, or, for `refused`, every reason of the piece
 joined by `; `. A reason is one of these, with paths relative to the
