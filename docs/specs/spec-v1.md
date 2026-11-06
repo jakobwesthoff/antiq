@@ -1226,9 +1226,13 @@ rsync_args = []                     # extra rsync options, e.g. for SMB shares
 
 A path target may be any absolute path; the path of an ssh target is
 passed to rsync verbatim (rsync 3.2.4 and later protect arguments by
-default). A `url` starting with `/` is a path; the host of an ssh target
-does not start with `-`. Unknown keys under `[collection]` or `[target]`
-are ignored, and each one is reported in a warning.
+default). A `url` starting with `/` is a path. A `url` does not start with
+`-`, and the host of an ssh target does not hold a `/`. The user, the host
+and the path of an ssh target are not empty when given. A path after the
+host that starts with `:` or `//` is refused, since rsync reads
+`host::module` and `rsync://host/module` as daemon syntax. An IPv6 host is
+written in brackets, `[::1]:path`. Unknown keys under `[collection]` or
+`[target]` are ignored, and each one is reported in a warning.
 
 The keys of the earlier design are refused with all their names in one
 error: `junk`, `remote_only_days`, `backup_live`, `live_exclude`,
