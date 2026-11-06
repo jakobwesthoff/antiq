@@ -1843,7 +1843,6 @@ and its parent is a directory when the plan is made. The run decides.
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
 | `target_unreachable` | 4 | the target cannot be reached; the message is the reason | |
 | `no_target` | 1 | `push` runs without `[target] url` | |
-| `not_implemented` | 1 | a command is not built yet; removed once every command is | |
 | `format_too_new` | 1 | `unearth`, `fork` or `rebuild` meets a listing of a newer format (see "Damage"), or `push` meets a marker with a higher `format` | |
 | `other` | 1 | any other failure | |
 

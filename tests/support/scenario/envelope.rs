@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 /// The error kinds of the spec's table.
-const KINDS: [&str; 11] = [
+const KINDS: [&str; 10] = [
     "usage",
     "not_a_collection",
     "ambiguous_reference",
@@ -17,7 +17,6 @@ const KINDS: [&str; 11] = [
     "lock_held",
     "target_unreachable",
     "no_target",
-    "not_implemented",
     "format_too_new",
     "other",
 ];

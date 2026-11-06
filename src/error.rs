@@ -62,15 +62,13 @@ pub enum ErrorKind {
     TargetUnreachable,
     /// `push` runs without a target url.
     NoTarget,
-    /// A command that has no implementation yet.
-    NotImplemented,
     FormatTooNew,
     /// Every failure without a kind of its own.
     Other,
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 11] = [
+    pub const ALL: [ErrorKind; 10] = [
         ErrorKind::Usage,
         ErrorKind::NotACollection,
         ErrorKind::AmbiguousReference,
@@ -79,7 +77,6 @@ impl ErrorKind {
         ErrorKind::LockHeld,
         ErrorKind::TargetUnreachable,
         ErrorKind::NoTarget,
-        ErrorKind::NotImplemented,
         ErrorKind::FormatTooNew,
         ErrorKind::Other,
     ];
@@ -95,7 +92,6 @@ impl ErrorKind {
             ErrorKind::LockHeld => "lock_held",
             ErrorKind::TargetUnreachable => "target_unreachable",
             ErrorKind::NoTarget => "no_target",
-            ErrorKind::NotImplemented => "not_implemented",
             ErrorKind::FormatTooNew => "format_too_new",
             ErrorKind::Other => "other",
         }
@@ -126,8 +122,6 @@ pub trait HasKind {
 pub enum Error {
     #[error("{0}")]
     Usage(String),
-    #[error("{command} is not implemented")]
-    NotImplemented { command: String },
     #[error(transparent)]
     Collection(#[from] CollectionError),
     #[error(transparent)]
@@ -202,7 +196,6 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Error::Usage(_) => ErrorKind::Usage,
-            Error::NotImplemented { .. } => ErrorKind::NotImplemented,
             Error::Collection(e) => e.kind(),
             Error::Config(e) => e.kind(),
             Error::Filesystem(e) => e.kind(),
@@ -376,7 +369,6 @@ mod tests {
             (ErrorKind::LockHeld, "lock_held", 1),
             (ErrorKind::TargetUnreachable, "target_unreachable", 4),
             (ErrorKind::NoTarget, "no_target", 1),
-            (ErrorKind::NotImplemented, "not_implemented", 1),
             (ErrorKind::FormatTooNew, "format_too_new", 1),
             (ErrorKind::Other, "other", 1),
         ];
@@ -391,13 +383,8 @@ mod tests {
     }
 
     #[test]
-    fn usage_and_not_implemented_carry_their_kinds() {
+    fn usage_carries_its_kind() {
         assert_eq!(Error::Usage("bad".into()).kind(), ErrorKind::Usage);
-        let error = Error::NotImplemented {
-            command: "status".into(),
-        };
-        assert_eq!(error.kind(), ErrorKind::NotImplemented);
-        assert_eq!(error.to_string(), "status is not implemented");
     }
 
     #[test]
