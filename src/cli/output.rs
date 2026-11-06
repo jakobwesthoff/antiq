@@ -232,14 +232,24 @@ impl Output {
         self.stderr.write_line(text)
     }
 
-    /// Writes what went wrong, then what the run was doing, to stderr.
-    pub fn plain_error(&mut self, message: &str, contexts: &[String]) -> io::Result<()> {
+    /// Writes what went wrong, the pieces an ambiguous reference could mean
+    /// and what the run was doing, to stderr.
+    pub fn plain_error(
+        &mut self,
+        message: &str,
+        candidates: &[&str],
+        contexts: &[String],
+    ) -> io::Result<()> {
         let label = if self.colored {
             "\x1b[1;31merror:\x1b[0m"
         } else {
             "error:"
         };
         self.stderr.write_line(&format!("{label} {message}"))?;
+        for candidate in candidates {
+            self.stderr
+                .write_line(&format!("    candidate: {candidate}"))?;
+        }
         for context in contexts {
             self.stderr
                 .write_line(&format!("  while attempting to {context}"))?;
@@ -391,6 +401,7 @@ mod tests {
             .output(false)
             .plain_error(
                 "permission denied",
+                &[],
                 &["read the config file".into(), "start the run".into()],
             )
             .expect("memory accepts writes");
@@ -404,11 +415,28 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_error_lists_the_candidates_between_the_message_and_the_contexts() {
+        let capture = Capture::default();
+        capture
+            .output(false)
+            .plain_error(
+                "`scan` matches 2 pieces",
+                &["projects/scanner", "tools/scan-old"],
+                &["find the piece".into()],
+            )
+            .expect("memory accepts writes");
+        assert_eq!(
+            capture.stderr(),
+            "error: `scan` matches 2 pieces\n    candidate: projects/scanner\n    candidate: tools/scan-old\n  while attempting to find the piece\n"
+        );
+    }
+
+    #[test]
     fn colour_changes_only_the_label() {
         let capture = Capture::default();
         capture
             .output(true)
-            .plain_error("broken", &[])
+            .plain_error("broken", &[], &[])
             .expect("memory accepts writes");
         assert_eq!(capture.stderr(), "\x1b[1;31merror:\x1b[0m broken\n");
     }

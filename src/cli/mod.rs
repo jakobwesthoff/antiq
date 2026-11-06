@@ -275,11 +275,7 @@ fn describe(error: &anyhow::Error) -> Description<'_> {
     let library_error = chain.iter().position(|link| link.is::<antiq::Error>());
     let (root, outer) = match library_error {
         Some(index) => {
-            let root = chain[index..]
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(": ");
+            let root = antiq::error::join_distinct(chain[index..].iter().map(ToString::to_string));
             (root, &chain[..index])
         }
         None => {
@@ -311,7 +307,14 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     let _ = if cli.json {
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
     } else {
-        out.plain_error(&description.root, &description.contexts)
+        let candidates: Vec<&str> = description
+            .library_error
+            .and_then(antiq::Error::candidates)
+            .unwrap_or_default()
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect();
+        out.plain_error(&description.root, &candidates, &description.contexts)
     };
     kind.exit_code()
 }
@@ -470,6 +473,54 @@ mod tests {
                 "\"error\":{\"kind\":\"lock_held\",\
                  \"message\":\"another run holds the lock (pid 4242, started 2026-11-03T10:00:00Z)\",\
                  \"pid\":4242,\"started\":\"2026-11-03T10:00:00Z\"}}\n"
+            ),
+            "{stdout}"
+        );
+    }
+
+    /// An unearth-shaped chain: every layer's text embeds the one below.
+    fn ambiguous_unearth() -> anyhow::Error {
+        let reference = antiq::reference::ReferenceError::Ambiguous {
+            reference: "scan".into(),
+            candidates: vec![
+                antiq::reference::Candidate {
+                    path: "projects/scanner".into(),
+                },
+                antiq::reference::Candidate {
+                    path: "tools/scan-old".into(),
+                },
+            ],
+        };
+        let restore = antiq::commands::restore::RestoreError::from(reference);
+        let unearth = antiq::commands::unearth::UnearthError::from(restore);
+        anyhow::Error::new(antiq::Error::from(unearth)).context("unearth the version")
+    }
+
+    #[test]
+    fn a_plain_error_says_each_cause_once_and_lists_the_candidates() {
+        let cli = parse(&["unearth", "scan"]);
+        let (code, _, stderr) = finish_captured(&cli, Err(ambiguous_unearth()));
+        assert_eq!(code, 1);
+        assert_eq!(
+            stderr,
+            "error: cannot find the piece: `scan` matches 2 pieces\n    \
+             candidate: projects/scanner\n    \
+             candidate: tools/scan-old\n  \
+             while attempting to unearth the version\n"
+        );
+    }
+
+    #[test]
+    fn a_json_error_says_each_cause_once_and_keeps_its_candidates() {
+        let cli = parse(&["--json", "unearth", "scan"]);
+        let (code, stdout, stderr) = finish_captured(&cli, Err(ambiguous_unearth()));
+        assert_eq!(code, 1);
+        assert_eq!(stderr, "");
+        assert!(
+            stdout.ends_with(
+                "\"error\":{\"kind\":\"ambiguous_reference\",\
+                 \"message\":\"cannot find the piece: `scan` matches 2 pieces\",\
+                 \"candidates\":[{\"path\":\"projects/scanner\"},{\"path\":\"tools/scan-old\"}]}}\n"
             ),
             "{stdout}"
         );

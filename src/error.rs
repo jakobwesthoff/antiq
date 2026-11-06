@@ -240,18 +240,29 @@ impl Error {
         }
     }
 
+    /// The error the walks for details start at. `Reference`, `Lock` and
+    /// `Run` are transparent, so their walks start at what they wrap.
+    fn walk_start(&self) -> &(dyn std::error::Error + 'static) {
+        match self {
+            Error::Reference(inner) => inner,
+            Error::Lock(inner) => inner,
+            Error::Run(inner) => inner,
+            other => other,
+        }
+    }
+
+    /// The candidates of the ambiguous reference this error holds, in the
+    /// order the JSON error object lists them.
+    pub fn candidates(&self) -> Option<&[Candidate]> {
+        find_candidates(self.walk_start())
+    }
+
     /// The keys the JSON error object carries next to `kind` and
     /// `message` for this error. Empty for errors without details.
     pub fn details(&self) -> Map<String, Value> {
         let mut details = Map::new();
-        // `Reference`, `Lock` and `Run` are transparent, so the walks start
-        // at what they wrap.
-        let (candidates, held) = match self {
-            Error::Reference(inner) => (find_candidates(inner), find_held_lock(inner)),
-            Error::Lock(inner) => (find_candidates(inner), find_held_lock(inner)),
-            Error::Run(inner) => (find_candidates(inner), find_held_lock(inner)),
-            other => (find_candidates(other), find_held_lock(other)),
-        };
+        let candidates = self.candidates();
+        let held = find_held_lock(self.walk_start());
         if let Some(candidates) = candidates {
             details.insert(
                 "candidates".into(),
@@ -268,6 +279,35 @@ impl Error {
         }
         details
     }
+}
+
+/// The error and its sources in one line, each cause once: see
+/// [`join_distinct`].
+pub fn chain_text(error: &(dyn std::error::Error + 'static)) -> String {
+    join_distinct(std::iter::successors(Some(error), |link| link.source()).map(ToString::to_string))
+}
+
+/// Joins the texts of an error chain, outermost first, with ": ".
+///
+/// A `Display` that includes its source (`"cannot read {path}: {source}"`)
+/// already shows the text of the link below it, so a text the link directly
+/// above it contains is left out. Only the adjacent link is compared: a short
+/// cause that merely occurs in an earlier link still shows.
+pub fn join_distinct(texts: impl IntoIterator<Item = String>) -> String {
+    let mut joined = String::new();
+    let mut above: Option<String> = None;
+    for text in texts {
+        match &above {
+            None => joined.push_str(&text),
+            Some(above) if above.contains(&text) => {}
+            Some(_) => {
+                joined.push_str(": ");
+                joined.push_str(&text);
+            }
+        }
+        above = Some(text);
+    }
+    joined
 }
 
 /// The candidates of the ambiguous reference that `error` or one of its
@@ -553,6 +593,80 @@ mod tests {
         assert_eq!(
             serde_json::Value::Object(error.details()),
             json!({"pid": 4242, "started": "2026-11-03T10:00:00Z"})
+        );
+    }
+
+    #[test]
+    fn the_candidates_of_an_error_are_those_of_its_ambiguous_reference() {
+        let wrapped = Error::Reference(ambiguous());
+        assert_eq!(
+            wrapped.candidates(),
+            Some(&[candidate("projects/a"), candidate("projects/b")][..])
+        );
+        let other = Error::Reference(ReferenceError::Unknown {
+            reference: "alpha".into(),
+        });
+        assert_eq!(other.candidates(), None);
+    }
+
+    #[test]
+    fn a_cause_the_text_above_it_contains_is_joined_once() {
+        let texts = [
+            "cannot find the piece: `scan` matches 3 pieces",
+            "`scan` matches 3 pieces",
+        ];
+        assert_eq!(
+            join_distinct(texts.map(String::from)),
+            "cannot find the piece: `scan` matches 3 pieces"
+        );
+    }
+
+    #[test]
+    fn a_contained_cause_in_the_middle_of_a_chain_does_not_hide_the_ones_below() {
+        let texts = [
+            "cannot start",
+            "cannot start: no room",
+            "no room",
+            "disk full",
+        ];
+        assert_eq!(
+            join_distinct(texts.map(String::from)),
+            "cannot start: cannot start: no room: disk full"
+        );
+    }
+
+    #[test]
+    fn a_short_cause_that_only_an_earlier_link_contains_still_shows() {
+        let texts = [
+            "cannot open the file: Permission denied",
+            "cannot read the listing",
+            "Permission denied",
+        ];
+        assert_eq!(
+            join_distinct(texts.map(String::from)),
+            "cannot open the file: Permission denied: cannot read the listing: Permission denied"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_embeds_nothing_is_joined_as_it_is() {
+        let texts = ["cannot change the pin", "disk full"];
+        assert_eq!(
+            join_distinct(texts.map(String::from)),
+            "cannot change the pin: disk full"
+        );
+        assert_eq!(join_distinct(Vec::<String>::new()), "");
+    }
+
+    #[test]
+    fn a_pin_error_that_embeds_its_io_error_shows_the_io_error_once() {
+        let error = crate::pin::PinError::Stat {
+            path: crate::relpath::RelPath::parse("projects/alpha/.antiq-pin").expect("a path"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(
+            chain_text(&error),
+            "cannot look for the pin file projects/alpha/.antiq-pin: permission denied"
         );
     }
 
