@@ -2,73 +2,78 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The marker file at the root of a remote.
+//! The marker file at the root of a target.
 
 use crate::error::HasKind;
 use crate::id::ObjectId;
 use serde::{Deserialize, Serialize};
 
-/// The name of the marker in the remote's root.
-pub const FILE_NAME: &str = "antiq-remote.json";
+/// The name of the marker in the target's root.
+pub const FILE_NAME: &str = ".antiq-target";
 
-/// The `format` and `layout` this version reads and writes.
-const CURRENT: u32 = 1;
+/// The `format` this version reads and writes.
+const CURRENT: u64 = 1;
 
 /// Why a marker cannot be used.
 #[derive(Debug, thiserror::Error)]
 pub enum MarkerError {
     #[error("the marker {FILE_NAME} cannot be read: {reason}")]
     Invalid { reason: String },
-    #[error("the marker {FILE_NAME} has {field} {found}, written by a newer antiq than this one")]
-    TooNew { field: &'static str, found: u32 },
+    #[error("the marker {FILE_NAME} has format {found}, written by a newer antiq than this one")]
+    TooNew { found: u64 },
 }
 
 impl HasKind for MarkerError {}
 
-/// The content of `antiq-remote.json`.
+/// The content of `.antiq-target`: the collection the target mirrors and
+/// the machine and place it is pushed from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
-    pub format: u32,
+    pub format: u64,
     pub id: ObjectId,
-    pub layout: u32,
+    /// The machine name `machine::detect` gives.
+    pub host: String,
+    /// The canonical root of the collection.
+    pub path: String,
 }
 
 impl Marker {
-    pub fn new(id: ObjectId) -> Marker {
+    pub fn new(id: ObjectId, host: String, path: String) -> Marker {
         Marker {
             format: CURRENT,
             id,
-            layout: CURRENT,
+            host,
+            path,
         }
     }
 
-    /// The bytes of the file: one line of JSON.
+    /// The bytes of the file: one line of JSON with the keys in the order
+    /// of the fields.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes =
-            serde_json::to_vec(self).expect("a marker of numbers and a string always serialises");
+            serde_json::to_vec(self).expect("a marker of a number and strings always serialises");
         bytes.push(b'\n');
         bytes
     }
 
-    /// Reads a marker. Keys this version does not know are ignored, and a
-    /// `format` or `layout` above the one this version writes is refused,
-    /// since a newer antiq may have changed what the root holds.
+    /// Reads a marker. Keys this version does not know are ignored. A
+    /// `format` above the one this version writes is refused before any
+    /// other key is looked at, since a newer antiq may have changed them.
     pub fn parse(bytes: &[u8]) -> Result<Marker, MarkerError> {
-        let marker: Marker =
-            serde_json::from_slice(bytes).map_err(|error| MarkerError::Invalid {
-                reason: error.to_string(),
-            })?;
-        for (field, found) in [("format", marker.format), ("layout", marker.layout)] {
-            if found > CURRENT {
-                return Err(MarkerError::TooNew { field, found });
-            }
-            if found == 0 {
-                return Err(MarkerError::Invalid {
-                    reason: format!("{field} is 0"),
-                });
-            }
+        let invalid = |reason: String| MarkerError::Invalid { reason };
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+        let format = value
+            .get("format")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| invalid("format is missing or no unsigned integer".to_string()))?;
+        if format > CURRENT {
+            return Err(MarkerError::TooNew { found: format });
         }
-        Ok(marker)
+        if format == 0 {
+            return Err(invalid("format is 0".to_string()));
+        }
+        serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
     }
 }
 
@@ -82,76 +87,121 @@ mod tests {
         ID.parse().expect("a ULID")
     }
 
-    fn expected_bytes() -> Vec<u8> {
-        format!("{{\"format\":1,\"id\":\"{ID}\",\"layout\":1}}\n").into_bytes()
+    fn marker() -> Marker {
+        Marker::new(id(), "Studio Mac".into(), "/Users/jakob/projects".into())
+    }
+
+    fn invalid(text: &str) -> bool {
+        matches!(
+            Marker::parse(text.as_bytes()),
+            Err(MarkerError::Invalid { .. })
+        )
     }
 
     #[test]
     fn a_marker_is_one_line_of_json_in_a_fixed_key_order() {
-        assert_eq!(Marker::new(id()).to_bytes(), expected_bytes());
+        let expected = format!(
+            "{{\"format\":1,\"id\":\"{ID}\",\"host\":\"Studio Mac\",\"path\":\"/Users/jakob/projects\"}}\n"
+        );
+        assert_eq!(marker().to_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn quotes_and_backslashes_are_escaped_and_non_ascii_stays_literal() {
+        let marker = Marker::new(id(), "Jakob's \"Mac\"".into(), "/Büro\\neu".into());
+        let expected = format!(
+            "{{\"format\":1,\"id\":\"{ID}\",\"host\":\"Jakob's \\\"Mac\\\"\",\"path\":\"/Büro\\\\neu\"}}\n"
+        );
+        assert_eq!(marker.to_bytes(), expected.as_bytes());
+        assert_eq!(Marker::parse(&marker.to_bytes()).expect("a marker"), marker);
     }
 
     #[test]
     fn a_marker_reads_back() {
-        let parsed = Marker::parse(&Marker::new(id()).to_bytes()).expect("a marker");
-        assert_eq!(parsed, Marker::new(id()));
+        let parsed = Marker::parse(&marker().to_bytes()).expect("a marker");
+        assert_eq!(parsed, marker());
+    }
+
+    #[test]
+    fn the_final_newline_is_optional() {
+        let bytes = marker().to_bytes();
+        let parsed = Marker::parse(&bytes[..bytes.len() - 1]).expect("a marker");
+        assert_eq!(parsed, marker());
     }
 
     #[test]
     fn unknown_keys_are_ignored() {
-        let text = format!("{{\"format\":1,\"id\":\"{ID}\",\"layout\":1,\"note\":\"x\"}}");
-        assert_eq!(
-            Marker::parse(text.as_bytes()).expect("a marker"),
-            Marker::new(id())
+        let text = format!(
+            "{{\"format\":1,\"id\":\"{ID}\",\"host\":\"h\",\"path\":\"/p\",\"layout\":1,\"note\":\"x\"}}"
         );
-    }
-
-    #[test]
-    fn text_that_is_no_json_is_invalid() {
-        assert!(matches!(
-            Marker::parse(b"not json"),
-            Err(MarkerError::Invalid { .. })
-        ));
-    }
-
-    #[test]
-    fn a_marker_without_an_id_is_invalid() {
-        assert!(matches!(
-            Marker::parse(br#"{"format":1,"layout":1}"#),
-            Err(MarkerError::Invalid { .. })
-        ));
-    }
-
-    #[test]
-    fn a_format_of_zero_is_invalid() {
-        let text = format!("{{\"format\":0,\"id\":\"{ID}\",\"layout\":1}}");
-        assert!(matches!(
-            Marker::parse(text.as_bytes()),
-            Err(MarkerError::Invalid { .. })
-        ));
+        let parsed = Marker::parse(text.as_bytes()).expect("a marker");
+        assert_eq!(parsed, Marker::new(id(), "h".into(), "/p".into()));
     }
 
     #[test]
     fn a_higher_format_is_too_new() {
-        let text = format!("{{\"format\":2,\"id\":\"{ID}\",\"layout\":1}}");
+        let text = format!("{{\"format\":2,\"id\":\"{ID}\",\"host\":\"h\",\"path\":\"/p\"}}");
         assert!(matches!(
             Marker::parse(text.as_bytes()),
-            Err(MarkerError::TooNew {
-                field: "format",
-                found: 2
-            })
+            Err(MarkerError::TooNew { found: 2 })
         ));
     }
 
     #[test]
-    fn a_higher_layout_is_too_new() {
-        let text = format!("{{\"format\":1,\"id\":\"{ID}\",\"layout\":2}}");
+    fn a_higher_format_is_too_new_whatever_else_the_marker_holds() {
         assert!(matches!(
-            Marker::parse(text.as_bytes()),
-            Err(MarkerError::TooNew {
-                field: "layout",
-                found: 2
-            })
+            Marker::parse(br#"{"format":2,"id":7}"#),
+            Err(MarkerError::TooNew { found: 2 })
         ));
+    }
+
+    #[test]
+    fn a_format_beyond_u64_is_invalid() {
+        assert!(invalid(r#"{"format":99999999999999999999}"#));
+    }
+
+    #[test]
+    fn a_format_that_is_no_unsigned_integer_is_invalid() {
+        assert!(invalid(r#"{"format":"1"}"#));
+        assert!(invalid(r#"{"format":-1}"#));
+        assert!(invalid(r#"{"format":1.5}"#));
+    }
+
+    #[test]
+    fn a_format_of_zero_is_invalid() {
+        let text = format!("{{\"format\":0,\"id\":\"{ID}\",\"host\":\"h\",\"path\":\"/p\"}}");
+        assert!(invalid(&text));
+    }
+
+    #[test]
+    fn a_missing_format_is_invalid() {
+        let text = format!("{{\"id\":\"{ID}\",\"host\":\"h\",\"path\":\"/p\"}}");
+        assert!(invalid(&text));
+    }
+
+    #[test]
+    fn text_that_is_no_json_object_is_invalid() {
+        assert!(invalid("not json"));
+        assert!(invalid("[1]"));
+    }
+
+    #[test]
+    fn each_missing_key_is_invalid() {
+        for missing in ["id", "host", "path"] {
+            let mut keys = vec![
+                format!("\"id\":\"{ID}\""),
+                "\"host\":\"h\"".to_string(),
+                "\"path\":\"/p\"".to_string(),
+            ];
+            keys.retain(|key| !key.starts_with(&format!("\"{missing}\"")));
+            let text = format!("{{\"format\":1,{}}}", keys.join(","));
+            assert!(invalid(&text), "{missing}");
+        }
+    }
+
+    #[test]
+    fn a_key_of_the_wrong_type_is_invalid() {
+        let text = format!("{{\"format\":1,\"id\":\"{ID}\",\"host\":7,\"path\":\"/p\"}}");
+        assert!(invalid(&text));
     }
 }
