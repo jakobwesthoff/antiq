@@ -13,7 +13,8 @@
 Output ../assets/demo.webm
 Output ../assets/demo.mp4
 # The version screen needs 24 rows: 22 for the emblem, the command and the prompt.
-Set Height 1080
+# A row is 38.46 pixels high and the padding takes 80, so 24 rows need 1004.
+Set Height 1004
 Source common.tape
 Set TypingSpeed 55ms
 
