@@ -7,8 +7,7 @@ origin: discussion
 ---
 # Compare the whole target with the collection on request
 
-`push` in the simplified v1 concept (`docs/concept-v1-simplified.md`)
-relies on rsync's own check: rsync computes a whole-file checksum of
+`push` in the simplified v1 spec (`docs/specs/spec-v1.md`) relies on rsync's own check: rsync computes a whole-file checksum of
 each transferred file while the receiver writes it and compares it with
 the sender's, and `--fsync` makes the receiver flush each finished
 file. That covers the transfer, not what the target's disk loses later

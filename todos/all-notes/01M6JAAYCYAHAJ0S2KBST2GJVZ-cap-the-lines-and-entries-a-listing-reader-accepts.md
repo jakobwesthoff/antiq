@@ -8,10 +8,9 @@ origin: review
 # Cap the lines and entries a listing reader accepts
 
 `listing::Reader` (`src/listing.rs`) reads a listing without a limit on
-the length of a line or on the number of entries. `unearth` through the
-remote (I34) reads a listing fetched from the remote before the archive
-is checked, so a damaged or hostile listing can make it allocate without
-bound. Found in the plan review of I34 (finding O12), 2026-11-04.
+the length of a line or on the number of entries. `grep`, `list` and
+`status` read listings, which can be copied back from the target by hand,
+so a damaged or hostile listing can make them allocate without bound. Found in the plan review of I34 (finding O12), 2026-11-04.
 
 ## Open question
 
@@ -21,4 +20,4 @@ a number with a source; none is chosen yet.
 
 ## Relations
 
-- Part of: [Implement antiq v1](01M6HJYBXSTQFSHP29EX3MPN97-implement-antiq-v1.md)
+- Part of: [Rework antiq v1 to the simplified concept](01M6KFHS2FVQ9APAGQ947FP3CM-rework-antiq-v1-to-the-simplified-concept.md)

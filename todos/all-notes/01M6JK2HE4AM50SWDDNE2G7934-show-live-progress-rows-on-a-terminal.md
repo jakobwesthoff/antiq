@@ -7,8 +7,8 @@ tags: [architecture]
 ---
 # Show live progress rows on a terminal
 
-Work item I41 of the v1 implementation plan: long runs of `archive`, `unearth` and `sync` show their pieces as live rows on a terminal, with `sync` phases as a checklist. Its full entry is section 5, "I41", of the plan todo.
+Long runs of `archive`, `unearth` and `push` show their pieces as live rows on a terminal: one row per piece with its path, its size, a progress bar, the operation running on it (packing, verifying, storing, removing) and one detail, such as the files checked. A row takes one line when the path fits and two lines otherwise, the full path above the bar. Without a terminal only the finished lines are printed.
 
 ## Relations
 
-- Part of: [Implement antiq v1](01M6HJYBXSTQFSHP29EX3MPN97-implement-antiq-v1.md)
+- Part of: [Rework antiq v1 to the simplified concept](01M6KFHS2FVQ9APAGQ947FP3CM-rework-antiq-v1-to-the-simplified-concept.md)

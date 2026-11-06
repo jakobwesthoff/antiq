@@ -12,7 +12,7 @@ a regular file: packing reads its full apparent size, and unearthing
 writes it back fully allocated, so a piece that fit on disk before may
 not fit after unearthing. `archive` warns when a piece's apparent size
 exceeds its allocated size by more than 1 GiB, and all free-space checks
-use the apparent size (spec, from adversarial review 2, finding O23).
+use the apparent size (spec "Operations").
 
 ## Decisions
 

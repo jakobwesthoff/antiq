@@ -9,7 +9,7 @@ tags: [ux]
 # Decide how unearth treats volumes that keep modes and times only in part
 
 exFAT and FAT32 keep file modes and modification times only in part.
-Unearthing a package onto such a volume restores neither exactly, so
+Unearthing a version onto such a volume restores neither exactly, so
 the strict verify of the staged tree differs on every file. Whether
 unearth goes on there, and how the verify treats the difference, is a
 product decision that is still open.
@@ -32,7 +32,7 @@ drivers may refuse symlinks.
 
 - Archived on the volume and unearthed onto it on the same OS: the
   modes are already 0700 and the times already at the volume's
-  granularity, so the package round-trips.
+  granularity, so the version round-trips.
 - Archived on another volume and unearthed onto exFAT or FAT32: modes
   are lost, and on FAT32 odd-second times are rounded.
 - The same drive under macOS and then Linux: macOS stores 0700, Linux
@@ -41,7 +41,7 @@ drivers may refuse symlinks.
 ## Already handled
 
 The volume probe in `src/pack/names.rs` (I13) checks for hard links and
-symlinks. A package holding members of a kind the volume cannot create
+symlinks. A version holding members of a kind the volume cannot create
 is refused before anything is written, together with the name problems.
 
 ## Options

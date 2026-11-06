@@ -11,7 +11,7 @@ origin: review
 inode (`cp -al`, pnpm or git stores that hard-link), deleting the first
 piece's tree changes the shared inode's link count and so its ctime. The
 second piece, between its verify and its re-walk, then sees a change and
-comes back as unearthed, or is skipped as `differs` when the delete hits
+is given back, or is skipped as `differs` when the delete hits
 during its verify. Nothing is lost, but the result depends on timing.
 Found in the opus diff review of I19 (finding R5), 2026-11-04; the spec
 documents the behaviour.
@@ -25,4 +25,4 @@ either a pre-walk or a scheduling decision deferred until the walk.
 
 ## Relations
 
-- Part of: [Implement antiq v1](01M6HJYBXSTQFSHP29EX3MPN97-implement-antiq-v1.md)
+- Part of: [Rework antiq v1 to the simplified concept](01M6KFHS2FVQ9APAGQ947FP3CM-rework-antiq-v1-to-the-simplified-concept.md)

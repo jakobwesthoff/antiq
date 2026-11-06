@@ -22,7 +22,8 @@ with exit 0 (`docs/research/names.md`).
   this later and give users a solution, if it turns out to be a real
   problem or use case.
 - 2026-11-03, user: Linux machines may archive into a shared remote in
-  v1 ("possibly").
+  v1 ("possibly"). v1 now has one machine; a version reaches another
+  machine by copying its files from the target.
 
 ## Facts
 
@@ -35,5 +36,5 @@ with exit 0 (`docs/research/names.md`).
 
 ## Revisit when
 
-A user hits the refusal, or a Linux machine starts archiving pieces with
-names that differ only in case or normalisation.
+A user hits the refusal, or a version made on Linux is copied from the target to a macOS machine
+and holds names that differ only in case or normalisation.

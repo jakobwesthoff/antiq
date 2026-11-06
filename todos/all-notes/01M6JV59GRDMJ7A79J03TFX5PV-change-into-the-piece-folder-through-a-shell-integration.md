@@ -13,9 +13,9 @@ that folder. A program cannot change its parent shell's directory, so
 antiq would ship a shell function that wraps the executable and changes
 directory when antiq names a target. Designed with the user in asqr
 rounds 3 and 4 on 2026-11-04 around the picker of `find`. On
-2026-11-04 the simplified v1 concept (`docs/concept-v1-simplified.md`)
-dropped `find` and the picker; the user kept the idea for after v1,
-with `list` and `grep` as the ways to find a piece.
+2026-11-04 the simplified v1 design (`docs/specs/spec-v1.md`) dropped
+`find` and the picker; the user kept the idea for after v1, with `list`
+and `grep` as the ways to find a piece.
 
 ## Design so far
 

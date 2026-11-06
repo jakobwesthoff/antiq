@@ -7,10 +7,10 @@ origin: discussion
 ---
 # Consider storing extended attributes in archives
 
-Archives and live packages store no extended attributes in v1
-(ADR 0050): macOS attributes such as `com.apple.provenance` and any
-`user.*` attributes are dropped when a piece is packed, and an unearthed
-piece comes back without them. The 313 archives `archive.sh` made carry
+Versions store no extended attributes in v1 (ADR 0050): macOS
+attributes such as `com.apple.provenance` and any `user.*` attributes are
+dropped when a piece is packed, and an unearthed piece comes back without
+them. The mirror on the target keeps none either. The 313 archives `archive.sh` made carry
 none either (no pax records, `docs/research/tar.md`).
 
 ## Decisions
@@ -26,8 +26,7 @@ none either (no pax records, `docs/research/tar.md`).
 - `bsdtar` on macOS writes `._*` AppleDouble members plus
   `LIBARCHIVE.xattr.*` and `SCHILY.xattr.*` records for files with
   attributes, measured during the tar research.
-- Attributes would also enter the strict verify (ADR 0033) and the
-  byte stability of live packages.
+- Attributes would also enter the strict verify (ADR 0033).
 
 ## Revisit when
 
