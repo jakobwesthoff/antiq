@@ -82,6 +82,9 @@ pub enum Problem {
     /// An entry of the collection's exclude list lies at this path inside
     /// the piece.
     Excluded { path: RelPath },
+    /// A collection of its own lies inside the piece: the directory at
+    /// this path holds a `.antiq` directory, the marker of a collection.
+    NestedCollection { root: RelPath },
 }
 
 /// A piece as the walk saw it.

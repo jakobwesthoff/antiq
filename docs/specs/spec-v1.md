@@ -158,7 +158,10 @@ macOS; the delete helper reads its flag again once it has given the
 directory owner access and has opened it.
 The walk does not enter an excluded directory either: a piece that
 contains an existing exclude entry is treated like one that contains a
-mount point, and `status` lists it with the excluded path. A walk enters
+mount point, and `status` lists it with the excluded path. So is a piece
+that contains a directory named `.antiq`, the marker of a collection of
+its own: `status` lists it with the directory that holds the marker, and
+the walk goes on into it. A walk enters
 directories up to 512 levels below the piece's top, since each level holds
 one directory open. A deeper directory is not entered and makes the piece
 unreadable.

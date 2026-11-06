@@ -96,7 +96,9 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// `lstat`, and a directory is entered only while it stays on the device of
 /// the top directory and is no mount root. Files named in `junk` are left out; a directory
 /// with a junk name is walked like any other. An entry that is on the
-/// exclude list of `rules` is reported and, if a directory, not entered.
+/// exclude list of `rules` is reported and, if a directory, not entered. A
+/// directory named `.antiq` marks a collection of its own: the directory
+/// that holds it is reported, and the walk goes on.
 /// A directory more than [`MAX_DEPTH`] levels below the top is not entered
 /// and makes the piece unreadable.
 pub fn walk_piece(
@@ -124,6 +126,7 @@ pub(crate) fn walk_piece_with(
         entries: Vec::new(),
         mount_points: Vec::new(),
         excluded: Vec::new(),
+        nested_collections: Vec::new(),
         first_failure: None,
     };
     let root = RelPath::root();
@@ -181,6 +184,13 @@ pub(crate) fn walk_piece_with(
             .into_iter()
             .map(|path| Problem::Excluded { path }),
     );
+    walker.nested_collections.sort();
+    problems.extend(
+        walker
+            .nested_collections
+            .into_iter()
+            .map(|root| Problem::NestedCollection { root }),
+    );
     Ok(PieceTree::new(top.clone(), walker.entries, problems))
 }
 
@@ -201,6 +211,9 @@ struct Walker<'a> {
     entries: Vec<TreeEntry>,
     mount_points: Vec<RelPath>,
     excluded: Vec<RelPath>,
+    /// The directories that hold a `.antiq` directory, the marker of a
+    /// collection of its own.
+    nested_collections: Vec<RelPath>,
     /// The smallest path, in entry order, that could not be read.
     first_failure: Option<RelPath>,
 }
@@ -285,6 +298,9 @@ impl Walker<'_> {
             return Ok(());
         }
         entry.path = child.clone();
+        if entry.kind == EntryKind::Directory && listed.name.as_bytes() == b".antiq" {
+            self.nested_collections.push(level.at.clone());
+        }
 
         let foreign = self.hooks.device(&child, entry.device) != self.top_device
             || self.hooks.mount_root(&child, entry.mount_root);
@@ -658,6 +674,66 @@ mod tests {
             [Problem::MountPoint {
                 other: RelPath::root()
             }]
+        );
+    }
+
+    #[test]
+    fn a_collection_marker_inside_the_piece_is_reported_with_the_directory_holding_it() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/.antiq/config.toml", "x");
+        tree.file("piece/sub/f", "x");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::NestedCollection { root: path("sub") }]
+        );
+        assert!(
+            paths(&walked).contains(&"sub/.antiq/config.toml".to_string()),
+            "the walk goes on into the marker"
+        );
+    }
+
+    #[test]
+    fn a_collection_marker_at_the_top_of_the_piece_names_the_top() {
+        let mut tree = Tree::new();
+        tree.dir("piece/.antiq");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [Problem::NestedCollection {
+                root: RelPath::root()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_or_a_symlink_named_antiq_is_no_collection_marker() {
+        let mut tree = Tree::new();
+        tree.file("piece/a/.antiq", "x");
+        tree.symlink("piece/b/.antiq", tree.path("piece"));
+        tree.dir("piece/b");
+        let walked = walk(&tree, "piece");
+        assert_eq!(walked.problems(), []);
+    }
+
+    #[test]
+    fn nested_collections_come_last_in_path_order() {
+        let mut tree = Tree::new();
+        tree.dir("piece/z/.antiq");
+        tree.dir("piece/a/.antiq");
+        tree.file("piece/mnt/f", "x");
+        let hooks = Staged {
+            foreign: vec![path("mnt")],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::MountPoint { other: path("mnt") },
+                Problem::NestedCollection { root: path("a") },
+                Problem::NestedCollection { root: path("z") },
+            ]
         );
     }
 

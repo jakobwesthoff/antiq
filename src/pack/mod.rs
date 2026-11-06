@@ -702,6 +702,9 @@ mod pack_tests {
             Problem::Excluded {
                 path: RelPath::parse("skip").expect("valid"),
             },
+            Problem::NestedCollection {
+                root: RelPath::parse("inner").expect("valid"),
+            },
         ] {
             let flawed = PieceTree::new(top.clone(), entries.clone(), vec![problem.clone()]);
             let mut out = Vec::new();
