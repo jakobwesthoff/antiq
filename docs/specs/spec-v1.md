@@ -321,9 +321,12 @@ directory or any other entry of that name is not a pin: it refuses the
 piece (see "Control files and markers"), and `unpin` refuses to remove it.
 `pin` and `unpin` create and remove the file and refuse on a piece whose
 folder is not present. A piece that is in the state asked for is left as
-it is and reported as such. A pin and its removal are durable when `pin`
-and `unpin` return: the file and the entry in the piece's directory are
-flushed. The pin is checked before the idle and empty tests. (ADR 0024)
+it is and reported as such. `pin` writes the file the way every marker is
+written (see "Control files and markers"), and `unpin` gives a top without
+owner write that permission for the removal and its mode back right
+after. A pin and its removal are durable when `pin` and `unpin` return:
+the file and the entry in the piece's directory are flushed. The pin is
+checked before the idle and empty tests. (ADR 0024)
 
 ## Store layout
 

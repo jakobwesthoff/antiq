@@ -4,11 +4,6 @@
 
 //! The markers antiq writes into a collection.
 
-#![allow(
-    dead_code,
-    reason = "pin.rs uses the writes in the next step, unearth and fork (C6, C7) later"
-)]
-
 use crate::error::HasKind;
 use crate::filesystem::atomic::{Durable, RealDurable, flush_dir_of, named};
 use crate::filesystem::tree::TreeRoot;
