@@ -60,9 +60,20 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<bool
         }
     };
     store_pulled(ctx, files, report);
+    fetch_listings_and_index(ctx, report)?;
+    Ok(false)
+}
+
+/// Fetches the missing listings and brings the member cache up to date.
+/// A change recorded as committed stops hiding the newest version, so the
+/// commit phase runs this again for the archives that version names.
+pub(super) fn fetch_listings_and_index(
+    ctx: &SyncContext<'_>,
+    report: &mut SyncReport,
+) -> Result<(), SyncError> {
     fetch_listings(ctx, report)?;
     index::update(ctx.collection, ctx.lock)?;
-    Ok(false)
+    Ok(())
 }
 
 /// Stores the pulled versions. A version whose number is stored with other

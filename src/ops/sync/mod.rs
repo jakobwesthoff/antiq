@@ -391,6 +391,9 @@ fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncEr
         )?;
     } else {
         commit::run(ctx, report)?;
+        if !report.committed.is_empty() {
+            pull::fetch_listings_and_index(ctx, report)?;
+        }
     }
     cleanup(ctx, report)?;
     live::delete_committed(ctx)?;

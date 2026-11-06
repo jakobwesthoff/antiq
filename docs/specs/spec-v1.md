@@ -1569,6 +1569,11 @@ error of another kind always fails only its object. What happened before
 the end of a run stays: uploaded files, committed versions, promoted
 changes. A run that ends so does not write `last_sync`.
 
+When the commits recorded any change as committed, `sync` then fetches
+the listings the current metadata names again and updates the member
+index, as a recorded change hides the newest version until it is
+recorded as committed.
+
 After the commits, `sync` cleans the remote (see "Committing a version"), keeping the
 temp names of uploads that are still pending. A cleanup that fails for a
 reason other than the remote's being gone is a warning and makes the run

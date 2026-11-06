@@ -1093,6 +1093,60 @@ mod tests {
     }
 
     #[test]
+    fn the_archive_of_the_version_that_settles_a_change_is_listed_and_indexed_in_the_same_run() {
+        let (shared, anna, ben) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        // `ben`'s second archive of the object is the archive of another
+        // object, so that its listing exists.
+        let donor = ben.import_piece("other", "world");
+        let donor_dir = ben.collection.object_dir(donor);
+        let donor_meta = crate::meta::parse(
+            &fs::read(ben.collection.meta_pending_path(donor)).expect("pending"),
+        )
+        .expect("parses");
+        let mut archive = donor_meta.payloads[0].clone();
+        archive.version = 2;
+        let listing = archive.listing.clone().expect("an archive has a listing");
+
+        let remote = anna.remote();
+        remote.after(Op::RenameIntoPlace, 1, move |inner| {
+            use crate::remote::Remote;
+            inner.create_exclusive(id, "meta.2.claim").expect("a claim");
+        });
+        let first = anna.sync_with(&remote);
+        assert_eq!(first.skipped[0].reason, SkipReason::Contested);
+
+        let dir = shared.objects().join(id.to_string());
+        fs::remove_file(dir.join("meta.2.claim")).expect("released");
+        let mut document = crate::meta::parse(&built_on_pending(&anna, &ben, id)).expect("parses");
+        document.payloads.push(archive);
+        fs::write(
+            dir.join("meta.2"),
+            crate::meta::to_bytes(&document).expect("serialises"),
+        )
+        .expect("ben's version");
+        fs::copy(donor_dir.join(listing.as_str()), dir.join(listing.as_str())).expect("listing");
+
+        let again = anna.sync();
+
+        assert_eq!(again.committed, [CommittedVersion { id, version: 1 }]);
+        assert!(
+            anna.collection
+                .object_dir(id)
+                .join(listing.as_str())
+                .exists(),
+            "the listing of the newest archive is stored"
+        );
+        assert_eq!(again.listings, [id]);
+        let cache = fs::read(anna.collection.index_dir().join(format!("{id}.json")))
+            .expect("the member cache");
+        assert!(
+            String::from_utf8_lossy(&cache).contains(listing.as_str()),
+            "the cache names the new listing"
+        );
+    }
+
+    #[test]
     fn a_retry_that_finds_a_higher_version_naming_its_files_is_settled_after_a_pull() {
         let (shared, anna, _) = anna_and_ben();
         let id = anna.import_piece("notes", "hello");
