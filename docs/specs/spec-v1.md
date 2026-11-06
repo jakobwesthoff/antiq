@@ -955,7 +955,11 @@ checks it would make. (ADR 0061)
 
 - `<piece>` is a path, or a search word that matches exactly one piece
   (see "Piece references"); anything else is an error that lists the
-  candidates. Without `--version` the newest version is taken.
+  candidates. Without `--version` the newest version is taken. A folder of
+  the store that holds only versions without an archive is no piece to
+  unearth: the error is `unknown_reference` and says that the piece holds
+  only incomplete versions, which `forget` removes. A version named by
+  `--version` that has no archive is refused with the same hint.
 - A damaged version is refused, naming `fork` (which extracts it with a
   warning and keeps it), `rebuild` and copying the missing file back from
   the target.

@@ -65,6 +65,10 @@ pub enum RestoreError {
         stamp: String,
         reasons: Vec<String>,
     },
+    #[error(
+        "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
+    )]
+    OnlyIncomplete { reference: String, piece: String },
     #[error("version {stamp} of {piece} has a listing of a newer format than this antiq reads")]
     FormatTooNew { piece: String, stamp: String },
     #[error("version {stamp} of {piece} holds `{name}` at its top, and it is not a file")]
@@ -82,6 +86,7 @@ impl HasKind for RestoreError {
             RestoreError::Reference(error) => error.kind(),
             RestoreError::Listing(error) => error.kind(),
             RestoreError::FormatTooNew { .. } => ErrorKind::FormatTooNew,
+            RestoreError::OnlyIncomplete { .. } => ErrorKind::UnknownReference,
             _ => ErrorKind::Other,
         }
     }
@@ -120,12 +125,29 @@ pub(crate) fn choose_version(
     }
 
     let scan = store::scan(places.pieces_dir)?;
-    let piece = reference::resolve_piece(
+    let piece = match reference::resolve_piece(
         collection,
         cwd,
         given,
         &CandidateSet::store(collection, &scan),
-    )?;
+    ) {
+        Ok(piece) => piece,
+        Err(ReferenceError::Unknown { reference }) => {
+            // A folder that holds only sidecars is no piece to unearth, but
+            // the person who names it is told what to do with it.
+            let wider = CandidateSet::store_and_sidecar_only(collection, &scan);
+            return Err(
+                match reference::resolve_piece(collection, cwd, given, &wider) {
+                    Ok(piece) => RestoreError::OnlyIncomplete {
+                        reference,
+                        piece: piece.to_string(),
+                    },
+                    Err(_) => ReferenceError::Unknown { reference }.into(),
+                },
+            );
+        }
+        Err(other) => return Err(other.into()),
+    };
     let mut versions = scan
         .pieces
         .iter()
@@ -922,13 +944,36 @@ mod choice_tests {
     }
 
     #[test]
-    fn a_piece_with_only_an_incomplete_version_is_not_a_piece_of_the_store() {
+    fn a_piece_with_only_incomplete_versions_is_unknown_and_the_error_names_forget() {
         let mut world = World::new();
         world
             .add("projects/scanner", NEW)
             .remove(VersionFile::Archive);
-        let error = world.choose("scanner", None).expect_err("no archive");
-        assert_eq!(error.kind(), ErrorKind::UnknownReference);
+        for given in ["projects/scanner", "scanner"] {
+            let error = world.choose(given, None).expect_err("no archive");
+            assert!(
+                matches!(error, RestoreError::OnlyIncomplete { .. }),
+                "{given}: {error:?}"
+            );
+            assert_eq!(error.kind(), ErrorKind::UnknownReference);
+            assert!(error.to_string().contains("forget"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_word_that_matches_nothing_even_among_incomplete_pieces_stays_unknown() {
+        let mut world = World::new();
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Archive);
+        let error = world.choose("nothing-like-it", None).expect_err("unknown");
+        assert!(
+            matches!(
+                error,
+                RestoreError::Reference(ReferenceError::Unknown { .. })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
