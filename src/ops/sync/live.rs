@@ -625,9 +625,16 @@ impl Backup<'_> {
             encoder: Some(package.encoder.clone()),
             extra,
         });
-        // A recorded change that is already there carries its history
-        // entry.
-        if current.source != Source::Pending {
+        // The history entry says that this machine backed the piece up. A
+        // recorded change keeps the one it has, and takes it from no later
+        // package.
+        let first_new = base
+            .and_then(|base| current.metadata.history_added_over(base))
+            .unwrap_or(0);
+        let recorded = metadata.history[first_new..].iter().any(|entry| {
+            entry.machine == ctx.machine && entry.action == HistoryAction::Sync.as_str()
+        });
+        if !recorded {
             metadata.history.push(HistoryEntry::new(
                 ctx.clock.now(),
                 ctx.machine,
@@ -1723,6 +1730,54 @@ mod tests {
         refresh_under_lock(&anna, false, &again, &mut Default::default());
 
         assert_eq!(again.walks.get(), 0, "the piece is packed a second time");
+    }
+
+    fn history_of(machine: &Machine, id: ObjectId) -> Vec<String> {
+        machine
+            .store()
+            .current(id)
+            .expect("reads")
+            .expect("exists")
+            .metadata
+            .history
+            .iter()
+            .map(|entry| entry.action.as_str().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_package_made_into_a_recorded_change_adds_the_sync_entry() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        anna.record_history(id, HistoryAction::Unearth);
+        change(&folder, "a.txt", "hello again");
+
+        anna.sync();
+
+        assert_eq!(history_of(&anna, id), ["sync", "unearth", "sync"]);
+    }
+
+    #[test]
+    fn a_second_package_into_the_same_recorded_change_adds_no_second_sync_entry() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        anna.record_history(id, HistoryAction::Unearth);
+        change(&folder, "a.txt", "hello again");
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&remote);
+        assert_eq!(history_of(&anna, id), ["sync", "unearth", "sync"]);
+        change(&folder, "a.txt", "hello once more");
+
+        anna.sync();
+
+        assert_eq!(history_of(&anna, id), ["sync", "unearth", "sync"]);
     }
 
     #[test]
