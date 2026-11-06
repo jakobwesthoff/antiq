@@ -13,6 +13,7 @@
 
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
+use crate::filesystem::moves::{Moved, move_dir};
 use crate::filesystem::remove::remove_tree;
 use crate::filesystem::space::available_space;
 use crate::filesystem::tree::TreeRoot;
@@ -52,6 +53,17 @@ pub(crate) trait Seams: Send + Sync {
     /// What the walk of the trashed tree asks about the disk.
     fn walk_hooks(&self) -> &dyn Hooks {
         &RealFs
+    }
+
+    /// Moves the folder `from` of `from_root` to `to` in `to_root`.
+    fn move_dir(
+        &self,
+        from_root: &TreeRoot,
+        from: &RelPath,
+        to_root: &TreeRoot,
+        to: &RelPath,
+    ) -> Result<Moved, FilesystemError> {
+        move_dir(from_root, from, to_root, to)
     }
 
     /// Deletes the tree at `path` below `root`.

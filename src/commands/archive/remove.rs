@@ -18,7 +18,6 @@ use crate::collection::Collection;
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, create_dir_chain, flush_dir_of};
 use crate::filesystem::io_error;
-use crate::filesystem::moves::move_dir;
 use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
 use crate::repair::{Destination, give_back as repair_give_back};
@@ -166,8 +165,11 @@ fn remove(
     };
     let renamed = {
         let _guard = guard();
-        create_dir_chain(durable, &roots.trash, &places.above)
-            .and_then(|()| move_dir(&roots.collection, request.live, &roots.trash, &places.tree))
+        create_dir_chain(durable, &roots.trash, &places.above).and_then(|()| {
+            context
+                .seams
+                .move_dir(&roots.collection, request.live, &roots.trash, &places.tree)
+        })
     };
     match renamed {
         Ok(moved) => {
@@ -218,7 +220,11 @@ fn remove(
     let moved = {
         let _guard = guard();
         create_dir_chain(durable, &roots.doomed, &places.above)
-            .and_then(|()| move_dir(&roots.trash, &places.tree, &roots.doomed, &places.tree))
+            .and_then(|()| {
+                context
+                    .seams
+                    .move_dir(&roots.trash, &places.tree, &roots.doomed, &places.tree)
+            })
             .map(|moved| {
                 let flushed = flush_dir_of(durable, &roots.doomed, &places.above)
                     .and_then(|()| flush_dir_of(durable, &roots.trash, &places.above));
@@ -356,7 +362,9 @@ fn rewalk(
         .iter()
         .map(|path| RelPath::root().join(&places.stamp).concat(path))
         .collect();
-    let select = match Rules::new(&[], &exclude).and_then(|rules| rules.bind(&roots.trash)) {
+    let select = match Rules::new(&[], &exclude)
+        .and_then(|rules| rules.bind_with(&roots.trash, context.seams.walk_hooks()))
+    {
         Ok(select) => select,
         Err(error) => return Some(error.to_string()),
     };
@@ -494,12 +502,14 @@ mod tests {
     use crate::filesystem::atomic::recording::Recording;
     use crate::filesystem::atomic::{Durable, RealDurable};
     use crate::filesystem::io_error;
+    use crate::filesystem::moves::Moved;
     use crate::filesystem::space::SpaceLedger;
     use crate::filesystem::tree::TreeRoot;
     use crate::select::Rules;
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
     use crate::tree::{Class, EntryKind, TreeEntry};
+    use crate::versions::names::VersionFile;
     use crate::walk::{Call, Hooks, walk_piece};
     use std::fs;
     use std::io;
@@ -521,6 +531,11 @@ mod tests {
         after_trash_rename: Option<Change>,
         mount_at: Option<RelPath>,
         failing_delete: bool,
+        /// Every move reports that the mode could not be restored.
+        restore_fails: bool,
+        /// Every `lstat` of the walk and of the exclude list runs out of
+        /// descriptors.
+        out_of_descriptors: bool,
     }
 
     impl Hooks for Probe {
@@ -528,8 +543,9 @@ mod tests {
             self.mount_at.as_ref() == Some(path) || reported
         }
 
-        fn fault(&self, _path: &RelPath, _call: Call) -> Option<io::Error> {
-            None
+        fn fault(&self, _path: &RelPath, call: Call) -> Option<io::Error> {
+            (self.out_of_descriptors && call == Call::Stat)
+                .then(|| io::Error::from_raw_os_error(libc::EMFILE))
         }
     }
 
@@ -549,6 +565,25 @@ mod tests {
 
         fn walk_hooks(&self) -> &dyn Hooks {
             self
+        }
+
+        fn move_dir(
+            &self,
+            from_root: &TreeRoot,
+            from: &RelPath,
+            to_root: &TreeRoot,
+            to: &RelPath,
+        ) -> Result<Moved, FilesystemError> {
+            let moved = RealSeams.move_dir(from_root, from, to_root, to)?;
+            if self.restore_fails {
+                let source = io::Error::from_raw_os_error(libc::EPERM);
+                return Ok(Moved {
+                    mode_restore_error: Some(io_error("restore the mode of", Path::new("moved"))(
+                        source,
+                    )),
+                });
+            }
+            Ok(moved)
         }
 
         fn remove(&self, root: &TreeRoot, path: &RelPath) -> Result<(), FilesystemError> {
@@ -953,19 +988,296 @@ mod tests {
             assert!(
                 matches!(first.outcome, Outcome::Removed),
                 "{:?}",
-                describe(&first)
+                describe_removal(&first)
             );
             assert!(
                 matches!(second.outcome, Outcome::Removed),
                 "{:?}",
-                describe(&second)
+                describe_removal(&second)
             );
             assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
             assert_eq!(entries(&antiq(&world, "doomed")), Vec::<String>::new());
         }
     }
 
-    fn describe(removal: &Removal) -> String {
+    fn warning_texts(removal: &Removal) -> Vec<&str> {
+        removal
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect()
+    }
+
+    fn failing_dir_flush(at: usize) -> Probe {
+        let recording = Recording::new();
+        recording.fail_dirs_at(at);
+        Probe {
+            recording: Some(recording),
+            ..Probe::default()
+        }
+    }
+
+    // The directory flushes of a removal of `piece`, in order: 0 and 1
+    // create `trash/<stamp>`, 2 is the collection after the rename into
+    // `trash/`, 3 is `trash/<stamp>`, 4 and 5 create `doomed/<stamp>`, 6 is
+    // `doomed/<stamp>` after the move, 7 is `trash/<stamp>`, 8 removes the
+    // empty `trash/<stamp>`, 9 is `doomed/<stamp>` after the deletion.
+    const FLUSH_AFTER_TRASH_RENAME: usize = 2;
+    const FLUSH_AFTER_DOOMED_MOVE: usize = 6;
+    const FLUSH_AFTER_DELETE: usize = 9;
+
+    #[test]
+    fn a_flush_that_fails_after_the_rename_into_trash_is_a_warning() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = failing_dir_flush(FLUSH_AFTER_TRASH_RENAME);
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        assert!(matches!(removal.outcome, Outcome::Removed));
+        let texts = warning_texts(&removal);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].starts_with("piece: the move into trash/ cannot be flushed"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_flush_that_fails_after_the_move_to_doomed_keeps_the_tree_there() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = failing_dir_flush(FLUSH_AFTER_DOOMED_MOVE);
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        let error = expect_kept(&removal);
+        assert_eq!(
+            error.to_string(),
+            format!("cannot move piece into doomed/{}", stored.stamp)
+        );
+        let doomed = antiq(&world, "doomed")
+            .join(stored.stamp.to_string())
+            .join("piece/a.txt");
+        assert!(doomed.exists(), "repair 3 deletes it on the next run");
+        assert!(!world.temp.root().join("piece").exists());
+    }
+
+    #[test]
+    fn a_flush_that_fails_after_the_deletion_is_a_warning() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = failing_dir_flush(FLUSH_AFTER_DELETE);
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        assert!(matches!(removal.outcome, Outcome::Removed));
+        let texts = warning_texts(&removal);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].starts_with("piece: the deletion cannot be flushed"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_mode_that_cannot_be_restored_is_a_warning_for_each_move() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = Probe {
+            restore_fails: true,
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        assert!(matches!(removal.outcome, Outcome::Removed));
+        let texts = warning_texts(&removal);
+        assert_eq!(texts.len(), 2, "into trash/ and into doomed/: {texts:?}");
+        assert!(
+            texts.iter().all(|text| text.starts_with(
+                "piece: cannot restore the mode of the moved tree: cannot restore the mode of moved"
+            )),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_go_back_stays_in_trash_for_repair_4() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let root = world.temp.root().to_path_buf();
+        let seams = tree_changes(move |tree| {
+            fs::write(tree.join("a.txt"), "changed later").expect("the file is written");
+            // The path is taken, and `recovered/` cannot be made.
+            fs::create_dir(root.join("piece")).expect("the path is taken");
+            let recovered = root.join(".antiq/recovered");
+            fs::remove_dir_all(&recovered).ok();
+            fs::write(&recovered, "in the way").expect("recovered/ is a file");
+        });
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        let error = expect_kept(&removal);
+        let text = error.to_string();
+        assert!(
+            text.starts_with(&format!(
+                "cannot give piece back from trash/{} after it changed (`a.txt` changed)",
+                stored.stamp
+            )),
+            "{text}"
+        );
+        let trashed = antiq(&world, "trash")
+            .join(stored.stamp.to_string())
+            .join("piece/a.txt");
+        assert!(trashed.exists(), "the tree stays in trash/");
+        assert_eq!(store_files(&world).len(), 3, "the version stays");
+    }
+
+    #[test]
+    fn a_missing_doomed_folder_takes_the_version_back_and_leaves_the_folder() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        fs::remove_dir(antiq(&world, "doomed")).expect("doomed/ is empty");
+
+        let removal = remove(&world, "piece", &stored, &RealSeams, &[]);
+
+        let error = expect_kept(&removal);
+        assert_eq!(
+            error.to_string(),
+            format!("cannot move piece into trash/{}", stored.stamp)
+        );
+        assert!(world.temp.root().join("piece/a.txt").exists());
+        assert_eq!(store_files(&world), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_walk_that_runs_out_of_descriptors_sends_the_folder_back() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = Probe {
+            out_of_descriptors: true,
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        let (destination, reason) = expect_differs(&removal);
+        assert_eq!(destination, Destination::Live);
+        assert!(reason.contains("descriptors"), "{reason}");
+        assert!(world.temp.root().join("piece/a.txt").exists());
+    }
+
+    #[test]
+    fn an_exclude_list_that_runs_out_of_descriptors_sends_the_folder_back() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let seams = Probe {
+            out_of_descriptors: true,
+            ..Probe::default()
+        };
+
+        let removal = remove(
+            &world,
+            "piece",
+            &stored,
+            &seams,
+            &[path("piece/secret.txt")],
+        );
+
+        let (destination, reason) = expect_differs(&removal);
+        assert_eq!(destination, Destination::Live);
+        assert!(reason.contains("piece/secret.txt"), "{reason}");
+        assert!(world.temp.root().join("piece/a.txt").exists());
+    }
+
+    #[test]
+    fn the_rollback_puts_the_files_back_archive_first_and_listing_last() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let target = antiq(&world, "trash")
+            .join(stored.stamp.to_string())
+            .join("piece/blocker");
+        fs::create_dir_all(&target).expect("the target is made");
+        let seams = Probe {
+            recording: Some(Recording::new()),
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        expect_kept(&removal);
+        let moved: Vec<String> = seams
+            .recording
+            .as_ref()
+            .expect("recorded")
+            .flushes()
+            .into_iter()
+            .filter_map(|flush| match flush {
+                crate::filesystem::atomic::recording::Flush::File(file) => Some(
+                    file.file_name()
+                        .expect("a file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                crate::filesystem::atomic::recording::Flush::Dir(_) => None,
+            })
+            .collect();
+        let names = &stored.names;
+        assert_eq!(
+            moved,
+            [
+                names.of(VersionFile::Archive),
+                names.of(VersionFile::Checksum),
+                names.of(VersionFile::Listing),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_names_every_problem_of_a_trashed_tree() {
+        let cases = [
+            (
+                Problem::Unreadable { first: path("a") },
+                "`a` cannot be read",
+            ),
+            (
+                Problem::MountPoint { other: path("m") },
+                "another filesystem is mounted at `m`",
+            ),
+            (
+                Problem::Excluded { path: path("x") },
+                "`x` is on the exclude list",
+            ),
+            (
+                Problem::NestedCollection { root: path("n") },
+                "`n` is a collection of its own",
+            ),
+            (Problem::Locked { path: path("l") }, "`l` is locked"),
+            (
+                Problem::LockedParent { path: path("p") },
+                "the folder above it is locked",
+            ),
+            (
+                Problem::RuleFile {
+                    path: path("r/.antiqignore"),
+                    line: Some(2),
+                },
+                "the rule file `r/.antiqignore` cannot be used",
+            ),
+            (
+                Problem::MarkerNotAFile {
+                    name: Name::from_bytes(b".antiq-pin".to_vec()).expect("a name"),
+                },
+                "`.antiq-pin` is not a file",
+            ),
+        ];
+        for (problem, text) in cases {
+            assert_eq!(describe(&problem), text);
+        }
+    }
+
+    fn describe_removal(removal: &Removal) -> String {
         match &removal.outcome {
             Outcome::Removed => "removed".into(),
             Outcome::Differs { reason, .. } => reason.clone(),
