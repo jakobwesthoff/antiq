@@ -989,6 +989,7 @@ mod tests {
     /// stands in for ssh, records the arguments rsync gives it and fails the
     /// connection.
     #[test]
+    #[ignore = "needs rsync 3.1 or later at /opt/homebrew/bin/rsync"]
     fn rsh_round_trips_through_real_rsync() {
         let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
             panic!("the round trip needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
@@ -1275,6 +1276,7 @@ total size is 2568  speedup is 0.96\n";
     /// A copy on this machine with the real rsync: the flags are accepted
     /// and the stats come out in the form the parser reads.
     #[test]
+    #[ignore = "needs rsync 3.1 or later at /opt/homebrew/bin/rsync"]
     fn real_rsync_copies_a_file_and_reports_its_stats() {
         let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
             panic!("this test needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
