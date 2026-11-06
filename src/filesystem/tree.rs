@@ -114,6 +114,11 @@ impl TreeRoot {
     /// directory), not something found inside a piece.
     pub fn open(path: &Path) -> io::Result<TreeRoot> {
         let fd = open(path, ROOT, Mode::empty())?;
+        // `O_PATH` opens a directory the user may not search, while macOS's
+        // `O_SEARCH` refuses it. Checking here makes both fail at the open,
+        // so that no later lookup in the root fails with a different error.
+        #[cfg(target_os = "linux")]
+        accessat(&fd, ".", Access::EXEC_OK, AtFlags::EACCESS)?;
         Ok(TreeRoot {
             fd,
             prefix: RelPath::root(),

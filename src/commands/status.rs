@@ -1130,7 +1130,11 @@ mod tests {
     fn a_directory_inside_a_leftover_that_cannot_be_read_is_a_warning_and_the_rest_is_named() {
         let temp = world("");
         leftover(&temp, "doomed/2026-11-04T090211/notes/f");
-        let locked = antiq(&temp, "doomed/2026-11-04T090211/notes/locked");
+        // A sibling of `notes`, not a directory inside it: the walk names
+        // `notes` as a tree at its first file and does not read below it, so
+        // a locked directory in `notes` is read or skipped by the order the
+        // filesystem lists `f` and `locked` in.
+        let locked = antiq(&temp, "doomed/2026-11-04T090211/locked");
         fs::create_dir(&locked).expect("the directory is made");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("the mode is set");
         let locked_out = fs::read_dir(&locked).is_err();
@@ -1143,7 +1147,7 @@ mod tests {
         assert!(
             found.warnings[0]
                 .message
-                .starts_with("cannot read doomed/2026-11-04T090211/notes/locked: "),
+                .starts_with("cannot read doomed/2026-11-04T090211/locked: "),
             "{}",
             found.warnings[0].message
         );
