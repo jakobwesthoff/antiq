@@ -924,7 +924,7 @@ Further closings, decided by the lead (O20, 8.4):
 
 - 01M6JY923GSB0SSZEGJS3882BQ (question the v1 scope): every point is
   decided in the concept; D0 closes it.
-- 01M6JV59PAVVWYAMB9PTRV9KG0 (forget command): the concept's `forget`
+- the multi-machine forget todo, closed in C8 (forget command): the concept's `forget`
   replaces it; C8 closes it.
 - The status lookup todo (closed in C1): the code it names
   goes in R1; the rule moves into section 4.10; C1 closes it.
@@ -1467,7 +1467,7 @@ neighbouring-hunk conflicts.
   --force` removes all, incomplete ones included, naming each;
   `--all-versions` alone is a usage error (S1); `-n` names files and
   changes nothing; the held-lock cases of 7.1.
-- Todos: closes 01M6JV59PAVVWYAMB9PTRV9KG0 (O20).
+- Todos: closes the multi-machine forget todo, closed in C8 (O20).
 - Risk: medium. Opus review: no.
 
 #### C9 rebuild
@@ -1915,6 +1915,16 @@ Depth chosen by the user (asqr 01M6KYYV6Q0PYXD0KKD2EV13Z0, 2026-11-04):
 - status, medium plus future times: every state in the table, a damaged
   version as a note, nothing written below `.antiq/`; plus a file with a
   time in the future (pinned joins once `pin` exists).
+
+Depth of the other scenarios (asqr 01M6M06PAR8A9YSNDNQ4RDAXT7,
+2026-11-04): deep for archive everything due (with hard links,
+symlinks, an awkward name, the unpacked archive equal to the original
+byte for byte), unearthed and archived again (changes made after
+unearthing land in the new version, the old one is gone), unearth by
+name (hard links, symlinks, modes and times kept) and unearth a given
+version (with the repeated hour of daylight saving time); push medium
+plus a folder whose name changes only in case (no `push -n` case); every
+other scenario medium as offered.
 
 Work: item E0 built the harness (main 0693f5b, `tests/support/scenario/`,
 how to write a scenario is in its module documentation; scenarios go to
