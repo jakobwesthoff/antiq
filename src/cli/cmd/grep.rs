@@ -189,7 +189,7 @@ fn render_terminal(
             // A column that is cut loses its highlight: the match may be
             // what was cut away.
             let (text, width) = if row.plain.width() > left {
-                let cut = mid(&row.plain, left);
+                let cut = mid(&row.plain, left, style.symbols().ellipsis);
                 let width = cut.width();
                 (cut, width)
             } else {
@@ -203,7 +203,7 @@ fn render_terminal(
         })
         .collect();
     lines.push(String::new());
-    lines.push(summary(found));
+    lines.push(summary(found, style));
     lines
 }
 
@@ -305,7 +305,7 @@ fn file_row(
 
 /// The line under the groups: how much was found, and how to bring it
 /// back.
-fn summary(found: &GrepReport) -> String {
+fn summary(found: &GrepReport, style: Style) -> String {
     let files: usize = found.pieces.iter().map(|hits| hits.files.len()).sum();
     let in_pieces = found.pieces.iter().filter(|hits| !hits.name_match).count();
     let names = found.pieces.len() - in_pieces;
@@ -324,8 +324,9 @@ fn summary(found: &GrepReport) -> String {
         ));
     }
     format!(
-        "{} · antiq unearth <piece> [--version <version>]",
-        counts.join(", ")
+        "{} {} antiq unearth <piece> [--version <version>]",
+        counts.join(", "),
+        style.symbols().separator
     )
 }
 
@@ -548,6 +549,7 @@ mod tests {
             width,
             color,
             terminal: true,
+            utf8: true,
         }
     }
 
@@ -804,6 +806,7 @@ mod tests {
             false,
             Style {
                 terminal: false,
+                utf8: true,
                 ..style(80, false)
             },
         );

@@ -211,6 +211,7 @@ mod tests {
         width: 80,
         color: false,
         terminal: false,
+        utf8: true,
     };
 
     fn report(skipped: Option<SkippedNote>) -> ForkReport {

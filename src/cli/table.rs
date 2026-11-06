@@ -114,16 +114,17 @@ pub(crate) fn sanitize(text: &str) -> String {
     shown
 }
 
-/// Cuts `text` to `width` columns by replacing its middle with `…`,
-/// keeping the start and the end. A text that fits stays as it is.
-pub(crate) fn mid(text: &str, width: usize) -> String {
+/// Cuts `text` to `width` columns by replacing its middle with
+/// `ellipsis`, keeping the start and the end. A text that fits stays as it
+/// is; a width too small for the ellipsis gets as much of it as fits.
+pub(crate) fn mid(text: &str, width: usize, ellipsis: &str) -> String {
     if text.width() <= width {
         return text.to_string();
     }
-    if width == 0 {
-        return String::new();
+    if width <= ellipsis.width() {
+        return ellipsis.chars().take(width).collect();
     }
-    let keep = width - 1;
+    let keep = width - ellipsis.width();
     let head = (keep / 2 + 2).min(keep);
     let tail = keep - head;
     let mut start = String::new();
@@ -147,7 +148,7 @@ pub(crate) fn mid(text: &str, width: usize) -> String {
         used += columns;
     }
     end.reverse();
-    format!("{start}…{}", end.into_iter().collect::<String>())
+    format!("{start}{ellipsis}{}", end.into_iter().collect::<String>())
 }
 
 /// Breaks `text` into lines of at most `width` columns at spaces; a word
@@ -201,28 +202,36 @@ pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::console::env::Env;
 
     fn colored() -> Style {
-        Style::for_terminal(Some(80), false, true)
+        Style::from_env(&Env::new(true, true, true, 80))
     }
 
     fn plain() -> Style {
-        Style::for_terminal(Some(80), true, true)
+        Style::from_env(&Env::new(true, false, true, 80))
     }
 
     #[test]
     fn mid_keeps_the_start_and_the_end() {
-        assert_eq!(mid("abcdefghij", 10), "abcdefghij");
-        assert_eq!(mid("abcdefghijklmnop", 10), "abcdef…nop");
-        assert_eq!(mid("abcdefghijklmnop", 8).chars().count(), 8);
+        assert_eq!(mid("abcdefghij", 10, "…"), "abcdefghij");
+        assert_eq!(mid("abcdefghijklmnop", 10, "…"), "abcdef…nop");
+        assert_eq!(mid("abcdefghijklmnop", 8, "…").chars().count(), 8);
+        assert_eq!(mid("abcdefghijklmnop", 10, "..."), "abcde...op");
+    }
+
+    #[test]
+    fn mid_with_dots_stays_within_the_width() {
+        assert_eq!(mid("abcdefghijklmnop", 10, "...").width(), 10);
+        assert_eq!(mid("abcdef", 2, "..."), "..");
     }
 
     #[test]
     fn mid_is_total_for_every_width() {
-        assert_eq!(mid("abcdef", 0), "");
-        assert_eq!(mid("abcdef", 1), "…");
+        assert_eq!(mid("abcdef", 0, "…"), "");
+        assert_eq!(mid("abcdef", 1, "…"), "…");
         for width in 0..6 {
-            let cut = mid("abcdefghij", width);
+            let cut = mid("abcdefghij", width, "…");
             assert!(cut.width() <= width, "{width}: {cut}");
         }
     }

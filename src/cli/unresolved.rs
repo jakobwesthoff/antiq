@@ -148,6 +148,7 @@ fn build(
         width: env.width,
         color: env.color,
         terminal: true,
+        utf8: true,
     };
     let mut parts = Vec::new();
     let mut hint = None;
@@ -442,7 +443,7 @@ fn count_table(pieces: &[(String, usize, Vec<usize>)], style: Style) -> Vec<Stri
         &[],
     )];
     for ((_, count, matched), name) in pieces.iter().zip(&names) {
-        let shown = mid(name, piece_width);
+        let shown = mid(name, piece_width, style.symbols().ellipsis);
         let matched = if shown == *name {
             matched.as_slice()
         } else {
@@ -792,6 +793,7 @@ mod tests {
             width: 40,
             color: false,
             terminal: true,
+            utf8: true,
         };
         let lines = count_table(&pieces, narrow);
         assert_eq!(lines[0], format!("PIECE{}VERSIONS", " ".repeat(27)));
@@ -806,6 +808,7 @@ mod tests {
             width: 80,
             color: true,
             terminal: true,
+            utf8: true,
         };
         let lines = count_table(&[("projects/scanner".into(), 2, Vec::new())], coloured);
         assert_eq!(lines[0], "\x1b[2mPIECE              VERSIONS\x1b[0m");
@@ -837,6 +840,7 @@ mod tests {
             width: 80,
             color: false,
             terminal: true,
+            utf8: true,
         };
         let lines = piece_table(
             &pieces,
@@ -891,6 +895,7 @@ mod tests {
             width: WIDE_FROM,
             color: false,
             terminal: true,
+            utf8: true,
         };
         let lines = count_table(&[(long.clone(), 3, Vec::new())], wide);
         assert!(lines[1].starts_with(&long), "{:?}", lines[1]);
@@ -903,6 +908,7 @@ mod tests {
             width: 100,
             color: true,
             terminal: true,
+            utf8: true,
         };
         let env = Env::new(true, true, true, 100);
         let lines = version_table(

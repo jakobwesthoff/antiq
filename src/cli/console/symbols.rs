@@ -22,6 +22,10 @@ pub struct Symbols {
     /// The line down the left side of text that is quoted, such as a file
     /// a dry run would write.
     pub frame: &'static str,
+    /// Stands for the middle of a text that was cut to fit a column.
+    pub ellipsis: &'static str,
+    /// Joins the parts of a one-line summary.
+    pub separator: &'static str,
 }
 
 const UNICODE: Symbols = Symbols {
@@ -35,6 +39,8 @@ const UNICODE: Symbols = Symbols {
     matched: "▸",
     rule: "─",
     frame: "│",
+    ellipsis: "…",
+    separator: "·",
 };
 
 const ASCII: Symbols = Symbols {
@@ -48,10 +54,16 @@ const ASCII: Symbols = Symbols {
     matched: ">",
     rule: "-",
     frame: "|",
+    ellipsis: "...",
+    separator: "-",
 };
 
 impl Symbols {
     pub fn for_env(env: &Env) -> Symbols {
-        if env.utf8 { UNICODE } else { ASCII }
+        Symbols::for_utf8(env.utf8)
+    }
+
+    pub fn for_utf8(utf8: bool) -> Symbols {
+        if utf8 { UNICODE } else { ASCII }
     }
 }

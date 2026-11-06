@@ -89,7 +89,7 @@ const MIN_PIECE: usize = 24;
 const MIN_WHAT: usize = 24;
 
 fn render(report: &StatusReport, style: Style, zone: &TimeZone, now: Timestamp) -> Rendered {
-    let mut stdout = vec![header(report)];
+    let mut stdout = vec![header(report, style)];
     let rows = rows_of(report);
     if !rows.is_empty() {
         stdout.push(String::new());
@@ -136,7 +136,7 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-fn header(report: &StatusReport) -> String {
+fn header(report: &StatusReport, style: Style) -> String {
     let mut parts = vec![plural(report.folders, "folder", "folders")];
     if let Some(versions) = report.versions {
         let size = decimal_size(report.archive_bytes.unwrap_or(0));
@@ -149,7 +149,7 @@ fn header(report: &StatusReport) -> String {
         "archive after {} idle",
         plural(report.idle_days as usize, "day", "days")
     ));
-    parts.join(" · ")
+    parts.join(&format!(" {} ", style.symbols().separator))
 }
 
 /// A piece that has a state, as the table and the JSON list it.
@@ -242,7 +242,7 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         let shown = if wide {
             name.clone()
         } else {
-            mid(name, piece_width)
+            mid(name, piece_width, style.symbols().ellipsis)
         };
         let prefix = format!(
             "{}{}{}{}{}{}",
@@ -716,6 +716,7 @@ mod tests {
             width: 120,
             color: false,
             terminal: false,
+            utf8: true,
         }
     }
 
@@ -724,6 +725,7 @@ mod tests {
             width: 80,
             color: false,
             terminal: false,
+            utf8: true,
         }
     }
 
@@ -836,7 +838,7 @@ mod tests {
         let narrow_shown = render(&report, narrow(), &TimeZone::UTC, now());
         let wide_shown = render(&report, wide(), &TimeZone::UTC, now());
 
-        let cut = crate::cli::table::mid(long, 39);
+        let cut = crate::cli::table::mid(long, 39, "…");
         assert_eq!(
             lines(&narrow_shown)[3],
             format!("due      {cut}   33d  archives next run")

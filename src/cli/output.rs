@@ -14,6 +14,7 @@ use crate::cli::console::dryrun;
 use crate::cli::console::env::Env;
 use crate::cli::console::render::{Part, render_blocks, render_parts};
 use crate::cli::console::rich::Rich;
+use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::Notice;
 use antiq::error::ErrorKind;
 use serde::Serialize;
@@ -88,8 +89,6 @@ struct ErrorBody<'a> {
 }
 
 /// The width a console is laid out for when nothing says otherwise.
-const DEFAULT_WIDTH: usize = 80;
-
 /// How data on stdout is laid out and coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
@@ -99,40 +98,26 @@ pub struct Style {
     /// terminal and a pipe asks this, not `color`, which `NO_COLOR` turns
     /// off on a terminal too.
     pub terminal: bool,
+    /// Whether `…` and `·` may be written.
+    pub utf8: bool,
 }
 
 impl Style {
-    /// The style for a stream. `columns` is what the terminal reports, if
-    /// the stream is one. Without a terminal the width is 80 and nothing
-    /// is coloured; a terminal that reports no columns gets width 80. A
-    /// non-empty `NO_COLOR` turns colour off (`no_color`).
-    pub fn for_terminal(columns: Option<u16>, no_color: bool, is_tty: bool) -> Style {
-        if !is_tty {
-            return Style {
-                width: DEFAULT_WIDTH,
-                color: false,
-                terminal: false,
-            };
-        }
+    /// The style of a stream whose environment is `env`. Tables take
+    /// their colour from the same detection as blocks, so `NO_COLOR`,
+    /// `CLICOLOR=0` and a `TERM` that cannot show colour switch both off.
+    pub fn from_env(env: &Env) -> Style {
         Style {
-            width: columns
-                .filter(|columns| *columns > 0)
-                .map_or(DEFAULT_WIDTH, usize::from),
-            color: !no_color,
-            terminal: true,
+            width: env.width,
+            color: env.color,
+            terminal: env.rich,
+            utf8: env.utf8,
         }
     }
 
-    /// The style of `stream`, asking the environment for `NO_COLOR`.
-    pub fn of(stream: impl AsFd) -> Style {
-        let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-        let is_tty = rustix::termios::isatty(&stream);
-        let columns = if is_tty {
-            terminal_columns(&stream)
-        } else {
-            None
-        };
-        Style::for_terminal(columns, no_color, is_tty)
+    /// The glyphs this style may write.
+    pub fn symbols(&self) -> Symbols {
+        Symbols::for_utf8(self.utf8)
     }
 }
 
@@ -153,23 +138,19 @@ pub struct Output {
 }
 
 impl Output {
-    /// The process's own stdout and stderr. Colour is used when stderr is
-    /// a terminal and `NO_COLOR` is not set.
+    /// The process's own stdout and stderr, each laid out for what it is.
     pub fn stdio() -> Output {
+        let stdout = Env::detect(&io::stdout());
         Output::new(Box::new(io::stdout()), Box::new(io::stderr()))
-            .with_stdout_style(Style::of(io::stdout()))
-            .with_envs(Env::detect(&io::stdout()), Env::detect(&io::stderr()))
+            .with_stdout_style(Style::from_env(&stdout))
+            .with_envs(stdout, Env::detect(&io::stderr()))
     }
 
     pub fn new(stdout: Box<dyn Write + Send>, stderr: Box<dyn Write + Send>) -> Output {
         Output {
             stdout: Sink::new(stdout),
             stderr: Sink::new(stderr),
-            stdout_style: Style {
-                width: DEFAULT_WIDTH,
-                color: false,
-                terminal: false,
-            },
+            stdout_style: Style::from_env(&Env::pipe()),
             stdout_env: Env::pipe(),
             stderr_env: Env::pipe(),
         }
@@ -815,61 +796,45 @@ mod tests {
     }
 
     #[test]
-    fn without_a_terminal_the_width_is_80_and_nothing_is_coloured() {
+    fn a_style_takes_everything_from_the_environment() {
         assert_eq!(
-            Style::for_terminal(None, false, false),
-            Style {
-                width: 80,
-                color: false,
-                terminal: false
-            }
-        );
-        // A size reported for a stream that is no terminal does not count.
-        assert_eq!(
-            Style::for_terminal(Some(200), false, false),
-            Style {
-                width: 80,
-                color: false,
-                terminal: false
-            }
-        );
-    }
-
-    #[test]
-    fn a_terminal_gets_its_width_and_colour() {
-        assert_eq!(
-            Style::for_terminal(Some(120), false, true),
+            Style::from_env(&Env::new(true, true, true, 120)),
             Style {
                 width: 120,
                 color: true,
-                terminal: true
+                terminal: true,
+                utf8: true
             }
         );
-    }
-
-    #[test]
-    fn a_terminal_that_reports_no_columns_gets_80() {
         assert_eq!(
-            Style::for_terminal(Some(0), false, true),
-            Style {
-                width: 80,
-                color: true,
-                terminal: true
-            }
-        );
-        assert_eq!(Style::for_terminal(None, false, true).width, 80);
-    }
-
-    #[test]
-    fn no_color_turns_colour_off_on_a_terminal() {
-        assert_eq!(
-            Style::for_terminal(Some(100), true, true),
+            Style::from_env(&Env::new(true, false, false, 100)),
             Style {
                 width: 100,
                 color: false,
-                terminal: true
+                terminal: true,
+                utf8: false
             }
         );
+    }
+
+    #[test]
+    fn a_pipe_is_80_columns_without_colour() {
+        assert_eq!(
+            Style::from_env(&Env::pipe()),
+            Style {
+                width: 80,
+                color: false,
+                terminal: false,
+                utf8: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_style_without_utf8_has_the_ascii_symbols() {
+        let ascii = Style::from_env(&Env::new(true, true, false, 80));
+        assert_eq!(ascii.symbols().ellipsis, "...");
+        assert_eq!(ascii.symbols().separator, "-");
     }
 
     /// A pseudo terminal whose window has `columns` columns.
@@ -907,8 +872,6 @@ mod tests {
     fn a_terminal_reports_the_columns_of_its_window() {
         let pty = pty(132);
         assert_eq!(terminal_columns(&pty.slave), Some(132));
-        let style = Style::of(&pty.slave);
-        assert_eq!(style.width, 132);
         drop(pty.master);
     }
 
@@ -916,7 +879,6 @@ mod tests {
     fn a_window_of_zero_columns_is_unknown() {
         let pty = pty(0);
         assert_eq!(terminal_columns(&pty.slave), None);
-        assert_eq!(Style::of(&pty.slave).width, 80);
         drop(pty.master);
     }
 
@@ -924,14 +886,6 @@ mod tests {
     fn a_pipe_and_dev_null_are_no_terminal() {
         let (reader, _writer) = io::pipe().expect("a pipe can be made");
         assert_eq!(terminal_columns(&reader), None);
-        assert_eq!(
-            Style::of(&reader),
-            Style {
-                width: 80,
-                color: false,
-                terminal: false
-            }
-        );
         let null = std::fs::File::open("/dev/null").expect("/dev/null opens");
         assert_eq!(terminal_columns(&null), None);
     }
@@ -943,6 +897,7 @@ mod tests {
             width: 120,
             color: true,
             terminal: true,
+            utf8: true,
         };
         let out = capture.output().with_stdout_style(style);
         assert_eq!(out.stdout_style(), style);

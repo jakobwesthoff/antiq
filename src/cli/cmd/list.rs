@@ -275,7 +275,7 @@ pub(in crate::cli) fn table(
         };
         // Positions in the piece refer to the whole name, so a name cut
         // short has none to mark.
-        let shown_piece = mid(&pieces[index], piece_width);
+        let shown_piece = mid(&pieces[index], piece_width, style.symbols().ellipsis);
         let piece_matched = look
             .filter(|_| shown_piece == pieces[index])
             .map_or(&[][..], |look| look.piece_matched.as_slice());
@@ -333,11 +333,13 @@ mod tests {
         width: 80,
         color: false,
         terminal: true,
+        utf8: true,
     };
     const PIPE: Style = Style {
         width: 80,
         color: false,
         terminal: false,
+        utf8: true,
     };
 
     fn row(piece: &str, stamp: &str, state: State, sizes: Option<(u64, u64, u64)>) -> Row {
