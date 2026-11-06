@@ -495,7 +495,7 @@ read or has a higher `format`.
 |---------|---------|
 | `archive` | lifecycle `archived`, a new archive payload, history |
 | reclaiming | lifecycle `archived`, live payload removed, history |
-| `unearth` | lifecycle `live`, owning collection, history |
+| `unearth` | lifecycle `live`, owning collection, path and name (the target), history |
 | `fork` | old ID: lifecycle `archived`, live payload removed; new ID created |
 | `sync` | live payload replaced, `verified` times, history |
 | `import` | new ID with its archive payload |
@@ -1195,14 +1195,21 @@ deleted through the trash and the time of the check is recorded.
 archive of an archived ID, or the archive with payload version `n`. When
 the remote is reachable it first pulls the ID's metadata and says when
 the remote has a newer version; with the remote away it proceeds from
-local data and warns. It fetches the archive into `.antiq/tmp/`, checks
-its checksum, extracts it into the staging directory, verifies the
-staged tree strictly, writes a tracking entry `unearthing`, checks the
-target again (missing parents are created; a file, symlink or piece in
-the path refuses), renames the tree into place, sets the top
-directory's mode, and sets the entry to `live` with the time of
-unearthing. Unearthing an ID that is already unearthed does nothing and
-says where it is. (ADR 0034)
+local data and warns. An archive that is not on this machine is fetched
+into `.antiq/tmp/` first. `unearth` checks the archive's size and
+checksum, extracts it into the staging directory, verifies the staged
+tree strictly, sets the staged top directory's mode, writes a tracking
+entry `unearthing`, checks the target again (missing parents are created;
+a file, symlink or piece in the path refuses), renames the tree into
+place, records the metadata change, and sets the entry to `live` with the
+time of unearthing. Unearthing an ID that is already unearthed does
+nothing and says where it is. (ADR 0034)
+
+A volume without room for the listing's total size skips the piece, and
+so does a volume that fills up during the extraction; the staged tree is
+removed and the run exits 3. A step that fails before the rename leaves
+the collection as it was, the entry as it was, and removes the folders it
+made above the target.
 
 The target is the stored relative path, or `--to`, a path inside the
 collection that the patterns select. `unearth` refuses the collection
@@ -1238,7 +1245,11 @@ collide when their paths are equal after Unicode normalisation (where
 the volume ignores it) and full case folding (where the volume ignores
 case); the refusal lists both names. A member more than 512 directory
 levels below the top directory is refused, since the walk, the strict
-verify and the removal of staging go no deeper. Paths are not checked for length:
+verify and the removal of staging go no deeper. The names of the target
+path are held to the same rules as directories, and on a volume that
+stores names decomposed a folder made above the target, or the target,
+is refused when its name would be stored in another form than it is
+written. Paths are not checked for length:
 a path longer than the platform's path limit is extracted directory by
 directory. (ADR 0054)
 

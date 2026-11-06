@@ -174,7 +174,7 @@ impl Verified {
 pub struct Unpacked {
     /// Permission bits the archive stores for its top-level directory.
     /// The staging root keeps the mode its owner gave it; the caller sets
-    /// this one when it moves the tree into place.
+    /// this one before it moves the tree into place.
     pub top_mode: u32,
     /// Modification time of that directory, in seconds since the epoch.
     /// Extraction sets it on the staging root.

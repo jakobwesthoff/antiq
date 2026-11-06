@@ -12,6 +12,7 @@ pub mod live;
 pub mod local;
 pub mod remote;
 
+use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::fsx::FsxError;
 use crate::fsx::space::available_space;
@@ -19,18 +20,23 @@ use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::index::{Index, IndexError};
 use crate::listing::{self, ListingError, ListingType};
+use crate::machine::MachineError;
 use crate::meta::{Payload, PayloadKind};
-use crate::pack::PackageFormat;
+use crate::pack::{PackError, PackageFormat};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
+use crate::report::{CommandReport, Warning};
+use crate::run::RunGuard;
 use crate::select::{Rules, SelectError};
 use crate::store::{Current, Store, StoreError};
 use crate::tracking::{self, EntryState, PieceState, TrackingEntry, TrackingError};
 use crate::tree::{EntryKind, TreeEntry};
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// Errors of the `unearth` command.
@@ -48,6 +54,10 @@ pub enum UnearthError {
     Fsx(#[from] FsxError),
     #[error(transparent)]
     Listing(#[from] ListingError),
+    #[error(transparent)]
+    Machine(#[from] MachineError),
+    #[error(transparent)]
+    Pack(#[from] PackError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -70,6 +80,8 @@ pub enum UnearthError {
     UnreadableVersions { id: ObjectId, versions: String },
     #[error("the archive {file} cannot be unearthed: {reason}")]
     UnsupportedPayload { file: String, reason: String },
+    #[error("the archive {file} does not match its metadata: {what}")]
+    ArchiveDiffers { file: String, what: String },
     #[error("cannot unearth into `{path}`: {problem}")]
     Target {
         path: RelPath,
@@ -100,6 +112,8 @@ pub enum TargetProblem {
     SpelledDifferently { at: RelPath },
     /// The target exists, or another entry holds it.
     Taken,
+    /// A name of the target is one the volume cannot hold.
+    Unholdable { reason: String },
 }
 
 impl fmt::Display for TargetProblem {
@@ -117,6 +131,7 @@ impl fmt::Display for TargetProblem {
                 write!(f, "`{at}` is spelled differently on disk")
             }
             TargetProblem::Taken => f.write_str("it is taken"),
+            TargetProblem::Unholdable { reason } => f.write_str(reason),
         }
     }
 }
@@ -185,8 +200,14 @@ pub struct Shortfall {
 #[derive(Debug)]
 pub struct UnearthPlan {
     pub(crate) id: ObjectId,
+    pub(crate) current: Current,
+    /// The entry this machine had before, restored when the unearth
+    /// fails.
+    pub(crate) entry: Option<TrackingEntry>,
     pub(crate) payload: Payload,
     pub(crate) target: RelPath,
+    /// The sum of the sizes of the files in the listing.
+    pub(crate) needed: u64,
     pub(crate) shortfall: Option<Shortfall>,
 }
 
@@ -234,6 +255,90 @@ impl Planned {
         }
         plan
     }
+}
+
+// =========================================================
+// Reporting and applying
+// =========================================================
+
+/// Why a piece was left as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum Skipped {
+    /// The staging volume has too little room for the extraction.
+    NoSpace { needed: u64, available: u64 },
+}
+
+/// What a run of `unearth` did.
+#[derive(Debug, Serialize)]
+pub struct UnearthReport {
+    /// False when the piece was unearthed before, or was skipped.
+    pub unearthed: bool,
+    pub id: ObjectId,
+    /// Where the piece is, or would have been put.
+    pub path: RelPath,
+    pub abs_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Skipped>,
+    pub warnings: Vec<Warning>,
+}
+
+impl CommandReport for UnearthReport {
+    fn partial(&self) -> bool {
+        self.skipped.is_some()
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+}
+
+impl UnearthReport {
+    /// The report of a piece that is unearthed already, at `path`.
+    pub fn already_unearthed(
+        collection: &Collection,
+        id: ObjectId,
+        path: RelPath,
+        warnings: Vec<Warning>,
+    ) -> UnearthReport {
+        UnearthReport {
+            unearthed: false,
+            id,
+            abs_path: absolute(collection, &path),
+            path,
+            payload_version: None,
+            skipped: None,
+            warnings,
+        }
+    }
+}
+
+/// The absolute path of a path in the collection.
+fn absolute(collection: &Collection, path: &RelPath) -> String {
+    collection
+        .root()
+        .join(OsStr::from_bytes(path.as_bytes()))
+        .display()
+        .to_string()
+}
+
+/// Carries out a plan under the run lock `guard` holds.
+pub fn apply(
+    collection: &Collection,
+    plan: &UnearthPlan,
+    guard: &RunGuard,
+    clock: &dyn Clock,
+) -> Result<UnearthReport, UnearthError> {
+    local::unearth_archive(
+        collection,
+        plan,
+        guard.lock(),
+        clock,
+        &local::Environment::real(),
+        guard.warnings().to_vec(),
+    )
 }
 
 /// Works out what unearthing `request` would do. Nothing is written.
@@ -324,8 +429,11 @@ pub(crate) fn plan_with(
 
     Ok(Planned::Unearth(Box::new(UnearthPlan {
         id,
+        current,
+        entry,
         payload,
         target,
+        needed,
         shortfall,
     })))
 }
@@ -500,7 +608,14 @@ pub(crate) fn check_target_on_disk(
 fn look_at(root: &TreeRoot, path: &RelPath) -> Result<Option<TreeEntry>, UnearthError> {
     match root.lstat(path) {
         Ok(found) => Ok(Some(found)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        // A name past the volume's limit cannot exist; the names are held
+        // to the volume's rules where the unearth reports them.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ENAMETOOLONG) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(io_error("look at", Path::new(&path.to_string()))(error)),
     }
 }
@@ -530,7 +645,7 @@ pub(crate) mod tests {
         self, Checksum, CreatedSource, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata,
     };
     use crate::relpath::Name;
-    use crate::testing::package::pack_piece;
+    use crate::testing::package::{Packaged, pack_piece};
     use crate::testing::tree::{COLLECTION_ID, TempCollection, Tree};
     use crate::tracking::{LocalPayload, VersionTakenOut};
     use serde_json::{Map, json};
@@ -649,10 +764,22 @@ pub(crate) mod tests {
             piece: &str,
             files: &[(&str, &str)],
         ) -> FileName {
+            self.archived_with(object, piece, files, |_| {})
+        }
+
+        /// [`Fixture::archived`] with more in the piece than plain files.
+        pub(crate) fn archived_with(
+            &mut self,
+            object: &str,
+            piece: &str,
+            files: &[(&str, &str)],
+            prepare: impl FnOnce(&mut Tree),
+        ) -> FileName {
             for (name, content) in files {
                 self.tree()
                     .file_with(&format!("{piece}/{name}"), content, 0o644, FILE_TIME);
             }
+            prepare(self.tree());
             // Directories carry the time they were made, which would give
             // every build of the same scenario other bytes.
             let fixed = filetime::FileTime::from_unix_time(FILE_TIME, 0);
@@ -667,6 +794,17 @@ pub(crate) mod tests {
                 filetime::set_file_mtime(directory, fixed).expect("the time can be set");
             }
             let packaged = pack_piece(self.tree(), piece);
+            self.archive_package(object, piece, &packaged)
+        }
+
+        /// Puts `packaged` into the store as the archive of `object` at
+        /// `piece`, as `archive` does, and removes the folder.
+        pub(crate) fn archive_package(
+            &mut self,
+            object: &str,
+            piece: &str,
+            packaged: &Packaged,
+        ) -> FileName {
             let sha = packaged.packed.sha256.clone();
             let payload = FileName::new(format!("{}-a.tar.zst", &sha[..16])).expect("a name");
             let listing_file = listing::file_name(&sha).expect("a listing name");
@@ -676,7 +814,9 @@ pub(crate) mod tests {
             fs::write(object_dir.join(payload.as_str()), &packaged.bytes).expect("the payload");
             let out = fs::File::create(object_dir.join(listing_file.as_str())).expect("a file");
             listing::write(packaged.packed.listing.iter(), out).expect("the listing is written");
-            fs::remove_dir_all(self.at(piece)).expect("the folder is archived away");
+            let root = TreeRoot::open(self.temp.root()).expect("the collection opens");
+            crate::fsx::remove::remove_tree(&root, &path(piece))
+                .expect("the folder is archived away");
 
             let top = path(piece);
             let name = top
@@ -1145,6 +1285,44 @@ pub(crate) mod tests {
                     "payload_version": 1,
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn a_report_leaves_out_what_does_not_apply_and_says_when_it_is_partial() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+
+        let already = UnearthReport::already_unearthed(
+            &fx.collection,
+            id(ID),
+            path("projects/a"),
+            vec![Warning::new("a note")],
+        );
+
+        assert!(!CommandReport::partial(&already));
+        assert_eq!(CommandReport::warnings(&already).len(), 1);
+        assert_eq!(
+            serde_json::to_value(&already).expect("serialises"),
+            json!({
+                "unearthed": false,
+                "id": ID,
+                "path": "projects/a",
+                "abs_path": fx.at("projects/a").display().to_string(),
+                "warnings": [{"message": "a note"}],
+            })
+        );
+        let skipped = UnearthReport {
+            skipped: Some(Skipped::NoSpace {
+                needed: 17,
+                available: 10,
+            }),
+            ..already
+        };
+        assert!(CommandReport::partial(&skipped));
+        assert_eq!(
+            serde_json::to_value(skipped.skipped).expect("serialises"),
+            json!({"reason": "no_space", "needed": 17, "available": 10})
         );
     }
 
