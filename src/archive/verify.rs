@@ -1330,6 +1330,130 @@ mod tests {
         );
     }
 
+    /// Verifies the archive of `archived()` while `change` runs at the chosen
+    /// stage for the path, and returns the differences it found.
+    fn verify_changing(at: (Stage, &str), change: impl Fn(&Tree)) -> Vec<Difference> {
+        let (_dir, archive, package, tree) = archived();
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+        let mut observe = |stage: Stage, seen: &RelPath| {
+            if (stage, seen.to_string().as_str()) == at {
+                change(&tree);
+            }
+        };
+        let error = verify_strict_observed(
+            &archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            None,
+            Some(&expected),
+            &mut observe,
+        )
+        .expect_err("a file changed while it was read");
+        let PackError::Differs(differences) = error else {
+            panic!("expected differences, got {error:?}");
+        };
+        differences
+    }
+
+    #[test]
+    fn the_strict_verify_reports_a_file_changed_between_the_walk_and_its_read() {
+        let differences = verify_changing((Stage::AfterWalk, "src/main.rs"), |tree| {
+            std::fs::write(tree.path("proj/src/main.rs"), "fn main() { 1 }").expect("written");
+        });
+        assert_eq!(
+            differences,
+            [Difference::ChangedWhileRead(path("src/main.rs"))]
+        );
+    }
+
+    #[test]
+    fn the_strict_verify_reports_a_file_touched_after_its_read() {
+        let differences = verify_changing((Stage::AfterRead, "src/main.rs"), |tree| {
+            filetime::set_file_mtime(
+                tree.path("proj/src/main.rs"),
+                FileTime::from_unix_time(1_000_000_009, 0),
+            )
+            .expect("the time is set");
+        });
+        assert_eq!(
+            differences,
+            [Difference::ChangedWhileRead(path("src/main.rs"))]
+        );
+    }
+
+    #[test]
+    fn the_strict_verify_reports_a_file_that_vanished_before_its_read() {
+        let differences = verify_changing((Stage::AfterWalk, "src/main.rs"), |tree| {
+            std::fs::remove_file(tree.path("proj/src/main.rs")).expect("removed");
+        });
+        assert_eq!(
+            differences,
+            [Difference::ChangedWhileRead(path("src/main.rs"))]
+        );
+    }
+
+    #[test]
+    fn the_strict_verify_reports_both_names_of_a_hard_link_whose_first_name_changed() {
+        let differences = verify_changing((Stage::AfterRead, "notes.txt"), |tree| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(tree.path("proj/notes.txt"))
+                .expect("opens");
+            file.write_all(b"!").expect("written");
+        });
+        assert_eq!(
+            differences,
+            [
+                Difference::ChangedWhileRead(path("notes.txt")),
+                Difference::ChangedWhileRead(path("src/copy.txt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_of_the_folder_is_read_before_the_archive_is_read_to_its_end() {
+        let (_dir, archive, package, tree) = archived();
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+        // Bytes that arrive in the archive once the first file is read are
+        // part of its hash only if the read of the archive is still going.
+        let mut observe = |stage: Stage, seen: &RelPath| {
+            if (stage, seen.to_string().as_str()) == (Stage::AfterRead, "notes.txt") {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&archive)
+                    .expect("the archive opens");
+                file.write_all(&[0; 7]).expect("the archive grows");
+            }
+        };
+
+        let error = verify_strict_observed(
+            &archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            None,
+            Some(&expected),
+            &mut observe,
+        )
+        .expect_err("the archive grew during the read");
+
+        assert!(
+            matches!(&error, PackError::ArchiveDiffers { .. }),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_damaged_archive_is_reported_even_when_the_walk_of_the_folder_fails() {
         let (_dir, archive, package, mut tree) = archived();
