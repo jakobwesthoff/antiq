@@ -1572,8 +1572,10 @@ with `no_remote` (exit 1). A run that holds the lock records whether the
 remote was reachable or away; a state file that cannot be read fails the
 run before anything is pulled. A `--dry-run` plans against the pulled
 versions without storing them, records nothing, counts the room for the
-listing of a remote archive from the remote's copy, and exits with the
-code the real run would get.
+listing of a remote archive from the remote's copy. For a remote that is
+away, broken or not attached, and for `--if-reachable`, it exits with the
+code the real run would get. A dry run that finds no room for a piece
+exits 0, like every other dry run.
 
 The entry of an unearthed folder is not diverged, whatever the entry of
 the gone piece said.
@@ -1650,7 +1652,8 @@ out of the package. The result has no archive payload until
 it is archived. A live piece without a live package, as with
 `backup_live = false`, cannot be unearthed this way, and `unearth` says
 so. A fork of another collection's piece writes nothing to that
-collection's ID.
+collection's ID, apart from storing the committed metadata versions it
+pulls, as `sync` does.
 
 ### fork
 
