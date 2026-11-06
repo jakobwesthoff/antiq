@@ -101,7 +101,7 @@ fn search_text(piece: &FoundPiece, shown_path: &str) -> String {
 /// Widths are Unicode display columns (via `unicode-width`), so a wide CJK
 /// character counts as two and a zero-width combining mark as none. The ellipsis
 /// occupies one column, reserved out of the budget on a cut.
-fn truncate(s: &str, max: usize) -> String {
+pub(super) fn truncate(s: &str, max: usize) -> String {
     if s.width() <= max {
         return s.to_string();
     }

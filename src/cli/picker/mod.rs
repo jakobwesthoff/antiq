@@ -57,32 +57,39 @@ pub struct Row {
     pub search: String,
 }
 
-/// A key that ends the picker with the selected item like Enter does, but
-/// tells the caller to act on it differently, e.g. Ctrl-K in `find` pins
-/// the piece instead of unearthing it. The stats line lists each key with
-/// its `hint`.
+/// A key that acts on the selected item like Enter does, but tells the caller
+/// to act on it differently, e.g. Ctrl-K in `find` pins the piece instead of
+/// unearthing it. The stats line lists each key with its `hint`.
 pub struct AcceptKey<A> {
     /// The letter pressed together with Ctrl.
     pub ctrl: char,
     /// A word or two for the stats line, e.g. `path`.
     pub hint: &'static str,
-    /// What the caller receives when the key ends the picker.
+    /// What the caller receives when the key acts on the item.
     pub action: A,
+    /// Whether the key ends the picker. A key that does not end it hands the
+    /// item and the action to the `on_stay` callback and keeps the picker
+    /// open, showing the callback's answer as a notice.
+    pub closes: bool,
 }
 
 /// The Ctrl keys the picker itself handles. An [`AcceptKey`] on one of them
 /// is ignored, so a caller cannot take away aborting or moving the selection.
 const BUILT_IN_CTRL_KEYS: [char; 6] = ['c', 'd', 'n', 'p', 'u', 'w'];
 
-/// The action of the accept key a key press matches, if any.
-fn accept_key<A: Copy>(keys: &[AcceptKey<A>], code: KeyCode, modifiers: KeyModifiers) -> Option<A> {
+/// The accept key a key press matches, if any.
+fn accept_key<A>(
+    keys: &[AcceptKey<A>],
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<&AcceptKey<A>> {
     let KeyCode::Char(c) = code else {
         return None;
     };
     if !modifiers.contains(KeyModifiers::CONTROL) || BUILT_IN_CTRL_KEYS.contains(&c) {
         return None;
     }
-    keys.iter().find(|k| k.ctrl == c).map(|k| k.action)
+    keys.iter().find(|k| k.ctrl == c)
 }
 
 /// The stats line's hint for the accept keys, e.g. `^Y path`, or empty when
@@ -104,17 +111,21 @@ fn key_hints<A>(keys: &[AcceptKey<A>]) -> String {
 /// without selecting.
 pub fn pick<T>(items: Vec<T>, render_all: impl Fn(&[T], usize) -> Vec<Row>) -> Result<Option<T>> {
     let keys: [AcceptKey<()>; 0] = [];
-    Ok(pick_with_keys(items, render_all, &keys)?.map(|(item, _)| item))
+    let picked = pick_with_keys(items, render_all, &keys, |_, ()| String::new())?;
+    Ok(picked.map(|(item, _)| item))
 }
 
 /// [`pick`] with extra [`AcceptKey`]s besides Enter.
 ///
 /// Returns the chosen item together with the action of the accept key that
-/// chose it, or `None` for the action when Enter did.
+/// chose it, or `None` for the action when Enter did. An accept key that does
+/// not close the picker calls `on_stay` with the selected item and its
+/// action; the returned text replaces the stats line until the next key.
 pub fn pick_with_keys<T, A: Copy>(
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
     keys: &[AcceptKey<A>],
+    mut on_stay: impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
     // Nothing to pick: never touch the terminal so non-interactive callers and
     // empty result sets stay side-effect free.
@@ -159,7 +170,7 @@ pub fn pick_with_keys<T, A: Copy>(
     // delivers each frame as one write; `draw` flushes once per frame.
     let mut frame = io::BufWriter::with_capacity(FRAME_BUFFER_BYTES, tty);
 
-    run_loop(&mut frame, items, render_all, keys)
+    run_loop(&mut frame, items, render_all, keys, &mut on_stay)
 }
 
 /// The frame buffer size: comfortably a full redraw of a large terminal, so a
@@ -195,6 +206,7 @@ fn run_loop<T, A: Copy>(
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
     keys: &[AcceptKey<A>],
+    on_stay: &mut impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
     let (mut cols, rows) = terminal::size().context("while querying the terminal size")?;
     let mut built_row_width = row_width(cols);
@@ -210,14 +222,14 @@ fn run_loop<T, A: Copy>(
         clear_all = false;
 
         match event::read().context("while reading a key event")? {
-            Event::Key(key) => match handle_key(&mut state, keys, key) {
-                Flow::Continue => {}
+            Event::Key(key) => match step(&mut state, keys, key, on_stay) {
+                Step::Continue => {}
                 // With nothing matching there is nothing to return, so the
                 // picker ends without a selection, as on abort.
-                Flow::Accept(action) => {
+                Step::Accept(action) => {
                     return Ok(state.into_selected().map(|item| (item, action)));
                 }
-                Flow::Abort => return Ok(None),
+                Step::Abort => return Ok(None),
             },
             Event::Resize(new_cols, new_rows) => {
                 // The column layout depends only on the width, so a height-only
@@ -246,8 +258,52 @@ enum Flow<A> {
     /// End with the selected item, chosen by Enter (`None`) or by the accept
     /// key with this action.
     Accept(Option<A>),
+    /// Act on the selected item without ending the picker.
+    Stay(A),
     /// End without a selection.
     Abort,
+}
+
+/// What the loop does after a key press.
+#[derive(Debug, PartialEq, Eq)]
+enum Step<A> {
+    /// Draw again and read the next event.
+    Continue,
+    /// End with the selected item, chosen by Enter (`None`) or by the accept
+    /// key with this action.
+    Accept(Option<A>),
+    /// End without a selection.
+    Abort,
+}
+
+/// Handle one key press of the loop: apply it to the state, run `on_stay` for
+/// an accept key that keeps the picker open, and keep the notice only until
+/// the next press.
+///
+/// Releases and repeats leave the notice alone: a terminal that reports them
+/// sends one with every press, and the notice would vanish the moment it
+/// appeared. With nothing selected a stay key does nothing.
+fn step<T, A: Copy>(
+    state: &mut PickerState<T>,
+    keys: &[AcceptKey<A>],
+    key: KeyEvent,
+    on_stay: &mut impl FnMut(&T, A) -> String,
+) -> Step<A> {
+    if key.kind == KeyEventKind::Press {
+        state.clear_notice();
+    }
+    match handle_key(state, keys, key) {
+        Flow::Continue => Step::Continue,
+        Flow::Accept(action) => Step::Accept(action),
+        Flow::Abort => Step::Abort,
+        Flow::Stay(action) => {
+            if let Some(item) = state.selected() {
+                let notice = on_stay(item, action);
+                state.set_notice(notice);
+            }
+            Step::Continue
+        }
+    }
 }
 
 /// Apply one key event to the picker state and say whether the picker goes on.
@@ -263,9 +319,12 @@ fn handle_key<T, A: Copy>(
     if key.kind != KeyEventKind::Press {
         return Flow::Continue;
     }
-    // An accept key ends the picker exactly as Enter does.
-    if let Some(action) = accept_key(keys, key.code, key.modifiers) {
-        return Flow::Accept(Some(action));
+    if let Some(accept) = accept_key(keys, key.code, key.modifiers) {
+        return if accept.closes {
+            Flow::Accept(Some(accept.action))
+        } else {
+            Flow::Stay(accept.action)
+        };
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -398,6 +457,7 @@ fn draw<T>(
             matching,
             total,
             state.selected_detail(),
+            state.notice(),
             hints,
         )),
         style::SetAttribute(Attribute::Reset),
@@ -457,41 +517,47 @@ const HINTS_GAP: usize = 2;
 /// the prompt prefix). Shows the cursor's rank within the matches plus the total
 /// candidate count, or an empty-state hint, followed by the selected row's
 /// detail (the piece's ID) when it has one. `rank` is the 1-based position of
-/// the selection among the matches, or `None` when nothing matches.
+/// the selection among the matches, or `None` when nothing matches. A `notice`
+/// replaces the counter and the detail.
 ///
-/// The accept-key `hints` sit right-aligned at the end of the line. They are
-/// the first thing to go when the line is too narrow: they show only with at
-/// least [`HINTS_GAP`] columns between them and the stats, and the stats are
-/// clipped to `width` (cutting the detail first) only once the hints are gone.
+/// The accept-key `hints` sit right-aligned at the end of the line and win
+/// over the detail and the notice: those are clipped with an ellipsis to leave
+/// the hints and [`HINTS_GAP`] columns between them. Only when the hints do not
+/// fit next to the counter either do they go, and the line is clipped to
+/// `width`.
 fn stats_line(
     width: usize,
     rank: Option<usize>,
     matching: usize,
     total: usize,
     detail: Option<&str>,
+    notice: Option<&str>,
     hints: &str,
 ) -> String {
-    let body = match rank {
-        None => format!("no matches · {total} total"),
-        Some(rank) => format!("{rank}/{matching} · {total} total"),
+    let indent = " ".repeat(PROMPT_PREFIX.width());
+    // `fixed` stays whole while the hints show; `flexible` gives way to them.
+    let (fixed, flexible) = match notice {
+        Some(notice) => (indent, notice.to_string()),
+        None => {
+            let counter = match rank {
+                None => format!("no matches · {total} total"),
+                Some(rank) => format!("{rank}/{matching} · {total} total"),
+            };
+            let detail = detail
+                .filter(|d| !d.is_empty())
+                .map(|d| format!(" · {d}"))
+                .unwrap_or_default();
+            (format!("{indent}{counter}"), detail)
+        }
     };
-    let mut line = " ".repeat(PROMPT_PREFIX.width());
-    line.push_str(&body);
-    if let Some(detail) = detail.filter(|d| !d.is_empty()) {
-        line.push_str(" · ");
-        line.push_str(detail);
-    }
 
-    let used = line.width() + hints.width();
-    if !hints.is_empty() && used + HINTS_GAP <= width {
-        line.push_str(&" ".repeat(width - used));
-        line.push_str(hints);
-        return line;
+    let hints_room = hints.width() + HINTS_GAP;
+    if !hints.is_empty() && fixed.width() + hints_room <= width {
+        let flexible = layout::truncate(&flexible, width - fixed.width() - hints_room);
+        let used = fixed.width() + flexible.width() + hints.width();
+        return format!("{fixed}{flexible}{}{hints}", " ".repeat(width - used));
     }
-    if line.chars().count() > width {
-        return line.chars().take(width).collect();
-    }
-    line
+    layout::truncate(&format!("{fixed}{flexible}"), width)
 }
 
 /// Draw a single list row. The selected row is drawn in cyan with a `▌ ` bar;
@@ -587,7 +653,7 @@ mod tests {
 
     #[test]
     fn stats_align_under_the_query_text() {
-        let line = stats_line(40, Some(3), 12, 40, None, "");
+        let line = stats_line(40, Some(3), 12, 40, None, None, "");
         // Indented past the prompt prefix so it sits under the query text.
         assert_eq!(line, "  3/12 · 40 total");
         assert_eq!(line.trim_start(), "3/12 · 40 total");
@@ -596,7 +662,7 @@ mod tests {
     #[test]
     fn stats_show_an_empty_state_when_nothing_matches() {
         assert_eq!(
-            stats_line(40, None, 0, 40, None, ""),
+            stats_line(40, None, 0, 40, None, None, ""),
             "  no matches · 40 total"
         );
     }
@@ -604,7 +670,15 @@ mod tests {
     #[test]
     fn stats_end_with_the_selected_rows_detail() {
         assert_eq!(
-            stats_line(80, Some(3), 12, 40, Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"), ""),
+            stats_line(
+                80,
+                Some(3),
+                12,
+                40,
+                Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                None,
+                ""
+            ),
             "  3/12 · 40 total · 01ARZ3NDEKTSV4RRFFQ69G5FAV"
         );
     }
@@ -612,7 +686,7 @@ mod tests {
     #[test]
     fn an_empty_detail_adds_no_separator() {
         assert_eq!(
-            stats_line(80, Some(1), 1, 1, Some(""), ""),
+            stats_line(80, Some(1), 1, 1, Some(""), None, ""),
             "  1/1 · 1 total"
         );
     }
@@ -627,6 +701,7 @@ mod tests {
             12,
             40,
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            None,
             "^Y path",
         )
     }
@@ -640,29 +715,76 @@ mod tests {
     }
 
     #[test]
-    fn key_hints_keep_a_two_column_gap_or_go() {
-        // 46 + 2 + 7 = 55.
+    fn key_hints_keep_a_two_column_gap_and_clip_the_detail_for_it() {
+        // 46 + 2 + 7 = 55 fits whole. One column less clips the detail by one
+        // column, marking the cut.
         assert!(stats_with_hint(55).ends_with(&format!("{LEFT}  ^Y path")));
-        assert_eq!(stats_with_hint(54), LEFT);
+        let clipped = stats_with_hint(54);
+        assert!(clipped.starts_with("  3/12 · 40 total · 01ARZ3NDEKTSV4RRFFQ69G5F…"));
+        assert!(clipped.ends_with("  ^Y path"));
+        assert_eq!(clipped.width(), 54);
     }
 
     #[test]
-    fn key_hints_go_before_the_ulid_is_cut() {
-        assert_eq!(LEFT.width(), 46);
-        assert_eq!(stats_with_hint(46), LEFT);
+    fn the_hints_win_over_the_detail_at_80_columns() {
+        let hints = "^F fork  ^K pin  ^X unpin";
+        let line = stats_line(
+            80,
+            Some(12345),
+            12345,
+            12345,
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            None,
+            hints,
+        );
+        assert_eq!(
+            line,
+            "  12345/12345 · 12345 total · 01ARZ3NDEKTSV4RRFFQ69G…  ^F fork  ^K pin  ^X unpin"
+        );
+        assert_eq!(line.width(), 80);
     }
 
     #[test]
-    fn a_narrow_terminal_cuts_the_detail_first() {
+    fn a_notice_replaces_the_counter_and_the_detail() {
+        let line = stats_line(
+            40,
+            Some(3),
+            12,
+            40,
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            Some("pinned sources/old-app"),
+            "",
+        );
+        assert_eq!(line, "  pinned sources/old-app");
+    }
+
+    #[test]
+    fn a_long_notice_is_clipped_for_the_hints() {
+        let line = stats_line(
+            30,
+            Some(1),
+            1,
+            1,
+            None,
+            Some("error: the collection is locked by another run"),
+            "^K pin",
+        );
+        assert_eq!(line, "  error: the collecti…  ^K pin");
+        assert_eq!(line.width(), 30);
+    }
+
+    #[test]
+    fn a_narrow_terminal_cuts_the_line_when_even_the_hints_do_not_fit() {
         let line = stats_line(
             20,
             Some(3),
             12,
             40,
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            None,
             "^Y path",
         );
-        assert_eq!(line, "  3/12 · 40 total · ");
+        assert_eq!(line, "  3/12 · 40 total ·…");
     }
 
     // -------------------------------------------------------------------------
@@ -680,38 +802,35 @@ mod tests {
             ctrl: 'y',
             hint: "path",
             action: Action::First,
+            closes: true,
         },
         AcceptKey {
             ctrl: 'o',
             hint: "other",
             action: Action::Second,
+            closes: true,
         },
     ];
 
     #[test]
     fn a_configured_ctrl_key_yields_its_action() {
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(
-            accept_key(&KEYS, KeyCode::Char('y'), ctrl),
-            Some(Action::First)
-        );
-        assert_eq!(
-            accept_key(&KEYS, KeyCode::Char('o'), ctrl),
-            Some(Action::Second)
-        );
+        let action = |c| accept_key(&KEYS, KeyCode::Char(c), ctrl).map(|k| k.action);
+        assert_eq!(action('y'), Some(Action::First));
+        assert_eq!(action('o'), Some(Action::Second));
     }
 
     #[test]
     fn the_letter_without_ctrl_is_no_accept_key() {
         let none = KeyModifiers::NONE;
-        assert_eq!(accept_key(&KEYS, KeyCode::Char('y'), none), None);
+        assert!(accept_key(&KEYS, KeyCode::Char('y'), none).is_none());
     }
 
     #[test]
     fn an_unconfigured_ctrl_key_is_no_accept_key() {
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(accept_key(&KEYS, KeyCode::Char('z'), ctrl), None);
-        assert_eq!(accept_key::<Action>(&[], KeyCode::Char('y'), ctrl), None);
+        assert!(accept_key(&KEYS, KeyCode::Char('z'), ctrl).is_none());
+        assert!(accept_key::<Action>(&[], KeyCode::Char('y'), ctrl).is_none());
     }
 
     #[test]
@@ -720,9 +839,10 @@ mod tests {
             ctrl: 'c',
             hint: "nope",
             action: Action::First,
+            closes: true,
         }];
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(accept_key(&shadowing, KeyCode::Char('c'), ctrl), None);
+        assert!(accept_key(&shadowing, KeyCode::Char('c'), ctrl).is_none());
     }
 
     #[test]
@@ -731,9 +851,10 @@ mod tests {
             ctrl: 'd',
             hint: "nope",
             action: Action::First,
+            closes: true,
         }];
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(accept_key(&shadowing, KeyCode::Char('d'), ctrl), None);
+        assert!(accept_key(&shadowing, KeyCode::Char('d'), ctrl).is_none());
     }
 
     #[test]
@@ -812,7 +933,7 @@ mod tests {
 
     #[test]
     fn stats_degrade_to_a_truncation_when_too_narrow() {
-        let line = stats_line(4, Some(1), 100, 200, None, "^Y path");
+        let line = stats_line(4, Some(1), 100, 200, None, None, "^Y path");
         assert_eq!(line.chars().count(), 4);
     }
 
@@ -978,5 +1099,131 @@ mod tests {
         let release =
             KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
         assert_eq!(handle_key(&mut s, &KEYS, release), Flow::Continue);
+    }
+
+    // -------------------------------------------------------------------------
+    // Keys that keep the picker open
+    // -------------------------------------------------------------------------
+
+    const STAY_KEYS: [AcceptKey<Action>; 2] = [
+        AcceptKey {
+            ctrl: 'y',
+            hint: "stay",
+            action: Action::First,
+            closes: false,
+        },
+        AcceptKey {
+            ctrl: 'o',
+            hint: "close",
+            action: Action::Second,
+            closes: true,
+        },
+    ];
+
+    #[test]
+    fn a_key_that_does_not_close_yields_stay() {
+        let mut s = picker(10);
+        assert_eq!(
+            handle_key(&mut s, &STAY_KEYS, ctrl('y')),
+            Flow::Stay(Action::First)
+        );
+    }
+
+    #[test]
+    fn a_key_that_closes_still_accepts() {
+        let mut s = picker(10);
+        assert_eq!(
+            handle_key(&mut s, &STAY_KEYS, ctrl('o')),
+            Flow::Accept(Some(Action::Second))
+        );
+    }
+
+    #[test]
+    fn a_stay_key_cannot_shadow_a_built_in_key() {
+        let shadowing = [AcceptKey {
+            ctrl: 'n',
+            hint: "nope",
+            action: Action::First,
+            closes: false,
+        }];
+        let mut s = picker(10);
+        feed_with(&mut s, &shadowing, &[ctrl('n')]);
+        assert_eq!(s.notice(), None);
+    }
+
+    /// Feed `events` through [`step`] with an `on_stay` that names the item.
+    fn feed_with(state: &mut PickerState<String>, keys: &[AcceptKey<Action>], events: &[KeyEvent]) {
+        let mut on_stay = |item: &String, action: Action| format!("{action:?} {item}");
+        for &event in events {
+            assert_eq!(step(state, keys, event, &mut on_stay), Step::Continue);
+        }
+    }
+
+    #[test]
+    fn a_stay_key_calls_back_with_the_selected_item_and_shows_the_notice() {
+        let mut s = picker(10);
+        feed_with(&mut s, &STAY_KEYS, &[press(KeyCode::Up), ctrl('y')]);
+        assert_eq!(s.notice(), Some("First beta"));
+    }
+
+    #[test]
+    fn a_stay_key_keeps_the_query_and_the_selection() {
+        let mut s = picker(10);
+        feed_with(
+            &mut s,
+            &STAY_KEYS,
+            &[press(KeyCode::Char('a')), press(KeyCode::Up), ctrl('y')],
+        );
+        assert_eq!(s.query(), "a");
+        assert_eq!(s.selected_rank(), Some(2));
+    }
+
+    #[test]
+    fn the_next_key_press_clears_the_notice() {
+        let mut s = picker(10);
+        feed_with(&mut s, &STAY_KEYS, &[ctrl('y'), press(KeyCode::Up)]);
+        assert_eq!(s.notice(), None);
+    }
+
+    #[test]
+    fn a_key_release_keeps_the_notice() {
+        let mut s = picker(10);
+        feed_with(&mut s, &STAY_KEYS, &[ctrl('y')]);
+        let release =
+            KeyEvent::new_with_kind(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release);
+        feed_with(&mut s, &STAY_KEYS, &[release]);
+        assert_eq!(s.notice(), Some("First alpha"));
+    }
+
+    #[test]
+    fn a_stay_key_with_no_match_does_not_call_back() {
+        let mut s = picker(10);
+        let mut on_stay = |_: &String, _: Action| -> String { unreachable!("nothing is selected") };
+        for c in "zzzz".chars() {
+            step(&mut s, &STAY_KEYS, press(KeyCode::Char(c)), &mut on_stay);
+        }
+        assert_eq!(
+            step(&mut s, &STAY_KEYS, ctrl('y'), &mut on_stay),
+            Step::Continue
+        );
+        assert_eq!(s.notice(), None);
+    }
+
+    #[test]
+    fn step_passes_accepting_and_aborting_keys_on() {
+        let mut s = picker(10);
+        let mut on_stay = |_: &String, _: Action| String::new();
+        assert_eq!(
+            step(&mut s, &STAY_KEYS, press(KeyCode::Enter), &mut on_stay),
+            Step::Accept(None)
+        );
+        assert_eq!(
+            step(&mut s, &STAY_KEYS, ctrl('o'), &mut on_stay),
+            Step::Accept(Some(Action::Second))
+        );
+        assert_eq!(
+            step(&mut s, &STAY_KEYS, press(KeyCode::Esc), &mut on_stay),
+            Step::Abort
+        );
     }
 }

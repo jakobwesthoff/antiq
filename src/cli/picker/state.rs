@@ -79,6 +79,9 @@ pub struct PickerState<T> {
     offset: usize,
     /// Number of list rows the viewport can show (always at least 1).
     height: usize,
+    /// A message that replaces the counter in the stats line until the next
+    /// key press.
+    notice: Option<String>,
 }
 
 impl<T> PickerState<T> {
@@ -112,6 +115,7 @@ impl<T> PickerState<T> {
             selected: 0,
             offset: 0,
             height: height.max(1),
+            notice: None,
         };
         state.recompute();
         state
@@ -342,6 +346,27 @@ impl<T> PickerState<T> {
     pub fn selected_detail(&self) -> Option<&str> {
         let item = self.scored.get(self.selected)?.item;
         Some(&self.detail[item])
+    }
+
+    /// The selected item, or `None` when nothing matches.
+    pub fn selected(&self) -> Option<&T> {
+        let item = self.scored.get(self.selected)?.item;
+        Some(&self.items[item])
+    }
+
+    /// The notice to show instead of the counter, if one is set.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    /// Replace the counter in the stats line with `notice`.
+    pub fn set_notice(&mut self, notice: String) {
+        self.notice = Some(notice);
+    }
+
+    /// Show the counter again.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     /// The rows currently inside the viewport, top to bottom.
@@ -762,6 +787,31 @@ mod tests {
         }
         s.delete_word();
         assert_eq!(s.query(), "");
+    }
+
+    #[test]
+    fn selected_borrows_the_cursor_row() {
+        let mut s = state(&["alpha", "beta", "gamma"], 10);
+        assert_eq!(s.selected().map(String::as_str), Some("alpha"));
+        s.select_worse();
+        assert_eq!(s.selected().map(String::as_str), Some("beta"));
+    }
+
+    #[test]
+    fn selected_is_none_when_nothing_matches() {
+        let mut s = state(&["alpha"], 10);
+        s.push_char('z');
+        assert_eq!(s.selected(), None);
+    }
+
+    #[test]
+    fn a_notice_is_kept_until_cleared() {
+        let mut s = state(&["alpha"], 10);
+        assert_eq!(s.notice(), None);
+        s.set_notice("pinned alpha".to_string());
+        assert_eq!(s.notice(), Some("pinned alpha"));
+        s.clear_notice();
+        assert_eq!(s.notice(), None);
     }
 
     #[test]
