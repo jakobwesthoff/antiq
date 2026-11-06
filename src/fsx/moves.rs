@@ -10,7 +10,7 @@
 
 use super::tree::TreeRoot;
 use super::{FsxError, failure, shown};
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use crate::tree::EntryKind;
 use std::io;
 
@@ -77,6 +77,14 @@ fn move_dir_with(
         let source = io::Error::new(io::ErrorKind::InvalidInput, "it is not a directory");
         return Err(failure("move", from_root, from)(source));
     }
+    // Everything that can refuse the move does so before the first mode
+    // changes. The contents of the moved directory do not matter: they
+    // move with it.
+    if source.flag_locked {
+        return Err(locked(from_root, from));
+    }
+    refuse_locked_parent(from_root, from)?;
+    refuse_locked_parent(to_root, to)?;
     let recorded = source.mode & 0o7777;
     let writable = recorded | 0o200;
     let changed = writable != recorded;
@@ -111,6 +119,41 @@ fn move_dir_with(
         None
     };
     Ok(Moved { mode_restore_error })
+}
+
+/// The refusal for the entry at `path`; the root of the original tree is
+/// named ".".
+fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
+    let shown = shown(root, path);
+    FsxError::Locked {
+        path: if shown.is_empty() { ".".into() } else { shown },
+    }
+}
+
+/// Refuses the move when the directory that holds `path` carries a flag or
+/// cannot be written by the user, whoever owns it: the entry is renamed
+/// in or out of it, and antiq changes nothing outside the moved tree.
+fn refuse_locked_parent(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
+    let mut parent = RelPath::root();
+    let mut names: Vec<&[u8]> = path.components().collect();
+    names.pop();
+    for component in names {
+        let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
+        parent = parent.join(&name);
+    }
+    // A parent that does not exist is the rename's failure to report.
+    let entry = match root.lstat(&parent) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failure("stat", root, &parent)(error)),
+    };
+    let writable =
+        root.user_can_write(&parent)
+            .map_err(failure("check the access to", root, &parent))?;
+    if entry.flag_locked || !writable {
+        return Err(locked(root, &parent));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -377,5 +420,100 @@ mod tests {
         assert!(moved.mode_restore_error.is_none());
         assert!(root.lstat(&path("trash/piece")).is_ok());
         assert!(root.lstat(&piece).is_err());
+    }
+
+    fn assert_locked(result: Result<Moved, FsxError>, expected: &str) {
+        match result {
+            Err(FsxError::Locked { path }) => assert_eq!(path, expected),
+            other => panic!("expected a locked refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_parent_the_user_cannot_write_refuses_the_move_before_any_mode_changes() {
+        let mut tree = Tree::new();
+        tree.file("out/d/f", "x");
+        tree.dir("in");
+        let out = tree.path("out");
+        let source = tree.path("out/d");
+        chmod(&source, 0o500);
+        let _guard = RestoreModes(vec![out.clone(), source.clone()]);
+        chmod(&out, 0o555);
+        let root = root_of(&tree);
+
+        assert_locked(move_dir(&root, &path("out/d"), &root, &path("in/d")), "out");
+        assert_eq!(mode_of(&source), 0o500);
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn a_target_parent_the_user_cannot_write_refuses_the_move() {
+        let mut tree = Tree::new();
+        tree.file("out/d/f", "x");
+        tree.dir("in");
+        let target = tree.path("in");
+        let _guard = RestoreModes(vec![target.clone()]);
+        chmod(&target, 0o555);
+        let root = root_of(&tree);
+
+        assert_locked(move_dir(&root, &path("out/d"), &root, &path("in/d")), "in");
+        assert!(tree.path("out/d/f").exists());
+    }
+
+    #[test]
+    fn a_parent_that_is_a_root_is_named_with_a_dot() {
+        let mut tree = Tree::new();
+        tree.file("d/f", "x");
+        tree.dir("in");
+        let top = tree.path("");
+        let _guard = RestoreModes(vec![top.clone()]);
+        chmod(&top, 0o555);
+        let root = root_of(&tree);
+
+        assert_locked(move_dir(&root, &path("d"), &root, &path("in/d")), ".");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_directory_or_a_locked_parent_refuses_the_move() {
+        let mut tree = Tree::new();
+        tree.file("out/d/f", "x");
+        tree.file("out2/e/f", "x");
+        tree.file("out3/g/f", "x");
+        tree.dir("in");
+        tree.dir("in2");
+        tree.immutable("out/d");
+        tree.immutable("out2");
+        tree.immutable("in2");
+        let root = root_of(&tree);
+
+        assert_locked(
+            move_dir(&root, &path("out/d"), &root, &path("in/d")),
+            "out/d",
+        );
+        assert_locked(
+            move_dir(&root, &path("out2/e"), &root, &path("in/e")),
+            "out2",
+        );
+        assert_locked(
+            move_dir(&root, &path("out3/g"), &root, &path("in2/g")),
+            "in2",
+        );
+        assert!(tree.path("out/d/f").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_entry_inside_the_moved_tree_does_not_stop_the_move() {
+        let mut tree = Tree::new();
+        tree.file("out/d/f", "x");
+        tree.dir("in");
+        tree.immutable("out/d/f");
+        tree.immutable_moves_to("in/d/f");
+        let root = root_of(&tree);
+
+        let moved = move_dir(&root, &path("out/d"), &root, &path("in/d")).expect("moves");
+        assert!(moved.mode_restore_error.is_none());
+        assert!(tree.path("in/d/f").exists());
     }
 }

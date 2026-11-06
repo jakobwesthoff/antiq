@@ -77,6 +77,7 @@ fn split_path(path: &Path) -> Option<(&Path, &OsStr)> {
 
 type DeviceOf<'a> = &'a dyn Fn(&TreeEntry) -> u64;
 type MountRootOf<'a> = &'a dyn Fn(&TreeEntry) -> bool;
+type OwnerOf<'a> = &'a dyn Fn(&TreeEntry) -> u32;
 type List<'a> = &'a dyn Fn(&TreeRoot) -> io::Result<Vec<DirEntry>>;
 
 /// `device_of`, `mount_root_of` and `list` are seams: tests report other
@@ -91,6 +92,28 @@ fn remove_tree_with(
     mount_root_of: MountRootOf<'_>,
     list: List<'_>,
     max_depth: usize,
+) -> Result<(), FsxError> {
+    remove_tree_owned(
+        root,
+        path,
+        device_of,
+        mount_root_of,
+        list,
+        max_depth,
+        &|entry| entry.uid,
+    )
+}
+
+/// [`remove_tree_with`] with a seam for the owner of an entry, which a
+/// test cannot change.
+fn remove_tree_owned(
+    root: &TreeRoot,
+    path: &RelPath,
+    device_of: DeviceOf<'_>,
+    mount_root_of: MountRootOf<'_>,
+    list: List<'_>,
+    max_depth: usize,
+    owner_of: OwnerOf<'_>,
 ) -> Result<(), FsxError> {
     // The root path names the tree itself, which has no directory above it
     // to take the last `remove_dir` from. Refusing here keeps the removal
@@ -126,6 +149,12 @@ fn remove_tree_with(
 
     let stat = skip_if_missing(root.lstat(path)).map_err(failure("stat", root, path))?;
     let Some(top) = stat else { return Ok(()) };
+    // Nothing may be removed from a tree that cannot be removed whole, so
+    // every refusal comes before the first removal.
+    refuse_locked_holder(root, path)?;
+    if top.flag_locked {
+        return Err(locked(root, path));
+    }
     if top.kind != EntryKind::Directory {
         return skip_if_missing(root.remove_file(path))
             .map(|_| ())
@@ -134,6 +163,15 @@ fn remove_tree_with(
     if device_of(&top) != reference || mount_root_of(&top) {
         return Err(foreign_device(root, path));
     }
+    let scan = Scan {
+        reference,
+        device_of,
+        mount_root_of,
+        list,
+        owner_of,
+        max_depth,
+    };
+    scan.refuse_locked(root, path, &top)?;
 
     // One open directory per level is kept in a list of its own and not on
     // the call stack, so a deep tree costs no deep recursion. `max_depth`
@@ -185,6 +223,183 @@ fn remove_tree_with(
     skip_if_missing(root.remove_dir(path))
         .map(|_| ())
         .map_err(failure("remove", root, path))
+}
+
+/// The refusal for the entry at `path`; the root of the original tree
+/// is named ".".
+fn locked(root: &TreeRoot, path: &RelPath) -> FsxError {
+    let shown = shown(root, path);
+    FsxError::Locked {
+        path: if shown.is_empty() { ".".into() } else { shown },
+    }
+}
+
+/// Refuses the removal when the directory that holds `path` carries a
+/// flag or cannot be written by the user, whoever owns it: the entry is
+/// removed from it, and antiq changes nothing outside the tree.
+fn refuse_locked_holder(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
+    let mut holder = RelPath::root();
+    let mut names: Vec<&[u8]> = path.components().collect();
+    names.pop();
+    for component in names {
+        let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
+        holder = holder.join(&name);
+    }
+    let entry = root
+        .lstat(&holder)
+        .map_err(failure("stat", root, &holder))?;
+    let writable =
+        root.user_can_write(&holder)
+            .map_err(failure("check the access to", root, &holder))?;
+    if entry.flag_locked || !writable {
+        return Err(locked(root, &holder));
+    }
+    Ok(())
+}
+
+/// The rules a tree is read by before anything in it is removed.
+struct Scan<'a> {
+    reference: u64,
+    device_of: DeviceOf<'a>,
+    mount_root_of: MountRootOf<'a>,
+    list: List<'a>,
+    owner_of: OwnerOf<'a>,
+    max_depth: usize,
+}
+
+impl Scan<'_> {
+    /// Reads the tree below the directory `path` of `root` without
+    /// changing it, and refuses it with [`FsxError::Locked`] when an entry
+    /// carries a flag, or is a directory that another user owns and this
+    /// one cannot write, with [`FsxError::ForeignDevice`] and
+    /// [`FsxError::TooDeep`] as the removal would. A directory that denies
+    /// access is given owner access to be read; its recorded mode comes
+    /// back when the scan leaves it, also on a refusal.
+    fn refuse_locked(
+        &self,
+        root: &TreeRoot,
+        path: &RelPath,
+        top: &TreeEntry,
+    ) -> Result<(), FsxError> {
+        let mut frames: Vec<Frame> = Vec::new();
+        let result = self.descend(root, path, top, &mut frames);
+        // Only a refusal leaves frames open, and its error is the one worth
+        // reporting, so the modes come back on a best effort.
+        while let Some(frame) = frames.pop() {
+            let holder = frames.last().map_or(root, |above| &above.directory);
+            let _ = restore_mode(holder, &frame);
+        }
+        result
+    }
+
+    fn descend(
+        &self,
+        root: &TreeRoot,
+        path: &RelPath,
+        top: &TreeEntry,
+        frames: &mut Vec<Frame>,
+    ) -> Result<(), FsxError> {
+        self.check_directory(root, path, top)?;
+        frames.extend(open_frame(
+            root,
+            path,
+            top.mode,
+            self.mount_root_of,
+            self.list,
+        )?);
+        while let Some(innermost) = frames.len().checked_sub(1) {
+            let Some(entry) = frames[innermost].entries.next() else {
+                let finished = frames.pop().expect("a frame was just looked at");
+                let holder = frames.last().map_or(root, |above| &above.directory);
+                restore_mode(holder, &finished)?;
+                continue;
+            };
+            let directory = &frames[innermost].directory;
+            let name = RelPath::root().join(&entry.name);
+            let stat = skip_if_missing(directory.lstat(&name));
+            let stat = stat.map_err(failure("stat", directory, &name))?;
+            let Some(stat) = stat else { continue };
+            if stat.flag_locked {
+                return Err(locked(directory, &name));
+            }
+            if stat.kind != EntryKind::Directory {
+                continue;
+            }
+            self.check_directory(directory, &name, &stat)?;
+            if frames.len() > self.max_depth {
+                return Err(FsxError::TooDeep {
+                    path: shown(directory, &name),
+                    limit: self.max_depth,
+                });
+            }
+            if let Some(child) = self.open(directory, &name, stat.mode)? {
+                frames.push(child);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`open_frame`], taking the mode back when the directory was given
+    /// owner access and then failed to open or list.
+    fn open(
+        &self,
+        holder: &TreeRoot,
+        name: &RelPath,
+        mode: u32,
+    ) -> Result<Option<Frame>, FsxError> {
+        let opened = open_frame(holder, name, mode, self.mount_root_of, self.list);
+        if opened.is_err() {
+            let recorded = mode & 0o7777;
+            if let Ok(current) = holder.lstat(name)
+                && current.mode & 0o7777 != recorded
+            {
+                // Best effort: the failure of the open is the one to report.
+                let _ = holder.set_mode(name, recorded);
+            }
+        }
+        opened
+    }
+
+    /// Refuses the directory `stat` at `name` of `holder` when it is on
+    /// another device, is a mount root, or is locked by its owner.
+    fn check_directory(
+        &self,
+        holder: &TreeRoot,
+        name: &RelPath,
+        stat: &TreeEntry,
+    ) -> Result<(), FsxError> {
+        if (self.device_of)(stat) != self.reference || (self.mount_root_of)(stat) {
+            return Err(foreign_device(holder, name));
+        }
+        let foreign = (self.owner_of)(stat) != rustix::process::geteuid().as_raw();
+        if foreign {
+            let writable = holder.user_can_write(name).map_err(failure(
+                "check the access to",
+                holder,
+                name,
+            ))?;
+            if !writable {
+                return Err(locked(holder, name));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Puts the mode `frame` recorded back, if the scan changed it.
+fn restore_mode(holder: &TreeRoot, frame: &Frame) -> Result<(), FsxError> {
+    let recorded = frame.mode & 0o7777;
+    let current = holder
+        .lstat(&frame.name)
+        .map_err(failure("stat", holder, &frame.name))?;
+    if current.mode & 0o7777 != recorded {
+        holder.set_mode(&frame.name, recorded).map_err(failure(
+            "restore the mode of",
+            holder,
+            &frame.name,
+        ))?;
+    }
+    Ok(())
 }
 
 /// A directory whose entries are being removed.
@@ -817,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn a_top_in_a_directory_that_refuses_the_removal_fails_and_changes_nothing_above_it() {
+    fn a_top_in_a_directory_the_user_cannot_write_is_refused_and_nothing_changes() {
         let mut tree = Tree::new();
         tree.file("p/t/f", "x");
         let parent = tree.path("p");
@@ -826,8 +1041,8 @@ mod tests {
         fs::set_permissions(&parent, Permissions::from_mode(0o555)).expect("chmod");
         locked_out(&parent);
         let error = remove_tree(&root, &path("t")).expect_err("fails");
-        assert!(error.to_string().contains("remove t"), "{error}");
-        assert!(parent.join("t").exists());
+        assert_locked(error, ".");
+        assert!(parent.join("t/f").exists());
         assert_eq!(mode_of(&parent), 0o555);
     }
 
@@ -927,5 +1142,295 @@ mod tests {
     fn a_path_without_a_file_name_cannot_be_removed() {
         let error = remove_tree_at(Path::new("/")).expect_err("refused");
         assert!(error.to_string().contains("remove /"), "{error}");
+    }
+
+    /// Every path under `tree` with its mode, in a stable order.
+    fn snapshot(tree: &Tree) -> Vec<(String, u32)> {
+        fn visit(dir: &Path, prefix: &str, out: &mut Vec<(String, u32)>) {
+            let mut names: Vec<_> = match fs::read_dir(dir) {
+                Ok(listing) => listing
+                    .map(|entry| entry.expect("entry").file_name())
+                    .collect(),
+                Err(_) => return,
+            };
+            names.sort();
+            for name in names {
+                let full = dir.join(&name);
+                let shown = format!("{prefix}/{}", name.to_string_lossy());
+                out.push((shown.clone(), mode_of(&full)));
+                if fs::symlink_metadata(&full).expect("exists").is_dir() {
+                    visit(&full, &shown, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(tree.root(), "", &mut out);
+        out
+    }
+
+    fn assert_locked(error: FsxError, expected: &str) {
+        assert!(
+            matches!(&error, FsxError::Locked { path } if path == expected),
+            "{error}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_file_deep_in_the_tree_refuses_the_removal_before_anything_goes() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/d/e/f", "x");
+        tree.file("t/z", "x");
+        tree.file("t/closed/g", "x");
+        tree.immutable("t/d/e/f");
+        let closed = tree.path("t/closed");
+        let _guard = RestoreModes(vec![closed.clone()]);
+        fs::set_permissions(&closed, Permissions::from_mode(0o000)).expect("chmod");
+        let before = snapshot(&tree);
+
+        let error = remove_tree(&root_of(&tree), &path("t")).expect_err("refused");
+
+        assert_locked(error, "t/d/e/f");
+        assert_eq!(snapshot(&tree), before);
+        assert_eq!(mode_of(&closed), 0o000, "the granted access is taken back");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_file_below_a_closed_directory_is_found_and_the_mode_comes_back() {
+        let mut tree = Tree::new();
+        tree.file("t/closed/g", "x");
+        tree.immutable("t/closed/g");
+        let closed = tree.path("t/closed");
+        let _guard = RestoreModes(vec![closed.clone()]);
+        fs::set_permissions(&closed, Permissions::from_mode(0o000)).expect("chmod");
+
+        let error = remove_tree(&root_of(&tree), &path("t")).expect_err("refused");
+
+        assert_locked(error, "t/closed/g");
+        assert_eq!(mode_of(&closed), 0o000);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_directory_the_top_and_a_lone_locked_file_are_refused() {
+        let mut tree = Tree::new();
+        tree.file("t/dir/f", "x");
+        tree.file("top/f", "x");
+        tree.file("lone", "x");
+        tree.immutable("t/dir");
+        tree.immutable("top");
+        tree.immutable("lone");
+        let root = root_of(&tree);
+        assert_locked(
+            remove_tree(&root, &path("t")).expect_err("refused"),
+            "t/dir",
+        );
+        assert_locked(
+            remove_tree(&root, &path("top")).expect_err("refused"),
+            "top",
+        );
+        assert_locked(
+            remove_tree(&root, &path("lone")).expect_err("refused"),
+            "lone",
+        );
+        assert!(tree.path("t/dir/f").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_locked_holder_of_the_top_refuses_the_removal() {
+        let mut tree = Tree::new();
+        tree.file("area/t/f", "x");
+        tree.immutable("area");
+        let error = remove_tree(&root_of(&tree), &path("area/t")).expect_err("refused");
+        assert_locked(error, "area");
+        assert!(tree.path("area/t/f").exists());
+    }
+
+    #[test]
+    fn a_holder_the_user_cannot_write_refuses_the_removal() {
+        let mut tree = Tree::new();
+        tree.file("area/t/f", "x");
+        let area = tree.path("area");
+        let _guard = RestoreModes(vec![area.clone()]);
+        fs::set_permissions(&area, Permissions::from_mode(0o555)).expect("chmod");
+        locked_out(&area);
+        let error = remove_tree(&root_of(&tree), &path("area/t")).expect_err("refused");
+        assert_locked(error, "area");
+        assert!(tree.path("area/t/f").exists());
+    }
+
+    #[test]
+    fn a_directory_someone_else_owns_and_the_user_cannot_write_refuses_the_removal() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/theirs/f", "x");
+        let theirs = tree.path("t/theirs");
+        let _guard = RestoreModes(vec![theirs.clone()]);
+        fs::set_permissions(&theirs, Permissions::from_mode(0o555)).expect("chmod");
+        locked_out(&theirs);
+        let before = snapshot(&tree);
+        let foreign = |entry: &TreeEntry| {
+            if last_name(entry) == b"theirs" {
+                entry.uid + 1
+            } else {
+                entry.uid
+            }
+        };
+        let error = remove_tree_owned(
+            &root_of(&tree),
+            &path("t"),
+            &|entry| entry.device,
+            &not_a_mount_root,
+            &real_list,
+            MAX_DEPTH,
+            &foreign,
+        )
+        .expect_err("refused");
+        assert_locked(error, "t/theirs");
+        assert_eq!(snapshot(&tree), before);
+    }
+
+    #[test]
+    fn a_foreign_device_below_earlier_siblings_leaves_them_in_place() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/mnt/file", "x");
+        let device = |entry: &TreeEntry| if last_name(entry) == b"mnt" { 9 } else { 8 };
+        let before = snapshot(&tree);
+        remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("stops");
+        assert_eq!(snapshot(&tree), before);
+    }
+
+    /// Answers `before` for the first `scan_calls` questions about the
+    /// entry named `name` and `after` from then on: the scan asks first,
+    /// the removal pass second.
+    fn flips<T: Copy>(
+        name: &'static [u8],
+        before: T,
+        after: T,
+        otherwise: T,
+    ) -> impl Fn(&TreeEntry) -> T {
+        let asked = std::cell::Cell::new(0);
+        move |entry: &TreeEntry| {
+            if last_name(entry) != name {
+                return otherwise;
+            }
+            asked.set(asked.get() + 1);
+            if asked.get() == 1 { before } else { after }
+        }
+    }
+
+    #[test]
+    fn the_removal_pass_still_stops_at_a_directory_that_moved_to_another_device() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/mnt/file", "x");
+        let device = flips(b"mnt", 8u64, 9, 8);
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("stops");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            "{error}"
+        );
+        assert!(!tree.path("t/a").exists(), "the earlier sibling went");
+        assert!(tree.path("t/mnt/file").exists());
+    }
+
+    #[test]
+    fn the_removal_pass_still_stops_at_a_directory_that_became_a_mount_root() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("t/mnt/file", "x");
+        let mount_root = flips(b"mnt", false, true, false);
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &|entry| entry.device,
+            &mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("stops");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            "{error}"
+        );
+        assert!(tree.path("t/mnt/file").exists());
+    }
+
+    #[test]
+    fn the_removal_pass_still_stops_at_a_directory_past_the_depth_cap() {
+        let mut tree = Tree::new();
+        tree.file("t/a/b/f", "x");
+        // The scan finds `a` empty, so it sees nothing too deep. The
+        // removal pass lists `a` again and meets `b`.
+        let listed = std::cell::Cell::new(0);
+        let list = |dir: &TreeRoot| {
+            let mut entries = real_list(dir)?;
+            if dir.prefix().components().last() == Some(&b"a"[..]) {
+                listed.set(listed.get() + 1);
+                if listed.get() == 1 {
+                    entries.retain(|entry| entry.name.as_bytes() != b"b");
+                }
+            }
+            Ok(entries)
+        };
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &|entry| entry.device,
+            &not_a_mount_root,
+            &list,
+            1,
+        )
+        .expect_err("stops");
+        assert!(
+            matches!(&error, FsxError::TooDeep { path, limit: 1 } if path == "t/a/b"),
+            "{error}"
+        );
+        assert!(tree.path("t/a/b/f").exists());
+    }
+
+    #[test]
+    fn a_scan_that_fails_after_a_grant_puts_the_mode_back() {
+        let mut tree = Tree::new();
+        tree.file("t/closed/f", "x");
+        let closed = tree.path("t/closed");
+        let _guard = RestoreModes(vec![closed.clone()]);
+        fs::set_permissions(&closed, Permissions::from_mode(0o000)).expect("chmod");
+        let list = |dir: &TreeRoot| {
+            if dir.prefix().components().last() == Some(&b"closed"[..]) {
+                return Err(io::Error::from_raw_os_error(Errno::IO.raw_os_error()));
+            }
+            real_list(dir)
+        };
+        remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &|entry| entry.device,
+            &not_a_mount_root,
+            &list,
+            MAX_DEPTH,
+        )
+        .expect_err("the listing fails");
+        assert_eq!(mode_of(&closed), 0o000);
     }
 }
