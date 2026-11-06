@@ -295,12 +295,15 @@ pub fn derive_state(
     // The folder at the entry's path belongs to this piece while it is in
     // place (`live`) or arriving (`unearthing`). One on its way out
     // (`removing`) does not count. A `gone` entry gets its folder back
-    // only while the metadata says live: with archived metadata, a folder
+    // only while the metadata says live and this collection owns it: with
+    // archived metadata, or live metadata of another collection, a folder
     // at that path is a new piece.
     let present = folder_present
         && match entry.state {
             EntryState::Live | EntryState::Unearthing => true,
-            EntryState::Gone => metadata.lifecycle == Lifecycle::Live,
+            EntryState::Gone => {
+                metadata.lifecycle == Lifecycle::Live && metadata.collection == own_collection
+            }
             EntryState::Removing => false,
         };
     let has_archive_payload = metadata
@@ -1297,6 +1300,16 @@ mod tests {
         assert_eq!(
             derive(Some(&entry), Some(&metadata), true).expect("derives"),
             PieceState::Live
+        );
+    }
+
+    #[test]
+    fn a_folder_at_the_path_of_a_gone_piece_another_collection_took_over_is_not_that_piece() {
+        let entry = with_state(EntryState::Gone, false);
+        let metadata = metadata(Lifecycle::Live, OTHER, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::LiveOnAnotherMachine
         );
     }
 
