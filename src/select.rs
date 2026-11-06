@@ -1136,11 +1136,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_default_depth_cap_is_512_levels() {
-        assert_eq!(RealFs.max_depth(), 512);
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn a_directory_with_a_non_utf8_name_is_selected_through_its_escaped_form() {

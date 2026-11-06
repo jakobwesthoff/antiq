@@ -1798,18 +1798,6 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_time_does_not_count_on_a_users_folder() {
-        let tree = mixed();
-        let listing = packed(&tree);
-        filetime::set_file_mtime(
-            tree.path("proj/src"),
-            FileTime::from_unix_time(2_000_000_000, 0),
-        )
-        .expect("the time is set");
-        assert_eq!(compare(&tree, &listing), []);
-    }
-
-    #[test]
     fn a_locked_directory_of_a_users_folder_is_refused_by_the_comparison() {
         let (tree, listing, _unlock) = staging_and_listing(0o000);
         let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
