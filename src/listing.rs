@@ -333,7 +333,7 @@ fn io_error(source: io::Error) -> ListingError {
 }
 
 /// Whether `text` is a SHA-256 in lower-case hex.
-fn is_sha256_hex(text: &[u8]) -> bool {
+pub(crate) fn is_sha256_hex(text: &[u8]) -> bool {
     text.len() == 64 && text.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

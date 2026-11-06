@@ -351,7 +351,8 @@ flushed. The pin is checked before the idle and empty tests. (ADR 0024)
   `tmp/pack/<stamp>/<piece path>` uses it; otherwise the same second with
   counter 2, then 3, and so on, the first one unused.
 - The checksum file holds one line, `<hash>  <archive file name>`, with
-  the bare file name, so `shasum -a 256 -c <checksum file>` run in the
+  the hash in lower-case hex, two spaces, the bare file name and a final
+  newline, and nothing else, so `shasum -a 256 -c <checksum file>` run in the
   store folder checks the archive. The listing is described under
   "Listing format".
 - Every directory antiq creates (store folders under `pieces/`, parents
@@ -918,7 +919,7 @@ only on the user's request, never as a repair. (ADR 0062)
   `archive-bytes` come from the same read.
 - Listing missing, checksum file present: hash the archive file and
   compare it with the checksum file. On a mismatch refuse (exit 1, naming
-  both hashes); otherwise write the listing, with `# rebuilt <UTC time>`,
+  both hashes); otherwise write the listing, with a `rebuilt` line,
   and say that the archive is the one checksummed when it was stored.
 - `.tar.zst.sha256` missing, listing present: verify every member against
   the listing, as `unearth` does. On any difference refuse; otherwise

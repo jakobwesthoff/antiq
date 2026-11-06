@@ -4,6 +4,7 @@
 
 //! Packing, verifying and unpacking archives.
 
+pub mod check;
 pub mod extract;
 pub mod hashing;
 pub mod names;
@@ -320,6 +321,18 @@ pub enum PackError {
     Differs(Vec<verify::Difference>),
     #[error("cannot read the package")]
     Archive(#[source] std::io::Error),
+    #[error("cannot read `{path}`")]
+    ReadFile {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the archive file `{file}` is not the one that was stored: {what}")]
+    ArchiveDiffers { file: String, what: String },
+    #[error("the checksum file cannot be used: {0}")]
+    ChecksumFile(String),
+    #[error("the archive differs from its listing: {}", verify::describe_against_listing(.0))]
+    ListingDiffers(Vec<verify::Difference>),
     #[error("the package holds no members")]
     NoMembers,
     #[error("the package holds a member that cannot be extracted: `{member}`: {refusal}")]

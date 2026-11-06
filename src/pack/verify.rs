@@ -85,6 +85,29 @@ pub(super) fn describe(differences: &[Difference]) -> String {
         .unwrap_or_default()
 }
 
+/// Like [`describe`], for the members of an archive compared with a
+/// listing, where `Removed` is a listed path the archive lacks and `Added`
+/// an archived path the listing lacks.
+pub(super) fn describe_against_listing(differences: &[Difference]) -> String {
+    let count = differences.len();
+    let noun = if count == 1 {
+        "difference"
+    } else {
+        "differences"
+    };
+    differences
+        .first()
+        .map(|first| {
+            let first = match first {
+                Difference::Removed(path) => format!("`{path}` is listed but not in the archive"),
+                Difference::Added(path) => format!("`{path}` is in the archive but not listed"),
+                other => other.to_string(),
+            };
+            format!("{count} {noun}, the first: {first}")
+        })
+        .unwrap_or_default()
+}
+
 /// What the walk's `lstat` said about one entry of the folder. The walk
 /// that comes after the folder has been moved compares against these.
 ///
@@ -577,7 +600,7 @@ fn without_junk(lines: &[ListingEntry], rules: &WalkRules) -> Vec<ListingEntry> 
 
 /// The differences between two sets of lines, in path order. `left` is
 /// the package or listing, `right` the folder.
-fn compare(
+pub(super) fn compare(
     left: &[ListingEntry],
     right: &[ListingEntry],
     skip: &[RelPath],

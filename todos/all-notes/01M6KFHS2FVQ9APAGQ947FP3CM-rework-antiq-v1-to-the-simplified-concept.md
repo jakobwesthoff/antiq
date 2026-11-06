@@ -168,7 +168,7 @@ the consumer removes the allowance; Z greps `allow(dead_code` under
 | Item | Consumer |
 |---|---|
 | `fsx::space::{available_space, SpaceLedger, Reservation}` (space.rs:13-61) | C4 (`store_version`), C6 |
-| `pack::read::{read_package, read_package_from}` (read.rs:98, 111), `pack::extract::check_structure` (extract.rs:538) | F3 (shared verification) |
+| `pack::extract::check_structure` (extract.rs:538) | C6 |
 | `fsx::remove::remove_tree_at` (remove.rs:48) | F6 (repair 3) |
 | `fsx::moves::move_dir` | F6 (repair 4, `give_back`) |
 | `fsx::device::is_mount_point` | P2 |

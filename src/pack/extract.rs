@@ -535,7 +535,7 @@ pub fn unpack(
 /// the container for the name check. A package that `unpack` would refuse
 /// for what its headers say is refused with the same error. The rules of
 /// a target volume are not applied.
-#[allow(dead_code, reason = "used again by F3")]
+#[allow(dead_code, reason = "used again by C6")]
 pub(crate) fn check_structure<R: Read>(
     mut open: impl FnMut() -> io::Result<R>,
 ) -> Result<Vec<MemberName>, PackError> {
