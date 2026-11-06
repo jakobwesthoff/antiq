@@ -216,6 +216,31 @@ fn a_held_lock_is_exit_1_with_the_holder_also_under_if_reachable() {
         let error = &run.json()["error"];
         assert_eq!(error["pid"], std::process::id(), "{args:?}");
         assert!(error["started"].is_string(), "{args:?}");
+        let keys: Vec<&str> = error
+            .as_object()
+            .expect("the error is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["kind", "code", "message", "fix", "pid", "started"],
+            "{args:?}"
+        );
+        assert_eq!(error["code"], "antiq::lock::held", "{args:?}");
+        assert_eq!(
+            error["fix"], "Wait until that run ends, then run the command again.",
+            "{args:?}"
+        );
+        assert_eq!(
+            error["message"],
+            format!(
+                "cannot start the run: another antiq run holds the lock (pid {}, started {}), and runs that change an antiq collection take turns",
+                std::process::id(),
+                error["started"].as_str().expect("a time")
+            ),
+            "{args:?}"
+        );
     }
 }
 

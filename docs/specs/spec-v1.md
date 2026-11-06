@@ -744,7 +744,11 @@ the kind `other` that reads `` `<input>` names no single version of
 version is an error of the kind `other` that reads `` `<input>` matches no
 version of `<piece>`; there are <stamps> ``, listing the stamps of all the
 versions of the piece, incomplete ones included, newest first for every
-command. When two versions of one piece render alike
+command. Both errors have a help: for several matches it is "Name one version by
+more of its stamp, for example <stamp>.", with the newest matching stamp, and
+for no match it is "Name one of these versions by its stamp, or by the start
+of it." Their codes are `antiq::version::ambiguous` and
+`antiq::version::no_such`. When two versions of one piece render alike
 in local time at different UTC offsets (the repeated hour when daylight
 saving time ends), text output adds the UTC offset. A local input matches
 the text with that offset where the output shows it
@@ -2085,10 +2089,14 @@ message is the title, with the first letter in upper case, and its help
 is the section "How to fix it". A help of several paragraphs separates
 them by an empty line, and a paragraph whose lines start with two spaces
 is shown as written. These errors have an explanation: outside an antiq
-collection, `push` without a target, `push` refused for a damaged or
-incomplete store, a target marker that names another host or path, a held
-run lock, a listing, a version listing or a target marker of a newer
-format, and a path outside the antiq collection. The `message` of the JSON
+collection, a piece reference that matches several pieces, no piece, or
+only pieces with incomplete versions, a path outside the antiq collection,
+a version input that matches several versions or none, a held run lock,
+`push` without a target, `push` refused for a damaged or incomplete store,
+a target marker that names another host or path, a target that cannot be
+reached (an explanation without a help), a listing, a version listing or a
+target marker of a newer format, and `forget --all-versions` without
+`--force`. The `message` of the JSON
 error is the chain text of the whole error, and its `fix` is the help of
 the explanation. The steps the run was in are listed innermost first under "What
 antiq was doing". A reference that matches several pieces or versions, or
@@ -2098,8 +2106,9 @@ warnings about a filesystem that cannot be told and a lock file that cannot
 be read, hold system text; they show it as written, backticks included.
 A usage error of the command line parser is a block too. Its title is the
 parser's first line, with the first letter in upper case. "How to fix it"
-lists what the parser carries for the error, in its order: "Did you mean
-...?" for each command, option or value it suggests, then each of its tips
+lists what the parser carries for the error, in its order: one "Did you
+mean ...?" line for each kind of suggestion (command, option, value), which
+names all the suggestions of that kind, then each of its tips
 as the parser words it, and then its usage line. The section is left out
 when the parser carries none of these. The tip on passing a word that
 starts with a dash as a value (`-- <word>`) shows only where the parser
@@ -2132,13 +2141,28 @@ that stream without a panic, and the run ends with the exit code it would have h
 Every JSON output is one object `{"format": 1, "command": "<name>", ...}`
 on one line of stdout. `<name>` is the command's name. A command line that
 fails to parse before naming a command has `"command": null`. An error is
-`{"format": 1, "command": ..., "error": {"kind": ..., "message": ...}}`,
-where `message` is the text of the error without the context lines a
-console shows. When the error is one that antiq explains, the object has a
-`code` after `kind`, the stable name of the explanation such as
-`antiq::lock::held`; the key is absent for an error without one. For a
-wrapper error such as `push` over a held lock, `code` is the innermost
-code in the chain. Some kinds add keys to the error object. A `--dry-run` plan
+`{"format": 1, "command": ..., "error": {...}}`, where the error object is
+`{kind, code?, message, fix?, ...details}`, in this order:
+
+- `kind` is one of the kinds in the table below.
+- `code` is the stable name of the explanation of the error, such as
+  `antiq::lock::held`. The key is absent for an error without an
+  explanation. For a wrapper error such as `push` over a held lock, it is
+  the innermost code in the chain.
+- `message` is the text of the error without the context lines a console
+  shows.
+- `fix` is the help of the explanation that gives `code`. It follows
+  `message` and is absent where that explanation has no help. A usage
+  error of the command line parser carries neither `code` nor `fix`.
+- The details are the keys that a kind adds, such as `pid` and `started`.
+
+`push` over a held lock:
+
+```json
+{"format":1,"command":"push","error":{"kind":"lock_held","code":"antiq::lock::held","message":"cannot start the run: another antiq run holds the lock (pid 4242, started 2026-11-04T09:00:00Z), and runs that change an antiq collection take turns","fix":"Wait until that run ends, then run the command again.","pid":4242,"started":"2026-11-04T09:00:00Z"}}
+```
+
+A `--dry-run` plan
 carries `"dry_run": true` and an `actions` list after it (`lock_held`
 stands between the two while another run holds the lock); repairs come
 first in it, as actions of kind `repair`. A real run has neither

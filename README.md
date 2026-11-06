@@ -267,7 +267,7 @@ $ antiq push
 $ antiq rebuild projects/scanner 2026-11-05
 Rebuilt version 2026-11-05 16:02:01 of projects/scanner: wrote projects-scanner--2026-11-05T150201.sha256.zst
 
- ℹ INFO  the archive is the one checksummed when it was stored
+ ℹ INFO  The archive is the one checksummed when it was stored
 ```
 
 ### Setting up a target
