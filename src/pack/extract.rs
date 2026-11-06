@@ -13,6 +13,7 @@ use super::names::check_paths;
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{RelPath, escape};
+use crate::walk::MAX_DEPTH;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{File, Permissions};
@@ -33,11 +34,6 @@ const PERMISSION_BITS: u32 = 0o7777;
 const OWNER_ACCESS: u32 = 0o700;
 
 const READ_CHUNK: usize = 64 * 1024;
-
-/// Directory levels below the container that a member may lie at. The
-/// walk, the strict verify and the removal of staging go this deep and no
-/// deeper.
-const MAX_DEPTH: usize = 512;
 
 /// Largest long name, long link or pax record accepted. The `tar` crate
 /// reads such a record whole into memory, whatever size its header claims.
@@ -278,6 +274,8 @@ impl Placement {
         if member.path.is_root() {
             return Ok(());
         }
+        // The walk, the strict verify and the removal of staging go this
+        // deep and no deeper.
         if member.path.components().count() > MAX_DEPTH {
             return Err(Refusal::TooDeep);
         }
