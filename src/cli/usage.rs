@@ -302,6 +302,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tip_that_ends_a_sentence_already_gets_no_second_full_stop() {
+        let error = raw(
+            ErrorKind::UnknownArgument,
+            "unexpected argument '--init' found",
+            &[(
+                ContextKind::Suggested,
+                ContextValue::StyledStrs(vec!["use the other one.".to_string().into()]),
+            )],
+        );
+        let lines = block_for(&error).render(&Env::new(true, false, true, 100));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("▌   Use the other one.")
+        );
+    }
+
+    #[test]
     fn the_usage_comes_from_the_context_of_the_error() {
         let error = raw(
             ErrorKind::UnknownArgument,

@@ -1835,10 +1835,9 @@ mod choice_tests {
                 "{given}: {error:?}"
             );
             assert_eq!(error.kind(), ErrorKind::UnknownReference);
-            let RestoreError::Reference(reference) = &error else {
-                unreachable!("matched above");
-            };
-            let help = miette::Diagnostic::help(reference).expect("an explained error has a help");
+            let help = miette::Diagnostic::diagnostic_source(&error)
+                .and_then(miette::Diagnostic::help)
+                .expect("an explained error has a help");
             assert!(help.to_string().contains("forget"), "{error}");
         }
     }
