@@ -1807,11 +1807,6 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   test, and the spec's JSON output section with it; a real `init` also
   stops emitting the empty `actions` key, which the spec names for the
   dry run only (found by E1).
-- For Z (found by C3): the `LockHeld` struct of the dry run exists twice
-  (forget and pin); Z shares one. A pin error that wraps a marker error
-  repeats its message in the text chain, since `PinError`'s `Display`
-  includes its source; Z keeps the message once (test on the rendered
-  chain), as P2 did for `RsyncError::Spawn`.
 - For F7: sidecars without their `.tar.zst` are an incomplete version
   only when `versions::store::is_being_stored` finds no staged archive
   for them in `tmp/pack/`; otherwise they are repair 1's and not
