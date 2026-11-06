@@ -747,8 +747,12 @@ or `doomed/`, the parents that became empty go too. (ADR 0059)
    shortest path below `<stamp>/` for which a version with that stamp
    exists, matched by the volume's name equality (ADR 0054); when no
    version has that stamp, the first component below `<stamp>/` goes back
-   as it is, which usually lands in `recovered/`. `status` names every
-   folder in `recovered/`.
+   as it is, which usually lands in `recovered/`; so does every other
+   child of `<stamp>/` that holds a non-directory entry. An entry that is
+   no directory (a file or a symlink, never followed) goes to
+   `recovered/` as it is, also one that lies directly in `trash/`. A tree
+   that can go neither way stays in `trash/` and is a warning that names
+   both reasons. `status` names every folder in `recovered/`.
 5. **Died unearth:** for each live piece whose `.antiq-restored` names a
    version stamp, delete what is left of that version of that piece (the
    `.tar.zst` first, if it still exists, then its sidecars), and rewrite

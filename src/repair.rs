@@ -5,7 +5,8 @@
 //! The repairs that open every run, after the lock is taken.
 
 use crate::collection::Collection;
-use crate::filesystem::atomic::{RealDurable, flush_dir_of};
+use crate::filesystem::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of};
+use crate::filesystem::moves::move_dir;
 use crate::filesystem::remove::{remove_tree, remove_tree_at};
 use crate::filesystem::tree::TreeRoot;
 use crate::lock::RunLock;
@@ -24,7 +25,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where a tree taken out of `trash/` went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -260,6 +261,7 @@ pub fn plan(collection: &Collection) -> Planned {
     planner.interrupted_archives();
     planner.temporary_files();
     planner.doomed();
+    planner.trash();
     Planned {
         repairs: planner.repairs,
         warnings: planner.warnings,
@@ -279,6 +281,8 @@ struct Planner<'a> {
 struct Found {
     stamp: Option<Name>,
     tree: RelPath,
+    /// Only a directory can go back to its live path.
+    is_dir: bool,
 }
 
 impl Planner<'_> {
@@ -469,7 +473,7 @@ impl Planner<'_> {
         let found = self.trees_below(Area::Doomed);
         for item in found {
             match item {
-                Item::Tree(Found { stamp, tree }) => {
+                Item::Tree(Found { stamp, tree, .. }) => {
                     self.repairs.push(Repair::DeleteDoomed { stamp, tree });
                 }
                 Item::Chain { stamp, path } => self.repairs.push(Repair::RemoveEmptyChain {
@@ -479,6 +483,72 @@ impl Planner<'_> {
                 }),
             }
         }
+    }
+
+    // ---- 4: trash/ ----
+
+    fn trash(&mut self) {
+        // Without the store the trees cannot be told from leftovers, and
+        // giving back the first component of every one would misplace them.
+        if self.scan.is_none() {
+            return;
+        }
+        let collection = match TreeRoot::open(self.collection.root()) {
+            Ok(root) => root,
+            Err(error) => return self.cannot_read("", &RelPath::root(), error),
+        };
+        let mut claimed: BTreeSet<RelPath> = BTreeSet::new();
+        for item in self.trees_below(Area::Trash) {
+            match item {
+                Item::Tree(Found {
+                    stamp,
+                    tree,
+                    is_dir,
+                }) => {
+                    let destination = if is_dir && self.live_is_free(&collection, &claimed, &tree) {
+                        claimed.insert(tree.clone());
+                        Destination::Live
+                    } else {
+                        Destination::Recovered
+                    };
+                    self.repairs.push(Repair::GiveBack {
+                        stamp,
+                        tree,
+                        destination,
+                    });
+                }
+                Item::Chain { stamp, path } => self.repairs.push(Repair::RemoveEmptyChain {
+                    area: Area::Trash,
+                    stamp,
+                    path,
+                }),
+            }
+        }
+    }
+
+    /// Whether a tree could go to `live` now: its parent is a directory,
+    /// or will be one because an earlier tree goes there, and nothing is at
+    /// `live`. Only a prediction; the move decides.
+    fn live_is_free(
+        &self,
+        collection: &TreeRoot,
+        claimed: &BTreeSet<RelPath>,
+        live: &RelPath,
+    ) -> bool {
+        let parent = parent_of(live);
+        let parent_claimed = claimed
+            .iter()
+            .any(|path| *path == parent || is_below(path, &parent));
+        let parent_ok = parent.is_root()
+            || parent_claimed
+            || collection
+                .lstat(&parent)
+                .is_ok_and(|entry| entry.kind == EntryKind::Directory);
+        let taken = claimed
+            .iter()
+            .any(|path| path == live || is_below(path, live))
+            || collection.lstat(live).is_ok();
+        parent_ok && !taken
     }
 
     /// The trees and leftovers below `trash/` or `doomed/`, then the
@@ -529,6 +599,7 @@ impl Planner<'_> {
             items.push(Item::Tree(Found {
                 stamp: None,
                 tree: RelPath::root().join(&name),
+                is_dir: false,
             }));
         }
         items
@@ -555,7 +626,7 @@ impl Planner<'_> {
             Err(error) => return self.cannot_read(&area_name, &here, error),
         };
         let mut removed: BTreeSet<RelPath> = taken.iter().cloned().collect();
-        let mut leftovers = Vec::new();
+        let mut leftovers: Vec<(RelPath, bool)> = Vec::new();
         for child in &children {
             if removed.contains(&child.path) {
                 continue;
@@ -576,14 +647,16 @@ impl Planner<'_> {
             };
             if leftover {
                 removed.insert(child.path.clone());
-                leftovers.push(child.path.clone());
+                leftovers.push((child.path.clone(), child.kind == EntryKind::Directory));
             }
         }
         taken.sort_by_key(|tree| (tree.components().count(), tree.clone()));
-        for tree in taken.into_iter().chain(leftovers) {
+        let trees = taken.into_iter().map(|tree| (tree, true));
+        for (tree, is_dir) in trees.chain(leftovers) {
             items.push(Item::Tree(Found {
                 stamp: Some(stamp.clone()),
                 tree,
+                is_dir,
             }));
         }
         let mut empties = Vec::new();
@@ -714,20 +787,20 @@ pub fn run(collection: &Collection, lock: &RunLock) -> Outcome {
         done: Vec::new(),
         warnings: planned.warnings,
     };
-    let mut kept = Kept::default();
+    let mut state = State::default();
     for repair in planned.repairs {
-        match apply(collection, lock, &repair, &mut kept) {
+        match apply(collection, lock, &repair, &mut state) {
             Ok(Some(done)) => outcome.done.push(done),
             Ok(None) => {}
             Err(error) => {
                 if let Repair::DeleteSidecars { version, .. } = &repair {
-                    kept.0.insert(name_of(version.to_string().as_bytes()));
+                    state.kept.insert(name_of(version.to_string().as_bytes()));
                 }
                 outcome.warnings.push(Warning::new(error.to_string()));
             }
         }
         if matches!(&repair, Repair::DeleteTemporary { entry } if entry.as_bytes() == b"pack") {
-            for stamp in &kept.0 {
+            for stamp in &state.kept {
                 outcome.warnings.push(Warning::new(format!(
                     ".antiq/tmp/pack/{stamp} stays: the sidecars it belongs to are not deleted yet"
                 )));
@@ -737,10 +810,126 @@ pub fn run(collection: &Collection, lock: &RunLock) -> Outcome {
     outcome
 }
 
-/// What repair 2 must leave alone: the staging folders, by stamp, of
-/// repair 1 failures of this run.
+/// The result of [`give_back`].
+#[derive(Debug)]
+pub(crate) struct GivenBack {
+    pub destination: Destination,
+    /// A failure after the tree arrived: the destination stands.
+    pub note: Option<RepairError>,
+}
+
+/// Gives the tree `tree` of `trash/<stamp>/` back to `live` below the
+/// collection, or, when that is not possible for any reason, moves it to
+/// the same place below `recovered/` of `antiq`, creating and flushing the
+/// chain there, `recovered/` itself included. `stamp` is absent for an
+/// entry that lies directly in `trash/`.
+/// Only a directory is tried at `live`: it never replaces anything, so a
+/// path that is taken or has no directory as a parent fails the move. A
+/// failure after the rename, a flush or the mode of the tree, does not
+/// undo it and comes back as the note.
+///
+/// The empty folders left in `trash/` are not removed here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn give_back(
+    trash: &TreeRoot,
+    collection: &TreeRoot,
+    antiq: &TreeRoot,
+    stamp: Option<&Name>,
+    tree: &RelPath,
+    live: &RelPath,
+    durable: &dyn Durable,
+) -> Result<GivenBack, RepairError> {
+    let step = "give a tree in trash/ back";
+    let from = match stamp {
+        Some(stamp) => RelPath::root().join(stamp).concat(tree),
+        None => tree.clone(),
+    };
+    let here = place("trash", &from);
+    let is_dir = trash
+        .lstat(&from)
+        .map_err(|error| failure(step, here.clone(), error))?
+        .kind
+        == EntryKind::Directory;
+
+    let mut live_failure = None;
+    if is_dir {
+        match move_dir(trash, &from, collection, live) {
+            Ok(moved) => {
+                let late = moved
+                    .mode_restore_error
+                    .map(|error| failure(step, here.clone(), error));
+                let note = late.or_else(|| {
+                    after_move(durable, collection, live, trash, &from)
+                        .err()
+                        .map(|error| failure(step, here.clone(), error))
+                });
+                return Ok(GivenBack {
+                    destination: Destination::Live,
+                    note,
+                });
+            }
+            Err(error) => live_failure = Some(error.to_string()),
+        }
+    }
+
+    let reached = place("recovered", &from);
+    let in_recovered = RelPath::root().join(&name_of(b"recovered")).concat(&from);
+    let both = |error: String| match &live_failure {
+        Some(first) => failure(
+            step,
+            here.clone(),
+            io::Error::other(format!(
+                "cannot go back to {live} ({first}) and cannot go to {reached} ({error})"
+            )),
+        ),
+        None => failure(step, here.clone(), io::Error::other(error)),
+    };
+    create_dir_chain(durable, antiq, &parent_of(&in_recovered))
+        .map_err(|error| both(error.to_string()))?;
+    let late = if is_dir {
+        move_dir(trash, &from, antiq, &in_recovered)
+            .map_err(|error| both(error.to_string()))?
+            .mode_restore_error
+            .map(|error| failure(step, here.clone(), error))
+    } else {
+        trash
+            .rename(&from, antiq, &in_recovered)
+            .map_err(|error| both(error.to_string()))?;
+        None
+    };
+    let note = late.or_else(|| {
+        after_move(durable, antiq, &in_recovered, trash, &from)
+            .err()
+            .map(|error| failure(step, here.clone(), error))
+    });
+    Ok(GivenBack {
+        destination: Destination::Recovered,
+        note,
+    })
+}
+
+/// Makes a rename durable: the parent that gained the tree, then the one
+/// that lost it.
+fn after_move(
+    durable: &dyn Durable,
+    to_root: &TreeRoot,
+    to: &RelPath,
+    from_root: &TreeRoot,
+    from: &RelPath,
+) -> Result<(), crate::filesystem::FilesystemError> {
+    flush_dir_of(durable, to_root, &parent_of(to))?;
+    flush_dir_of(durable, from_root, &parent_of(from))
+}
+
+/// What the repairs of a run pass on to each other and to the outcome.
 #[derive(Default)]
-struct Kept(BTreeSet<Name>);
+struct State {
+    /// What repair 2 must leave alone: the staging folders, by stamp, of
+    /// repair 1 failures of this run.
+    kept: BTreeSet<Name>,
+    /// Failures after which a repair stands.
+    notes: Vec<Warning>,
+}
 
 /// Does one repair and returns what it did, or `None` when there was
 /// nothing left to do.
@@ -748,14 +937,14 @@ fn apply(
     collection: &Collection,
     _lock: &RunLock,
     repair: &Repair,
-    kept: &mut Kept,
+    state: &mut State,
 ) -> Result<Option<Repair>, RepairError> {
     match repair {
         Repair::DeleteSidecars { piece, version } => {
             delete_sidecars(collection, piece, version).map(|done| done.then(|| repair.clone()))
         }
         Repair::DeleteTemporary { entry } => {
-            delete_temporary(collection, entry, kept).map(|()| Some(repair.clone()))
+            delete_temporary(collection, entry, &state.kept).map(|()| Some(repair.clone()))
         }
         Repair::DeleteDoomed { stamp, tree } => {
             delete_doomed(collection, stamp.as_ref(), tree).map(|()| Some(repair.clone()))
@@ -763,8 +952,34 @@ fn apply(
         Repair::RemoveEmptyChain { area, stamp, path } => {
             remove_chain(collection, *area, stamp, path).map(|done| done.then(|| repair.clone()))
         }
+        Repair::GiveBack { stamp, tree, .. } => {
+            let given = give_back_in(collection, stamp.as_ref(), tree)?;
+            state
+                .notes
+                .extend(given.note.map(|note| Warning::new(note.to_string())));
+            Ok(Some(Repair::GiveBack {
+                stamp: stamp.clone(),
+                tree: tree.clone(),
+                destination: given.destination,
+            }))
+        }
         _ => Ok(None),
     }
+}
+
+fn give_back_in(
+    collection: &Collection,
+    stamp: Option<&Name>,
+    tree: &RelPath,
+) -> Result<GivenBack, RepairError> {
+    let step = "give a tree in trash/ back";
+    let open = |dir: PathBuf, area: &str| {
+        TreeRoot::open(&dir).map_err(|error| failure(step, place(area, &RelPath::root()), error))
+    };
+    let trash = open(collection.trash_dir(), "trash")?;
+    let live = open(collection.root().to_path_buf(), "")?;
+    let antiq = open(collection.antiq_dir(), "")?;
+    give_back(&trash, &live, &antiq, stamp, tree, tree, &RealDurable)
 }
 
 fn delete_sidecars(
@@ -806,20 +1021,21 @@ fn delete_sidecars(
     Ok(true)
 }
 
-fn delete_temporary(collection: &Collection, entry: &Name, kept: &Kept) -> Result<(), RepairError> {
+fn delete_temporary(
+    collection: &Collection,
+    entry: &Name,
+    kept: &BTreeSet<Name>,
+) -> Result<(), RepairError> {
     let step = "delete a temporary file";
     let here = place("tmp", &RelPath::root().join(entry));
     let root = TreeRoot::open(&collection.tmp_dir())
         .map_err(|error| failure(step, here.clone(), error))?;
-    if entry.as_bytes() == b"pack" && !kept.0.is_empty() {
+    if entry.as_bytes() == b"pack" && !kept.is_empty() {
         let pack = RelPath::root().join(entry);
         let children = root
             .read_dir(&pack)
             .map_err(|error| failure(step, here.clone(), error))?;
-        for child in children
-            .iter()
-            .filter(|child| !kept.0.contains(&child.name))
-        {
+        for child in children.iter().filter(|child| !kept.contains(&child.name)) {
             remove_tree(&root, &child.path)
                 .map_err(|error| failure(step, place("tmp", &child.path), error))?;
         }
@@ -1494,5 +1710,380 @@ mod tests {
             done_lines(&outcome),
             [format!("remove the empty folder .antiq/doomed/{S}")]
         );
+    }
+
+    // ---- repair 4 ----
+
+    fn trash_tree(temp: &mut TempCollection, stamp: &str, tree: &str) {
+        temp.tree()
+            .file(&format!(".antiq/trash/{stamp}/{tree}/f"), "x");
+    }
+
+    fn live_content(temp: &TempCollection, relative: &str) -> Option<String> {
+        fs::read_to_string(temp.root().join(relative)).ok()
+    }
+
+    #[test]
+    fn a_trashed_tree_goes_back_to_its_live_path_and_its_empty_chain_goes() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &WHOLE);
+        temp.tree().file("a/keep", "k");
+        trash_tree(&mut temp, S, "a/b");
+        temp.tree().dir(&format!(".antiq/trash/{S}/x/y"));
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/b/f").as_deref(), Some("x"));
+        assert!(!exists(&temp, &format!(".antiq/trash/{S}")));
+        assert_eq!(
+            done_lines(&outcome),
+            [
+                format!("move .antiq/trash/{S}/a/b back to a/b"),
+                format!("remove the empty folder .antiq/trash/{S}/a"),
+                format!("remove the empty folder .antiq/trash/{S}/x/y"),
+                format!("remove the empty folder .antiq/trash/{S}/x"),
+                format!("remove the empty folder .antiq/trash/{S}"),
+            ]
+        );
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_taken_live_path_sends_the_tree_to_recovered_with_its_chain() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &WHOLE);
+        temp.tree().file("a/b/mine", "m");
+        trash_tree(&mut temp, S, "a/b");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(
+            live_content(&temp, &format!(".antiq/recovered/{S}/a/b/f")).as_deref(),
+            Some("x")
+        );
+        assert_eq!(live_content(&temp, "a/b/mine").as_deref(), Some("m"));
+        assert!(
+            done_lines(&outcome)[0].ends_with(&format!("to .antiq/recovered/{S}/a/b")),
+            "{:?}",
+            done_lines(&outcome)
+        );
+    }
+
+    #[test]
+    fn a_missing_recovered_folder_blocks_no_give_back_and_is_created_when_needed() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        lay(&mut temp, ".antiq/pieces", "b", S, &WHOLE);
+        temp.tree().file("b/mine", "m");
+        trash_tree(&mut temp, S, "a");
+        trash_tree(&mut temp, S, "b");
+        fs::remove_dir(temp.root().join(".antiq/recovered")).expect("recovered is empty");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/f").as_deref(), Some("x"));
+        assert_eq!(
+            live_content(&temp, &format!(".antiq/recovered/{S}/b/f")).as_deref(),
+            Some("x")
+        );
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_missing_recovered_folder_does_not_stop_a_give_back_to_a_free_live_path() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        trash_tree(&mut temp, S, "a");
+        fs::remove_dir(temp.root().join(".antiq/recovered")).expect("recovered is empty");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/f").as_deref(), Some("x"));
+        assert!(!exists(&temp, ".antiq/recovered"), "nothing needed it");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_missing_parent_sends_the_tree_to_recovered() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &WHOLE);
+        trash_tree(&mut temp, S, "a/b");
+
+        repaired(&temp);
+
+        assert!(exists(&temp, &format!(".antiq/recovered/{S}/a/b/f")));
+        assert!(!exists(&temp, "a"));
+    }
+
+    #[test]
+    fn a_parent_that_is_a_file_sends_the_tree_to_recovered() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &WHOLE);
+        temp.tree().file("a", "in the way");
+        trash_tree(&mut temp, S, "a/b");
+
+        repaired(&temp);
+
+        assert!(exists(&temp, &format!(".antiq/recovered/{S}/a/b/f")));
+        assert_eq!(live_content(&temp, "a").as_deref(), Some("in the way"));
+    }
+
+    #[test]
+    fn the_shortest_path_with_a_version_of_that_stamp_is_the_tree() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        lay(&mut temp, ".antiq/pieces", "a/b", S, &WHOLE);
+        trash_tree(&mut temp, S, "a/b");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/b/f").as_deref(), Some("x"));
+        assert_eq!(
+            done_lines(&outcome)[0],
+            format!("move .antiq/trash/{S}/a back to a")
+        );
+    }
+
+    #[test]
+    fn without_a_version_of_that_stamp_the_first_component_goes_back() {
+        let mut temp = TempCollection::minimal();
+        trash_tree(&mut temp, S, "x/y");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "x/y/f").as_deref(), Some("x"));
+        assert_eq!(
+            done_lines(&outcome)[0],
+            format!("move .antiq/trash/{S}/x back to x")
+        );
+    }
+
+    #[test]
+    fn a_stamp_folder_that_is_no_stamp_gives_back_its_children() {
+        let mut temp = TempCollection::minimal();
+        trash_tree(&mut temp, "junk", "x");
+
+        repaired(&temp);
+
+        assert_eq!(live_content(&temp, "x/f").as_deref(), Some("x"));
+        assert!(!exists(&temp, ".antiq/trash/junk"));
+    }
+
+    #[test]
+    fn entries_that_are_no_directory_lie_directly_in_trash_go_to_recovered_unfollowed() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().file(".antiq/trash/stray", "s");
+        temp.tree().symlink(".antiq/trash/link", "/nonexistent");
+        temp.tree().file(&format!(".antiq/trash/{S}/loose"), "l");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(
+            live_content(&temp, ".antiq/recovered/stray").as_deref(),
+            Some("s")
+        );
+        assert_eq!(
+            live_content(&temp, &format!(".antiq/recovered/{S}/loose")).as_deref(),
+            Some("l")
+        );
+        let link = temp.root().join(".antiq/recovered/link");
+        assert_eq!(
+            fs::read_link(link).expect("a symlink"),
+            std::path::PathBuf::from("/nonexistent")
+        );
+        assert!(!exists(&temp, ".antiq/trash/stray"));
+        assert!(!exists(&temp, "stray"), "a loose file never goes live");
+        assert!(
+            done_lines(&outcome)
+                .iter()
+                .all(|line| !line.contains("back to"))
+        );
+    }
+
+    #[test]
+    fn a_second_tree_for_one_path_goes_to_recovered() {
+        let mut temp = TempCollection::minimal();
+        let later = "2026-11-04T090212";
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        lay(&mut temp, ".antiq/pieces", "a", later, &WHOLE);
+        trash_tree(&mut temp, S, "a");
+        temp.tree().file(&format!(".antiq/trash/{later}/a/g"), "g");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/f").as_deref(), Some("x"));
+        assert_eq!(
+            live_content(&temp, &format!(".antiq/recovered/{later}/a/g")).as_deref(),
+            Some("g")
+        );
+        assert_eq!(
+            done_lines(&outcome)
+                .into_iter()
+                .filter(|line| line.starts_with("move"))
+                .collect::<Vec<_>>(),
+            [
+                format!("move .antiq/trash/{S}/a back to a"),
+                format!("move .antiq/trash/{later}/a to .antiq/recovered/{later}/a"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tree_that_goes_nowhere_stays_in_trash_with_both_reasons_in_the_warning() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        temp.tree().file("a/mine", "m");
+        temp.tree()
+            .file(&format!(".antiq/recovered/{S}/a/theirs"), "t");
+        trash_tree(&mut temp, S, "a");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(
+            live_content(&temp, &format!(".antiq/trash/{S}/a/f")).as_deref(),
+            Some("x")
+        );
+        let message = &outcome.warnings[0].message;
+        assert!(
+            message.starts_with(&format!(
+                "cannot give a tree in trash/ back .antiq/trash/{S}/a: "
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("back to a") && message.contains(&format!("recovered/{S}/a")),
+            "{message}"
+        );
+        assert!(
+            outcome
+                .done
+                .iter()
+                .all(|repair| !matches!(repair, Repair::GiveBack { .. }))
+        );
+    }
+
+    #[test]
+    fn a_leftover_child_goes_beside_a_matched_tree() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        trash_tree(&mut temp, S, "a");
+        temp.tree().file(&format!(".antiq/trash/{S}/junk/g"), "g");
+
+        repaired(&temp);
+
+        assert_eq!(live_content(&temp, "a/f").as_deref(), Some("x"));
+        assert_eq!(
+            live_content(&temp, "junk/g").as_deref(),
+            Some("g"),
+            "no version: its first component goes back as it is"
+        );
+        assert!(!exists(&temp, &format!(".antiq/trash/{S}")));
+    }
+
+    #[test]
+    fn repairs_2_3_and_6_never_delete_a_tree_in_trash() {
+        let mut temp = TempCollection::minimal();
+        lay(&mut temp, ".antiq/pieces", "a", S, &WHOLE);
+        temp.tree().file("a/mine", "m");
+        temp.tree()
+            .file(&format!(".antiq/recovered/{S}/a/theirs"), "t");
+        trash_tree(&mut temp, S, "a");
+        temp.tree().file(".antiq/tmp/x", "x");
+        temp.tree().file(&format!(".antiq/doomed/{S}/b/f"), "x");
+        temp.tree().dir(".antiq/pieces/empty/er");
+
+        repaired(&temp);
+
+        assert!(exists(&temp, &format!(".antiq/trash/{S}/a/f")));
+        assert!(!exists(&temp, ".antiq/tmp/x"));
+        assert!(!exists(&temp, &format!(".antiq/doomed/{S}")));
+    }
+
+    mod give_back_unit {
+        use super::*;
+        use crate::filesystem::atomic::recording::{Flush, Recording};
+        use std::path::PathBuf;
+
+        fn roots(temp: &TempCollection) -> (TreeRoot, TreeRoot, TreeRoot) {
+            let open = |relative: &str| TreeRoot::open(&temp.root().join(relative)).expect("opens");
+            (open(".antiq/trash"), open("."), open(".antiq"))
+        }
+
+        fn dirs(recording: &Recording) -> Vec<PathBuf> {
+            recording
+                .flushes()
+                .into_iter()
+                .filter_map(|flush| match flush {
+                    Flush::Dir(path) => Some(path),
+                    Flush::File(_) => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn a_tree_in_recovered_has_its_chain_and_both_parents_flushed() {
+            let mut temp = TempCollection::minimal();
+            temp.tree().file("a/b/mine", "m");
+            trash_tree(&mut temp, S, "a/b");
+            let (trash, collection, antiq) = roots(&temp);
+            let recording = Recording::new();
+
+            let given = give_back(
+                &trash,
+                &collection,
+                &antiq,
+                Some(&name(S)),
+                &path("a/b"),
+                &path("a/b"),
+                &recording,
+            )
+            .expect("the tree moves");
+
+            assert_eq!(given.destination, Destination::Recovered);
+            let expected: Vec<PathBuf> = [
+                "recovered",
+                ".",
+                &format!("recovered/{S}"),
+                "recovered",
+                &format!("recovered/{S}/a"),
+                &format!("recovered/{S}"),
+                &format!("recovered/{S}/a"),
+                &format!("{S}/a"),
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+            assert_eq!(dirs(&recording), expected);
+        }
+
+        #[test]
+        fn a_flush_that_fails_after_the_rename_leaves_the_tree_live_with_a_note() {
+            let mut temp = TempCollection::minimal();
+            temp.tree().file("a/keep", "k");
+            trash_tree(&mut temp, S, "a/b");
+            let (trash, collection, antiq) = roots(&temp);
+            let recording = Recording::new();
+            recording.fail_dirs_from(0);
+
+            let given = give_back(
+                &trash,
+                &collection,
+                &antiq,
+                Some(&name(S)),
+                &path("a/b"),
+                &path("a/b"),
+                &recording,
+            )
+            .expect("the tree moved");
+
+            assert_eq!(given.destination, Destination::Live);
+            let note = given.note.expect("the flush failure is told");
+            assert!(
+                note.to_string()
+                    .starts_with("cannot give a tree in trash/ back "),
+                "{note}"
+            );
+            assert!(exists(&temp, "a/b/f"));
+        }
     }
 }
