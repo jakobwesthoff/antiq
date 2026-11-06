@@ -2,12 +2,340 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `forget` operation.
+//! The `forget` operation: deletes one version of a piece, or all of them.
 
-use crate::error::HasKind;
+use crate::clock::Clock;
+use crate::collection::Collection;
+use crate::error::{ErrorKind, HasKind};
+use crate::reference::{self, CandidateSet, ReferenceError};
+use crate::relpath::{RelPath, escape};
+use crate::repair::Repair;
+use crate::report::{self, CommandReport, Warning};
+use crate::run::{RunError, RunGuard};
+use crate::versions::VersionsError;
+use crate::versions::names::VersionFile;
+use crate::versions::naming::{self, Candidate, Lookup};
+use crate::versions::stamp::Stamp;
+use crate::versions::store::{self, StorePiece, StoreScan, StoreVersion};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+use serde::{Serialize, Serializer};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
-/// Why forget failed. Nothing in it can fail yet.
+/// Why forget failed.
 #[derive(Debug, thiserror::Error)]
-pub enum ForgetError {}
+pub enum ForgetError {
+    /// The lock is held, or the machine has no name to write into it.
+    #[error("cannot start the run")]
+    Run(#[from] RunError),
+    #[error("cannot find the piece")]
+    Reference(#[from] ReferenceError),
+    /// A file of the store could not be read for another reason than being
+    /// gone. The source says which.
+    #[error("cannot read the versions in the store")]
+    Versions(#[from] VersionsError),
+    /// The piece or the version on the command line is empty.
+    #[error("{0}")]
+    Usage(&'static str),
+    #[error("`{input}` matches no version of {piece}")]
+    NoSuchVersion { input: String, piece: String },
+    #[error("`{input}` matches {} versions of {piece}: {}", stamps.len(), stamps.join(", "))]
+    AmbiguousVersion {
+        input: String,
+        piece: String,
+        stamps: Vec<String>,
+    },
+}
 
-impl HasKind for ForgetError {}
+impl HasKind for ForgetError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            ForgetError::Run(error) => error.kind(),
+            ForgetError::Reference(error) => error.kind(),
+            ForgetError::Usage(_) => ErrorKind::Usage,
+            ForgetError::Versions(_)
+            | ForgetError::NoSuchVersion { .. }
+            | ForgetError::AmbiguousVersion { .. } => ErrorKind::Other,
+        }
+    }
+}
+
+/// Which versions of the piece to delete.
+#[derive(Debug, Clone, Copy)]
+pub enum Which<'a> {
+    /// The version the text names ([`naming::find_version`]).
+    One(&'a str),
+    /// Every version of the piece, incomplete ones included.
+    All,
+}
+
+#[derive(Debug)]
+pub struct ForgetRequest<'a> {
+    pub collection: &'a Collection,
+    /// The directory a piece given as a relative path starts at.
+    pub cwd: &'a Path,
+    /// A path or a search word.
+    pub piece: &'a OsStr,
+    pub which: Which<'a>,
+}
+
+/// A version that `forget` deleted, or would delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionEntry {
+    pub piece: RelPath,
+    #[serde(serialize_with = "as_text")]
+    pub stamp: Stamp,
+    /// The time of the stamp in UTC. The stamp has the counter this lacks.
+    pub version: Timestamp,
+    /// Sidecars without an archive.
+    pub incomplete: bool,
+    /// The bare names of the files, in the order they are deleted.
+    pub files: Vec<String>,
+}
+
+fn as_text<S: Serializer>(stamp: &Stamp, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(stamp)
+}
+
+impl VersionEntry {
+    fn of(piece: &RelPath, version: &StoreVersion) -> VersionEntry {
+        let files = VersionFile::ALL
+            .into_iter()
+            .flat_map(|kind| version.files(kind))
+            .map(|name| escape(name.as_bytes()))
+            .collect();
+        VersionEntry {
+            piece: piece.clone(),
+            stamp: version.stamp,
+            version: version.stamp.time(),
+            incomplete: version.is_incomplete(),
+            files,
+        }
+    }
+}
+
+/// A version that could not be deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Failed {
+    pub piece: RelPath,
+    #[serde(serialize_with = "as_text")]
+    pub stamp: Stamp,
+    pub reason: String,
+}
+
+/// One step of a run, as a plan lists it and as the report names the
+/// repairs that were done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Action {
+    Repair(Repair),
+    ForgetVersion(VersionEntry),
+}
+
+/// What a real run did.
+#[derive(Debug, Serialize)]
+pub struct ForgetReport {
+    pub forgotten: Vec<VersionEntry>,
+    pub failed: Vec<Failed>,
+    /// The repairs at the start of the run that were done.
+    pub repairs: Vec<Action>,
+    pub warnings: Vec<Warning>,
+}
+
+impl CommandReport for ForgetReport {
+    fn partial(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+}
+
+/// Deletes the versions the request names. The run lock is taken and the
+/// repairs run first.
+///
+/// A version that cannot be deleted is recorded in the report and the run
+/// goes on with the next one. Whatever the delete had removed by then stays
+/// removed, the archive first, so a rerun of the same `forget` finds the
+/// rest as an incomplete version.
+pub fn forget(
+    request: &ForgetRequest<'_>,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+) -> Result<ForgetReport, ForgetError> {
+    check_arguments(request)?;
+    let guard = RunGuard::begin(request.collection, clock)?;
+    let chosen = choose(request, zone)?;
+
+    let pieces = crate::filesystem::tree::TreeRoot::open(&request.collection.pieces_dir())
+        .map_err(|source| VersionsError::Io {
+            action: "open",
+            path: request.collection.pieces_dir().display().to_string(),
+            source,
+        })?;
+    let mut forgotten = Vec::new();
+    let mut failed = Vec::new();
+    for version in &chosen.versions {
+        match store::delete_version(&pieces, &chosen.folder, version) {
+            Ok(()) => forgotten.push(VersionEntry::of(&chosen.folder, version)),
+            Err(error) => failed.push(Failed {
+                piece: chosen.folder.clone(),
+                stamp: version.stamp,
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    let mut warnings = report::setting_notes(request.collection);
+    warnings.extend(guard.warnings().iter().cloned());
+    Ok(ForgetReport {
+        forgotten,
+        failed,
+        repairs: guard
+            .repaired()
+            .iter()
+            .cloned()
+            .map(Action::Repair)
+            .collect(),
+        warnings,
+    })
+}
+
+/// The empty piece or version is a flaw of the command line: the shell
+/// passed a variable that was not set.
+fn check_arguments(request: &ForgetRequest<'_>) -> Result<(), ForgetError> {
+    if request.piece.is_empty() {
+        return Err(ForgetError::Usage("the piece is empty"));
+    }
+    if matches!(request.which, Which::One("")) {
+        return Err(ForgetError::Usage("the version is empty"));
+    }
+    Ok(())
+}
+
+/// The store folder the request names and the versions of it to delete.
+struct Chosen {
+    folder: RelPath,
+    versions: Vec<StoreVersion>,
+}
+
+fn choose(request: &ForgetRequest<'_>, zone: &TimeZone) -> Result<Chosen, ForgetError> {
+    let collection = request.collection;
+    let scan = settled(collection, store::scan(&collection.pieces_dir())?)?;
+    let candidates = CandidateSet::store_and_sidecar_only(collection, &scan);
+    let folder = reference::resolve_piece(collection, request.cwd, request.piece, &candidates)?;
+    let found: &StorePiece = scan
+        .pieces
+        .iter()
+        .chain(&scan.sidecar_only)
+        .find(|candidate| candidate.path == folder)
+        .expect("the candidates are the folders of the scan");
+
+    let versions = match request.which {
+        Which::All => found.versions.clone(),
+        Which::One(input) => {
+            let named: Vec<Candidate> = found
+                .versions
+                .iter()
+                .map(|version| Candidate {
+                    stamp: version.stamp,
+                    incomplete: version.is_incomplete(),
+                })
+                .collect();
+            match naming::find_version(input, &named, zone) {
+                Lookup::Found(stamp) => found
+                    .versions
+                    .iter()
+                    .filter(|version| version.stamp == stamp)
+                    .cloned()
+                    .collect(),
+                Lookup::NoMatch => {
+                    return Err(ForgetError::NoSuchVersion {
+                        input: input.to_string(),
+                        piece: folder.to_string(),
+                    });
+                }
+                Lookup::Several(stamps) => {
+                    return Err(ForgetError::AmbiguousVersion {
+                        input: input.to_string(),
+                        piece: folder.to_string(),
+                        stamps: stamps.iter().map(ToString::to_string).collect(),
+                    });
+                }
+            }
+        }
+    };
+    Ok(Chosen { folder, versions })
+}
+
+/// `scan` without the versions that a run is still moving into the store:
+/// sidecars whose archive is staged in `tmp/pack/` belong to repair 1, not
+/// to the user. A folder left without a version is no piece to forget.
+fn settled(collection: &Collection, mut scan: StoreScan) -> Result<StoreScan, VersionsError> {
+    let staging = collection.tmp_dir().join("pack");
+    for folder in scan.pieces.iter_mut().chain(&mut scan.sidecar_only) {
+        let mut kept = Vec::new();
+        for version in std::mem::take(&mut folder.versions) {
+            let staged = version.is_incomplete()
+                && store::is_being_stored(&staging, &folder.path, &version.stamp)?;
+            if !staged {
+                kept.push(version);
+            }
+        }
+        folder.versions = kept;
+    }
+    scan.pieces.retain(|folder| !folder.versions.is_empty());
+    scan.sidecar_only
+        .retain(|folder| !folder.versions.is_empty());
+    Ok(scan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lock::LockError;
+
+    #[test]
+    fn a_usage_error_is_a_usage_kind_and_a_held_lock_keeps_its_kind() {
+        assert_eq!(ForgetError::Usage("x").kind(), ErrorKind::Usage);
+        let held = ForgetError::Run(RunError::Lock(LockError::Held {
+            pid: 7,
+            started: "2026-11-04T09:02:11Z".parse().expect("a timestamp"),
+        }));
+        assert_eq!(held.kind(), ErrorKind::LockHeld);
+    }
+
+    #[test]
+    fn a_reference_keeps_its_kind() {
+        let unknown = ForgetError::Reference(ReferenceError::Unknown {
+            reference: "zzz".to_string(),
+        });
+        assert_eq!(unknown.kind(), ErrorKind::UnknownReference);
+    }
+
+    #[test]
+    fn a_version_that_is_not_there_is_an_error_of_no_kind_of_its_own() {
+        let none = ForgetError::NoSuchVersion {
+            input: "2020".to_string(),
+            piece: "tools/scan".to_string(),
+        };
+        assert_eq!(none.kind(), ErrorKind::Other);
+        assert_eq!(none.to_string(), "`2020` matches no version of tools/scan");
+        let several = ForgetError::AmbiguousVersion {
+            input: "2026".to_string(),
+            piece: "tools/scan".to_string(),
+            stamps: vec![
+                "2026-01-01T000000".to_string(),
+                "2026-02-01T000000".to_string(),
+            ],
+        };
+        assert_eq!(several.kind(), ErrorKind::Other);
+        assert_eq!(
+            several.to_string(),
+            "`2026` matches 2 versions of tools/scan: 2026-01-01T000000, 2026-02-01T000000"
+        );
+    }
+}

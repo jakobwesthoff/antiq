@@ -164,12 +164,6 @@ command_line!(
     "fork",
     ["fork", "piece", "--version", "v", "--name", "copy", "-n"]
 );
-command_line!(forget_a_version, "forget", ["forget", "piece", "v", "-n"]);
-command_line!(
-    forget_all_versions,
-    "forget",
-    ["forget", "piece", "--all-versions", "--force", "-n"]
-);
 command_line!(rebuild, "rebuild", ["rebuild", "piece", "v", "-n"]);
 command_line!(
     import,
@@ -184,6 +178,30 @@ command_line!(
         "-n"
     ]
 );
+
+#[test]
+fn forget_needs_a_collection() {
+    for args in [
+        &["forget", "piece", "v"][..],
+        &["forget", "piece", "--all-versions", "--force"],
+    ] {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args(args)
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
+        assert_eq!(run.json()["command"], "forget");
+    }
+}
 
 #[test]
 fn list_needs_a_collection() {
