@@ -4,6 +4,7 @@
 
 //! The `grep` command: searches the paths of all archived files.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{Color, WIDE_FROM, mid, paint, sanitize, spaces};
 use crate::cli::{Context, GrepArgs};
@@ -65,23 +66,17 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
             .context("print the result")?;
     } else {
         // Notes on the settings, then the lock, as `list` orders them.
-        for warning in &found.warnings {
-            out.note(&format!("note: {}", warning.message))
-                .context("print the notes")?;
-        }
-        if let Some(note) = &found.note {
-            out.note(&format!("note: {note}"))
-                .context("print the notes")?;
-        }
-        for skipped in &found.skipped {
-            out.note(&format!(
-                "warning: cannot search version {} of {}: {}",
+        let mut notices = notice::warnings(&found.warnings);
+        notices.extend(found.note.iter().cloned().map(Notice::Note));
+        notices.extend(found.skipped.iter().map(|skipped| {
+            Notice::Warning(Warning::new(format!(
+                "cannot search version {} of {}: {}",
                 skipped.stamp,
                 sanitize(&skipped.piece.to_string()),
                 skipped.reason
-            ))
-            .context("print the warnings")?;
-        }
+            )))
+        }));
+        out.notices(&notices).context("print the notes")?;
         let style = out.stdout_style();
         if style.terminal {
             for line in render_terminal(found, printed.regex, style, printed.zone) {

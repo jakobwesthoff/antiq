@@ -5,6 +5,7 @@
 //! The `fork` command: extracts a working copy of a version.
 
 use super::unearth::label;
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{decimal_size, sanitize};
 use crate::cli::{Context, ForkArgs};
@@ -52,10 +53,8 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
                 for line in dry_run_lines(&plan, style, &zone) {
                     out.line(&line).context("print the result")?;
                 }
-                for warning in &plan.warnings {
-                    out.note(&format!("note: {}", warning.message))
-                        .context("print the notes")?;
-                }
+                out.notices(&notice::warnings(&plan.warnings))
+                    .context("print the notes")?;
             }
             Ok(if plan.skips() { 3 } else { 0 })
         }
@@ -68,6 +67,7 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
                 for line in &lines.stdout {
                     out.line(line).context("print the result")?;
                 }
+                out.notices(&lines.notices).context("print the notes")?;
                 for line in &lines.stderr {
                     out.note(line).context("print the notes")?;
                 }
@@ -80,6 +80,8 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
+    /// Warnings and repairs, written before the lines of `stderr`.
+    notices: Vec<Notice>,
     stderr: Vec<String>,
 }
 
@@ -88,12 +90,10 @@ fn done_lines(report: &ForkReport, style: Style, zone: &TimeZone) -> Lines {
     let mut lines = Lines::default();
     for repair in &report.repairs {
         lines
-            .stderr
-            .push(format!("note: repaired: {}", repair.describe()));
+            .notices
+            .push(Notice::Note(format!("repaired: {}", repair.describe())));
     }
-    for warning in &report.warnings {
-        lines.stderr.push(format!("note: {}", warning.message));
-    }
+    lines.notices.extend(notice::warnings(&report.warnings));
     if let Some(skipped) = &report.skipped {
         lines.stderr.push(match skipped.needed {
             Some(needed) => format!(
@@ -215,11 +215,12 @@ mod tests {
         );
         assert_eq!(lines.stdout, Vec::<String>::new());
         assert_eq!(
+            crate::cli::notice::pipe_lines(&lines.notices),
+            ["warning: a warning"]
+        );
+        assert_eq!(
             lines.stderr,
-            [
-                "note: a warning",
-                "Skipped projects/scanner: out of space during the extraction, 5.0 kB free"
-            ]
+            ["Skipped projects/scanner: out of space during the extraction, 5.0 kB free"]
         );
     }
 

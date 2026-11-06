@@ -294,6 +294,17 @@ fn a_stderr_pipe_gets_greppable_plain_lines() {
 }
 
 #[test]
+fn a_block_with_a_pipe_line_gives_a_pipe_that_line_and_nothing_else() {
+    let warning = Block::warning(rich("Unknown setting"))
+        .text(rich("antiq ignores it."))
+        .fix(rich("Remove it."))
+        .pipe("warning: the key `x` is unknown");
+    assert_eq!(warning.render_plain(), ["warning: the key `x` is unknown"]);
+    let info = Block::info(rich("Repaired")).pipe("note: repaired: x");
+    assert_eq!(render_blocks(&[info], &Env::pipe()), ["note: repaired: x"]);
+}
+
+#[test]
 fn info_and_hint_have_no_pipe_form() {
     assert!(Block::info(rich("x")).render_plain().is_empty());
     assert!(Block::hint(rich("x")).render_plain().is_empty());

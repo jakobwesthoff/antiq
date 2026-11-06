@@ -9,6 +9,7 @@ pub mod cmd;
 #[expect(dead_code, reason = "no command renders a block yet")]
 pub mod console;
 mod error_block;
+pub mod notice;
 pub mod output;
 pub mod table;
 mod usage;

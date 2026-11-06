@@ -4,6 +4,7 @@
 
 //! The `push` command: mirrors the collection to the target.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
@@ -43,21 +44,21 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 // An unreachable target is not a failure under
                 // `--if-reachable`, so its reason is a message and stdout
                 // stays empty.
+                let mut notices: Vec<Notice> = Vec::new();
                 if let Some(reason) = &report.reason {
-                    out.note(&format!("note: {reason}"))
-                        .context("print the result")?;
+                    notices.push(Notice::Note(reason.clone()));
                 }
-                for repair in &report.repairs {
-                    out.note(&format!("note: repaired: {}", repair.describe()))
-                        .context("print the result")?;
-                }
-                for warning in &report.warnings {
-                    out.note(&format!("note: {}", warning.message))
-                        .context("print the result")?;
-                }
-                for note in report.note_lines() {
-                    out.note(&note).context("print the result")?;
-                }
+                notices.extend(
+                    report
+                        .repairs
+                        .iter()
+                        .map(|repair| Notice::Note(format!("repaired: {}", repair.describe()))),
+                );
+                notices.extend(notice::warnings(&report.warnings));
+                notices.extend(report.note_lines().into_iter().map(|line| {
+                    Notice::Note(line.strip_prefix("note: ").unwrap_or(&line).to_string())
+                }));
+                out.notices(&notices).context("print the result")?;
                 for line in report.lines() {
                     out.line(&line).context("print the result")?;
                 }

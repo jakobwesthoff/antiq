@@ -4,6 +4,7 @@
 
 //! The `init` command.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
@@ -37,9 +38,7 @@ pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u
         for line in &lines.stdout {
             out.line(line).context("print the result")?;
         }
-        for line in &lines.stderr {
-            out.note(line).context("print the notes")?;
-        }
+        out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(0)
 }
@@ -48,7 +47,7 @@ pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u
 #[derive(Debug, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    stderr: Vec<Notice>,
 }
 
 fn render(report: &InitReport) -> Lines {
@@ -58,7 +57,10 @@ fn render(report: &InitReport) -> Lines {
     if let Some(config) = &report.config {
         // The config is the data of a dry run; a shell can redirect it.
         stdout.extend(config.lines().map(str::to_string));
-        stderr.push(format!("Would create a collection at {}", report.path));
+        stderr.push(Notice::Line(format!(
+            "Would create a collection at {}",
+            report.path
+        )));
     } else {
         stdout.push(format!("Created the collection at {}", report.path));
         if let Some(id) = report.id {
@@ -70,18 +72,14 @@ fn render(report: &InitReport) -> Lines {
             stdout.push(format!("The next archive would archive {due} {folders}."));
         }
     }
-    stderr.extend(
-        report
-            .warnings
-            .iter()
-            .map(|warning| format!("note: {}", warning.message)),
-    );
+    stderr.extend(notice::warnings(&report.warnings));
     Lines { stdout, stderr }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::notice::pipe_lines;
     use antiq::report::Warning;
 
     fn report() -> InitReport {
@@ -114,7 +112,7 @@ mod tests {
                 "The next archive would archive 2 folders.",
             ]
         );
-        assert_eq!(texts(&lines.stderr), ["note: watch out"]);
+        assert_eq!(pipe_lines(&lines.stderr), ["warning: watch out"]);
     }
 
     #[test]
@@ -146,8 +144,8 @@ mod tests {
         });
         assert_eq!(texts(&lines.stdout), ["[collection]", "id = \"X\""]);
         assert_eq!(
-            texts(&lines.stderr),
-            ["Would create a collection at /work", "note: watch out"]
+            pipe_lines(&lines.stderr),
+            ["Would create a collection at /work", "warning: watch out"]
         );
     }
 }

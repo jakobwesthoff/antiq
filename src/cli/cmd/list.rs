@@ -4,6 +4,7 @@
 
 //! The `list` command: lists the versions.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, sanitize};
 use crate::cli::{Context, ListArgs};
@@ -28,7 +29,7 @@ pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u
         // The empty result is data in the JSON, and a note for the person
         // who reads the console.
         if let Some(text) = empty_note(&report, query) {
-            out.note(&format!("note: {text}"))
+            out.notices(&[Notice::Note(text)])
                 .context("print the notes")?;
         }
     } else {
@@ -36,9 +37,7 @@ pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u
         for line in &lines.stdout {
             out.line(line).context("print the result")?;
         }
-        for line in &lines.stderr {
-            out.note(line).context("print the notes")?;
-        }
+        out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(0)
 }
@@ -47,7 +46,7 @@ pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    stderr: Vec<Notice>,
 }
 
 /// The distance between two columns of the table.
@@ -70,21 +69,17 @@ fn render(report: &ListReport, query: Option<&str>, style: Style, zone: &TimeZon
 
 /// The notes on stderr, in the order: settings, the lock, nothing to list,
 /// the damage of each damaged version.
-fn notes(report: &ListReport, query: Option<&str>) -> Vec<String> {
-    let mut notes: Vec<String> = report
-        .warnings
-        .iter()
-        .map(|warning| format!("note: {}", warning.message))
-        .collect();
-    notes.extend(report.note.iter().map(|note| format!("note: {note}")));
-    notes.extend(empty_note(report, query).map(|text| format!("note: {text}")));
+fn notes(report: &ListReport, query: Option<&str>) -> Vec<Notice> {
+    let mut notes = notice::warnings(&report.warnings);
+    notes.extend(report.note.iter().cloned().map(Notice::Note));
+    notes.extend(empty_note(report, query).map(Notice::Note));
     for row in &report.versions {
         for fault in &row.damage {
-            notes.push(format!(
-                "note: {} {} is damaged: {fault}",
+            notes.push(Notice::Note(format!(
+                "{} {} is damaged: {fault}",
                 sanitize(&row.piece.to_string()),
                 row.stamp
-            ));
+            )));
         }
     }
     notes
@@ -253,6 +248,7 @@ fn thousands(count: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::notice::pipe_lines;
     use antiq::commands::list::{Row, State};
     use antiq::relpath::RelPath;
     use antiq::report::Warning;
@@ -562,9 +558,9 @@ mod tests {
         report.note = Some("another run holds the lock".to_string());
         let lines = render(&report, None, TERMINAL, &plus_one());
         assert_eq!(
-            texts(&lines.stderr),
+            pipe_lines(&lines.stderr),
             [
-                "note: a setting",
+                "warning: a setting",
                 "note: another run holds the lock",
                 "note: a 2026-11-04T090211 is damaged: the listing is missing",
                 "note: a 2026-11-04T090211 is damaged: other",
@@ -584,7 +580,7 @@ mod tests {
             let lines = render(&none, Some("scan"), style, &plus_one());
             assert!(lines.stdout.is_empty(), "{:?}", lines.stdout);
             assert_eq!(
-                texts(&lines.stderr),
+                pipe_lines(&lines.stderr),
                 ["note: no versions in the collection"]
             );
         }
@@ -597,7 +593,7 @@ mod tests {
         let lines = render(&none, Some("zzz"), TERMINAL, &plus_one());
         assert!(lines.stdout.is_empty(), "{:?}", lines.stdout);
         assert_eq!(
-            texts(&lines.stderr),
+            pipe_lines(&lines.stderr),
             ["note: held", "note: no piece matches `zzz`"]
         );
     }

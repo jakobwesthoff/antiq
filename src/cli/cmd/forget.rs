@@ -4,6 +4,7 @@
 
 //! The `forget` command: deletes a version, or all versions of a piece.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
 use crate::cli::{Context, ForgetArgs};
@@ -46,9 +47,7 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
             for line in &lines.stdout {
                 out.line(line).context("print the plan")?;
             }
-            for line in &lines.stderr {
-                out.note(line).context("print the notes")?;
-            }
+            out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
     }
@@ -65,9 +64,7 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
         for line in &lines.stdout {
             out.line(line).context("print the result")?;
         }
-        for line in &lines.stderr {
-            out.note(line).context("print the notes")?;
-        }
+        out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(if report.partial() { PARTIAL } else { 0 })
 }
@@ -76,7 +73,7 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    stderr: Vec<Notice>,
 }
 
 /// How each entry names its version, after `Deleted` or `Would delete`. A
@@ -120,22 +117,17 @@ fn render(report: &ForgetReport, terminal: bool, zone: &TimeZone) -> Lines {
     let mut stderr = Vec::new();
     for action in &report.repairs {
         if let antiq::commands::forget::Action::Repair(repair) = action {
-            stderr.push(format!("note: repaired: {}", repair.describe()));
+            stderr.push(Notice::Note(format!("repaired: {}", repair.describe())));
         }
     }
-    stderr.extend(
-        report
-            .warnings()
-            .iter()
-            .map(|warning| format!("note: {}", warning.message)),
-    );
+    stderr.extend(notice::warnings(report.warnings()));
     for failure in &report.failed {
-        stderr.push(format!(
+        stderr.push(Notice::Line(format!(
             "error: could not delete version {} of {}: {}",
             failure.stamp,
             sanitize(&failure.piece.to_string()),
             failure.reason
-        ));
+        )));
     }
     Lines { stdout, stderr }
 }
@@ -181,16 +173,16 @@ fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
             }
         });
     }
-    let stderr = warnings
-        .iter()
-        .map(|warning| format!("note: {}", warning.message))
-        .collect();
-    Lines { stdout, stderr }
+    Lines {
+        stdout,
+        stderr: notice::warnings(warnings),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::notice::pipe_lines;
     use antiq::commands::forget::Failed;
     use antiq::plan::LockHeld;
     use antiq::relpath::{Name, RelPath};
@@ -320,10 +312,10 @@ mod tests {
         let lines = render(&done, false, &berlin());
         assert!(lines.stdout.is_empty());
         assert_eq!(
-            lines.stderr,
+            pipe_lines(&lines.stderr),
             [
                 "note: repaired: delete .antiq/tmp/leftover",
-                "note: watch out",
+                "warning: watch out",
                 "error: could not delete version 2026-11-04T090211 of tools/scan: cannot delete the file",
             ]
         );
@@ -378,7 +370,7 @@ mod tests {
                 "Would delete incomplete version 2026-11-03T090211 of tools/scan: b.sha256.zst",
             ]
         );
-        assert_eq!(lines.stderr, ["note: watch out"]);
+        assert_eq!(pipe_lines(&lines.stderr), ["warning: watch out"]);
     }
 
     #[test]

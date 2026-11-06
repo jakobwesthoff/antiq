@@ -47,6 +47,7 @@ pub struct Block {
     pub(super) how: Vec<Para>,
     pub(super) doing: Vec<String>,
     pub(super) candidates: Vec<String>,
+    pub(super) pipe: Option<String>,
 }
 
 impl Block {
@@ -60,6 +61,7 @@ impl Block {
             how: Vec::new(),
             doing: Vec::new(),
             candidates: Vec::new(),
+            pipe: None,
         }
     }
 
@@ -77,6 +79,13 @@ impl Block {
 
     pub fn hint(text: Rich) -> Block {
         Block::new(Kind::Hint, text)
+    }
+
+    /// The one line a pipe gets for this block, whatever the kind. Scripts
+    /// read it, so it keeps the wording they match on.
+    pub fn pipe(mut self, line: &str) -> Block {
+        self.pipe = Some(line.to_string());
+        self
     }
 
     pub fn kind(&self) -> Kind {

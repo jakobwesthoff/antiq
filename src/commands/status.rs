@@ -114,9 +114,7 @@ pub fn status(collection: &Collection, now: Timestamp) -> Result<StatusReport, S
     // The lock is only read: taking it would make status a run of its own.
     match lock::holder(&collection.lock_path()) {
         Ok(holder) => report.holder = holder,
-        Err(error) => report
-            .warnings
-            .push(Warning::new(format!("cannot read the lock file: {error}"))),
+        Err(error) => report.warnings.push(report::unreadable_lock(&error)),
     }
 
     // A store that cannot be read costs the notes that need it, not the
@@ -467,6 +465,7 @@ fn doomed_leftover(root: &TreeRoot, tree: RelPath) -> Option<Doomed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::WarningKind;
     use crate::testing::tree::{COLLECTION_ID, TempCollection, Tree};
     use crate::testing::versions::Store;
     use crate::versions::names::VersionFile;
@@ -1197,7 +1196,11 @@ mod tests {
 
         assert_eq!(
             found.warnings,
-            [Warning::new(
+            [Warning::of(
+                WarningKind::UnknownKey {
+                    table: "collection",
+                    key: "idle_dyas".into()
+                },
                 "the key `idle_dyas` under [collection] is unknown and ignored"
             )]
         );

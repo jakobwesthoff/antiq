@@ -321,7 +321,7 @@ fn an_unknown_target_key_is_a_warning_in_json_and_a_note_on_stderr() {
     let text = push_text(&collection, &[]);
     assert_eq!(text.code(), 0, "{}", text.stderr);
     assert!(
-        text.stderr.contains(&format!("note: {note}")),
+        text.stderr.contains(&format!("warning: {note}")),
         "{}",
         text.stderr
     );

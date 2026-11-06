@@ -73,6 +73,10 @@ impl Rich {
         self.push(Role::Matched, text)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
     pub fn to_plain(&self) -> String {
         self.spans.iter().map(|(_, text)| text.as_str()).collect()
     }

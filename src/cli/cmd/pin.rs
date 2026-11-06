@@ -4,6 +4,7 @@
 
 //! The `pin` and `unpin` commands: create or remove the `.antiq-pin` of a piece.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
 use crate::cli::{Context, PieceArgs};
@@ -65,9 +66,7 @@ fn run(
     for line in &lines.stdout {
         out.line(line).context("print the result")?;
     }
-    for line in &lines.stderr {
-        out.note(line).context("print the notes")?;
-    }
+    out.notices(&lines.stderr).context("print the notes")?;
     Ok(0)
 }
 
@@ -75,7 +74,7 @@ fn run(
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    stderr: Vec<Notice>,
 }
 
 /// What a run, or a dry run in the state asked for, says about the piece.
@@ -93,15 +92,10 @@ fn render(report: &PinReport, direction: Direction) -> Lines {
     let mut stderr = Vec::new();
     for action in &report.repairs {
         if let Action::Repair(repair) = action {
-            stderr.push(format!("note: repaired: {}", repair.describe()));
+            stderr.push(Notice::Note(format!("repaired: {}", repair.describe())));
         }
     }
-    stderr.extend(
-        report
-            .warnings()
-            .iter()
-            .map(|warning| format!("note: {}", warning.message)),
-    );
+    stderr.extend(notice::warnings(report.warnings()));
     Lines {
         stdout: vec![sentence(
             &report.piece.to_string(),
@@ -147,16 +141,14 @@ fn render_plan(plan: &PinPlan, direction: Direction) -> Lines {
     }
     Lines {
         stdout,
-        stderr: warnings
-            .iter()
-            .map(|warning| format!("note: {}", warning.message))
-            .collect(),
+        stderr: notice::warnings(warnings),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::notice::pipe_lines;
     use antiq::commands::pin::Action;
     use antiq::plan::LockHeld;
     use antiq::relpath::{Name, RelPath};
@@ -230,10 +222,10 @@ mod tests {
         done.warnings = vec![Warning::new("watch out")];
         let lines = render(&done, Direction::Pin);
         assert_eq!(
-            lines.stderr,
+            pipe_lines(&lines.stderr),
             [
                 "note: repaired: delete .antiq/tmp/leftover",
-                "note: watch out"
+                "warning: watch out"
             ]
         );
     }
@@ -247,7 +239,7 @@ mod tests {
             let pinned = direction == Direction::Pin;
             let lines = render_plan(&listed("tools/scan", pinned, true, direction), direction);
             assert_eq!(lines.stdout, ["Would delete .antiq/tmp/leftover", expected]);
-            assert_eq!(lines.stderr, ["note: watch out"]);
+            assert_eq!(pipe_lines(&lines.stderr), ["warning: watch out"]);
         }
     }
 

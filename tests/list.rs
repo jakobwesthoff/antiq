@@ -382,7 +382,7 @@ fn a_listing_that_cannot_be_read_keeps_its_row_and_is_a_warning() {
             );
             assert_eq!(fields(lines[1])[4], "ok");
             assert!(
-                run.stderr.starts_with("note: cannot open notes/"),
+                run.stderr.starts_with("warning: cannot open notes/"),
                 "{:?}",
                 run.stderr
             );

@@ -14,6 +14,7 @@ use crate::cli::console::dryrun;
 use crate::cli::console::env::Env;
 use crate::cli::console::render::render_blocks;
 use crate::cli::console::rich::Rich;
+use crate::cli::notice::Notice;
 use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -181,10 +182,6 @@ impl Output {
     }
 
     /// How blocks and symbols on stdout are rendered.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no command reads the environments yet")
-    )]
     pub fn stdout_env(&self) -> Env {
         self.stdout_env
     }
@@ -260,7 +257,6 @@ impl Output {
 
     /// Writes a hint that belongs to a command's result to stdout, under
     /// the same rule as `info_result`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
     pub fn hint_result(&mut self, hint: &Block) -> io::Result<()> {
         self.result_block(hint)
     }
@@ -284,6 +280,44 @@ impl Output {
             self.stderr.write_line(&line)?;
         }
         Ok(())
+    }
+
+    /// Writes blocks that belong to a command's result to stdout, after an
+    /// empty line. Only a terminal gets them; a pipe gets nothing.
+    pub fn result_blocks(&mut self, blocks: &[Block]) -> io::Result<()> {
+        if !self.stdout_env.rich || blocks.is_empty() {
+            return Ok(());
+        }
+        self.stdout.write_line("")?;
+        for line in render_blocks(blocks, &self.stdout_env) {
+            self.stdout.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the warnings and notes of a run to stderr, after its result.
+    /// A terminal gets an empty line first and a block each; a pipe gets
+    /// the `warning:` and `note:` lines.
+    pub fn notices(&mut self, notices: &[Notice]) -> io::Result<()> {
+        if notices.is_empty() {
+            return Ok(());
+        }
+        if self.stderr_env.rich {
+            self.stderr.write_line("")?;
+        }
+        let mut pending: Vec<Block> = Vec::new();
+        for notice in notices {
+            match notice.block() {
+                Some(block) => pending.push(block),
+                None => {
+                    self.blocks(&std::mem::take(&mut pending))?;
+                    if let Notice::Line(line) = notice {
+                        self.stderr.write_line(line)?;
+                    }
+                }
+            }
+        }
+        self.blocks(&pending)
     }
 
     /// Writes one action of a dry run to stdout.
@@ -402,6 +436,7 @@ pub mod testing {
 mod tests {
     use super::testing::{Capture, FailsOnFlush};
     use super::*;
+    use antiq::report::Warning;
     use serde_json::json;
 
     #[test]
@@ -449,6 +484,77 @@ mod tests {
         out.hint_result(&Block::hint(Rich::parse("Run `antiq status`.")))
             .expect("memory accepts writes");
         assert_eq!(capture.stdout(), "\n → HINT  Run antiq status.\n");
+    }
+
+    #[test]
+    fn result_blocks_follow_an_empty_line_on_a_terminal_stdout_and_vanish_on_a_pipe() {
+        let blocks = [
+            Block::warning(Rich::parse("One")),
+            Block::warning(Rich::parse("Two")),
+        ];
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.result_blocks(&blocks).expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "\n ⚠ WARNING  One\n\n ⚠ WARNING  Two\n");
+        assert_eq!(capture.stderr(), "");
+
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.result_blocks(&blocks).expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "");
+    }
+
+    #[test]
+    fn notices_on_a_stderr_terminal_follow_an_empty_line_and_are_blocks() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.notices(&[
+            Notice::Warning(Warning::new("Clock skew")),
+            Notice::Note("repaired: x".into()),
+        ])
+        .expect("memory accepts writes");
+        assert_eq!(
+            capture.stderr(),
+            "\n ⚠ WARNING  Clock skew\n\n ℹ INFO  repaired: x\n"
+        );
+        assert_eq!(capture.stdout(), "");
+    }
+
+    #[test]
+    fn notices_on_a_stderr_pipe_are_warning_and_note_lines() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.notices(&[
+            Notice::Warning(Warning::new("Clock skew")),
+            Notice::Note("repaired: x".into()),
+        ])
+        .expect("memory accepts writes");
+        assert_eq!(capture.stderr(), "warning: Clock skew\nnote: repaired: x\n");
+        assert_eq!(capture.stdout(), "");
+    }
+
+    #[test]
+    fn a_line_among_the_notices_keeps_its_place() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.notices(&[
+            Notice::Line("error: could not delete x".into()),
+            Notice::Warning(Warning::new("Clock skew")),
+            Notice::Line("error: could not delete y".into()),
+        ])
+        .expect("memory accepts writes");
+        assert_eq!(
+            capture.stderr(),
+            "\nerror: could not delete x\n ⚠ WARNING  Clock skew\nerror: could not delete y\n"
+        );
+    }
+
+    #[test]
+    fn no_notices_write_nothing_not_even_an_empty_line() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), terminal());
+        out.notices(&[]).expect("memory accepts writes");
+        assert_eq!(capture.stderr(), "");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 //! The `rebuild` command: repairs a damaged version.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
 use crate::cli::{Context, RebuildArgs};
@@ -39,9 +40,7 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
             for line in &lines.stdout {
                 out.line(line).context("print the plan")?;
             }
-            for line in &lines.stderr {
-                out.note(line).context("print the notes")?;
-            }
+            out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
     }
@@ -57,9 +56,7 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
         for line in &lines.stdout {
             out.line(line).context("print the result")?;
         }
-        for line in &lines.stderr {
-            out.note(line).context("print the notes")?;
-        }
+        out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(0)
 }
@@ -68,7 +65,7 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Lines {
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    stderr: Vec<Notice>,
 }
 
 /// What the files written for `basis` can vouch for.
@@ -100,16 +97,11 @@ fn render(report: &RebuildReport, terminal: bool, zone: &TimeZone) -> Lines {
     let mut stderr = Vec::new();
     for action in &report.repairs {
         if let Action::Repair(repair) = action {
-            stderr.push(format!("note: repaired: {}", repair.describe()));
+            stderr.push(Notice::Note(format!("repaired: {}", repair.describe())));
         }
     }
-    stderr.extend(
-        report
-            .warnings
-            .iter()
-            .map(|warning| format!("note: {}", warning.message)),
-    );
-    stderr.push(format!("note: {}", statement(report.basis)));
+    stderr.extend(notice::warnings(&report.warnings));
+    stderr.push(Notice::Note(statement(report.basis).to_string()));
     Lines { stdout, stderr }
 }
 
@@ -153,9 +145,6 @@ fn render_plan(plan: &RebuildPlan) -> Lines {
             }
         })
         .collect();
-    let stderr = warnings
-        .iter()
-        .map(|warning| format!("note: {}", warning.message))
-        .collect();
+    let stderr = notice::warnings(warnings);
     Lines { stdout, stderr }
 }

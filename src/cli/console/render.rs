@@ -213,13 +213,14 @@ impl Block {
                 }
                 if let Some(fix) = &self.fix {
                     let arrow = paint(env, theme::bar(self.kind), symbols.hint);
-                    let prefix = symbols.hint.width() + 2;
-                    let fixed = flow(env, fix, Style::new(), available(env, prefix + 1));
+                    // Later lines of the fix start under the text after the arrow.
+                    let hang = symbols.hint.width() + 1;
+                    let fixed = flow(env, fix, Style::new(), available(env, hang + 2));
                     for (index, line) in fixed.iter().enumerate() {
                         if index == 0 {
                             lines.push(bar.line(&format!("{arrow} {line}")));
                         } else {
-                            lines.push(bar.line(&format!("{}{line}", " ".repeat(prefix))));
+                            lines.push(bar.line(&format!("{}{line}", " ".repeat(hang))));
                         }
                     }
                 }
@@ -277,6 +278,9 @@ impl Block {
     /// The block as a pipe on stderr gets it: lines a script can grep.
     /// Info and hint exist only for a person at a terminal.
     pub fn render_plain(&self) -> Vec<String> {
+        if let Some(line) = &self.pipe {
+            return vec![line.clone()];
+        }
         let mut lines = Vec::new();
         match self.kind {
             Kind::Error => {

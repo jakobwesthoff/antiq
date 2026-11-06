@@ -5,6 +5,9 @@
 //! The `status` command.
 
 use crate::cli::Context;
+use crate::cli::console::block::{Block, Para};
+use crate::cli::console::rich::Rich;
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
     Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, sanitize, spaces, wrap,
@@ -39,12 +42,22 @@ pub fn run(ctx: &Context, out: &mut Output) -> anyhow::Result<u8> {
     } else {
         let zone = antiq::versions::naming::system_zone();
         let shown = render(&report, out.stdout_style(), &zone, now);
-        for line in &shown.stdout {
+        // A terminal gets the findings as blocks, a pipe their lines.
+        let rich = out.stdout_env().rich;
+        let table = if rich {
+            &shown.stdout[..shown.findings_at]
+        } else {
+            &shown.stdout[..]
+        };
+        for line in table {
             out.line(line).context("print the result")?;
         }
-        for line in &shown.stderr {
-            out.note(line).context("print the notes")?;
+        out.result_blocks(&shown.findings)
+            .context("print the result")?;
+        if let Some(hint) = due_hint(&report) {
+            out.hint_result(&hint).context("print the result")?;
         }
+        out.notices(&shown.stderr).context("print the notes")?;
     }
     // Pieces that `archive` refuses are not a failure of `status`.
     Ok(0)
@@ -53,8 +66,13 @@ pub fn run(ctx: &Context, out: &mut Output) -> anyhow::Result<u8> {
 /// What a run prints on a console.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Rendered {
+    /// The header, the table and, for a pipe, the findings.
     stdout: Vec<String>,
-    stderr: Vec<String>,
+    /// Where the findings start in `stdout`.
+    findings_at: usize,
+    /// The findings as the blocks a terminal gets in their place.
+    findings: Vec<Block>,
+    stderr: Vec<Notice>,
 }
 
 // =========================================================
@@ -76,30 +94,41 @@ fn render(report: &StatusReport, style: Style, zone: &TimeZone, now: Timestamp) 
         stdout.push(String::new());
         stdout.extend(table(&rows, style, now));
     }
-    let notes = notes(report, zone);
-    if !notes.is_empty() {
+    let findings = findings(report, zone);
+    let findings_at = stdout.len();
+    if !findings.is_empty() {
         stdout.push(String::new());
-        stdout.extend(notes);
+        stdout.extend(findings.iter().flat_map(|found| found.pipe.clone()));
     }
 
-    let mut stderr: Vec<String> = report
-        .warnings
-        .iter()
-        .map(|warning| format!("note: {}", warning.message))
-        .collect();
-    stderr.extend(
-        report
-            .store_error
-            .iter()
-            .map(|text| format!("note: {text}")),
-    );
+    let mut stderr = notice::warnings(&report.warnings);
+    stderr.extend(report.store_error.iter().cloned().map(Notice::Note));
     stderr.extend(
         report
             .holder
             .iter()
-            .map(|holder| format!("note: {}", lock_note(holder).message)),
+            .map(|holder| Notice::Warning(lock_note(holder))),
     );
-    Rendered { stdout, stderr }
+    Rendered {
+        stdout,
+        findings_at,
+        findings: findings.into_iter().map(|found| found.block).collect(),
+        stderr,
+    }
+}
+
+/// The hint under the findings: what to run to see the pieces that are
+/// due. Only a report with a due piece has one.
+fn due_hint(report: &StatusReport) -> Option<Block> {
+    report
+        .pieces
+        .iter()
+        .any(|piece| matches!(piece.verdict, Verdict::Due))
+        .then(|| {
+            Block::hint(Rich::parse(
+                "Run `antiq archive -n` to see what the next run would archive.",
+            ))
+        })
 }
 
 fn plural(count: usize, one: &str, many: &str) -> String {
@@ -247,9 +276,32 @@ fn shown(path: &RelPath) -> String {
     sanitize(&path.to_string())
 }
 
+/// One finding below the table: the lines a pipe gets and the block a
+/// terminal gets.
+#[derive(Debug, PartialEq, Eq)]
+struct Finding {
+    pipe: Vec<String>,
+    block: Block,
+}
+
+/// What a kind of finding means and what to do about it.
+struct Meaning {
+    text: Rich,
+    fix: Option<Rich>,
+}
+
+impl Meaning {
+    fn none() -> Meaning {
+        Meaning {
+            text: Rich::new(),
+            fix: None,
+        }
+    }
+}
+
 /// One note: a single item stays on the line of the note, several are
 /// indented below it.
-fn note(count_of: (&str, &str), items: Vec<String>) -> Vec<String> {
+fn note(count_of: (&str, &str), items: &[String]) -> Vec<String> {
     match items.len() {
         0 => Vec::new(),
         1 => vec![format!(
@@ -259,10 +311,29 @@ fn note(count_of: (&str, &str), items: Vec<String>) -> Vec<String> {
         )],
         count => {
             let mut lines = vec![format!("! {}:", plural(count, count_of.0, count_of.1))];
-            lines.extend(items.into_iter().map(|item| format!("    {item}")));
+            lines.extend(items.iter().map(|item| format!("    {item}")));
             lines
         }
     }
+}
+
+/// The finding for `items`, if there are any. The title and the items of
+/// the block are the lines of the note without their marks.
+fn finding(count_of: (&str, &str), items: Vec<String>, meaning: Meaning) -> Option<Finding> {
+    let pipe = note(count_of, &items);
+    let (head, rest) = pipe.split_first()?;
+    let title = head.trim_start_matches("! ");
+    let mut block = Block::warning(Rich::new().text(title));
+    for item in rest {
+        block = block.text(Para::pre(item.trim_start()));
+    }
+    if !meaning.text.is_empty() {
+        block = block.text(meaning.text);
+    }
+    if let Some(fix) = meaning.fix {
+        block = block.fix(fix);
+    }
+    Some(Finding { pipe, block })
 }
 
 /// A version as a note names it: the piece, the label of the version and
@@ -276,7 +347,7 @@ fn version_text(note: &VersionNote, label: &str) -> String {
     }
 }
 
-fn notes(report: &StatusReport, zone: &TimeZone) -> Vec<String> {
+fn findings(report: &StatusReport, zone: &TimeZone) -> Vec<Finding> {
     // Versions of one piece that render alike get the UTC offset, so the
     // labels are made for the damaged and newer-format versions of a piece.
     // An incomplete version is named by its stamp only and takes no part.
@@ -334,69 +405,148 @@ fn notes(report: &StatusReport, zone: &TimeZone) -> Vec<String> {
         })
         .collect();
 
-    let mut lines = Vec::new();
-    lines.extend(note(
-        (
-            "file with a time in the future",
-            "files with a time in the future",
+    let one = |items: &[String]| items.len() == 1;
+    let rebuild = |note: &VersionNote| {
+        Rich::new()
+            .cmd(&format!(
+                "antiq rebuild {} {}",
+                shown(&note.piece),
+                note.stamp
+            ))
+            .text(" writes the missing file.")
+    };
+    let forget = |note: &VersionNote| {
+        Rich::new()
+            .cmd(&format!(
+                "antiq forget {} {}",
+                shown(&note.piece),
+                note.stamp
+            ))
+            .text(" removes the leftovers, or copy the version back from the push target.")
+    };
+    let damaged: Vec<String> = report.damaged.iter().map(version).collect();
+    let incomplete_items: Vec<String> = report.incomplete.iter().map(incomplete).collect();
+
+    [
+        finding(
+            (
+                "file with a time in the future",
+                "files with a time in the future",
+            ),
+            future,
+            Meaning {
+                text: Rich::new().text("A file time in the future counts like any other, so a piece that holds such a file cannot become due before that date."),
+                fix: Some(Rich::new().text("Correct the file time if it is a mistake.")),
+            },
         ),
-        future,
-    ));
-    lines.extend(note(
-        ("damaged version", "damaged versions"),
-        report.damaged.iter().map(version).collect(),
-    ));
-    lines.extend(note(
-        ("incomplete version", "incomplete versions"),
-        report.incomplete.iter().map(incomplete).collect(),
-    ));
-    lines.extend(note(
-        ("version in a newer format", "versions in a newer format"),
-        report.newer_format.iter().map(version).collect(),
-    ));
-    lines.extend(note(
-        ("folder in recovered/", "folders in recovered/"),
-        report.recovered.iter().map(shown).collect(),
-    ));
-    lines.extend(note(
-        ("tree left in trash/", "trees left in trash/"),
-        report.trash.iter().map(shown).collect(),
-    ));
-    lines.extend(note(
-        ("leftover in doomed/", "leftovers in doomed/"),
-        doomed,
-    ));
-    lines.extend(note(
-        (
-            "live folder spelled differently from the store",
-            "live folders spelled differently from the store",
+        finding(
+            ("damaged version", "damaged versions"),
+            damaged.clone(),
+            Meaning {
+                text: Rich::new().text("The archive is there, but its listing or checksum file is missing or does not match it, so the version cannot be listed, searched or checked."),
+                fix: if one(&damaged) {
+                    Some(rebuild(&report.damaged[0]))
+                } else {
+                    Some(Rich::parse("`antiq rebuild <piece> <version>` writes the missing file of one version."))
+                },
+            },
         ),
-        report
-            .spelling
-            .iter()
-            .map(|found| {
-                format!(
-                    "{} (stored as {})",
-                    shown(&found.live),
-                    shown(&found.stored)
-                )
-            })
-            .collect(),
-    ));
-    lines.extend(
-        report
-            .unreadable_directories
-            .iter()
-            .map(|directory| format!("! unreadable: {}", shown(directory))),
-    );
-    lines.extend(note(
-        (
-            "file in a store folder that is not a version file",
-            "files in a store folder that is not a version file",
+        finding(
+            ("incomplete version", "incomplete versions"),
+            incomplete_items.clone(),
+            Meaning {
+                text: Rich::new().text("Only the listing or checksum is left, the archive itself is missing, so the version cannot be restored."),
+                fix: if one(&incomplete_items) {
+                    Some(forget(&report.incomplete[0]))
+                } else {
+                    Some(Rich::parse("`antiq forget <piece> <version>` removes the leftovers of one version, or copy the version back from the push target."))
+                },
+            },
         ),
-        report.unparsable.iter().map(shown).collect(),
-    ));
-    lines
+        finding(
+            ("version in a newer format", "versions in a newer format"),
+            report.newer_format.iter().map(version).collect(),
+            Meaning {
+                text: Rich::new().text("The listing of such a version was written in a format this version of antiq cannot read, so unearth, fork and rebuild refuse it."),
+                fix: Some(Rich::new().text("Use a version of antiq that reads the newer format.")),
+            },
+        ),
+        finding(
+            ("folder in recovered/", "folders in recovered/"),
+            report.recovered.iter().map(shown).collect(),
+            Meaning {
+                text: Rich::parse("A folder that antiq gave back after a failed removal is kept in `.antiq/recovered/`."),
+                fix: Some(Rich::new().text("Compare it with the live folder and delete it by hand once you no longer need it.")),
+            },
+        ),
+        finding(
+            ("tree left in trash/", "trees left in trash/"),
+            report.trash.iter().map(shown).collect(),
+            Meaning {
+                text: Rich::parse("A folder taken out for archiving could go neither back to its path nor into `.antiq/recovered/`."),
+                fix: Some(Rich::new().text("Look at it, then move it back or delete it by hand.")),
+            },
+        ),
+        finding(
+            ("leftover in doomed/", "leftovers in doomed/"),
+            doomed,
+            Meaning {
+                text: Rich::new().text("The removal of an archived folder did not finish. antiq tries again at the start of a later run."),
+                fix: None,
+            },
+        ),
+        finding(
+            (
+                "live folder spelled differently from the store",
+                "live folders spelled differently from the store",
+            ),
+            report
+                .spelling
+                .iter()
+                .map(|found| {
+                    format!(
+                        "{} (stored as {})",
+                        shown(&found.live),
+                        shown(&found.stored)
+                    )
+                })
+                .collect(),
+            Meaning {
+                text: Rich::new().text("The volume treats both spellings as one name, so antiq archives into the stored spelling."),
+                fix: None,
+            },
+        ),
+        unreadable(&report.unreadable_directories),
+        finding(
+            (
+                "file in a store folder that is not a version file",
+                "files in a store folder that is not a version file",
+            ),
+            report.unparsable.iter().map(shown).collect(),
+            Meaning::none(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The directories status could not read. A pipe gets one `! unreadable:`
+/// line for each.
+fn unreadable(directories: &[RelPath]) -> Option<Finding> {
+    let mut found = finding(
+        (
+            "directory antiq could not read",
+            "directories antiq could not read",
+        ),
+        directories.iter().map(shown).collect(),
+        Meaning::none(),
+    )?;
+    found.pipe = directories
+        .iter()
+        .map(|directory| format!("! unreadable: {}", shown(directory)))
+        .collect();
+    Some(found)
 }
 
 // =========================================================
@@ -814,13 +964,13 @@ mod tests {
 
         assert_eq!(lines(&shown), ["1 folder · archive after 30 days idle"]);
         assert_eq!(
-            shown.stderr,
+            crate::cli::notice::pipe_lines(&shown.stderr),
             ["note: cannot read the store: pieces/notes: denied"]
         );
     }
 
     #[test]
-    fn warnings_and_the_held_lock_are_notes_on_stderr() {
+    fn a_warning_and_the_held_lock_are_a_warning_and_a_note_on_stderr() {
         let mut report = one(piece("a", Verdict::Plain, Some(2)));
         report.warnings = vec![Warning::new(
             "the key `x` under [collection] is unknown and ignored",
@@ -834,9 +984,9 @@ mod tests {
         let shown = render(&report, wide(), &TimeZone::UTC, now());
 
         assert_eq!(
-            shown.stderr,
+            crate::cli::notice::pipe_lines(&shown.stderr),
             [
-                "note: the key `x` under [collection] is unknown and ignored",
+                "warning: the key `x` under [collection] is unknown and ignored",
                 "note: another run holds the lock (pid 4711, machine imperius, started 2026-11-04T09:00:00Z)",
             ]
         );
@@ -874,6 +1024,95 @@ mod tests {
                 "! 2 damaged versions:",
                 "    tools/scan-old 2024-06-30 08:12:45 (no listing)",
                 "    tools/scan-old 2024-07-01 08:12:45 (no checksum file; the archive has 1 bytes, its listing records 2)",
+            ]
+        );
+    }
+
+    /// The findings of `report` as a terminal 100 columns wide shows them.
+    fn finding_lines(report: &StatusReport) -> Vec<String> {
+        let shown = render(report, wide(), &TimeZone::UTC, now());
+        crate::cli::console::render::render_blocks(
+            &shown.findings,
+            &crate::cli::console::env::Env::new(true, false, true, 100),
+        )
+    }
+
+    #[test]
+    fn each_finding_is_a_block_that_says_what_it_means_and_how_to_fix_it() {
+        let mut report = one(piece("a", Verdict::Plain, Some(2)));
+        let version = |piece: &str, text: &str, reasons: &[&str]| VersionNote {
+            piece: path(piece),
+            stamp: stamp(text),
+            reasons: reasons.iter().map(ToString::to_string).collect(),
+        };
+        report.pieces[0].future = vec![FutureTime {
+            path: path("experiments/wasm-fun/plan.md"),
+            time: "2027-01-12T12:00:00Z".parse().expect("a timestamp"),
+        }];
+        report.damaged = vec![version(
+            "tools/scan-old",
+            "2026-11-05T130211",
+            &["no listing"],
+        )];
+        report.incomplete = vec![version("experiments/synth-toy", "2026-11-05T120211", &[])];
+        report.recovered = vec![path("recovered/20261103T081522/experiments")];
+
+        assert_eq!(
+            finding_lines(&report),
+            [
+                " ⚠ WARNING  1 file with a time in the future: experiments/wasm-fun/plan.md (2027-01-12)",
+                "▌   A file time in the future counts like any other, so a piece that holds such a file cannot become",
+                "▌   due before that date.",
+                "▌ → Correct the file time if it is a mistake.",
+                "",
+                " ⚠ WARNING  1 damaged version: tools/scan-old 2026-11-05 13:02:11 (no listing)",
+                "▌   The archive is there, but its listing or checksum file is missing or does not match it, so the",
+                "▌   version cannot be listed, searched or checked.",
+                "▌ → antiq rebuild tools/scan-old 2026-11-05T130211 writes the missing file.",
+                "",
+                " ⚠ WARNING  1 incomplete version: experiments/synth-toy 2026-11-05T120211",
+                "▌   Only the listing or checksum is left, the archive itself is missing, so the version cannot be",
+                "▌   restored.",
+                "▌ → antiq forget experiments/synth-toy 2026-11-05T120211 removes the leftovers, or copy the version",
+                "▌   back from the push target.",
+                "",
+                " ⚠ WARNING  1 folder in recovered/: recovered/20261103T081522/experiments",
+                "▌   A folder that antiq gave back after a failed removal is kept in .antiq/recovered/.",
+                "▌ → Compare it with the live folder and delete it by hand once you no longer need it.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_due_piece_gets_a_hint_how_to_see_what_the_next_run_archives() {
+        let report = one(piece("a", Verdict::Due, Some(33)));
+        let hint = due_hint(&report).expect("a due piece has a hint");
+        assert_eq!(
+            crate::cli::console::render::render_blocks(
+                &[hint],
+                &crate::cli::console::env::Env::new(true, false, true, 100)
+            ),
+            [" → HINT  Run antiq archive -n to see what the next run would archive."]
+        );
+        assert_eq!(
+            due_hint(&one(piece("a", Verdict::Soon { days_left: 2 }, Some(28)))),
+            None
+        );
+        assert_eq!(due_hint(&one(piece("a", Verdict::Plain, Some(2)))), None);
+    }
+
+    #[test]
+    fn several_items_of_one_kind_stand_under_the_title() {
+        let mut report = one(piece("a", Verdict::Plain, Some(2)));
+        report.trash = vec![path("trash/a/x"), path("trash/a/y")];
+        assert_eq!(
+            finding_lines(&report),
+            [
+                " ⚠ WARNING  2 trees left in trash/:",
+                "▌   trash/a/x",
+                "▌   trash/a/y",
+                "▌   A folder taken out for archiving could go neither back to its path nor into .antiq/recovered/.",
+                "▌ → Look at it, then move it back or delete it by hand.",
             ]
         );
     }

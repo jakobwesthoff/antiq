@@ -4,13 +4,13 @@
 
 //! The `archive` command: archives due pieces, or one piece now.
 
+use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::archive::{ArchiveReport, Outcome, Request, Target, archive};
 use antiq::plan::PlanAction;
-use antiq::report::Warning;
 use anyhow::Context as _;
 
 pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -49,7 +49,8 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
                 for line in plan.lines() {
                     out.line(&line).context("print the result")?;
                 }
-                notes(&plan.warnings, out)?;
+                out.notices(&notice::warnings(&plan.warnings))
+                    .context("print the notes")?;
             }
             Ok(plan.exit_code())
         }
@@ -96,17 +97,11 @@ fn print_report(ctx: &Context, report: &ArchiveReport, out: &mut Output) -> anyh
         report.refused.len()
     ))
     .context("print the result")?;
-    for repair in &report.repairs {
-        out.note(&format!("note: repaired: {}", repair.describe()))
-            .context("print the notes")?;
-    }
-    notes(&report.warnings, out)
-}
-
-fn notes(warnings: &[Warning], out: &mut Output) -> anyhow::Result<()> {
-    for warning in warnings {
-        out.note(&format!("note: {}", warning.message))
-            .context("print the notes")?;
-    }
-    Ok(())
+    let mut notices: Vec<Notice> = report
+        .repairs
+        .iter()
+        .map(|repair| Notice::Note(format!("repaired: {}", repair.describe())))
+        .collect();
+    notices.extend(notice::warnings(&report.warnings));
+    out.notices(&notices).context("print the notes")
 }

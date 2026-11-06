@@ -297,6 +297,7 @@ mod tests {
     use crate::filesystem::atomic::recording::{Flush, Recording};
     use crate::filesystem::tree::TreeRoot;
     use crate::lock;
+    use crate::report::WarningKind;
     use crate::testing::hold_lock;
     use crate::testing::tree::{COLLECTION_ID, TempCollection, snapshot};
     use std::fs;
@@ -719,7 +720,11 @@ mod tests {
 
         assert_eq!(
             report.warnings,
-            [Warning::new(
+            [Warning::of(
+                WarningKind::UnknownKey {
+                    table: "collection",
+                    key: "colour".into()
+                },
                 "the key `colour` under [collection] is unknown and ignored"
             )]
         );
@@ -881,7 +886,11 @@ mod tests {
 
         assert_eq!(
             warnings,
-            [Warning::new(
+            [Warning::of(
+                WarningKind::UnknownKey {
+                    table: "collection",
+                    key: "colour".into()
+                },
                 "the key `colour` under [collection] is unknown and ignored"
             )]
         );

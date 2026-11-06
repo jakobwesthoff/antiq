@@ -14,12 +14,44 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub message: String,
+    #[serde(skip)]
+    pub kind: Option<WarningKind>,
+}
+
+/// What a warning is about, for the few the console words at length. The
+/// JSON output carries `message` only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarningKind {
+    /// A key of the config that antiq does not know, under `[collection]`
+    /// or `[target]`.
+    UnknownKey { table: &'static str, key: String },
+    /// The collection is on a network mount, `SMB` or `NFS`.
+    NetworkMount { filesystem: &'static str },
+    /// The filesystem of the collection could not be probed.
+    FilesystemUnknown { reason: String },
+    /// The lock file could not be read.
+    LockUnreadable { reason: String },
+    /// Another run holds the lock. A note more than a warning: nothing is
+    /// wrong, the run is simply there.
+    LockHeld {
+        pid: u32,
+        machine: String,
+        started: String,
+    },
 }
 
 impl Warning {
     pub fn new(message: impl Into<String>) -> Self {
         Warning {
             message: message.into(),
+            kind: None,
+        }
+    }
+
+    pub fn of(kind: WarningKind, message: impl Into<String>) -> Self {
+        Warning {
+            message: message.into(),
+            kind: Some(kind),
         }
     }
 }
@@ -54,7 +86,7 @@ pub(crate) fn notes_with(
     match lock::holder(&collection.lock_path()) {
         Ok(Some(holder)) => warnings.push(lock_note(&holder)),
         Ok(None) => {}
-        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
+        Err(error) => warnings.push(unreadable_lock(&error)),
     }
     warnings
 }
@@ -75,24 +107,41 @@ pub(crate) fn setting_notes_with(
     let mut unknown_keys = collection.config().unknown_collection_keys.clone();
     unknown_keys.sort();
     for key in &unknown_keys {
-        warnings.push(Warning::new(format!(
-            "the key `{key}` under [collection] is unknown and ignored"
-        )));
+        warnings.push(Warning::of(
+            WarningKind::UnknownKey {
+                table: "collection",
+                key: key.clone(),
+            },
+            format!("the key `{key}` under [collection] is unknown and ignored"),
+        ));
     }
     let mut unknown_target_keys = collection.config().unknown_target_keys.clone();
     unknown_target_keys.sort();
     for key in &unknown_target_keys {
-        warnings.push(Warning::new(format!(
-            "the key `{key}` under [target] is unknown and ignored"
-        )));
+        warnings.push(Warning::of(
+            WarningKind::UnknownKey {
+                table: "target",
+                key: key.clone(),
+            },
+            format!("the key `{key}` under [target] is unknown and ignored"),
+        ));
     }
     match fs_kind {
-        Ok(FsKind::Smb) => warnings.push(Warning::new("the collection is on an SMB mount")),
-        Ok(FsKind::Nfs) => warnings.push(Warning::new("the collection is on an NFS mount")),
+        Ok(FsKind::Smb) => warnings.push(Warning::of(
+            WarningKind::NetworkMount { filesystem: "SMB" },
+            "the collection is on an SMB mount",
+        )),
+        Ok(FsKind::Nfs) => warnings.push(Warning::of(
+            WarningKind::NetworkMount { filesystem: "NFS" },
+            "the collection is on an NFS mount",
+        )),
         Ok(FsKind::Local | FsKind::Other) => {}
-        Err(error) => warnings.push(Warning::new(format!(
-            "cannot tell what kind of filesystem the collection is on: {error}"
-        ))),
+        Err(error) => warnings.push(Warning::of(
+            WarningKind::FilesystemUnknown {
+                reason: error.to_string(),
+            },
+            format!("cannot tell what kind of filesystem the collection is on: {error}"),
+        )),
     }
     warnings
 }
@@ -104,20 +153,33 @@ pub fn lock_status(collection: &Collection) -> (Option<String>, Option<Warning>)
     match lock::holder(&collection.lock_path()) {
         Ok(Some(holder)) => (Some(lock_note(&holder).message), None),
         Ok(None) => (None, None),
-        Err(error) => (
-            None,
-            Some(Warning::new(format!("cannot read the lock file: {error}"))),
-        ),
+        Err(error) => (None, Some(unreadable_lock(&error))),
     }
 }
 
 /// The note for a run that holds the lock while a command that takes none
 /// looks at the collection.
 pub fn lock_note(holder: &Holder) -> Warning {
-    Warning::new(format!(
-        "another run holds the lock (pid {}, machine {}, started {})",
-        holder.pid, holder.machine, holder.started
-    ))
+    Warning::of(
+        WarningKind::LockHeld {
+            pid: holder.pid,
+            machine: holder.machine.clone(),
+            started: holder.started.to_string(),
+        },
+        format!(
+            "another run holds the lock (pid {}, machine {}, started {})",
+            holder.pid, holder.machine, holder.started
+        ),
+    )
+}
+
+pub(crate) fn unreadable_lock(error: &dyn std::fmt::Display) -> Warning {
+    Warning::of(
+        WarningKind::LockUnreadable {
+            reason: error.to_string(),
+        },
+        format!("cannot read the lock file: {error}"),
+    )
 }
 
 #[cfg(test)]
@@ -141,6 +203,41 @@ mod tests {
 
     fn messages(warnings: &[Warning]) -> Vec<&str> {
         warnings.iter().map(|w| w.message.as_str()).collect()
+    }
+
+    #[test]
+    fn a_warning_with_a_kind_serialises_as_its_message_only() {
+        let warning = Warning::of(
+            WarningKind::NetworkMount { filesystem: "SMB" },
+            "the collection is on an SMB mount",
+        );
+        assert_eq!(
+            serde_json::to_string(&warning).expect("a warning serialises"),
+            r#"{"message":"the collection is on an SMB mount"}"#
+        );
+    }
+
+    #[test]
+    fn the_notes_of_a_collection_carry_what_they_are_about() {
+        let (_temp, collection) = collection_with("bogus = 1\n[target]\nrsynk = \"x\"");
+        let kinds: Vec<Option<WarningKind>> = notes_with(&collection, Ok(FsKind::Smb))
+            .into_iter()
+            .map(|warning| warning.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(WarningKind::UnknownKey {
+                    table: "collection",
+                    key: "bogus".into()
+                }),
+                Some(WarningKind::UnknownKey {
+                    table: "target",
+                    key: "rsynk".into()
+                }),
+                Some(WarningKind::NetworkMount { filesystem: "SMB" }),
+            ]
+        );
     }
 
     #[test]

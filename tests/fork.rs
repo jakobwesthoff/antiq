@@ -223,7 +223,11 @@ fn a_damaged_version_is_forked_with_a_warning() {
                     out,
                     format!("Forked projects/scanner (version {NEW}) to tools/copy\n")
                 );
-                assert!(run.stderr.starts_with("note: version "), "{:?}", run.stderr);
+                assert!(
+                    run.stderr.starts_with("warning: version "),
+                    "{:?}",
+                    run.stderr
+                );
                 assert!(run.stderr.contains("is damaged"), "{:?}", run.stderr);
             })
             .json_only(|json| {
@@ -250,7 +254,12 @@ fn a_version_without_a_listing_is_forked_with_two_warnings_and_no_size() {
         let run = world.run(&["fork", "projects/scanner"]);
         run.expect_code(0)
             .text_only(|_| {
-                assert_eq!(run.stderr.matches("note: ").count(), 2, "{:?}", run.stderr);
+                assert_eq!(
+                    run.stderr.matches("warning: ").count(),
+                    2,
+                    "{:?}",
+                    run.stderr
+                );
                 assert!(run.stderr.contains("free space is not checked"));
             })
             .json_only(|json| {
@@ -297,7 +306,7 @@ fn a_dry_run_of_a_damaged_version_says_so_and_drops_the_checks_it_cannot_make() 
     );
     assert!(lines[3].contains("member names"), "{lines:?}");
     assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(run.stderr.contains("note: version "), "{:?}", run.stderr);
+    assert!(run.stderr.contains("warning: version "), "{:?}", run.stderr);
 }
 
 #[test]

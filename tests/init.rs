@@ -201,7 +201,8 @@ fn a_pattern_with_double_star_prints_a_note() {
     let run = init_in(&tree, &["--pattern", "a/**"]);
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     assert!(
-        run.stderr.starts_with("note: pattern a/** contains `**`"),
+        run.stderr
+            .starts_with("warning: pattern a/** contains `**`"),
         "{}",
         run.stderr
     );

@@ -381,7 +381,8 @@ fn a_lock_file_that_cannot_be_read_is_a_warning() {
     let text = grep(&collection, &["README"]);
     assert_eq!(text.code(), 0);
     assert!(
-        text.stderr.starts_with("note: cannot read the lock file: "),
+        text.stderr
+            .starts_with("warning: cannot read the lock file: "),
         "{}",
         text.stderr
     );
@@ -420,7 +421,7 @@ fn an_unknown_config_key_is_a_note_and_a_warning() {
     assert_eq!(text.code(), 0);
     assert_eq!(
         text.stderr,
-        "note: the key `bogus` under [collection] is unknown and ignored\n\
+        "warning: the key `bogus` under [collection] is unknown and ignored\n\
          no archived path matches qxzv\n"
     );
 

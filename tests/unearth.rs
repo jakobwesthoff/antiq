@@ -462,7 +462,7 @@ fn a_refusal_a_repair_may_lift_is_a_note_of_the_dry_run() {
     dry.expect_code(0);
     assert!(
         dry.stderr
-            .contains("note: cannot be judged before the repairs run"),
+            .contains("warning: cannot be judged before the repairs run"),
         "{:?}",
         dry.stderr
     );

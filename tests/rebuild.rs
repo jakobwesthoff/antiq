@@ -887,7 +887,7 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
             };
             let run = world.run(args);
             run.expect_code(0);
-            run.text_only(|_| assert!(run.stderr.contains(&format!("note: {note}\n"))));
+            run.text_only(|_| assert!(run.stderr.contains(&format!("warning: {note}\n"))));
             run.json_only(|json| {
                 assert_eq!(json["warnings"], serde_json::json!([{"message": note}]));
             });

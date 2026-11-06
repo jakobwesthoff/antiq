@@ -977,7 +977,7 @@ not judged.
 8. One output line per folder on stdout, `archived <piece>`, `skipped
    <piece>: <message>` or `refused <piece>: <reasons>`, then the summary
    `Archived N, skipped N, refused N.` The repairs of the start of the run
-   and the warnings go to stderr as `note:` lines. A dry run prints the
+   go to stderr as `note:` lines and the warnings as `warning:` lines. A dry run prints the
    repair lines and `Would archive <piece>` lines, then `Refused <piece>:
    <reasons>` for each refused piece, and `Nothing to do.` when it prints
    none. A skipped piece has the reason `differs` (the folder changed while
@@ -1119,7 +1119,7 @@ checks it would make. (ADR 0061)
   write of `.antiq-restored`, not the archived one.
 - On the console a run prints `Unearthed <piece> (version <version>)` on
   stdout. The repairs that were done (`note: repaired: <repair>`) and the
-  warnings (`note: <warning>`) go to stderr. A skipped version prints
+  warnings (`warning: <warning>`) go to stderr. A skipped version prints
   `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout
   line, the sizes in decimal units. In `-n` the `Would skip` line reads
   `Would skip <piece> (version <version>): <size> needed, <size> free`, and
@@ -1180,7 +1180,7 @@ beforehand.
 
 On the console a run prints `Forked <piece> (version <version>) to <path>`
 on stdout. The repairs that were done (`note: repaired: <repair>`) and the
-warnings (`note: <warning>`) go to stderr. A skipped version prints
+warnings (`warning: <warning>`) go to stderr. A skipped version prints
 `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout line,
 or `Skipped <piece>: out of space during the extraction, <size> free` where
 `needed` is null. In `-n` a line reads `Would fork <piece> (version
@@ -1378,7 +1378,7 @@ SIZE and FILES are `-` on a terminal and in a pipe, and null in `--json`,
 where the head of the listing lacks the number; SIZE is the size the listing
 records, also when the archive on disk has another. A file that cannot
 be read does not fail the run: its version is listed as `unreadable`, and
-a warning names the file and the reason, as a note on stderr in text
+a warning names the file and the reason, as a `warning:` line on stderr in text
 output and in the `warnings` of `--json`. Each fault of a damaged version
 is a note on stderr in text output, `note: <piece> <stamp> is damaged:
 <fault>`, and under `--json` an entry in the `damage` list of its row. A folder that holds sidecars only is
@@ -1466,7 +1466,7 @@ path, then version with the newest first. A skipped version is a `warning:`
 line on stderr. With no hit `grep` exits 0 and says `no archived path
 matches <pattern>` on stderr; a pattern that is not a valid regular
 expression is a usage error, exit 2, also outside a collection. A held lock
-is noted as for `list`: a `note:` line on stderr, after the `note:` lines
+is noted as for `list`: a `note:` line on stderr, after the `warning:` lines
 on the settings of the collection.
 
 ### status
@@ -1546,6 +1546,12 @@ several are indented below it. The kinds, in this order:
   (`unreadable: <dir>`);
 - files in store folders whose names do not parse.
 
+On a terminal each of these notes is a warning block on stdout instead:
+a bold title with the same count and items, a sentence that says what the
+finding means, and a `→` line that says how to fix it where there is a
+fix. When a piece is due, a hint `Run antiq archive -n to see what the next
+run would archive.` follows. A pipe gets the lines above and no hint.
+
 Damaged and newer-format versions are shown by their local time with
 seconds, with the UTC offset added where two of a piece render alike. An
 incomplete version is shown by its stamp, as it can be named by its stamp
@@ -1557,7 +1563,7 @@ store are shown relative to `.antiq/`.
 
 Warnings about the config, an unreadable lock file, a directory that cannot
 be read, a version that cannot be inspected or a spelling that cannot be
-looked up are notes on stderr, each starting `note: `. When the store cannot
+looked up are warnings on stderr, each starting `warning: `; a held lock is a `note: ` line. When the store cannot
 be read, `status` still prints the table of the live pieces, adds the note
 `cannot read the store: <path>: <reason>`, leaves out the versions of the
 header and the notes on versions, on spellings and on files in the store, and
@@ -1966,6 +1972,15 @@ to a command's result and the dry-run footer go to stdout and are dropped
 when stdout is not rich. One that belongs to a failure or a warning goes to
 stderr and is dropped when stderr is not rich.
 
+The warnings of a run go to stderr after its result, one block each. An
+unknown config key, a collection on an SMB or NFS mount, a filesystem or a
+lock file that cannot be read have a title of their own in the words of the
+console; an unknown key adds that antiq ignores it and a `→` line with the
+fix. Every other warning has its message as the title. A pipe gets one
+`warning: <message>` line for each. Notes that are no warning, such as a
+repair that ran, a reason in `push` or the run that holds the lock, are
+info blocks on a rich stderr and `note: <text>` lines on a pipe.
+
 An error on a rich stderr is an error block. Its title is the error and
 its causes joined with `: `, unless the error has an explanation of its own.
 These errors have one, with a title in the words of the console and the
@@ -2081,7 +2096,7 @@ of the counts, with `repairs` and `warnings` after them, and the console
 prints `note: <reason>` on stderr and nothing on stdout. Without `--if-reachable` it is the error kind
 `target_unreachable`. In text the repairs that were done go to stderr as
 `note: repaired: <repair>` lines, after the `note: <reason>` of an
-unreachable target, and the warnings follow as `note: <message>` lines. The
+unreachable target, and the warnings follow as `warning: <message>` lines. The
 warnings hold the notes on the settings of the collection (an unknown key
 under `[target]` among them) besides those of the repairs.
 
