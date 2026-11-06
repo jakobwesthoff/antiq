@@ -35,9 +35,11 @@ impl Reflow {
     /// Every variable [`Reflow::detect`] reads. A test that needs a known
     /// answer removes these from the environment it hands to a program.
     #[cfg(test)]
-    pub(crate) const VARIABLES: [&str; 8] = [
+    pub(crate) const VARIABLES: [&str; 10] = [
         "XTERM_VERSION",
         "STY",
+        "INSIDE_EMACS",
+        "VIM_TERMINAL",
         "TMUX",
         "TERM",
         "VTE_VERSION",
@@ -51,40 +53,66 @@ impl Reflow {
     /// A terminal passes its variables on to every program started from it,
     /// including another terminal. The rules therefore lean towards `Cuts`:
     ///
-    /// 1. `XTERM_VERSION` (xterm exports it, and xterm cuts) and `STY` (GNU
-    ///    screen) win over everything else.
+    /// 1. `XTERM_VERSION` (xterm exports it, and xterm cuts), `STY` (GNU
+    ///    screen), `INSIDE_EMACS` (Emacs `M-x shell` and `term`) and
+    ///    `VIM_TERMINAL` (Vim's `:terminal`) win over everything else: a
+    ///    terminal emulated inside a program keeps its width.
     /// 2. In a tmux pane, `TMUX` is set and `TERM` starts with `tmux` or
     ///    `screen`. tmux lays lines out again (its CHANGES: "Support wide
     ///    characters properly when reflowing"), and `TMUX` comes from
     ///    `environ_for_session` in its `environ.c`. Whatever the outer
     ///    terminal exported does not matter inside it.
-    /// 3. Otherwise exactly one terminal family must be named:
-    ///    `VTE_VERSION` (set by VTE in `spawn.cc`; VTE reflows since 0.35),
-    ///    `KITTY_WINDOW_ID` (`kitty/tabs.py`; `rewrap` in `kitty/resize.c`),
-    ///    `ALACRITTY_LOG` (set at start in `alacritty/src/logging.rs`;
-    ///    Alacritty's CHANGELOG 0.3.0: "Text will reflow instead of
-    ///    truncating when resizing Alacritty") or a `TERM_PROGRAM` of
-    ///    [`REFLOWING_PROGRAMS`]. Two families mean a terminal started from
-    ///    another one, and which of them it is stays unknown.
+    /// 3. Otherwise exactly one terminal family must be named, and `TERM`
+    ///    must be one the family exports. A terminal that sets no variable
+    ///    of its own (st, for one) exports its own `TERM` and fails this
+    ///    test whichever terminal it was started from. The families:
+    ///    - `VTE_VERSION` (set by VTE in `spawn.cc`; VTE reflows since
+    ///      0.35), with `TERM` `xterm*`, as VTE terminals export;
+    ///    - `KITTY_WINDOW_ID` (`kitty/tabs.py`; `rewrap` in
+    ///      `kitty/resize.c`), with `TERM=xterm-kitty`, the default of its
+    ///      `term` option in `kitty/options/definition.py`;
+    ///    - `ALACRITTY_LOG` (set at start in `alacritty/src/logging.rs`;
+    ///      CHANGELOG 0.3.0: "Text will reflow instead of truncating when
+    ///      resizing Alacritty"), with `TERM=alacritty` or `xterm*`, which
+    ///      it falls back to without its terminfo entry;
+    ///    - a `TERM_PROGRAM` of [`REFLOWING_PROGRAMS`], with `TERM` `xterm*`
+    ///      (iTerm2, Terminal.app, WezTerm), `wezterm` (WezTerm's `term`
+    ///      setting) or `xterm-ghostty` (the default of `term` in ghostty's
+    ///      `Config.zig`).
+    ///
+    ///    Two families mean a terminal started from another one, and which
+    ///    of them it is stays unknown.
     pub(crate) fn detect(get: impl Fn(&str) -> Option<String>) -> Reflow {
         let set = |name: &str| get(name).is_some_and(|value| !value.is_empty());
-        if set("XTERM_VERSION") || set("STY") {
+        if set("XTERM_VERSION") || set("STY") || set("INSIDE_EMACS") || set("VIM_TERMINAL") {
             return Reflow::Cuts;
         }
-        let multiplexer =
-            get("TERM").is_some_and(|term| term.starts_with("tmux") || term.starts_with("screen"));
-        if set("TMUX") && multiplexer {
+        let term = get("TERM").unwrap_or_default();
+        if set("TMUX") && (term.starts_with("tmux") || term.starts_with("screen")) {
             return Reflow::Rewraps;
         }
-        let program = get("TERM_PROGRAM")
-            .is_some_and(|program| REFLOWING_PROGRAMS.contains(&program.as_str()));
-        let families = [
-            set("VTE_VERSION"),
-            set("KITTY_WINDOW_ID"),
-            set("ALACRITTY_LOG"),
-            program,
+        let xterm = term.starts_with("xterm");
+        let program = get("TERM_PROGRAM").unwrap_or_default();
+        // Each family that is named, with whether `TERM` is one it exports.
+        let named = [
+            (set("VTE_VERSION"), xterm),
+            (set("KITTY_WINDOW_ID"), term == "xterm-kitty"),
+            (set("ALACRITTY_LOG"), term == "alacritty" || xterm),
+            (
+                REFLOWING_PROGRAMS.contains(&program.as_str()),
+                match program.as_str() {
+                    "WezTerm" => xterm || term == "wezterm",
+                    "ghostty" => xterm || term == "xterm-ghostty",
+                    _ => xterm,
+                },
+            ),
         ];
-        if families.into_iter().filter(|named| *named).count() == 1 {
+        let fits: Vec<bool> = named
+            .into_iter()
+            .filter(|(named, _)| *named)
+            .map(|(_, term_fits)| term_fits)
+            .collect();
+        if fits == [true] {
             Reflow::Rewraps
         } else {
             Reflow::Cuts
@@ -119,7 +147,9 @@ pub(crate) fn rows_taken(line: &str, columns: usize) -> usize {
     let mut used = 0;
     for character in plain.chars() {
         let width = widths(character);
-        if used + width > columns {
+        // A character wider than the whole window stays on its row, since
+        // moving it down would only give it an empty row again.
+        if used > 0 && used + width > columns {
             rows += 1;
             used = 0;
         }

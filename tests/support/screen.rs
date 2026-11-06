@@ -258,7 +258,7 @@ impl Screen {
             let mut first = true;
             for (offset, character) in line.iter().enumerate() {
                 let width = character.width().unwrap_or(0);
-                if used + width > cols {
+                if used > 0 && used + width > cols {
                     self.grid.push(std::mem::take(&mut row));
                     self.continued.push(!first);
                     first = false;

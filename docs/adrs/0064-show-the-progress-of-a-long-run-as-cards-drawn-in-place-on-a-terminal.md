@@ -57,13 +57,15 @@ leaves each line on one row, and the cursor climbs one row per line. The
 environment names the terminals that lay lines out again: VTE
 (`VTE_VERSION`), kitty (`KITTY_WINDOW_ID`), Alacritty (`ALACRITTY_LOG`),
 tmux (`TMUX`, with a `TERM` of `tmux` or `screen`), and iTerm2,
-Terminal.app, WezTerm and ghostty (`TERM_PROGRAM`). A terminal that is not
-named is treated as one that does not lay lines out again, because a
-fragment of an old card that stays on the screen costs less than a
-finished line that is erased. The same holds when the variables name two
-terminals at once, or when `XTERM_VERSION` or `STY` names xterm or GNU
-screen: a terminal passes its variables on to the programs started from
-it, including another terminal.
+Terminal.app, WezTerm and ghostty (`TERM_PROGRAM`). The `TERM` has to be
+one that terminal exports, such as `xterm-kitty` for kitty. A terminal
+that is not named is treated as one that does not lay lines out again,
+because a fragment of an old card that stays on the screen costs less
+than a finished line that is erased. The same holds when the variables
+name two terminals at once, when the `TERM` does not fit the one named,
+or when `XTERM_VERSION`, `STY`, `INSIDE_EMACS` or `VIM_TERMINAL` names
+xterm, GNU screen, Emacs or Vim: a terminal passes its variables on to
+the programs started from it, including another terminal.
 
 A finished line is never erased as long as the width read at a redraw is
 the width the terminal has when it parses the redraw. If the window is

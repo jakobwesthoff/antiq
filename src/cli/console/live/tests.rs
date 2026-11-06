@@ -323,6 +323,13 @@ fn a_shorter_window_scrolls_only_as_far_as_the_cursor_needs() {
 }
 
 #[test]
+fn a_wide_character_wider_than_the_window_keeps_its_row_on_a_rewrap() {
+    let mut screen = fed(10, "中\n");
+    screen.resize(1, 10, true);
+    assert_eq!(screen.visible(), ["中"]);
+}
+
+#[test]
 fn a_wide_character_cut_by_a_narrowing_without_rewrap_is_dropped() {
     let mut screen = fed(10, "ab世\n");
     screen.resize(3, 10, false);

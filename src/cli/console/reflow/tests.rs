@@ -61,6 +61,12 @@ fn no_columns_count_as_one_column() {
 }
 
 #[test]
+fn a_wide_character_alone_on_a_row_takes_that_row_even_when_it_is_too_wide_for_it() {
+    assert_eq!(rows_taken("中", 1), 1);
+    assert!(rows_taken("中中", 1) <= 2);
+}
+
+#[test]
 fn an_emoji_sequence_counts_by_the_width_of_the_whole_sequence() {
     // A family emoji is four emoji joined by zero width joiners. Per
     // character it is 8 columns, as a whole it is 2.
@@ -138,15 +144,57 @@ fn an_empty_environment_is_a_terminal_that_cuts() {
 #[test]
 fn a_terminal_that_names_itself_rewraps() {
     for pairs in [
-        vec![("VTE_VERSION", "7600")],
-        vec![("KITTY_WINDOW_ID", "1")],
-        vec![("ALACRITTY_LOG", "/tmp/Alacritty-1.log")],
-        vec![("TERM_PROGRAM", "iTerm.app")],
-        vec![("TERM_PROGRAM", "Apple_Terminal")],
-        vec![("TERM_PROGRAM", "WezTerm")],
-        vec![("TERM_PROGRAM", "ghostty")],
+        vec![("VTE_VERSION", "7600"), ("TERM", "xterm-256color")],
+        vec![("KITTY_WINDOW_ID", "1"), ("TERM", "xterm-kitty")],
+        vec![
+            ("ALACRITTY_LOG", "/tmp/Alacritty-1.log"),
+            ("TERM", "alacritty"),
+        ],
+        vec![
+            ("ALACRITTY_LOG", "/tmp/Alacritty-1.log"),
+            ("TERM", "xterm-256color"),
+        ],
+        vec![("TERM_PROGRAM", "iTerm.app"), ("TERM", "xterm-256color")],
+        vec![
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("TERM", "xterm-256color"),
+        ],
+        vec![("TERM_PROGRAM", "WezTerm"), ("TERM", "xterm-256color")],
+        vec![("TERM_PROGRAM", "WezTerm"), ("TERM", "wezterm")],
+        vec![("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty")],
+        vec![("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-256color")],
     ] {
         assert_eq!(detect(&pairs), Reflow::Rewraps, "{pairs:?}");
+    }
+}
+
+#[test]
+fn a_terminal_that_inherited_the_variable_of_another_cuts() {
+    // st sets none of the variables and exports its own TERM, so it cuts
+    // whichever terminal it was started from.
+    for pairs in [
+        vec![("VTE_VERSION", "7600"), ("TERM", "st-256color")],
+        vec![("KITTY_WINDOW_ID", "1"), ("TERM", "st-256color")],
+        vec![("ALACRITTY_LOG", "/tmp/a.log"), ("TERM", "st-256color")],
+        vec![("TERM_PROGRAM", "iTerm.app"), ("TERM", "st-256color")],
+        vec![("TERM_PROGRAM", "ghostty"), ("TERM", "st-256color")],
+        vec![("KITTY_WINDOW_ID", "1"), ("TERM", "xterm-256color")],
+        vec![("TERM_PROGRAM", "WezTerm")],
+        vec![("VTE_VERSION", "7600")],
+    ] {
+        assert_eq!(detect(&pairs), Reflow::Cuts, "{pairs:?}");
+    }
+}
+
+#[test]
+fn a_terminal_inside_an_editor_cuts() {
+    for marker in ["INSIDE_EMACS", "VIM_TERMINAL"] {
+        let pairs = [
+            ("VTE_VERSION", "7600"),
+            ("TERM", "xterm-256color"),
+            (marker, "1"),
+        ];
+        assert_eq!(detect(&pairs), Reflow::Cuts, "{marker}");
     }
 }
 
@@ -216,7 +264,11 @@ fn two_terminals_named_at_once_cut() {
 
 #[test]
 fn tmux_as_program_is_no_terminal_of_its_own() {
-    let pairs = [("TERM_PROGRAM", "tmux"), ("VTE_VERSION", "7600")];
+    let pairs = [
+        ("TERM_PROGRAM", "tmux"),
+        ("VTE_VERSION", "7600"),
+        ("TERM", "xterm-256color"),
+    ];
     assert_eq!(detect(&pairs), Reflow::Rewraps);
 }
 
