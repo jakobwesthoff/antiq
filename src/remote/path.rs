@@ -10,15 +10,18 @@ use crate::fsx::device::is_mount_point;
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::pack::hashing::hex;
-use crate::relpath::RelPath;
+use crate::relpath::{RelPath, machine_part};
 use crate::remote::marker::{self, Marker};
 use crate::remote::{
-    Assessment, Created, Durable, Placement, Reachability, RealDurable, Remote, RemoteError,
-    Transfer, Upload,
+    Assessment, Created, Durable, KnownVersions, MetaFile, Placement, Reachability, RealDurable,
+    Remote, RemoteError, RemoteFile, Transfer, Upload,
 };
+use crate::store::version_number;
+use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -185,18 +188,27 @@ pub(crate) fn assess_root(root: &Path, expected: ObjectId, seams: &Seams) -> Ass
 pub struct PathRemote {
     root: PathBuf,
     expected: ObjectId,
+    /// The machine name as it appears in names this machine gives files on
+    /// the remote.
+    machine_part: String,
     seams: Seams,
 }
 
 impl PathRemote {
-    pub fn new(root: PathBuf, expected: ObjectId) -> PathRemote {
-        PathRemote::with_seams(root, expected, Seams::default())
+    pub fn new(root: PathBuf, expected: ObjectId, machine: &str) -> PathRemote {
+        PathRemote::with_seams(root, expected, machine, Seams::default())
     }
 
-    pub(crate) fn with_seams(root: PathBuf, expected: ObjectId, seams: Seams) -> PathRemote {
+    pub(crate) fn with_seams(
+        root: PathBuf,
+        expected: ObjectId,
+        machine: &str,
+        seams: Seams,
+    ) -> PathRemote {
         PathRemote {
             root,
             expected,
+            machine_part: machine_part(machine),
             seams,
         }
     }
@@ -315,6 +327,57 @@ fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Remo
     }
 }
 
+/// The entries of a directory, none when it does not exist.
+fn read_dir_if_present(dir: &Path) -> Result<Vec<io::Result<fs::DirEntry>>, RemoteError> {
+    match fs::read_dir(dir) {
+        Ok(entries) => Ok(entries.collect()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(io_error("list", dir)(error)),
+    }
+}
+
+/// The names of the regular files of a directory that are UTF-8. Names
+/// that are not are none antiq gave a file.
+fn list_file_names(dir: &Path) -> Result<Vec<String>, RemoteError> {
+    let mut names = Vec::new();
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry.map_err(io_error("list", dir))?;
+        let is_file = entry
+            .file_type()
+            .map_err(io_error("stat", &entry.path()))?
+            .is_file();
+        if let Ok(name) = entry.file_name().into_string()
+            && is_file
+        {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The entries of a directory with the sizes, kinds and times the remote
+/// reports, by name.
+fn list_files(dir: &Path) -> Result<Vec<RemoteFile>, RemoteError> {
+    let mut files = Vec::new();
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry.map_err(io_error("list", dir))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let found = entry.metadata().map_err(io_error("stat", &entry.path()))?;
+        let modified = found.modified().map_err(io_error("stat", &entry.path()))?;
+        files.push(RemoteFile {
+            name,
+            size: found.len(),
+            modified: Timestamp::try_from(modified)
+                .expect("a file time is within the range of a timestamp"),
+            is_dir: found.is_dir(),
+        });
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(files)
+}
+
 fn create_or_truncate(path: &Path) -> Result<File, RemoteError> {
     OpenOptions::new()
         .write(true)
@@ -341,6 +404,99 @@ impl Remote for PathRemote {
 
     fn begin_phase(&self) -> Result<(), RemoteError> {
         self.require()
+    }
+
+    fn clock(&self) -> Result<Timestamp, RemoteError> {
+        self.require()?;
+        // The probe file is written, flushed and closed before its time is
+        // read, so that the time is the one the server set and not one
+        // this machine's cache made up while the write was still open.
+        let path = self
+            .root
+            .join(format!(".antiq-clock.{}", self.machine_part));
+        {
+            let mut file = create_or_truncate(&path)?;
+            file.write_all(b"\n").map_err(io_error("write", &path))?;
+            self.seams.durable.file(&file, &path)?;
+        }
+        let modified = fs::metadata(&path)
+            .and_then(|found| found.modified())
+            .map_err(io_error("stat", &path))?;
+        Ok(Timestamp::try_from(modified).expect("a file time is within the range of a timestamp"))
+    }
+
+    fn pull_metadata(&self, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError> {
+        let mut files = Vec::new();
+        for id in self.list_objects()? {
+            let dir = self.object_dir(id);
+            let mut numbers: Vec<u32> = list_file_names(&dir)?
+                .iter()
+                .filter_map(|name| version_number(name))
+                .filter(|number| *number > known.highest(id))
+                .collect();
+            numbers.sort_unstable();
+            for number in numbers {
+                let path = dir.join(format!("meta.{number}"));
+                let bytes = fs::read(&path).map_err(io_error("read", &path))?;
+                let number = NonZeroU32::new(number).expect("a version number is above zero");
+                files.push(MetaFile { id, number, bytes });
+            }
+        }
+        Ok(files)
+    }
+
+    fn list_objects(&self) -> Result<Vec<ObjectId>, RemoteError> {
+        self.require()?;
+        let objects = self.root.join("objects");
+        let mut ids = Vec::new();
+        for entry in read_dir_if_present(&objects)? {
+            let entry = entry.map_err(io_error("list", &objects))?;
+            let is_dir = entry
+                .file_type()
+                .map_err(io_error("stat", &entry.path()))?
+                .is_dir();
+            // Only the canonical (upper case) spelling of an ID is an
+            // object: every path of the remote is built from it.
+            if let Some(name) = entry.file_name().to_str()
+                && is_dir
+                && let Ok(id) = name.parse::<ObjectId>()
+                && id.to_string() == name
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    fn list_dir(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
+        self.require()?;
+        list_files(&self.object_dir(id))
+    }
+
+    fn list_partial(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
+        self.require()?;
+        list_files(&self.object_dir(id).join(PARTIAL_DIR))
+    }
+
+    fn read_file(&self, id: ObjectId, name: &str) -> Result<Vec<u8>, RemoteError> {
+        self.require()?;
+        plain_name(name)?;
+        let path = self.object_dir(id).join(name);
+        fs::read(&path).map_err(io_error("read", &path))
+    }
+
+    fn get_payload(&self, id: ObjectId, name: &str, to: &Path) -> Result<Transfer, RemoteError> {
+        self.require()?;
+        plain_name(name)?;
+        let from = self.object_dir(id).join(name);
+        let mut source = File::open(&from).map_err(io_error("open", &from))?;
+        let mut out = create_or_truncate(to)?;
+        let bytes = io::copy(&mut source, &mut out).map_err(io_error("write", to))?;
+        Ok(Transfer {
+            bytes,
+            already_present: false,
+        })
     }
 
     fn create_exclusive(&self, id: ObjectId, name: &str) -> Result<Created, RemoteError> {
@@ -671,7 +827,7 @@ mod tests {
     #[test]
     fn a_phase_begins_only_at_a_reachable_remote() {
         let root = remote_root();
-        let remote = PathRemote::new(root.path().to_path_buf(), id(ID));
+        let remote = PathRemote::new(root.path().to_path_buf(), id(ID), "laptop");
         remote.begin_phase().expect("the remote is reachable");
         fs::write(
             root.path().join(marker::FILE_NAME),
@@ -685,7 +841,7 @@ mod tests {
     #[test]
     fn a_phase_does_not_begin_at_an_away_remote() {
         let parent = tempfile::tempdir().expect("temp dir");
-        let remote = PathRemote::new(parent.path().join("absent"), id(ID));
+        let remote = PathRemote::new(parent.path().join("absent"), id(ID), "laptop");
         let error = remote.begin_phase().expect_err("no root");
         assert!(matches!(error, RemoteError::Away { .. }), "{error}");
     }
@@ -693,7 +849,8 @@ mod tests {
     #[test]
     fn the_trait_object_answers_reachability_and_finishes() {
         let root = remote_root();
-        let remote: Box<dyn Remote> = Box::new(PathRemote::new(root.path().to_path_buf(), id(ID)));
+        let remote: Box<dyn Remote> =
+            Box::new(PathRemote::new(root.path().to_path_buf(), id(ID), "laptop"));
         let found = remote.reachability().expect("an answer");
         assert_eq!(found.reachability, Reachability::Reachable);
         remote.finish();
@@ -701,7 +858,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod writing {
+mod operations {
     use super::*;
     use crate::remote::recording::{Flush, Recording};
     use sha2::{Digest, Sha256};
@@ -740,7 +897,7 @@ mod writing {
             durable: durable.clone(),
             ..Seams::default()
         };
-        let remote = PathRemote::with_seams(root.path().to_path_buf(), id(), seams);
+        let remote = PathRemote::with_seams(root.path().to_path_buf(), id(), "laptop", seams);
         Fixture {
             root,
             local: tempfile::tempdir().expect("temp dir"),
@@ -1378,7 +1535,7 @@ mod writing {
             }),
             ..Seams::default()
         };
-        let remote = PathRemote::with_seams(fx.root.path().to_path_buf(), id(), seams);
+        let remote = PathRemote::with_seams(fx.root.path().to_path_buf(), id(), "laptop", seams);
         let found = remote.checksum(id(), "p.tar.zst").expect("a checksum");
         assert_eq!(found, sha(b"what the seam opens"));
         assert_eq!(
@@ -1395,7 +1552,7 @@ mod writing {
             read_back: Arc::new(|_| Err(io::Error::from(io::ErrorKind::Unsupported))),
             ..Seams::default()
         };
-        let remote = PathRemote::with_seams(fx.root.path().to_path_buf(), id(), seams);
+        let remote = PathRemote::with_seams(fx.root.path().to_path_buf(), id(), "laptop", seams);
         let result = remote.checksum(id(), "p.tar.zst");
         assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
     }
@@ -1431,6 +1588,333 @@ mod writing {
         let fx = fixture();
         fx.replace_marker();
         assert_broken(fx.remote.checksum(id(), "p"));
+    }
+
+    // =====================================================
+    // Reading
+    // =====================================================
+
+    fn other_id() -> ObjectId {
+        OTHER.parse().expect("a ULID")
+    }
+
+    /// Writes a file into the directory of object `id`, making it.
+    fn put_file(fx: &Fixture, id: ObjectId, name: &str, bytes: &[u8]) {
+        let dir = fx.objects().join(id.to_string());
+        fs::create_dir_all(&dir).expect("dirs");
+        fs::write(dir.join(name), bytes).expect("write");
+    }
+
+    fn pulled(files: &[MetaFile]) -> Vec<(String, u32)> {
+        files
+            .iter()
+            .map(|file| (file.id.to_string(), file.number.get()))
+            .collect()
+    }
+
+    #[test]
+    fn the_objects_are_the_directories_named_like_an_id_in_id_order() {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"{}");
+        put_file(&fx, other_id(), "meta.1", b"{}");
+        fs::create_dir_all(fx.objects().join("notes")).expect("dirs");
+        // A different ID in the spelling that is not the canonical one,
+        // and a plain file that is named like an ID.
+        let third = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        fs::create_dir_all(fx.objects().join(third.to_lowercase())).expect("dirs");
+        fs::write(fx.objects().join("01ARZ3NDEKTSV4RRFFQ69G5FAX"), "x").expect("write");
+        let objects = fx.remote.list_objects().expect("listed");
+        assert_eq!(objects, [other_id(), id()]);
+    }
+
+    #[test]
+    fn a_remote_without_an_objects_directory_has_no_objects() {
+        let fx = fixture();
+        assert_eq!(fx.remote.list_objects().expect("listed"), []);
+    }
+
+    #[test]
+    fn an_objects_directory_that_cannot_be_read_is_an_error() {
+        let fx = fixture();
+        fs::create_dir(fx.objects()).expect("dir");
+        fs::set_permissions(fx.objects(), fs::Permissions::from_mode(0o000)).expect("chmod");
+        let denied = fs::read_dir(fx.objects()).is_err();
+        let result = fx.remote.list_objects();
+        fs::set_permissions(fx.objects(), fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(
+            denied,
+            "the test needs a user for whom mode 000 denies listing; run it as a non-root user"
+        );
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn an_objects_directory_lists_names_sizes_kinds_and_times() {
+        let fx = fixture();
+        put_file(&fx, id(), "b.tar.zst", b"123");
+        fs::create_dir_all(fx.object_dir().join(".antiq-partial")).expect("dirs");
+        let before = Timestamp::now();
+        let listed = fx.remote.list_dir(id()).expect("listed");
+        let names: Vec<&str> = listed.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, [".antiq-partial", "b.tar.zst"]);
+        assert!(listed[0].is_dir);
+        assert!(!listed[1].is_dir);
+        assert_eq!(listed[1].size, 3);
+        let age = before.as_second() - listed[1].modified.as_second();
+        assert!((0..60).contains(&age), "modified {age} s before now");
+    }
+
+    /// A name that is not UTF-8 can only be made on a filesystem that keeps
+    /// the bytes it is given, which macOS's does not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_left_out_of_a_listing() {
+        use std::os::unix::ffi::OsStrExt;
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"{}");
+        let odd = std::ffi::OsStr::from_bytes(b"odd-\xff-name");
+        fs::write(fx.object_dir().join(odd), "x").expect("write");
+        let listed = fx.remote.list_dir(id()).expect("listed");
+        let names: Vec<&str> = listed.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, ["meta.1"]);
+    }
+
+    #[test]
+    fn an_object_without_a_directory_lists_nothing() {
+        let fx = fixture();
+        assert_eq!(fx.remote.list_dir(id()).expect("listed"), []);
+    }
+
+    #[test]
+    fn the_partial_directory_lists_its_files() {
+        let fx = fixture();
+        let partial = fx.object_dir().join(".antiq-partial");
+        fs::create_dir_all(&partial).expect("dirs");
+        fs::write(partial.join("p.tar.zst"), "12345").expect("write");
+        let listed = fx.remote.list_partial(id()).expect("listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "p.tar.zst");
+        assert_eq!(listed[0].size, 5);
+    }
+
+    #[test]
+    fn an_object_without_a_partial_directory_lists_nothing() {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"{}");
+        assert_eq!(fx.remote.list_partial(id()).expect("listed"), []);
+    }
+
+    #[test]
+    fn a_small_file_is_read_whole() {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"{\"format\":1}");
+        assert_eq!(
+            fx.remote.read_file(id(), "meta.1").expect("read"),
+            b"{\"format\":1}"
+        );
+    }
+
+    #[test]
+    fn a_small_file_that_is_not_there_is_an_error() {
+        let fx = fixture();
+        let result = fx.remote.read_file(id(), "meta.1");
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn a_payload_is_copied_to_a_local_path() {
+        let fx = fixture();
+        put_file(&fx, id(), "p.tar.zst", b"archive bytes");
+        let to = fx.local.path().join("fetched");
+        fs::write(&to, "a leftover that is longer than the payload itself").expect("write");
+        let moved = fx.remote.get_payload(id(), "p.tar.zst", &to).expect("got");
+        assert_eq!(moved.bytes, 13);
+        assert!(!moved.already_present);
+        assert_eq!(fs::read(&to).expect("exists"), b"archive bytes");
+    }
+
+    #[test]
+    fn a_payload_that_is_not_there_is_an_error() {
+        let fx = fixture();
+        let to = fx.local.path().join("fetched");
+        let result = fx.remote.get_payload(id(), "p.tar.zst", &to);
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn a_payload_cannot_be_copied_to_a_directory_that_is_not_there() {
+        let fx = fixture();
+        put_file(&fx, id(), "p.tar.zst", b"archive bytes");
+        let to = fx.local.path().join("absent").join("fetched");
+        let result = fx.remote.get_payload(id(), "p.tar.zst", &to);
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn a_read_with_a_name_that_is_no_file_name_is_refused() {
+        let fx = fixture();
+        for name in bad_names() {
+            assert_invalid(fx.remote.read_file(id(), name), name);
+        }
+    }
+
+    #[test]
+    fn a_fetch_with_a_name_that_is_no_file_name_is_refused_and_writes_nothing() {
+        let fx = fixture();
+        let to = fx.local.path().join("fetched");
+        for name in bad_names() {
+            assert_invalid(fx.remote.get_payload(id(), name, &to), name);
+        }
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn the_metadata_pull_returns_every_version_above_what_is_known() {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"one");
+        put_file(&fx, id(), "meta.2", b"two");
+        put_file(&fx, other_id(), "meta.1", b"other");
+        let all = fx
+            .remote
+            .pull_metadata(&KnownVersions::new())
+            .expect("pulled");
+        assert_eq!(
+            pulled(&all),
+            [(OTHER.into(), 1), (ID.into(), 1), (ID.into(), 2)]
+        );
+        assert_eq!(all[0].bytes, b"other");
+        assert_eq!(all[2].bytes, b"two");
+
+        let mut known = KnownVersions::new();
+        known.insert(id(), 1);
+        let newer = fx.remote.pull_metadata(&known).expect("pulled");
+        assert_eq!(pulled(&newer), [(OTHER.into(), 1), (ID.into(), 2)]);
+
+        known.insert(id(), 2);
+        known.insert(other_id(), 1);
+        assert_eq!(fx.remote.pull_metadata(&known).expect("pulled"), []);
+    }
+
+    #[test]
+    fn the_metadata_pull_leaves_out_files_that_are_no_versions() {
+        let fx = fixture();
+        for name in [
+            "meta.3",
+            "meta.3.claim",
+            ".meta.4.imperius.part",
+            "meta.0",
+            "meta.007",
+            "meta.4294967296",
+            "meta.",
+            "p.tar.zst",
+        ] {
+            put_file(&fx, id(), name, b"x");
+        }
+        fs::create_dir_all(fx.object_dir().join("meta.9")).expect("dirs");
+        let pulled_files = fx
+            .remote
+            .pull_metadata(&KnownVersions::new())
+            .expect("pulled");
+        assert_eq!(pulled(&pulled_files), [(ID.into(), 3)]);
+    }
+
+    #[test]
+    fn the_metadata_pull_of_a_remote_without_objects_is_empty() {
+        let fx = fixture();
+        let none = fx.remote.pull_metadata(&KnownVersions::new());
+        assert_eq!(none.expect("pulled"), []);
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_fails_the_pull() {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"one");
+        let path = fx.object_dir().join("meta.1");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let denied = fs::read(&path).is_err();
+        let result = fx.remote.pull_metadata(&KnownVersions::new());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore");
+        assert!(
+            denied,
+            "the test needs a user for whom mode 000 denies reading; run it as a non-root user"
+        );
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn the_clock_is_the_modification_time_of_a_probe_file_named_for_the_machine() {
+        let fx = fixture();
+        let before = Timestamp::now().as_second();
+        let first = fx.remote.clock().expect("a time").as_second();
+        let second = fx.remote.clock().expect("a time").as_second();
+        let after = Timestamp::now().as_second();
+        assert!((before - 2..=after + 2).contains(&first), "{first}");
+        assert!(second >= first);
+        assert!(fx.root.path().join(".antiq-clock.laptop").is_file());
+    }
+
+    #[test]
+    fn the_clock_of_a_remote_that_cannot_be_written_is_an_error() {
+        let fx = fixture();
+        fs::set_permissions(fx.root.path(), fs::Permissions::from_mode(0o555)).expect("chmod");
+        let denied = File::create(fx.root.path().join("probe")).is_err();
+        let result = fx.remote.clock();
+        fs::set_permissions(fx.root.path(), fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(
+            denied,
+            "the test needs a user for whom mode 555 denies writing; run it as a non-root user"
+        );
+        assert!(matches!(result, Err(RemoteError::Io { .. })), "{result:?}");
+    }
+
+    /// A remote that holds one version of the object and has had another
+    /// remote's marker put in place of its own.
+    fn replaced() -> Fixture {
+        let fx = fixture();
+        put_file(&fx, id(), "meta.1", b"one");
+        fx.replace_marker();
+        fx
+    }
+
+    #[test]
+    fn listing_the_objects_at_a_remote_with_another_marker_is_refused() {
+        assert_broken(replaced().remote.list_objects());
+    }
+
+    #[test]
+    fn listing_an_object_at_a_remote_with_another_marker_is_refused() {
+        assert_broken(replaced().remote.list_dir(id()));
+    }
+
+    #[test]
+    fn listing_the_partial_files_at_a_remote_with_another_marker_is_refused() {
+        assert_broken(replaced().remote.list_partial(id()));
+    }
+
+    #[test]
+    fn reading_a_file_at_a_remote_with_another_marker_is_refused() {
+        assert_broken(replaced().remote.read_file(id(), "meta.1"));
+    }
+
+    #[test]
+    fn fetching_a_payload_at_a_remote_with_another_marker_is_refused_and_writes_nothing() {
+        let fx = replaced();
+        let to = fx.local.path().join("fetched");
+        assert_broken(fx.remote.get_payload(id(), "meta.1", &to));
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn pulling_metadata_at_a_remote_with_another_marker_is_refused() {
+        assert_broken(replaced().remote.pull_metadata(&KnownVersions::new()));
+    }
+
+    #[test]
+    fn asking_the_clock_of_a_remote_with_another_marker_is_refused_and_writes_nothing() {
+        let fx = replaced();
+        assert_broken(fx.remote.clock());
+        assert!(!fx.root.path().join(".antiq-clock.laptop").exists());
     }
 
     #[test]

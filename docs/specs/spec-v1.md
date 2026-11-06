@@ -534,6 +534,7 @@ Remote layout:
 <root>/objects/<ulid>/<sha256 16 hex>-<name part>.tar.zst
 <root>/objects/<ulid>/<sha256 16 hex>.listing.zst
 <root>/objects/<ulid>/.antiq-partial/
+<root>/.antiq-clock.<machine part>   path remote only: its modification time is the remote's clock
 ```
 
 The marker is one line of JSON with the keys `format`, `id` and `layout`
@@ -758,6 +759,12 @@ path component: an empty name, `.`, `..` and a name with `/` are refused.
 A checksum is computed from a read that bypasses the client's cache of
 the file (`F_NOCACHE` on macOS, `posix_fadvise` with `POSIX_FADV_DONTNEED`
 on Linux); on another system it fails.
+
+The path remote's clock is the modification time of
+`.antiq-clock.<machine part>` in the root, written, flushed and closed
+just before its time is read. The metadata pull lists the objects once
+and reads, of each, the `meta.<N>` files above the highest version this
+machine has; claims, temp names and other files are not versions.
 
 ### SSH remote
 

@@ -534,7 +534,7 @@ fn parse_for(id: ObjectId, bytes: &[u8]) -> Result<Metadata, String> {
 
 /// The number of `meta.<N>`: decimal digits only, no leading zero, above
 /// zero, and small enough for a `u32`.
-fn version_number(name: &str) -> Option<u32> {
+pub(crate) fn version_number(name: &str) -> Option<u32> {
     let digits = name.strip_prefix("meta.")?;
     if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;

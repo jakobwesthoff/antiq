@@ -21,9 +21,13 @@ use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, flush_file};
 use crate::id::ObjectId;
+use crate::machine::MachineError;
+use jiff::Timestamp;
 use path::PathRemote;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::path::Path;
 use url::{RemoteUrl, UrlError};
 
@@ -226,6 +230,34 @@ pub trait Remote: Send + Sync {
     /// Called at the start of each remote phase of a run.
     fn begin_phase(&self) -> Result<(), RemoteError>;
 
+    /// The remote's own clock, which the ages of its files are measured
+    /// against (spec "Committing a version"). The path remote writes a
+    /// probe file and reads its modification time.
+    fn clock(&self) -> Result<Timestamp, RemoteError>;
+
+    /// The metadata versions of every object that are newer than the ones
+    /// `known` lists, in one call: claims, temp names and other files are
+    /// not versions and are left out. The bytes are not parsed.
+    fn pull_metadata(&self, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError>;
+
+    /// The objects that have a directory, in ID order.
+    fn list_objects(&self) -> Result<Vec<ObjectId>, RemoteError>;
+
+    /// The entries of an object's directory, by name; none when the object
+    /// has no directory.
+    fn list_dir(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError>;
+
+    /// The entries of an object's `.antiq-partial` directory, by name.
+    fn list_partial(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError>;
+
+    /// The whole content of a small file, such as a listing or a metadata
+    /// version.
+    fn read_file(&self, id: ObjectId, name: &str) -> Result<Vec<u8>, RemoteError>;
+
+    /// Copies a file of the object to `to`, which is created or rewritten.
+    /// The caller flushes it, as it has to move it into place anyway.
+    fn get_payload(&self, id: ObjectId, name: &str, to: &Path) -> Result<Transfer, RemoteError>;
+
     /// Creates the empty file `name` in the object's directory, and fails
     /// to when it exists. The claim of a metadata version is made this
     /// way (ADR 0030).
@@ -270,6 +302,43 @@ pub trait Remote: Send + Sync {
 
     /// Called once when the run is done with the remote.
     fn finish(&self);
+}
+
+/// The highest committed metadata version this machine has of each object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KnownVersions(BTreeMap<ObjectId, u32>);
+
+impl KnownVersions {
+    pub fn new() -> KnownVersions {
+        KnownVersions::default()
+    }
+
+    pub fn insert(&mut self, id: ObjectId, number: u32) {
+        self.0.insert(id, number);
+    }
+
+    /// The highest version known of the object; 0 when it is unknown.
+    pub fn highest(&self, id: ObjectId) -> u32 {
+        self.0.get(&id).copied().unwrap_or(0)
+    }
+}
+
+/// One committed metadata version as the remote holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaFile {
+    pub id: ObjectId,
+    pub number: NonZeroU32,
+    pub bytes: Vec<u8>,
+}
+
+/// An entry of an object's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFile {
+    pub name: String,
+    pub size: u64,
+    /// The modification time the remote reports.
+    pub modified: Timestamp,
+    pub is_dir: bool,
 }
 
 /// What [`Remote::create_exclusive`] did.
@@ -345,7 +414,10 @@ pub fn open(collection: &Collection) -> Result<Box<dyn Remote>, RemoteError> {
         .first()
         .ok_or(RemoteError::NoRemote)?;
     match RemoteUrl::parse(&config.url)? {
-        RemoteUrl::Path { root } => Ok(Box::new(PathRemote::new(root, config.id))),
+        RemoteUrl::Path { root } => {
+            let machine = collection.machine_name()?;
+            Ok(Box::new(PathRemote::new(root, config.id, &machine)))
+        }
         RemoteUrl::Ssh { .. } => Err(RemoteError::Unsupported("an ssh remote".into())),
     }
 }
@@ -488,6 +560,26 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_path_remote_needs_the_machine_name_for_its_probe_file() {
+        let root = remote_root();
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some(""));
+        let error = open(&collection).err().expect("no machine name");
+        assert!(matches!(error, RemoteError::Machine(_)), "{error}");
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn a_version_nobody_knows_of_is_version_zero() {
+        let id: ObjectId = REMOTE_ID.parse().expect("a ULID");
+        let mut known = KnownVersions::new();
+        assert_eq!(known.highest(id), 0);
+        known.insert(id, 3);
+        assert_eq!(known.highest(id), 3);
+        known.insert(id, 4);
+        assert_eq!(known.highest(id), 4);
+    }
+
+    #[test]
     fn opening_without_a_remote_says_so() {
         let error = open(&Collection::for_tests()).err().expect("no remote");
         assert!(matches!(error, RemoteError::NoRemote), "{error}");
@@ -560,6 +652,8 @@ pub enum RemoteError {
     },
     #[error(transparent)]
     Fsx(#[from] FsxError),
+    #[error(transparent)]
+    Machine(#[from] MachineError),
     #[error("`{name}` is not a file name of an object's directory")]
     InvalidName { name: String },
     #[error("`{name}` exists on the remote with other content")]
@@ -572,6 +666,7 @@ impl HasKind for RemoteError {
             RemoteError::Url(_)
             | RemoteError::Io { .. }
             | RemoteError::Fsx(_)
+            | RemoteError::Machine(_)
             | RemoteError::InvalidName { .. }
             | RemoteError::PayloadConflict { .. } => ErrorKind::Other,
             RemoteError::NoRemote => ErrorKind::NoRemote,
