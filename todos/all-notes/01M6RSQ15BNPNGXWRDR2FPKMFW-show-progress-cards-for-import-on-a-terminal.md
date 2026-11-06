@@ -25,3 +25,17 @@ the plain output as its result. The plain line stays for a dry run,
 
 The spec's "Progress cards" list of commands and the "import" section
 change with it.
+
+## Where the code stands (2026-11-06)
+
+- `src/commands/import.rs` stores through the same `StoreContext` as
+  `archive`, but hands it `Tracker::silent()`, so the counters the cards
+  read exist and only stay unobserved.
+- `archive` has `archive_observed` beside `archive`, both on
+  `run_archive(.., observer: Option<&dyn Observer>)`
+  (`src/commands/archive/mod.rs`); `import` needs the same pair, with a
+  tracker built from the observer in place of the silent one.
+- `src/cli/cmd/import.rs` prints the line directly; `src/cli/cmd/archive.rs`
+  wraps the call in `progress::watch` and prints the card result through
+  `progress::archive_pieces` and `archive_summary`
+  (`src/cli/cmd/progress.rs`), which `import` can mirror for one piece.
