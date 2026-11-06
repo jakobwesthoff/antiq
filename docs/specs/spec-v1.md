@@ -2184,7 +2184,14 @@ cards of the running pieces in the order they started, then one line
 when the terminal has too few rows for all cards. That region has at most as
 many lines as the terminal has rows, less one. The size of the terminal is
 read at each redraw, and a terminal that reports none has the columns of the
-environment and 24 rows.
+environment and 24 rows. After a change of size the region is drawn again
+at the new size once the size has stayed the same for one redraw interval. The cursor
+climbs the rows the region occupies at the new width on VTE, kitty,
+Alacritty, tmux, iTerm2, Terminal.app, WezTerm and ghostty, which lay old
+lines out again, and one row per line on any other terminal. A fragment of
+an old card can stay on the screen; a finished line is erased only if the
+window gets wider between the moment antiq reads its size and the moment
+the terminal draws the redraw.
 
 Lines are laid out for at most 100 columns. The size column is left out
 below 50 columns, the count below 60, and the bar is 40 cells wide from 70

@@ -5,15 +5,16 @@
 use super::*;
 use crate::cli::console::cards::{Summary, Tone};
 use crate::cli::console::env::Env;
-use crate::cli::output::Style;
+use crate::cli::console::reflow::Reflow;
 use crate::cli::output::testing::{Capture, FailsOnFlush};
+use crate::cli::output::{SizeSource, Style};
 use antiq::progress::{Counter, Operation, Outcome, Planned};
 
 #[path = "../../../../tests/support/screen.rs"]
 mod screen;
 
 use screen::Screen;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn secs(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
@@ -332,45 +333,314 @@ fn a_wide_character_cut_by_a_narrowing_without_rewrap_is_dropped() {
 // Resize
 // =========================================================
 
-fn resize_run(rewrap: bool) {
-    let (capture, mut out) = terminal(100, 12, true);
-    let mut watcher = Watcher::new(&capture, 100, 12);
-    let mut driver = driver(&mut out, 100);
-    for (index, name) in ["one", "two", "three"].iter().enumerate() {
+/// The size the driver reads, which a test changes between frames.
+type Window = Arc<Mutex<Option<(usize, usize)>>>;
+
+fn window(size: (usize, usize)) -> Window {
+    Arc::new(Mutex::new(Some(size)))
+}
+
+fn resize_to(window: &Window, size: (usize, usize)) {
+    *window.lock().unwrap() = Some(size);
+}
+
+/// A driver whose size comes from `window` and whose terminal is `reflow`.
+fn driver_in<'o>(out: &'o mut Output, cols: usize, window: &Window, reflow: Reflow) -> Driver<'o> {
+    let window = Arc::clone(window);
+    let sizes = SizeSource::new(move || *window.lock().unwrap());
+    Driver::on_terminal(Cards::new(config(cols)), out, None, sizes, reflow)
+}
+
+/// Three finished pieces, then `running` pieces with a card each. The
+/// counters keep the cards running.
+fn scene(driver: &mut Driver<'_>, running: usize) -> Vec<Counter> {
+    for name in ["one", "two", "three"] {
         driver.message(started(name, 10), secs(0)).unwrap();
         driver.message(done(name, 1), secs(1)).unwrap();
-        driver.frame(secs(index as u64), true).unwrap();
+        driver.frame(secs(1), true).unwrap();
     }
-    driver.message(started("four", 10), secs(2)).unwrap();
-    let (msg, _keep) = packing("four", 1, 2);
-    driver.message(msg, secs(2)).unwrap();
-    driver.frame(secs(2), true).unwrap();
+    let mut counters = Vec::new();
+    for number in 0..running {
+        let name = format!("piece/{number}");
+        driver.message(started(&name, 10), secs(2)).unwrap();
+        let (msg, counter) = packing(&name, 1, 2);
+        driver.message(msg, secs(2)).unwrap();
+        counters.push(counter);
+    }
+    driver.frame(secs(5), true).unwrap();
+    counters
+}
+
+/// What the screen holds after a window of `from` became `to` during a run.
+struct Resized {
+    /// The lines the screen holds, finished ones first.
+    lines: Vec<String>,
+    /// The finished lines as the screen held them before the resize.
+    finished: Vec<String>,
+    /// The region as the driver draws it for the new size.
+    region: Vec<String>,
+}
+
+/// Runs the scene on a screen of `from` that lays lines out again when
+/// `rewrap` is set, makes the window `to` and lets the driver draw once more.
+fn resized(
+    reflow: Reflow,
+    rewrap: bool,
+    from: (usize, usize),
+    to: (usize, usize),
+    running: usize,
+) -> Resized {
+    let (capture, mut out) = terminal(from.0, from.1, true);
+    let mut watcher = Watcher::new(&capture, from.0, from.1);
+    let size = window(from);
+    let mut driver = driver_in(&mut out, from.0, &size, reflow);
+    let _keep = scene(&mut driver, running);
+    let finished = watcher.sync().lines()[..3].to_vec();
+    watcher.screen.resize(to.0, to.1, rewrap);
+    resize_to(&size, to);
+    driver.frame(secs(6), true).unwrap();
+    driver.frame(secs(7), true).unwrap();
+    let region = driver
+        .cards
+        .region(secs(7), to.0, to.1)
+        .iter()
+        .map(|line| line.trim_end().to_string())
+        .collect();
+    Resized {
+        lines: watcher.sync().lines(),
+        finished,
+        region,
+    }
+}
+
+/// `line` cut to `columns` columns, as a screen that does not lay out again
+/// holds it.
+fn cut(line: &str, columns: usize) -> String {
+    line.chars()
+        .take(columns)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+#[test]
+fn narrowing_on_a_terminal_that_rewraps_leaves_the_finished_lines_and_one_region() {
+    let run = resized(Reflow::Rewraps, true, (100, 24), (60, 24), 3);
+    let expected: Vec<String> = [run.finished, run.region].concat();
+    assert_eq!(run.lines, expected);
+}
+
+#[test]
+fn narrowing_on_a_terminal_that_cuts_leaves_the_finished_lines_and_one_region() {
+    let run = resized(Reflow::Cuts, false, (100, 24), (60, 24), 3);
+    let finished: Vec<String> = run.finished.iter().map(|line| cut(line, 60)).collect();
+    assert_eq!(run.lines, [finished, run.region].concat());
+}
+
+#[test]
+fn widening_on_a_terminal_that_rewraps_leaves_the_finished_lines_and_one_region() {
+    let run = resized(Reflow::Rewraps, true, (60, 24), (100, 24), 3);
+    assert_eq!(run.lines, [run.finished, run.region].concat());
+}
+
+#[test]
+fn widening_on_a_terminal_that_cuts_leaves_the_finished_lines_and_one_region() {
+    let run = resized(Reflow::Cuts, false, (60, 24), (100, 24), 3);
+    assert_eq!(run.lines, [run.finished, run.region].concat());
+}
+
+#[test]
+fn a_terminal_taken_for_one_that_cuts_leaves_fragments_but_keeps_every_finished_line() {
+    let run = resized(Reflow::Cuts, true, (100, 24), (60, 24), 3);
+    let mut seen = run.lines.iter();
+    for line in &run.finished {
+        assert!(
+            seen.any(|found| found == line),
+            "{line} in {:#?}",
+            run.lines
+        );
+    }
+    assert!(run.lines.ends_with(&run.region));
+}
+
+#[test]
+fn a_window_that_gets_shorter_keeps_the_finished_lines_and_scrolls_the_top_of_the_region_away() {
+    let run = resized(Reflow::Rewraps, true, (100, 24), (100, 8), 5);
+    assert_eq!(run.lines[..3], run.finished[..]);
+    assert!(run.lines.ends_with(&run.region));
+    assert_eq!(run.region.len(), 7, "a region of at most rows less one");
+}
+
+#[test]
+fn a_region_taller_than_the_window_after_a_narrowing_keeps_the_finished_lines() {
+    let run = resized(Reflow::Rewraps, true, (100, 12), (40, 12), 5);
+    let mut seen = run.lines.iter();
+    for line in &run.finished {
+        assert!(
+            seen.any(|found| found == line),
+            "{line} in {:#?}",
+            run.lines
+        );
+    }
+    assert!(
+        run.lines.ends_with(&run.region),
+        "{:#?} vs {:#?}",
+        run.lines,
+        run.region
+    );
+}
+
+#[test]
+fn two_resizes_between_frames_use_the_final_width() {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let size = window((100, 24));
+    let mut driver = driver_in(&mut out, 100, &size, Reflow::Rewraps);
+    let _keep = scene(&mut driver, 3);
+    let finished = watcher.sync().lines()[..3].to_vec();
+    watcher.screen.resize(50, 24, true);
+    watcher.screen.resize(80, 24, true);
+    resize_to(&size, (80, 24));
+    driver.frame(secs(6), true).unwrap();
+    driver.frame(secs(7), true).unwrap();
+    let region: Vec<String> = driver
+        .cards
+        .region(secs(7), 80, 24)
+        .iter()
+        .map(|line| line.trim_end().to_string())
+        .collect();
+    assert_eq!(watcher.sync().lines(), [finished, region].concat());
+}
+
+#[test]
+fn a_resize_that_is_undone_before_the_frame_writes_nothing() {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let size = window((100, 24));
+    let mut driver = driver_in(&mut out, 100, &size, Reflow::Rewraps);
+    let _keep = scene(&mut driver, 3);
+    let before = watcher.sync().lines();
+    let written = capture.stdout_bytes().len();
+    // The screen lays the lines out again and joins them again, as a
+    // terminal does that rejoins rows; the time of the frame is the same, so
+    // the region itself is unchanged.
+    watcher.screen.resize(60, 24, true);
+    watcher.screen.resize(100, 24, true);
+    driver.frame(secs(5), true).unwrap();
+    assert_eq!(capture.stdout_bytes().len(), written);
+    assert_eq!(watcher.sync().lines(), before);
+}
+
+/// The scene on a terminal that lays lines out again, with the bytes
+/// written so far and the window to change.
+fn dragged<T>(run: impl FnOnce(&mut Driver<'_>, &Window, &Capture, &mut Watcher) -> T) -> T {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let size = window((100, 24));
+    let mut driver = driver_in(&mut out, 100, &size, Reflow::Rewraps);
+    let _keep = scene(&mut driver, 3);
     watcher.sync();
-    // The window shrinks. The driver has no signal for it and goes on with
-    // the size it was given.
-    watcher.screen.resize(60, 12, rewrap);
-    driver.message(started("five", 10), secs(3)).unwrap();
-    driver.message(done("four", 1), secs(3)).unwrap();
-    driver.message(done("five", 1), secs(3)).unwrap();
-    driver.finish(secs(3), Vec::new()).unwrap();
-    let lines = watcher.sync().lines();
-    for name in ["one", "two", "three", "four", "five"] {
-        let found = lines
-            .iter()
-            .filter(|line| line.starts_with(&format!("  ✔ {name}")))
-            .count();
-        assert_eq!(found, 1, "{name} in {lines:#?}");
-    }
+    run(&mut driver, &size, &capture, &mut watcher)
 }
 
 #[test]
-fn no_finished_line_is_erased_when_the_window_shrinks_and_the_terminal_rewraps() {
-    resize_run(true);
+fn the_first_frame_that_reads_a_new_size_draws_nothing() {
+    dragged(|driver, size, capture, watcher| {
+        let written = capture.stdout_bytes().len();
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.frame(secs(6), true).unwrap();
+        assert_eq!(capture.stdout_bytes().len(), written);
+    });
 }
 
 #[test]
-fn no_finished_line_is_erased_when_the_window_shrinks_and_the_terminal_does_not_rewrap() {
-    resize_run(false);
+fn a_size_that_changes_at_every_frame_draws_nothing_until_it_holds() {
+    dragged(|driver, size, capture, watcher| {
+        let written = capture.stdout_bytes().len();
+        for columns in [90, 80, 70, 60] {
+            watcher.screen.resize(columns, 24, true);
+            resize_to(size, (columns, 24));
+            driver.frame(secs(6), true).unwrap();
+        }
+        assert_eq!(capture.stdout_bytes().len(), written);
+        driver.frame(secs(7), true).unwrap();
+        assert!(capture.stdout_bytes().len() > written);
+        let region = driver.cards.region(secs(7), 60, 24);
+        assert!(watcher.sync().lines().ends_with(&region));
+    });
+}
+
+#[test]
+fn a_line_owed_while_the_size_changes_is_written_when_it_holds() {
+    dragged(|driver, size, _capture, watcher| {
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.message(done("piece/0", 1), secs(6)).unwrap();
+        driver.frame(secs(6), true).unwrap();
+        assert!(
+            !watcher
+                .sync()
+                .lines()
+                .iter()
+                .any(|line| line.contains("✔ piece/0")),
+            "not yet"
+        );
+        // Messages in between make frames, but no time passes.
+        driver.message(done("piece/1", 1), secs(6)).unwrap();
+        driver.frame(secs(6), true).unwrap();
+        assert!(
+            !watcher
+                .sync()
+                .lines()
+                .iter()
+                .any(|line| line.contains("✔ piece/0")),
+            "still not"
+        );
+        driver.frame(secs(7), true).unwrap();
+        let lines = watcher.sync().lines();
+        let found = lines.iter().filter(|l| l.contains("✔ piece/0")).count();
+        assert_eq!(found, 1, "{lines:#?}");
+    });
+}
+
+#[test]
+fn the_end_of_a_run_clears_the_region_even_while_the_size_changes() {
+    dragged(|driver, size, _capture, watcher| {
+        watcher.screen.resize(60, 24, true);
+        resize_to(size, (60, 24));
+        driver.finish(secs(6), Vec::new()).unwrap();
+        let lines = watcher.sync().lines();
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+    });
+}
+
+#[test]
+fn a_halt_after_a_narrowing_takes_the_whole_region_off_the_screen() {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let size = window((100, 24));
+    let mut driver = driver_in(&mut out, 100, &size, Reflow::Rewraps);
+    let _keep = scene(&mut driver, 3);
+    let finished = watcher.sync().lines()[..3].to_vec();
+    watcher.screen.resize(60, 24, true);
+    resize_to(&size, (60, 24));
+    driver.halt().unwrap();
+    assert_eq!(watcher.sync().lines(), finished);
+}
+
+#[test]
+fn the_end_of_a_run_after_a_narrowing_takes_the_whole_region_off_the_screen() {
+    let (capture, mut out) = terminal(100, 24, true);
+    let mut watcher = Watcher::new(&capture, 100, 24);
+    let size = window((100, 24));
+    let mut driver = driver_in(&mut out, 100, &size, Reflow::Rewraps);
+    let _keep = scene(&mut driver, 3);
+    let finished = watcher.sync().lines()[..3].to_vec();
+    watcher.screen.resize(60, 24, true);
+    resize_to(&size, (60, 24));
+    driver.finish(secs(6), Vec::new()).unwrap();
+    assert_eq!(watcher.sync().lines(), finished);
 }
 
 // =========================================================

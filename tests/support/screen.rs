@@ -89,6 +89,11 @@ impl Screen {
             'A' => self.row = self.row.saturating_sub(number().unwrap_or(1).max(1)),
             'J' if body.is_empty() || body == "0" => {
                 self.grid[self.row].truncate(self.col);
+                // A row erased from its first cell no longer continues the
+                // line above it.
+                if self.col == 0 {
+                    self.continued[self.row] = false;
+                }
                 for row in self.row + 1..self.rows {
                     self.grid[row].clear();
                     self.continued[row] = false;

@@ -22,6 +22,7 @@ use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 /// The format number of the JSON envelope.
@@ -186,6 +187,22 @@ pub struct Output {
     size: Size,
 }
 
+/// Where the columns and rows of a terminal are read, each time `get` is
+/// called.
+#[derive(Clone)]
+pub struct SizeSource(Arc<dyn Fn() -> Option<(usize, usize)> + Send + Sync>);
+
+impl SizeSource {
+    pub fn new(read: impl Fn() -> Option<(usize, usize)> + Send + Sync + 'static) -> SizeSource {
+        SizeSource(Arc::new(read))
+    }
+
+    /// The columns and rows now, or `None` when the terminal reports none.
+    pub fn get(&self) -> Option<(usize, usize)> {
+        (self.0)()
+    }
+}
+
 /// Where the size of the terminal comes from.
 #[derive(Debug, Clone, Copy)]
 enum Size {
@@ -217,20 +234,23 @@ impl Output {
         }
     }
 
-    /// The same output with the size that `stdout_size` reports.
+    /// The same output with the size that its size source reports.
     #[cfg(test)]
     pub fn with_stdout_size(mut self, size: Option<(usize, usize)>) -> Output {
         self.size = Size::Given(size);
         self
     }
 
-    /// The columns and rows of the terminal behind stdout, or `None` when
-    /// it reports none. A window of zero columns or zero rows is unknown.
-    pub fn stdout_size(&self) -> Option<(usize, usize)> {
-        match self.size {
+    /// Reads the columns and rows of the terminal behind stdout whenever
+    /// asked, `None` when it reports none. A window of zero columns or zero
+    /// rows is unknown. The source does not borrow the output, so a driver
+    /// that holds the output mutably still sees the window change.
+    pub fn stdout_size_source(&self) -> SizeSource {
+        let size = self.size;
+        SizeSource::new(move || match size {
             Size::Given(size) => size,
             Size::Window => window_size(io::stdout()),
-        }
+        })
     }
 
     /// Writes `bytes` to stdout as they are, such as the escape sequences
@@ -1029,12 +1049,13 @@ mod tests {
         let (reader, _writer) = io::pipe().expect("a pipe can be made");
         assert_eq!(window_size(&reader), None);
         let capture = Capture::default();
-        assert_eq!(capture.output().stdout_size(), None);
+        assert_eq!(capture.output().stdout_size_source().get(), None);
         assert_eq!(
             capture
                 .output()
                 .with_stdout_size(Some((90, 30)))
-                .stdout_size(),
+                .stdout_size_source()
+                .get(),
             Some((90, 30))
         );
     }

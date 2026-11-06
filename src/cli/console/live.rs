@@ -10,7 +10,8 @@
 //! terminal mode, so there is nothing to restore when a run ends by Ctrl-C.
 
 use crate::cli::console::cards::{Cards, Config, Msg, Ready};
-use crate::cli::output::Output;
+use crate::cli::console::reflow::{Reflow, rows_to_climb};
+use crate::cli::output::{Output, SizeSource};
 use antiq::progress::{Event, Observer};
 use std::io;
 use std::panic;
@@ -39,9 +40,18 @@ pub(crate) struct Driver<'o> {
     out: &'o mut Output,
     /// The cursor moves, so the region can be redrawn in place.
     live: bool,
+    /// Where the window size is read at each redraw.
+    sizes: SizeSource,
+    /// What the terminal does to the region when its width changes.
+    reflow: Reflow,
     /// The lines of the region on the screen. The cursor sits below them.
     shown: Vec<String>,
+    /// The size the region on the screen was drawn for.
     last_size: (usize, usize),
+    /// The size the last frame read, drawn or not, and since when the
+    /// frames have read it.
+    seen_size: (usize, usize),
+    seen_since: Duration,
     /// The first message prints this above the cards.
     header: Option<String>,
     /// A panic elsewhere cleared the region: finished lines go out plainly.
@@ -50,13 +60,30 @@ pub(crate) struct Driver<'o> {
 
 impl<'o> Driver<'o> {
     pub(crate) fn new(cards: Cards, out: &'o mut Output, header: Option<String>) -> Driver<'o> {
+        let sizes = out.stdout_size_source();
+        Driver::on_terminal(cards, out, header, sizes, Reflow::from_process())
+    }
+
+    /// A driver for a terminal whose size is read from `sizes` and which
+    /// treats a change of width as `reflow` says.
+    pub(crate) fn on_terminal(
+        cards: Cards,
+        out: &'o mut Output,
+        header: Option<String>,
+        sizes: SizeSource,
+        reflow: Reflow,
+    ) -> Driver<'o> {
         let env = out.stdout_env();
         Driver {
             cards,
             live: env.rich && env.cursor,
+            sizes,
+            reflow,
             out,
             shown: Vec::new(),
             last_size: (0, 0),
+            seen_size: (0, 0),
+            seen_since: Duration::ZERO,
             header,
             halted: false,
         }
@@ -64,7 +91,7 @@ impl<'o> Driver<'o> {
 
     fn size(&self) -> (usize, usize) {
         let columns = self.out.stdout_env().width;
-        self.out.stdout_size().unwrap_or((columns, DEFAULT_ROWS))
+        self.sizes.get().unwrap_or((columns, DEFAULT_ROWS))
     }
 
     pub(crate) fn message(&mut self, msg: Msg, now: Duration) -> io::Result<()> {
@@ -82,11 +109,13 @@ impl<'o> Driver<'o> {
     }
 
     /// The sequence that takes the cursor to the start of the region and
-    /// erases everything from there on.
-    fn erase(&self) -> String {
+    /// erases everything from there on. The terminal has `columns` columns
+    /// now, which decides how many rows the region takes on screen.
+    fn erase(&self, columns: usize) -> String {
         let mut sequence = String::from("\r");
         if !self.shown.is_empty() {
-            sequence.push_str(&format!("\x1b[{}A", self.shown.len()));
+            let rows = rows_to_climb(&self.shown, columns, self.reflow);
+            sequence.push_str(&format!("\x1b[{rows}A"));
         }
         sequence.push_str("\x1b[J");
         sequence
@@ -101,8 +130,24 @@ impl<'o> Driver<'o> {
     /// interrupted run has them whole; a frame that equals the last one is
     /// not written again.
     /// With `draw_region` off the region is taken off the screen instead.
+    ///
+    /// While the size of the window is still changing, as when the window is
+    /// dragged, nothing is drawn: a terminal that lays the lines out again
+    /// goes on doing so, and a climb computed for a width that is already
+    /// gone leaves fragments or erases a finished line. The first frame that
+    /// finds the size unchanged for a whole [`TICK`] draws. Lines owed wait
+    /// until then, however many messages arrive meanwhile.
     pub(crate) fn frame(&mut self, now: Duration, draw_region: bool) -> io::Result<()> {
         let size = self.size();
+        if size != self.seen_size {
+            self.seen_size = size;
+            self.seen_since = now;
+        }
+        let settled = now.saturating_sub(self.seen_since) >= TICK;
+        let drawn = self.live && !self.halted && !self.shown.is_empty();
+        if draw_region && drawn && size != self.last_size && !settled {
+            return Ok(());
+        }
         let (columns, rows) = size;
         let ready = self.cards.take_ready();
         let lines: Vec<String> = ready
@@ -127,7 +172,7 @@ impl<'o> Driver<'o> {
             return Ok(());
         }
         self.last_size = size;
-        let mut prefix = self.erase();
+        let mut prefix = self.erase(columns);
         if !lines.is_empty() {
             self.out
                 .stdout_raw(format!("{prefix}{}", Self::text(&lines)).as_bytes())?;
@@ -143,7 +188,7 @@ impl<'o> Driver<'o> {
     /// Takes the region off the screen.
     pub(crate) fn clear(&mut self) -> io::Result<()> {
         if self.live && !self.shown.is_empty() {
-            let erase = self.erase();
+            let erase = self.erase(self.size().0);
             self.out.stdout_raw(erase.as_bytes())?;
             self.shown.clear();
         }

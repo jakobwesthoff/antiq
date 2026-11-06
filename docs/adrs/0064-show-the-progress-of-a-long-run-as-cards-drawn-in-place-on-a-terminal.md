@@ -43,6 +43,32 @@ dry run, and `push` lists its pieces at the end.
 `push` on a terminal that moves the cursor scans the source twice and
 makes one more ssh connection to an ssh target.
 
-The size of the terminal is read at each redraw. A resize during a run
-can leave fragments of old cards on the screen. A finished line is never
-erased.
+The size of the terminal is read at each redraw. A redraw after a change
+of size waits until the size has stayed the same for the length of one
+redraw interval, so that a window being dragged is not drawn for a width
+that is already gone. Then
+the region is erased and drawn again for the new size.
+
+How far the cursor climbs to the first row of the region depends on what
+the terminal does to old lines when its width changes. A terminal that
+lays them out again gives a line wider than the window as many rows as it
+needs, so the cursor climbs the sum of those rows. Any other terminal
+leaves each line on one row, and the cursor climbs one row per line. The
+environment names the terminals that lay lines out again: VTE
+(`VTE_VERSION`), kitty (`KITTY_WINDOW_ID`), Alacritty (`ALACRITTY_LOG`),
+tmux (`TMUX`, with a `TERM` of `tmux` or `screen`), and iTerm2,
+Terminal.app, WezTerm and ghostty (`TERM_PROGRAM`). A terminal that is not
+named is treated as one that does not lay lines out again, because a
+fragment of an old card that stays on the screen costs less than a
+finished line that is erased. The same holds when the variables name two
+terminals at once, or when `XTERM_VERSION` or `STY` names xterm or GNU
+screen: a terminal passes its variables on to the programs started from
+it, including another terminal.
+
+A finished line is never erased as long as the width read at a redraw is
+the width the terminal has when it parses the redraw. If the window is
+wider by then, the climb can be too long and reach finished lines. Where a
+terminal does not join the rows of a line again when the window gets wider
+(kitty), a window that was narrowed and widened again leaves a fragment of
+the region's top on the screen. Rows that scrolled into the scrollback
+because the window got shorter stay there.
