@@ -318,6 +318,22 @@ fn with_both_missing_the_archive_is_read_and_both_files_are_written() {
 }
 
 #[test]
+fn a_terminal_names_the_version_by_its_local_time() {
+    let world = world(Mode::Text, one_version);
+    remove(&files(&world, STAMP).listing);
+    let run = world.run_tty(&["rebuild", PIECE, STAMP]);
+    run.expect_code(0);
+    // 09:02:11 UTC is 22:02:11 in Auckland.
+    assert!(
+        run.plain().starts_with(&format!(
+            "Rebuilt version 2026-11-04 22:02:11 of {PIECE}: wrote "
+        )),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
 fn a_rebuilt_version_is_no_longer_damaged() {
     both(one_version, |world| {
         let version = files(world, STAMP);
@@ -527,24 +543,30 @@ fn a_doubled_slot_is_refused_naming_the_files_to_remove_by_hand() {
 }
 
 #[test]
-fn an_archive_that_reads_as_nothing_is_refused_although_its_checksum_matches() {
-    both(one_version, |world| {
-        let version = files(world, STAMP);
-        let garbage = b"this is not a zstd stream";
-        fs::write(&version.archive, garbage).expect("the archive is replaced");
-        fs::write(
-            &version.checksum,
-            format!("{}  {}\n", hex(garbage), name(&version.archive)),
-        )
-        .expect("the checksum file is rewritten");
-        remove(&version.listing);
+fn an_archive_that_does_not_read_is_refused_although_its_checksum_matches() {
+    for cut in [false, true] {
+        both(one_version, |world| {
+            let version = files(world, STAMP);
+            let mut content = b"this is not a zstd stream".to_vec();
+            if cut {
+                content = fs::read(&version.archive).expect("the archive exists");
+                content.truncate(content.len() - 8);
+            }
+            fs::write(&version.archive, &content).expect("the archive is replaced");
+            fs::write(
+                &version.checksum,
+                format!("{}  {}\n", hex(&content), name(&version.archive)),
+            )
+            .expect("the checksum file is rewritten");
+            remove(&version.listing);
 
-        let run = assert_refused(world, &["rebuild", PIECE, STAMP]);
-        let text = error_text(&run);
-        assert_all_in(&text, &["damaged"]);
-        assert_ways_out(&text);
-        assert!(!version.listing.exists());
-    });
+            let run = assert_refused(world, &["rebuild", PIECE, STAMP]);
+            let text = error_text(&run);
+            assert_all_in(&text, &["cannot rebuild version", "damaged"]);
+            assert_ways_out(&text);
+            assert!(!version.listing.exists());
+        });
+    }
 }
 
 // =========================================================

@@ -21,7 +21,7 @@ use crate::plan::LockHeld;
 use crate::reference::{self, CandidateSet, ReferenceError};
 use crate::relpath::{Name, RelPath};
 use crate::repair::Repair;
-use crate::report::{self, CommandReport, Warning};
+use crate::report::{self, Warning};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Damage, Places};
@@ -88,7 +88,7 @@ pub enum RebuildError {
     #[error("cannot write the listing")]
     Listing(#[from] ListingError),
     #[error("cannot {action} {path}")]
-    Stage {
+    Io {
         action: &'static str,
         path: String,
         #[source]
@@ -190,16 +190,6 @@ pub struct RebuildReport {
     /// The repairs at the start of the run that were done.
     pub repairs: Vec<Action>,
     pub warnings: Vec<Warning>,
-}
-
-impl CommandReport for RebuildReport {
-    fn partial(&self) -> bool {
-        false
-    }
-
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
-    }
 }
 
 /// What a dry run found.
@@ -463,11 +453,7 @@ fn listing_is_newer(
         .pieces_dir
         .join(OsStr::from_bytes(chosen.folder.as_bytes()))
         .join(name);
-    let file = File::open(&path).map_err(|source| RebuildError::Stage {
-        action: "open",
-        path: path.display().to_string(),
-        source,
-    })?;
+    let file = File::open(&path).map_err(io_error("open", &path))?;
     Ok(matches!(
         listing::read_head(file),
         Err(ListingError::FormatTooNew { .. })
@@ -557,22 +543,13 @@ fn write_missing(
 
     let files: Vec<(String, Vec<u8>)> = match basis {
         Basis::ChecksumFile => {
-            let line = std::fs::read(sidecar(VersionFile::Checksum)).map_err(|source| {
-                RebuildError::Archive(PackError::ReadFile {
-                    path: sidecar(VersionFile::Checksum),
-                    source,
-                })
-            })?;
+            let path = sidecar(VersionFile::Checksum);
+            let line = std::fs::read(&path).map_err(io_error("read", &path))?;
             let checksum = ChecksumFile::parse(&line).map_err(from_pack)?;
             check_archive(&archive, ArchiveCheck::Checksum(&checksum)).map_err(from_pack)?;
             let entries = read::list(&archive).map_err(from_pack)?;
             let size = std::fs::metadata(&archive)
-                .map_err(|source| {
-                    RebuildError::Archive(PackError::ReadFile {
-                        path: archive.clone(),
-                        source,
-                    })
-                })?
+                .map_err(io_error("look at", &archive))?
                 .len();
             vec![(
                 sidecar_name(&archive_name, VersionFile::Listing),
@@ -580,12 +557,8 @@ fn write_missing(
             )]
         }
         Basis::Listing => {
-            let file = File::open(sidecar(VersionFile::Listing)).map_err(|source| {
-                RebuildError::Archive(PackError::ReadFile {
-                    path: sidecar(VersionFile::Listing),
-                    source,
-                })
-            })?;
+            let path = sidecar(VersionFile::Listing);
+            let file = File::open(&path).map_err(io_error("open", &path))?;
             let listing = listing::read_full(file)?;
             check_members_against_listing(&archive, &listing.entries).map_err(from_pack)?;
             let hash = file_sha256(&archive).map_err(from_pack)?;
@@ -612,12 +585,8 @@ fn write_missing(
 
     let staged = stage(collection, &files);
     let moved = staged.and_then(|staging| {
-        let pieces =
-            TreeRoot::open(&collection.pieces_dir()).map_err(|source| RebuildError::Stage {
-                action: "open",
-                path: collection.pieces_dir().display().to_string(),
-                source,
-            })?;
+        let pieces_dir = collection.pieces_dir();
+        let pieces = TreeRoot::open(&pieces_dir).map_err(io_error("open", &pieces_dir))?;
         let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
         store::move_sidecars_in(&staging, &pieces, folder, &names).map_err(RebuildError::Store)
     });
@@ -627,32 +596,34 @@ fn write_missing(
     moved
 }
 
+/// An I/O error as the error of the step `action` on `path`.
+fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> RebuildError {
+    let path = path.display().to_string();
+    move |source| RebuildError::Io {
+        action,
+        path,
+        source,
+    }
+}
+
 /// Writes `files` into the staging folder of `tmp/` and opens it.
 fn stage(collection: &Collection, files: &[(String, Vec<u8>)]) -> Result<TreeRoot, RebuildError> {
     let tmp_dir = collection.tmp_dir();
-    let at = |action: &'static str, path: &Path| {
-        let path = path.display().to_string();
-        move |source| RebuildError::Stage {
-            action,
-            path,
-            source,
-        }
-    };
-    let tmp = TreeRoot::open(&tmp_dir).map_err(at("open", &tmp_dir))?;
+    let tmp = TreeRoot::open(&tmp_dir).map_err(io_error("open", &tmp_dir))?;
     let folder = staging_folder();
     let shown = tmp_dir.join(STAGING);
     tmp.create_dir(&folder, 0o755)
-        .map_err(at("create", &shown))?;
+        .map_err(io_error("create", &shown))?;
     for (name, bytes) in files {
         let path = shown.join(name);
         let relative =
             folder.join(&Name::from_bytes(name.as_bytes().to_vec()).expect("a file name"));
         let mut file = tmp
             .create_file(&relative, 0o644)
-            .map_err(at("create", &path))?;
-        file.write_all(bytes).map_err(at("write", &path))?;
+            .map_err(io_error("create", &path))?;
+        file.write_all(bytes).map_err(io_error("write", &path))?;
     }
-    tmp.sub(&folder).map_err(at("open", &shown))
+    tmp.sub(&folder).map_err(io_error("open", &shown))
 }
 
 fn staging_folder() -> RelPath {
@@ -724,6 +695,15 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "cannot rebuild version 2026-11-04T090211 of tools/scan: the archive is gone. `antiq forget tools/scan 2026-11-04T090211` removes the version; copying the version back from the target restores it"
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_causes_below_the_error() {
+        let error = PackError::Archive(io::Error::other("unexpected end of file"));
+        assert_eq!(
+            chain(&error),
+            "cannot read the package: unexpected end of file"
         );
     }
 

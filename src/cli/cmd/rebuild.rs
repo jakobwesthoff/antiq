@@ -12,7 +12,6 @@ use antiq::collection::Collection;
 use antiq::commands::rebuild::{
     Action, Basis, RebuildPlan, RebuildReport, RebuildRequest, plan, rebuild,
 };
-use antiq::report::CommandReport;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -113,7 +112,7 @@ fn render(report: &RebuildReport, terminal: bool, zone: &TimeZone) -> Lines {
     }
     stderr.extend(
         report
-            .warnings()
+            .warnings
             .iter()
             .map(|warning| format!("note: {}", warning.message)),
     );
