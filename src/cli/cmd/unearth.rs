@@ -7,11 +7,14 @@
 use super::status::sanitize;
 use crate::cli::output::Output;
 use crate::cli::{Context, UnearthArgs};
+use antiq::clock::Clock;
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
+use antiq::id::RandomIds;
 use antiq::index::Index;
 use antiq::lock::Holder;
-use antiq::ops::unearth::{Planned, Skipped, UnearthReport, UnearthRequest, apply, plan};
+use antiq::ops::unearth::remote::{overdue, prepare};
+use antiq::ops::unearth::{Planned, Skipped, UnearthReport, UnearthRequest, apply_with_remote};
 use antiq::reference::{resolve, resolve_path};
 use antiq::report::{self, CommandReport};
 use antiq::run::{Started, start};
@@ -52,9 +55,23 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
         to,
         version: args.version,
     };
-    let planned = plan(&collection, &request)
-        .map_err(antiq::Error::from)
-        .context("work out what to unearth")?;
+
+    // A real run stores the newer metadata the remote has before it plans;
+    // a dry run plans against it without storing it. Either way the remote
+    // is only needed when the plan does.
+    let lock = match &started {
+        Started::Guarded(guard) => Some(guard.lock()),
+        Started::DryRun { .. } => None,
+    };
+    let (refreshed, planned) = overdue(
+        &collection,
+        prepare(&collection, lock, &request, clock.now()),
+        &clock,
+    )
+    .context("work out what to unearth")?;
+    // Taken before the unearth, which records a change of its own that
+    // the note would otherwise find.
+    let remote_notes = refreshed.warnings(&collection);
 
     match started {
         Started::DryRun { holder } => {
@@ -67,23 +84,38 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
             for line in plan.lines() {
                 out.line(&line).context("print the plan")?;
             }
+            for note in &remote_notes {
+                out.note(&format!("note: {}", sanitize(&note.message)))
+                    .context("print the notes")?;
+            }
             if let Some(holder) = holder {
                 out.note(&lock_note(&holder)).context("print the notes")?;
             }
             Ok(0)
         }
         Started::Guarded(guard) => {
-            let report = match planned {
+            let mut report = match planned {
                 Planned::AlreadyUnearthed { id, path } => UnearthReport::already_unearthed(
                     &collection,
                     id,
                     path,
                     guard.warnings().to_vec(),
                 ),
-                Planned::Unearth(plan) => apply(&collection, &plan, &guard, &clock)
-                    .map_err(antiq::Error::from)
-                    .context("unearth the piece")?,
+                Planned::Unearth(plan) => overdue(
+                    &collection,
+                    apply_with_remote(
+                        &collection,
+                        &plan,
+                        &guard,
+                        &clock,
+                        &RandomIds,
+                        refreshed.remote(),
+                    ),
+                    &clock,
+                )
+                .context("unearth the piece")?,
             };
+            report.warnings.extend(remote_notes);
             print_report(ctx, &report, out).context("print the report")?;
             Ok(if report.partial() { 3 } else { 0 })
         }

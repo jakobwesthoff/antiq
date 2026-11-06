@@ -467,10 +467,8 @@ fn an_archive_that_is_not_on_this_machine_is_an_error() {
     let run = world.global("--json", &["alpha"]);
 
     assert_eq!(run.code(), 1);
-    assert_eq!(
-        run.error_message(),
-        "`alpha` is not on this machine and no remote was given"
-    );
+    assert_eq!(run.error_kind(), "no_remote");
+    assert_eq!(run.error_message(), "no remote is attached");
 }
 
 #[test]

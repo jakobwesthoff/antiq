@@ -10,17 +10,27 @@
 //! verification, so a refusal leaves the store as it was.
 
 use super::local::{check_archive, is_out_of_space};
-use super::{UnearthError, UnearthPlan, io_error};
+use super::{
+    Planned, Shortfall, UnearthError, UnearthPlan, UnearthRequest, UnearthSource, io_error,
+    plan_from,
+};
+use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::fsx::FsxError;
+use crate::fsx::space::available_space;
+use crate::id::ObjectId;
 use crate::index;
 use crate::listing::{self, ListingEntry, ListingType};
 use crate::lock::RunLock;
-use crate::meta::FileName;
+use crate::meta::{self, FileName, Metadata};
+use crate::ops::status::{has_pending_remote_work, status};
 use crate::pack::hashing::HashingReader;
 use crate::pack::live::check_stream;
-use crate::remote::{Remote, RemoteError};
-use crate::store::{Put, Store};
+use crate::remote::away::{self, with_overdue};
+use crate::remote::{KnownVersions, MetaFile, Reachability, Remote, RemoteError};
+use crate::report::Warning;
+use crate::store::{Current, Put, Source, Store, Unreadable};
+use jiff::Timestamp;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -252,12 +262,7 @@ pub(crate) fn fetch(
         (entries, ListingOrigin::Remote)
     };
 
-    let extracted: u64 = entries
-        .iter()
-        .filter(|member| member.kind == ListingType::File)
-        .map(|member| member.size)
-        .sum();
-    let needed = plan.payload.size + extracted;
+    let needed = plan.payload.size + extracted_size(&entries);
     let available = free_space(&staging_dir)?;
     if available < needed {
         return Ok(Fetch::NoSpace { needed, available });
@@ -316,6 +321,364 @@ pub(crate) fn fetch_live(
         fetched: Vec::new(),
         _parts: parts,
     }))
+}
+
+// =========================================================
+// Refreshing the metadata before planning
+// =========================================================
+
+/// What a run found out about the remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// No remote is attached.
+    Absent,
+    Reachable,
+    Away(String),
+    Broken(String),
+}
+
+/// The remote as a run sees it before it plans: whether it can be used and
+/// the metadata versions of the piece that it holds and this machine lacks.
+///
+/// Dropping it ends the run's use of the remote, whichever way the run
+/// ends.
+pub struct Refreshed {
+    remote: Option<Box<dyn Remote>>,
+    standing: Standing,
+    /// The versions of the piece that were newer than this machine's
+    /// highest committed one, lowest first. A real run has stored them.
+    pulled: Vec<MetaFile>,
+    /// Nothing is stored and nothing is recorded.
+    dry_run: bool,
+}
+
+impl Drop for Refreshed {
+    fn drop(&mut self) {
+        if let Some(remote) = &self.remote {
+            remote.finish();
+        }
+    }
+}
+
+/// Looks at the remote of `collection` and pulls the metadata versions of
+/// `id` that this machine lacks. A real run, which holds `lock`, stores
+/// them and records whether the remote was reachable; a dry run (`lock`
+/// is `None`) does neither.
+///
+/// A remote that is away or broken is no error here, since a plan from
+/// local data does not need it; [`Refreshed::check_usable`] says whether
+/// the plan does.
+pub fn refresh(
+    collection: &Collection,
+    lock: Option<&RunLock>,
+    id: ObjectId,
+    now: Timestamp,
+) -> Result<Refreshed, UnearthError> {
+    refresh_with(crate::remote::open(collection), collection, lock, id, now)
+}
+
+pub(crate) fn refresh_with(
+    opened: Result<Box<dyn Remote>, RemoteError>,
+    collection: &Collection,
+    lock: Option<&RunLock>,
+    id: ObjectId,
+    now: Timestamp,
+) -> Result<Refreshed, UnearthError> {
+    let mut refreshed = Refreshed {
+        remote: None,
+        standing: Standing::Absent,
+        pulled: Vec::new(),
+        dry_run: lock.is_none(),
+    };
+    let remote = match opened {
+        Ok(remote) => remote,
+        Err(RemoteError::NoRemote) => return Ok(refreshed),
+        Err(error) => {
+            refreshed.standing = Standing::Broken(error.to_string());
+            return Ok(refreshed);
+        }
+    };
+    refreshed.standing = match remote.reachability() {
+        Ok(assessment) => match assessment.reachability {
+            Reachability::Reachable => Standing::Reachable,
+            Reachability::Away => Standing::Away(assessment.reason),
+            Reachability::Broken => Standing::Broken(assessment.reason),
+        },
+        Err(RemoteError::Away { message, .. }) => Standing::Away(message),
+        Err(RemoteError::Broken(reason)) => Standing::Broken(reason),
+        Err(error) => {
+            refreshed.remote = Some(remote);
+            return Err(error.into());
+        }
+    };
+    refreshed.remote = Some(remote);
+
+    if let Some(lock) = lock {
+        match &refreshed.standing {
+            Standing::Reachable => away::record_reachable(collection, lock, now)?,
+            Standing::Away(_) => away::record_away(collection, lock, now)?,
+            Standing::Absent | Standing::Broken(_) => {}
+        }
+    }
+    if refreshed.standing != Standing::Reachable {
+        return Ok(refreshed);
+    }
+
+    let store = Store::new(collection);
+    let mut known = KnownVersions::new();
+    for object in store.objects()? {
+        if let Some(highest) = store.committed_versions(object)?.last() {
+            known.insert(object, *highest);
+        }
+    }
+    let remote = refreshed
+        .remote
+        .as_deref()
+        .expect("the remote was just kept");
+    remote.begin_phase()?;
+    // Other objects' versions come with the same call and are left for
+    // `sync`: an unearth changes this piece only.
+    let mut pulled: Vec<MetaFile> = remote
+        .pull_metadata(&known)?
+        .into_iter()
+        .filter(|file| file.id == id)
+        .collect();
+    pulled.sort_by_key(|file| file.number);
+    if let Some(lock) = lock {
+        for file in &pulled {
+            store.store_committed(lock, id, file.number, &file.bytes)?;
+        }
+    }
+    refreshed.pulled = pulled;
+    Ok(refreshed)
+}
+
+impl Refreshed {
+    pub fn standing(&self) -> &Standing {
+        &self.standing
+    }
+
+    /// The remote, when the run may use it.
+    pub fn remote(&self) -> Option<&dyn Remote> {
+        if self.standing == Standing::Reachable {
+            self.remote.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Plans the unearth against the metadata the run uses: the store's,
+    /// which a real run has brought up to date, or for a dry run the store's
+    /// together with what was pulled.
+    pub fn plan(
+        &self,
+        collection: &Collection,
+        request: &UnearthRequest,
+    ) -> Result<Planned, UnearthError> {
+        let current = self.current(collection, request.id)?;
+        let planned = plan_from(collection, request, current, &available_space)?;
+        self.count_remote_listing(collection, planned)
+    }
+
+    /// The metadata of the piece with the pulled versions merged in that
+    /// the store does not hold yet; `None` when the store alone decides.
+    fn current(
+        &self,
+        collection: &Collection,
+        id: ObjectId,
+    ) -> Result<Option<Current>, UnearthError> {
+        let store = Store::new(collection);
+        let held = store.committed_versions(id)?.last().copied().unwrap_or(0);
+        let mut unreadable = Vec::new();
+        let mut readable = None;
+        for file in self
+            .pulled
+            .iter()
+            .rev()
+            .filter(|file| file.number.get() > held)
+        {
+            match read_pulled(id, file) {
+                Ok(metadata) => {
+                    readable = Some((file.number.get(), metadata));
+                    break;
+                }
+                Err(version) => unreadable.push(version),
+            }
+        }
+        if unreadable.is_empty() && readable.is_none() {
+            return Ok(None);
+        }
+        Ok(match (store.current(id)?, readable) {
+            // A recorded change stays the metadata in use.
+            (Some(stored), Some(_)) if stored.source == Source::Pending => Some(Current {
+                unreadable,
+                ..stored
+            }),
+            (_, Some((number, metadata))) => Some(Current {
+                metadata,
+                source: Source::Committed(number),
+                unreadable,
+            }),
+            (Some(mut stored), None) => {
+                unreadable.append(&mut stored.unreadable);
+                Some(Current {
+                    unreadable,
+                    ..stored
+                })
+            }
+            (None, None) => None,
+        })
+    }
+
+    /// A dry run does not fetch the listing of an archive the store lacks
+    /// the listing of; it reads it from the remote to count the room the
+    /// extraction needs.
+    fn count_remote_listing(
+        &self,
+        collection: &Collection,
+        planned: Planned,
+    ) -> Result<Planned, UnearthError> {
+        let Planned::Unearth(mut plan) = planned else {
+            return Ok(planned);
+        };
+        let Some(remote) = self.remote().filter(|_| self.dry_run) else {
+            return Ok(Planned::Unearth(plan));
+        };
+        let name = plan
+            .payload
+            .listing
+            .as_ref()
+            .expect("planning refuses an archive without a listing");
+        let held = Store::new(collection).file_path(plan.id, name);
+        if plan.source != UnearthSource::RemoteArchive || held.exists() {
+            return Ok(Planned::Unearth(plan));
+        }
+        let bytes = remote.read_file(plan.id, name.as_str())?;
+        plan.needed += extracted_size(&listing::read_all(bytes.as_slice())?);
+        let available = available_space(&collection.staging_dir())?;
+        plan.shortfall = (available < plan.needed).then_some(Shortfall {
+            needed: plan.needed,
+            available,
+        });
+        Ok(Planned::Unearth(plan))
+    }
+
+    /// Fails when the plan needs a remote the run cannot use.
+    pub fn check_usable(&self, planned: &Planned) -> Result<(), UnearthError> {
+        let needs_remote = matches!(
+            planned,
+            Planned::Unearth(plan) if plan.source != UnearthSource::LocalArchive
+        );
+        if !needs_remote {
+            return Ok(());
+        }
+        Err(match &self.standing {
+            Standing::Reachable => return Ok(()),
+            Standing::Absent => RemoteError::NoRemote,
+            Standing::Away(message) => RemoteError::Away {
+                message: message.clone(),
+                overdue: false,
+            },
+            Standing::Broken(reason) => RemoteError::Broken(reason.clone()),
+        }
+        .into())
+    }
+
+    /// What the run says about the remote: that it is not used, and that
+    /// it brought a newer version of the piece.
+    pub fn warnings(&self, collection: &Collection) -> Vec<Warning> {
+        let mut notes = Vec::new();
+        match &self.standing {
+            Standing::Away(_) => notes.push(Warning::new(
+                "the remote is away; unearthing from local data",
+            )),
+            Standing::Broken(reason) => notes.push(Warning::new(format!(
+                "the remote is broken ({reason}); unearthing from local data, its metadata was not pulled"
+            ))),
+            Standing::Absent | Standing::Reachable => {}
+        }
+        if let Some(note) = self.newer_version_note(collection) {
+            notes.push(note);
+        }
+        notes
+    }
+
+    fn newer_version_note(&self, collection: &Collection) -> Option<Warning> {
+        let newest = self.pulled.last()?;
+        let current = self
+            .current(collection, newest.id)
+            .ok()
+            .flatten()
+            .or_else(|| Store::new(collection).current(newest.id).ok().flatten())?;
+        let path = &current.metadata.path;
+        Some(Warning::new(match current.source {
+            Source::Committed(number) => {
+                format!("the remote has metadata version {number} of `{path}`, which this run uses")
+            }
+            Source::Pending => format!(
+                "the remote has metadata version {} of `{path}`; this machine's recorded change is used and `sync` applies it on top",
+                newest.number
+            ),
+        }))
+    }
+}
+
+fn read_pulled(id: ObjectId, file: &MetaFile) -> Result<Metadata, Unreadable> {
+    let unreadable = |reason: String| Unreadable {
+        number: file.number.get(),
+        format: meta::read_format(&file.bytes).ok(),
+        reason,
+    };
+    let metadata = meta::parse(&file.bytes).map_err(|error| unreadable(error.to_string()))?;
+    if metadata.id != id {
+        return Err(unreadable(format!("it belongs to {}", metadata.id)));
+    }
+    Ok(metadata)
+}
+
+/// The bytes the files of a listing take once extracted.
+fn extracted_size(entries: &[ListingEntry]) -> u64 {
+    entries
+        .iter()
+        .filter(|member| member.kind == ListingType::File)
+        .map(|member| member.size)
+        .sum()
+}
+
+/// Refreshes from the remote and plans: the two steps a run takes before
+/// it changes anything. The run goes ahead from local data when the plan
+/// needs no remote, and fails by how the remote stands when it does.
+pub fn prepare(
+    collection: &Collection,
+    lock: Option<&RunLock>,
+    request: &UnearthRequest,
+    now: Timestamp,
+) -> Result<(Refreshed, Planned), UnearthError> {
+    let refreshed = refresh(collection, lock, request.id, now)?;
+    let planned = refreshed.plan(collection, request)?;
+    refreshed.check_usable(&planned)?;
+    Ok((refreshed, planned))
+}
+
+/// Gives an away error the `overdue` mark when it is due: the remote has
+/// been out of reach for longer than `away_warn_days` while remote work
+/// is pending. A `status` that fails counts as pending work, so that an
+/// error never hides an overdue remote.
+pub fn overdue<T>(
+    collection: &Collection,
+    result: Result<T, UnearthError>,
+    clock: &dyn Clock,
+) -> Result<T, crate::error::Error> {
+    with_overdue(
+        result.map_err(UnearthError::into_error),
+        collection,
+        || {
+            status(collection, clock)
+                .map(|report| has_pending_remote_work(&report.pieces))
+                .unwrap_or(true)
+        },
+        clock.now(),
+    )
 }
 
 #[cfg(test)]
@@ -1079,5 +1442,634 @@ pub(in crate::ops::unearth) mod tests {
             ]
         );
         let _ = path("projects/a");
+    }
+
+    // =====================================================
+    // Refreshing before the plan
+    // =====================================================
+
+    use crate::error::{Error, ErrorKind};
+    use crate::ops::unearth::Planned;
+    use crate::store::Source;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    impl Scenario {
+        /// The remote holds a version 2 of the piece that moved it.
+        fn newer_on_remote(&self) {
+            let there = self.root.path().join("objects").join(ID);
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(there.join("meta.1")).expect("reads"))
+                    .expect("json");
+            document["path"] = serde_json::json!("projects/b");
+            document["name"] = serde_json::json!("b");
+            fs::write(
+                there.join("meta.2"),
+                serde_json::to_vec(&document).expect("json"),
+            )
+            .expect("written");
+        }
+
+        /// A change recorded here that no sync has committed: remote work
+        /// is waiting.
+        fn record_pending_change(&self) {
+            let object_dir = self.fx.collection.object_dir(id(ID));
+            fs::copy(
+                object_dir.join("meta.1"),
+                self.fx.collection.meta_pending_path(id(ID)),
+            )
+            .expect("copied");
+        }
+
+        fn state_file(&self) -> serde_json::Value {
+            let bytes = fs::read(self.fx.collection.remote_state_path()).expect("the state file");
+            serde_json::from_slice(&bytes).expect("json")
+        }
+
+        fn refresh(&self, with_lock: bool) -> Result<Refreshed, UnearthError> {
+            let lock = with_lock.then_some(&self.fx.lock);
+            let remote = FaultRemote::new(path_remote(self.root.path(), "imperius"));
+            refresh_with(
+                Ok(Box::new(remote)),
+                &self.fx.collection,
+                lock,
+                id(ID),
+                self.fx.clock.now(),
+            )
+        }
+    }
+
+    fn refuse_away(scenario: &Scenario) -> Refreshed {
+        let remote = FaultRemote::new(path_remote(scenario.root.path(), "imperius"));
+        remote.fail(Op::Reachability, 1, Fault::Away);
+        refresh_with(
+            Ok(Box::new(remote)),
+            &scenario.fx.collection,
+            Some(&scenario.fx.lock),
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("an away remote is a standing, not an error")
+    }
+
+    fn needs_remote(scenario: &Scenario) -> Planned {
+        scenario
+            .fx
+            .plan(&scenario.fx.request(ID))
+            .expect("planned from local data")
+    }
+
+    #[test]
+    fn a_newer_version_of_the_remote_is_stored_before_planning() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+
+        let refreshed = scenario.refresh(true).expect("refreshed");
+
+        let current = Store::new(&scenario.fx.collection)
+            .current(id(ID))
+            .expect("reads")
+            .expect("metadata");
+        assert_eq!(current.source, Source::Committed(2));
+        let planned = refreshed
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect("planned");
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.target() == &path("projects/b")),
+            "{planned:?}"
+        );
+        assert_eq!(
+            refreshed.warnings(&scenario.fx.collection)[0].message,
+            "the remote has metadata version 2 of `projects/b`, which this run uses"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_plans_against_the_newer_version_and_stores_nothing() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+
+        let refreshed = scenario.refresh(false).expect("refreshed");
+
+        let store = Store::new(&scenario.fx.collection);
+        assert_eq!(store.committed_versions(id(ID)).expect("lists"), [1]);
+        let planned = refreshed
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect("planned");
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.target() == &path("projects/b")),
+            "{planned:?}"
+        );
+        assert!(!scenario.fx.collection.remote_state_path().exists());
+    }
+
+    #[test]
+    fn a_recorded_change_wins_over_a_newer_remote_version_and_the_note_says_so() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+        let object_dir = scenario.fx.collection.object_dir(id(ID));
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(object_dir.join("meta.1")).expect("reads"))
+                .expect("json");
+        document["path"] = serde_json::json!("projects/c");
+        document["name"] = serde_json::json!("c");
+        fs::write(
+            scenario.fx.collection.meta_pending_path(id(ID)),
+            serde_json::to_vec(&document).expect("json"),
+        )
+        .expect("written");
+
+        let refreshed = scenario.refresh(false).expect("refreshed");
+
+        let planned = refreshed
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect("planned");
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.target() == &path("projects/c")),
+            "{planned:?}"
+        );
+        assert_eq!(
+            refreshed.warnings(&scenario.fx.collection)[0].message,
+            "the remote has metadata version 2 of `projects/c`; this machine's recorded change \
+             is used and `sync` applies it on top"
+        );
+    }
+
+    #[test]
+    fn a_remote_without_news_adds_no_note() {
+        let scenario = Scenario::new(true);
+
+        let refreshed = scenario.refresh(true).expect("refreshed");
+
+        assert_eq!(refreshed.standing(), &Standing::Reachable);
+        assert!(refreshed.warnings(&scenario.fx.collection).is_empty());
+    }
+
+    #[test]
+    fn only_the_metadata_of_the_piece_is_stored() {
+        let scenario = Scenario::new(true);
+        let other = "01D39ZY06FGSCTVN4T2V9PKHFZ";
+        let there = scenario.root.path().join("objects").join(other);
+        fs::create_dir_all(&there).expect("dir");
+        fs::write(there.join("meta.1"), b"{}").expect("written");
+
+        scenario.refresh(true).expect("refreshed");
+
+        let store = Store::new(&scenario.fx.collection);
+        assert!(
+            store
+                .committed_versions(id(other))
+                .expect("lists")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_reachable_remote_is_recorded_by_a_real_run_only() {
+        let scenario = Scenario::new(true);
+        scenario.refresh(false).expect("refreshed");
+        assert!(!scenario.fx.collection.remote_state_path().exists());
+
+        scenario.refresh(true).expect("refreshed");
+
+        assert_eq!(
+            scenario.state_file()["last_reachable"],
+            "2026-11-04T12:00:00Z"
+        );
+    }
+
+    #[test]
+    fn an_away_remote_is_a_standing_and_recorded() {
+        let scenario = Scenario::new(true);
+
+        let refreshed = refuse_away(&scenario);
+
+        assert!(matches!(refreshed.standing(), Standing::Away(_)));
+        assert!(refreshed.remote().is_none());
+        assert_eq!(
+            scenario.state_file()["away_first_seen"],
+            "2026-11-04T12:00:00Z"
+        );
+        let notes = refreshed.warnings(&scenario.fx.collection);
+        assert!(
+            notes[0]
+                .message
+                .starts_with("the remote is away; unearthing from local data"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_that_cannot_be_opened_is_broken_and_nothing_is_read() {
+        let scenario = Scenario::new(true);
+
+        let refreshed = refresh_with(
+            Err(RemoteError::Unsupported("an ssh remote".into())),
+            &scenario.fx.collection,
+            Some(&scenario.fx.lock),
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("a broken remote is a standing");
+
+        assert_eq!(
+            refreshed.standing(),
+            &Standing::Broken("an ssh remote is not supported yet".into())
+        );
+        assert_eq!(
+            refreshed.warnings(&scenario.fx.collection)[0].message,
+            "the remote is broken (an ssh remote is not supported yet); unearthing from local \
+             data, its metadata was not pulled"
+        );
+        assert!(!scenario.fx.collection.remote_state_path().exists());
+    }
+
+    #[test]
+    fn a_broken_assessment_is_a_standing() {
+        let scenario = Scenario::new(true);
+        let remote = FaultRemote::new(path_remote(scenario.root.path(), "imperius"));
+        remote.fail(Op::Reachability, 1, Fault::Broken);
+
+        let refreshed = refresh_with(
+            Ok(Box::new(remote)),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("a standing");
+
+        assert!(matches!(refreshed.standing(), Standing::Broken(_)));
+    }
+
+    #[test]
+    fn no_remote_is_a_standing_without_a_note() {
+        let scenario = Scenario::new(true);
+
+        let refreshed = refresh_with(
+            Err(RemoteError::NoRemote),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("a standing");
+
+        assert_eq!(refreshed.standing(), &Standing::Absent);
+        assert!(refreshed.warnings(&scenario.fx.collection).is_empty());
+    }
+
+    #[test]
+    fn a_failing_pull_is_an_error() {
+        let scenario = Scenario::new(true);
+        let remote = FaultRemote::new(path_remote(scenario.root.path(), "imperius"));
+        remote.fail(Op::PullMetadata, 1, Fault::Io);
+
+        let error = refresh_with(
+            Ok(Box::new(remote)),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .err()
+        .expect("fails");
+
+        assert!(matches!(error, UnearthError::Remote(_)), "{error}");
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_fails_before_any_pull() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+        fs::create_dir(scenario.fx.collection.remote_state_path()).expect("a directory");
+
+        let error = scenario.refresh(true).err().expect("fails");
+
+        assert!(matches!(error, UnearthError::RemoteState(_)), "{error}");
+        let store = Store::new(&scenario.fx.collection);
+        assert_eq!(store.committed_versions(id(ID)).expect("lists"), [1]);
+    }
+
+    #[test]
+    fn a_plan_that_needs_the_remote_fails_by_how_the_remote_stands() {
+        let scenario = Scenario::new(true);
+        let planned = {
+            fs::remove_file(
+                Store::new(&scenario.fx.collection).file_path(id(ID), &scenario.payload),
+            )
+            .ok();
+            needs_remote(&scenario)
+        };
+        let away = refuse_away(&scenario);
+        let broken = refresh_with(
+            Err(RemoteError::Unsupported("x".into())),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("a standing");
+        let absent = refresh_with(
+            Err(RemoteError::NoRemote),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("a standing");
+
+        let kinds: Vec<ErrorKind> = [&away, &broken, &absent]
+            .iter()
+            .map(|refreshed| {
+                refreshed
+                    .check_usable(&planned)
+                    .expect_err("refused")
+                    .kind()
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            [
+                ErrorKind::RemoteAway,
+                ErrorKind::RemoteBroken,
+                ErrorKind::NoRemote
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plan_from_a_local_archive_goes_ahead_whatever_the_remote_does() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        let planned = fx.plan(&fx.request(ID)).expect("planned");
+        let refreshed = refresh_with(
+            Err(RemoteError::NoRemote),
+            &fx.collection,
+            None,
+            id(ID),
+            fx.clock.now(),
+        )
+        .expect("a standing");
+
+        refreshed.check_usable(&planned).expect("usable");
+    }
+
+    #[test]
+    fn a_unearthed_piece_needs_no_remote() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.unearthed(ID, "projects/a");
+        let planned = fx.plan(&fx.request(ID)).expect("planned");
+        let refreshed = refresh_with(
+            Err(RemoteError::NoRemote),
+            &fx.collection,
+            None,
+            id(ID),
+            fx.clock.now(),
+        )
+        .expect("a standing");
+
+        refreshed.check_usable(&planned).expect("usable");
+    }
+
+    #[test]
+    fn the_remote_is_finished_once_whichever_way_the_run_ends() {
+        let scenario = Scenario::new(true);
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let remote = FaultRemote::new(path_remote(scenario.root.path(), "imperius"));
+        let flag = Arc::clone(&first);
+        remote.before(Op::Finish, 1, move |_| flag.store(true, Ordering::SeqCst));
+        let flag = Arc::clone(&second);
+        remote.before(Op::Finish, 2, move |_| flag.store(true, Ordering::SeqCst));
+        let refreshed = refresh_with(
+            Ok(Box::new(remote)),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .expect("refreshed");
+        assert!(!first.load(Ordering::SeqCst), "not before the run is over");
+
+        drop(refreshed);
+
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_dry_run_counts_the_listing_of_the_remote_in_the_room() {
+        let scenario = Scenario::new(false);
+        let dry = scenario.refresh(false).expect("refreshed");
+        let real = scenario.refresh(true).expect("refreshed");
+        let needed = |refreshed: &Refreshed| match refreshed
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect("planned")
+        {
+            Planned::Unearth(plan) => plan.needed,
+            other => panic!("{other:?}"),
+        };
+
+        assert_eq!(needed(&dry), needed(&real) + 17);
+    }
+
+    fn away_remote_error() -> UnearthError {
+        UnearthError::Remote(RemoteError::Away {
+            message: "no route".into(),
+            overdue: false,
+        })
+    }
+
+    fn overdue_flag(result: Result<(), Error>) -> bool {
+        match result.expect_err("an error") {
+            Error::Remote(RemoteError::Away { overdue, .. }) => overdue,
+            other => panic!("{other}"),
+        }
+    }
+
+    #[test]
+    fn an_away_error_is_overdue_after_eight_days_with_pending_work() {
+        let scenario = Scenario::new(true);
+        scenario.record_pending_change();
+        fs::write(
+            scenario.fx.collection.remote_state_path(),
+            r#"{"last_reachable": "2026-10-27T12:00:00Z"}"#,
+        )
+        .expect("written");
+
+        let result = overdue(
+            &scenario.fx.collection,
+            Err(away_remote_error()),
+            &scenario.fx.clock,
+        );
+
+        assert!(overdue_flag(result));
+    }
+
+    #[test]
+    fn an_away_error_is_not_overdue_after_one_day() {
+        let scenario = Scenario::new(true);
+        fs::write(
+            scenario.fx.collection.remote_state_path(),
+            r#"{"last_reachable": "2026-11-03T12:00:00Z"}"#,
+        )
+        .expect("written");
+
+        let result = overdue(
+            &scenario.fx.collection,
+            Err(away_remote_error()),
+            &scenario.fx.clock,
+        );
+
+        assert!(!overdue_flag(result));
+    }
+
+    #[test]
+    fn an_away_error_is_not_overdue_without_pending_work() {
+        let scenario = Scenario::new(true);
+        fs::write(
+            scenario.fx.collection.remote_state_path(),
+            r#"{"last_reachable": "2026-10-27T12:00:00Z"}"#,
+        )
+        .expect("written");
+
+        let result = overdue(
+            &scenario.fx.collection,
+            Err(away_remote_error()),
+            &scenario.fx.clock,
+        );
+
+        assert!(!overdue_flag(result));
+    }
+
+    #[test]
+    fn a_status_that_fails_counts_as_pending_work() {
+        let scenario = Scenario::new(true);
+        fs::write(
+            scenario.fx.collection.remote_state_path(),
+            r#"{"last_reachable": "2026-10-27T12:00:00Z"}"#,
+        )
+        .expect("written");
+        let object_dir = scenario.fx.collection.object_dir(id(ID));
+        fs::write(object_dir.join("meta.2"), b"not json").expect("written");
+        let broken = scenario.fx.collection.objects_dir();
+        let _restore = RestoreModes(vec![broken.clone()]);
+        fs::set_permissions(&broken, fs::Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(&broken).is_err(),
+            "the directory must refuse listing; tests do not run as root"
+        );
+
+        let result = overdue(
+            &scenario.fx.collection,
+            Err(away_remote_error()),
+            &scenario.fx.clock,
+        );
+
+        assert!(overdue_flag(result));
+    }
+
+    #[test]
+    fn other_errors_pass_through_overdue_with_their_kind() {
+        let scenario = Scenario::new(true);
+
+        let error = overdue::<()>(
+            &scenario.fx.collection,
+            Err(UnearthError::NoArchive {
+                path: path("projects/a"),
+            }),
+            &scenario.fx.clock,
+        )
+        .expect_err("an error");
+
+        assert!(
+            matches!(error, Error::Unearth(UnearthError::NoArchive { .. })),
+            "{error}"
+        );
+    }
+
+    impl Scenario {
+        fn version_on_remote(&self, number: u32, bytes: &[u8]) {
+            let there = self.root.path().join("objects").join(ID);
+            fs::write(there.join(format!("meta.{number}")), bytes).expect("written");
+        }
+    }
+
+    fn dry_run_refusal(scenario: &Scenario) -> UnearthError {
+        scenario
+            .refresh(false)
+            .expect("refreshed")
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect_err("refused")
+    }
+
+    #[test]
+    fn a_newer_version_that_cannot_be_read_refuses_the_dry_run() {
+        let scenario = Scenario::new(true);
+        scenario.version_on_remote(2, b"not json");
+
+        let error = dry_run_refusal(&scenario);
+
+        assert!(
+            matches!(&error, UnearthError::UnreadableVersions { versions, .. } if versions.starts_with("2 (")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_version_above_a_readable_one_refuses_the_dry_run() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+        scenario.version_on_remote(3, b"not json");
+
+        let error = dry_run_refusal(&scenario);
+
+        assert!(
+            matches!(&error, UnearthError::UnreadableVersions { versions, .. } if versions.starts_with("3 (")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_newer_version_of_another_object_is_unreadable_for_this_one() {
+        let scenario = Scenario::new(true);
+        let there = scenario.root.path().join("objects").join(ID);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(there.join("meta.1")).expect("reads")).expect("json");
+        document["id"] = serde_json::json!("01D39ZY06FGSCTVN4T2V9PKHFZ");
+        scenario.version_on_remote(2, &serde_json::to_vec(&document).expect("json"));
+
+        let error = dry_run_refusal(&scenario);
+
+        assert!(
+            matches!(&error, UnearthError::UnreadableVersions { versions, .. } if versions.contains("it belongs to 01D39ZY06FGSCTVN4T2V9PKHFZ")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_reachability_check_that_fails_otherwise_is_an_error_and_the_remote_is_finished() {
+        let scenario = Scenario::new(true);
+        let finished = Arc::new(AtomicBool::new(false));
+        let remote = FaultRemote::new(path_remote(scenario.root.path(), "imperius"));
+        remote.fail(Op::Reachability, 1, Fault::Io);
+        let flag = Arc::clone(&finished);
+        remote.before(Op::Finish, 1, move |_| flag.store(true, Ordering::SeqCst));
+
+        let error = refresh_with(
+            Ok(Box::new(remote)),
+            &scenario.fx.collection,
+            None,
+            id(ID),
+            scenario.fx.clock.now(),
+        )
+        .err()
+        .expect("fails");
+
+        assert!(matches!(error, UnearthError::Remote(_)), "{error}");
+        assert!(finished.load(Ordering::SeqCst));
     }
 }

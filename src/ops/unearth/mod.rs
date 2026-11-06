@@ -28,6 +28,7 @@ use crate::pack::live::LiveError;
 use crate::pack::{PackError, PackageFormat};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
+use crate::remote::away::AwayError;
 use crate::remote::{Remote, RemoteError};
 use crate::report::{CommandReport, Warning};
 use crate::run::RunGuard;
@@ -68,6 +69,8 @@ pub enum UnearthError {
     Fork(#[from] ForkError),
     #[error(transparent)]
     Live(#[from] LiveError),
+    #[error(transparent)]
+    RemoteState(#[from] AwayError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -112,6 +115,17 @@ pub enum UnearthError {
         path: RelPath,
         problem: TargetProblem,
     },
+}
+
+impl UnearthError {
+    /// The library error the binary decides the exit code from. A remote
+    /// error keeps its own variant, which `--if-reachable` looks at.
+    pub fn into_error(self) -> crate::error::Error {
+        match self {
+            UnearthError::Remote(error) => crate::error::Error::Remote(error),
+            other => crate::error::Error::Unearth(other),
+        }
+    }
 }
 
 impl crate::error::HasKind for UnearthError {
