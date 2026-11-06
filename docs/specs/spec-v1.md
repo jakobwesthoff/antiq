@@ -1021,16 +1021,19 @@ Every state-changing run, right after taking the lock, in this order:
   directory whose owner access was added to empty it counts as equal).
   A tree that differs in any other way, or that cannot be compared (no
   payload named, no metadata, no listing, a listing or a walk that cannot
-  be read), is kept as unearthed at the committed version: a trashed one
-  is renamed back to its path, and moved to
-  `.antiq/recovered/<ulid>-<time>/` (the time as `YYYYMMDDTHHMMSSZ`) when
-  that path is taken or another `unearthing`, `live` or `removing` entry
-  holds it, and its entry becomes `gone`. The move is flushed, with the
-  directory it came from, before the entry is written. A `recovered/`
-  tree of the entry that is newer than the entry means the move already
-  happened: the entry becomes `gone` and a folder at the path is a new
-  piece. A tree that cannot be moved or deleted stays in the trash, with
-  a warning;
+  be read), is kept as unearthed at the committed version, which is not
+  recorded when the payload cannot be found: a trashed one is renamed
+  back to its path, and moved to `.antiq/recovered/<ulid>-<time>/` (the
+  time as `YYYYMMDDTHHMMSSZ`) when it cannot be renamed back (the path is
+  taken, another `unearthing`, `live` or `removing` entry holds it, or the
+  rename is refused), and its entry becomes `gone`. A folder in place that
+  another such entry holds is left to that entry, and the entry becomes
+  `gone`. The move is flushed, with the directory it came from, before the
+  entry is written. A `recovered/` tree of the entry that is newer than
+  the entry means the move already happened: the entry becomes `gone` and
+  a folder at the path is a new piece. A tree that cannot be moved or
+  deleted stays in the trash, with a warning, and so does a tree whose
+  presence in the trash cannot be established;
 - empties `.antiq/trash/`, `.antiq/tmp/` and `.antiq/staging/`, except
   the trash trees of IDs whose tracking entry cannot be read and of the
   entries above that stayed; an entry that cannot be removed after one
@@ -1045,9 +1048,11 @@ Every state-changing run, right after taking the lock, in this order:
   Any other `unearthing` entry is dropped: it goes back to `gone` when it
   holds local payloads or committed versions, and is removed otherwise. A
   folder at its path that it does not recognise, or that another entry
-  holds, becomes a new piece, reported once. An entry made while
-  unearthing from a live package records no payload version and has no
-  listing to match, so it is always dropped;
+  holds, becomes a new piece, reported once, unless the metadata of the
+  entry's ID is live and owned by this collection: the folder then stays
+  that piece's. An entry made while unearthing from a live package
+  records no payload version and has no listing to match, so it is always
+  dropped;
 - treats a present folder of an ID this machine committed as archived as
   unearthed at that version, unearthed now: a `live` entry whose folder is
   in place and whose metadata is archived and owned by this collection,

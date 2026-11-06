@@ -146,8 +146,9 @@ impl Effects for RealEffects {
 /// that no other run changes the collection meanwhile.
 ///
 /// Problems with one tree or one entry become warnings and the run goes on.
-/// Only what stops every later step ends it: a collection that cannot be
-/// opened, the tracking directory, an entry that cannot be written.
+/// Only what stops every later step ends it: the collection root or the
+/// machine name that cannot be found, the tracking or objects directory
+/// that cannot be listed, an entry that cannot be written or removed.
 pub(crate) fn run(
     collection: &Collection,
     lock: &RunLock,
@@ -176,7 +177,7 @@ pub(crate) fn run(
     for damaged in &tracked.damaged {
         repairs.protected.insert(damaged.id);
         repairs.warn(format!(
-            "the tracking entry of {} cannot be used ({}); a tree of it in the trash is kept",
+            "the tracking entry of {} cannot be used ({}); its tree in the trash, if there is one, stays",
             damaged.id, damaged.error
         ));
     }
@@ -217,6 +218,9 @@ enum Located {
     /// An earlier repair moved the tree to `recovered/` and was cut short
     /// before it could write the entry.
     Recovered,
+    /// Whether the trash holds the tree could not be found out. The
+    /// entry stays as it is.
+    Unknown(String),
     Nothing,
 }
 
@@ -333,6 +337,13 @@ impl Repairs<'_> {
         let shown = entry.path.to_string();
         match self.locate(&entry) {
             Located::Nothing => self.set_gone(entry),
+            Located::Unknown(error) => {
+                self.protected.insert(id);
+                self.warn(format!(
+                    "cannot tell whether the trash holds the tree of `{shown}` ({id}): {error}"
+                ));
+                Ok(())
+            }
             Located::Recovered => {
                 if self.folder_in_place(&entry) {
                     self.warn(format!(
@@ -404,6 +415,7 @@ impl Repairs<'_> {
         // The tree holds something the archive lacks. It goes back to its
         // path, or to recovered/ when the path is not free.
         let version = self.archive_version(&entry);
+        let mut why = "another entry holds its path".to_string();
         if !self.held_by_other(&entry.path, id) {
             let target = self
                 .collection
@@ -418,7 +430,7 @@ impl Repairs<'_> {
                     return self.set_unearthed(entry, version);
                 }
                 Outcome::Stuck => return Ok(()),
-                Outcome::Refused(_) => {}
+                Outcome::Refused(refusal) => why = format!("it could not go back ({refusal})"),
             }
         }
 
@@ -428,7 +440,7 @@ impl Repairs<'_> {
         match self.move_durably(id, &recovered, &to, &recovered) {
             Outcome::Done => {
                 self.warn(format!(
-                    "`{shown}` differs from its archive ({reason}) and its path is taken; it is kept in .antiq/recovered/{name}"
+                    "`{shown}` differs from its archive ({reason}) and {why}; it is kept in .antiq/recovered/{name}"
                 ));
                 self.set_gone(entry)
             }
@@ -475,9 +487,12 @@ impl Repairs<'_> {
     }
 
     fn locate(&self, entry: &TrackingEntry) -> Located {
-        if fs::symlink_metadata(self.collection.trash_path(entry.id)).is_ok() {
-            Located::Trashed
-        } else if self.moved_to_recovered(entry) {
+        match fs::symlink_metadata(self.collection.trash_path(entry.id)) {
+            Ok(_) => return Located::Trashed,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Located::Unknown(error.to_string()),
+        }
+        if self.moved_to_recovered(entry) {
             Located::Recovered
         } else if self.folder_in_place(entry) {
             Located::Folder
@@ -629,7 +644,9 @@ impl Repairs<'_> {
                 self.write(entry)?;
                 continue;
             }
-            if present {
+            // A piece that this collection owns and that is live stays at
+            // its path whatever stands there, so nothing there is new.
+            if present && !self.owns_live(id) {
                 self.warn(format!(
                     "`{}` is not the unearthed tree of {id}; it is a new piece",
                     entry.path
@@ -638,6 +655,16 @@ impl Repairs<'_> {
             self.drop_unearthing(entry)?;
         }
         Ok(())
+    }
+
+    /// Whether the metadata of `id` says live and owned by this collection.
+    fn owns_live(&self, id: ObjectId) -> bool {
+        matches!(
+            Store::new(self.collection).current(id),
+            Ok(Some(current))
+                if current.metadata.collection == self.collection.id()
+                    && current.metadata.lifecycle == Lifecycle::Live
+        )
     }
 
     /// Whether the folder at the entry's path equals the listing of the
@@ -1650,7 +1677,10 @@ mod tests {
         assert_eq!(world.entry(ID).state, EntryState::Gone);
     }
 
-    fn unusable_listing(break_it: impl FnOnce(&World, &Archived, &mut TrackingEntry)) {
+    fn unusable_listing(
+        version: Option<u32>,
+        break_it: impl FnOnce(&World, &Archived, &mut TrackingEntry),
+    ) {
         let mut world = World::new();
         let archive = world.archived(ID, "projects/a", FILES);
         let mut entry = world.removing(ID, "projects/a", &archive);
@@ -1666,17 +1696,18 @@ mod tests {
         );
         assert!(!world.trash(ID).exists());
         assert_eq!(world.entry(ID).state, EntryState::Live);
+        assert_eq!(world.entry(ID).unearthed_payload_version, version);
         assert!(mentions(&warnings, "projects/a"), "{warnings:?}");
     }
 
     #[test]
     fn an_entry_that_names_no_payload_keeps_the_tree() {
-        unusable_listing(|_, _, entry| entry.removing_payload = None);
+        unusable_listing(None, |_, _, entry| entry.removing_payload = None);
     }
 
     #[test]
     fn an_entry_that_names_an_unknown_payload_keeps_the_tree() {
-        unusable_listing(|_, _, entry| {
+        unusable_listing(None, |_, _, entry| {
             entry.removing_payload =
                 Some(FileName::new("0000000000000000-x.tar.zst").expect("a name"));
         });
@@ -1684,7 +1715,7 @@ mod tests {
 
     #[test]
     fn an_object_without_metadata_keeps_the_tree() {
-        unusable_listing(|world, _, _| {
+        unusable_listing(None, |world, _, _| {
             let dir = world.collection.object_dir(id(ID));
             fs::remove_file(dir.join("meta.1")).expect("no metadata");
         });
@@ -1692,7 +1723,7 @@ mod tests {
 
     #[test]
     fn a_missing_listing_file_keeps_the_tree() {
-        unusable_listing(|world, _, _| {
+        unusable_listing(Some(1), |world, _, _| {
             let dir = world.collection.object_dir(id(ID));
             for item in fs::read_dir(dir).expect("lists") {
                 let item = item.expect("an item").path();
@@ -1705,7 +1736,7 @@ mod tests {
 
     #[test]
     fn a_damaged_listing_keeps_the_tree() {
-        unusable_listing(|world, _, _| {
+        unusable_listing(Some(1), |world, _, _| {
             let dir = world.collection.object_dir(id(ID));
             for item in fs::read_dir(dir).expect("lists") {
                 let item = item.expect("an item").path();
@@ -1782,7 +1813,46 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_move_back_goes_to_recovered_and_both_failing_protects_the_tree() {
+    fn a_move_back_that_is_refused_goes_to_recovered_and_the_warning_gives_the_reason() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        world.removing(ID, "projects/a", &archive);
+        world.to_trash(ID, "projects/a");
+        fs::write(world.trash(ID).join("new.txt"), "x").expect("an added file");
+        let fails = |what: &str, subject: &str| what == "move" && subject == "projects/a";
+        let effects = Scripted::new(&fails);
+
+        let warnings = world.run_with(&effects).expect("the run goes on");
+
+        assert!(
+            world
+                .at(&format!(".antiq/recovered/{ID}-{NOW_STAMP}/new.txt"))
+                .exists()
+        );
+        assert_eq!(world.entry(ID).state, EntryState::Gone);
+        assert!(mentions(&warnings, "refused by the test"), "{warnings:?}");
+        assert!(!mentions(&warnings, "path is taken"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_taken_path_is_named_as_the_reason() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        world.removing(ID, "projects/a", &archive);
+        world.to_trash(ID, "projects/a");
+        fs::write(world.trash(ID).join("new.txt"), "x").expect("an added file");
+        world.entry_in(OTHER_ID, "projects/a", EntryState::Live);
+
+        let warnings = world.run();
+
+        assert!(
+            mentions(&warnings, "another entry holds its path"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn two_refused_moves_keep_the_tree_and_a_later_run_does_not_delete_it() {
         let mut world = World::new();
         let archive = world.archived(ID, "projects/a", FILES);
         world.removing(ID, "projects/a", &archive);
@@ -1796,6 +1866,38 @@ mod tests {
         assert!(mentions(&warnings, ID), "{warnings:?}");
         assert!(world.trash(ID).join("new.txt").exists(), "never emptied");
         assert_eq!(world.entry(ID).state, EntryState::Removing);
+
+        world.run();
+
+        assert!(world.at("projects/a/new.txt").exists(), "back at its path");
+        assert_eq!(world.entry(ID).state, EntryState::Live);
+    }
+
+    #[test]
+    fn a_trash_tree_that_cannot_be_looked_at_keeps_its_entry_and_its_tree() {
+        let mut world = World::new();
+        let archive = world.archived(ID, "projects/a", FILES);
+        world.removing(ID, "projects/a", &archive);
+        world.to_trash(ID, "projects/a");
+        fs::write(world.trash(ID).join("new.txt"), "x").expect("an added file");
+        let trash = world.at(".antiq/trash");
+        fs::set_permissions(&trash, Permissions::from_mode(0o600)).expect("chmod");
+        assert!(
+            fs::symlink_metadata(world.trash(ID)).is_err(),
+            "this test needs a user that a directory without search permission locks out"
+        );
+
+        let warnings = world.run();
+        fs::set_permissions(&trash, Permissions::from_mode(0o755)).expect("chmod back");
+
+        assert!(mentions(&warnings, "cannot tell"), "{warnings:?}");
+        assert_eq!(world.entry(ID).state, EntryState::Removing);
+        assert!(world.trash(ID).join("new.txt").exists());
+
+        world.run();
+
+        assert!(world.at("projects/a/new.txt").exists(), "kept, not deleted");
+        assert_eq!(world.entry(ID).state, EntryState::Live);
     }
 
     #[test]
@@ -2056,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unearthing_entry_from_a_live_package_has_no_listing_and_is_dropped() {
+    fn an_unearthing_entry_without_a_recorded_version_of_an_archived_piece_is_dropped() {
         let mut world = World::new();
         world.archived(ID, "projects/a", FILES);
         let mut entry = unearthing(&world, ID, "projects/a");
@@ -2067,6 +2169,22 @@ mod tests {
 
         assert!(!world.collection.tracking_path(id(ID)).exists());
         assert!(mentions(&warnings, "new piece"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unearthing_from_a_live_package_leaves_the_folder_to_its_piece() {
+        let mut world = World::new();
+        own_live(&mut world, ID, "projects/a");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.unearthed_payload_version = None;
+        world.store_entry(&entry);
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.path, path("projects/a"));
     }
 
     #[test]
@@ -3163,7 +3281,7 @@ mod tests {
 
     #[test]
     fn a_payload_without_a_listing_keeps_the_tree() {
-        unusable_listing(|world, _, _| {
+        unusable_listing(Some(1), |world, _, _| {
             let path = world.collection.object_dir(id(ID)).join("meta.1");
             let mut document: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
@@ -3177,7 +3295,7 @@ mod tests {
 
     #[test]
     fn metadata_that_cannot_be_read_keeps_the_tree() {
-        unusable_listing(|world, _, _| {
+        unusable_listing(None, |world, _, _| {
             let path = world.collection.object_dir(id(ID)).join("meta.1");
             fs::write(path, "not json").expect("damaged");
         });
