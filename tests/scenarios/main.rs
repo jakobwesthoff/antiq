@@ -8,6 +8,7 @@
 mod support;
 
 mod archive;
+mod damaged_version;
 mod find;
 mod forget;
 mod grep;
