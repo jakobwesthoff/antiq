@@ -14,8 +14,9 @@ lines scripts read must stay as they are (ADR 0020).
 ## Decision
 
 A real run of these commands on a rich stdout (ADR 0063) shows one card
-for each piece that is working. A card has two lines: the piece, its size
-and the current operation, then a bar with a percentage and a count. A
+for each piece that is working. A card has two lines: the piece and the current
+operation, which ends in the column where the second line ends, then a bar
+with a percentage and a count. A
 piece that has finished leaves one line with its result and its time, and
 a refused, skipped or unfinished piece keeps its reasons under that line.
 The finished lines scroll away like any output. Below them stay the cards

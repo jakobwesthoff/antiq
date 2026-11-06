@@ -223,7 +223,7 @@ fn the_bytes_of_a_measured_item_reach_its_card_through_the_feed() {
     driver.frame(secs(0), true).unwrap();
     let lines = watcher.sync().lines();
     assert!(
-        lines[0].contains("nas") && lines[0].contains("3.1 MB"),
+        lines[0].contains("nas") && lines[1].contains("3.1 MB"),
         "{lines:?}"
     );
 }
@@ -275,7 +275,7 @@ fn a_finished_line_is_written_apart_from_the_region() {
     // First the erase and the line, then the new region: the cursor never
     // moves up again between them.
     let line = written.find("✔ a").expect("the line is written");
-    let region = written.find("b ").expect("the region follows");
+    let region = written.find("⠋ b").expect("the region follows");
     assert!(line < region);
     assert_eq!(
         written.matches("\x1b[").filter(|_| true).count(),
@@ -1004,7 +1004,8 @@ fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
         let mut screen = Screen::new(100, 24);
         screen.feed(&sampler.stdout_bytes());
         *sample.lock().unwrap() = Some(screen.visible().len());
-        *seen.lock().unwrap() = String::from_utf8_lossy(&sampler.stdout_bytes()).contains("10 B");
+        *seen.lock().unwrap() =
+            String::from_utf8_lossy(&sampler.stdout_bytes()).contains("scanner");
     });
     let mut setup = setup(100);
     setup.panic_hook = panic_hook;
@@ -1014,7 +1015,7 @@ fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
             setup,
             |observer| {
                 observer.event(Event::Started {
-                    name: "a",
+                    name: "scanner",
                     bytes: Some(10),
                     stamp: None,
                     siblings: &[],
@@ -1072,14 +1073,14 @@ fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling
             setup,
             |observer| {
                 observer.event(Event::Started {
-                    name: "a",
+                    name: "scanner",
                     bytes: Some(10),
                     stamp: None,
                     siblings: &[],
                 });
                 thread::sleep(Duration::from_millis(300));
                 assert!(
-                    String::from_utf8_lossy(&drawn.stdout_bytes()).contains("10 B"),
+                    String::from_utf8_lossy(&drawn.stdout_bytes()).contains("scanner"),
                     "the card was on the screen before the panic"
                 );
                 // The worker panics while the renderer draws. The scope
@@ -1107,7 +1108,10 @@ fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling
         "{lines:?}"
     );
     assert!(
-        screen.visible().iter().all(|line| !line.contains("10 B")),
+        screen
+            .visible()
+            .iter()
+            .all(|line| !line.contains("scanner")),
         "no card is left on the screen: {:?}",
         screen.visible()
     );

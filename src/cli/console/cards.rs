@@ -32,6 +32,8 @@ const MIN_NAME: usize = 6;
 /// A name shown with a version is cut to this many columns before the
 /// version is dropped.
 const MIN_LABELLED_NAME: usize = 8;
+/// The least space between the name and the operation of a card.
+const GAP: usize = 2;
 /// The lit part of a bar without a total.
 const HEAD: usize = 4;
 /// The time between two frames of the spinner and of the moving bar.
@@ -99,8 +101,8 @@ pub(crate) enum Msg {
     Paused {
         name: String,
     },
-    /// The bytes the piece has sent so far, which its card shows in place of
-    /// the size it started with.
+    /// The bytes the piece has sent so far, which its card leads its count
+    /// with.
     Measured {
         name: String,
         bytes: Counter,
@@ -159,8 +161,8 @@ struct Item {
     name: String,
     /// `None` where the size of the piece is not known.
     bytes: Option<u64>,
-    /// The bytes sent so far, when the piece reports them: its card shows
-    /// them in place of `bytes`.
+    /// The bytes sent so far, when the piece reports them: its card leads
+    /// its count with them.
     measured: Option<Counter>,
     label: Option<String>,
     phase: Phase,
@@ -671,49 +673,63 @@ impl Cards {
 
     /// The two lines of a running piece.
     ///
-    /// The detail of the second line goes first when it does not fit in
-    /// `cols`: the bar and the percentage are what the line is for.
+    /// The first has the name and, ending in the column where the second
+    /// ends, the operation. The detail of the second line goes first when it
+    /// does not fit in `cols`: the bar and the percentage are what the line
+    /// is for.
     fn card(&self, item: &Item, now: Duration, layout: &Layout, cols: usize) -> [String; 2] {
         let symbols = self.symbols();
         let spinner = symbols.spinner[Self::frame(now) % symbols.spinner.len()];
         let prefix = self.config.name_prefix;
-        let (cell, cell_width) = self.name_cell(
-            &item.name,
-            item.label.as_deref(),
-            layout.name.saturating_sub(prefix.width()),
-        );
-        let cell = format!("{prefix}{cell}");
-        let cell_width = cell_width + prefix.width();
-        let bytes = item
-            .measured
-            .as_ref()
-            .map_or(item.bytes, |sent| Some(sent.done()));
         let current = match &item.phase {
             Phase::Running(Some((operation, counter))) => Some((*operation, counter)),
             _ => None,
         };
-        let word = current.map_or("", |(operation, _)| Self::operation_word(operation));
-        let first = format!(
-            "  {} {}{}{}  {}",
-            self.paint(theme::CYAN, spinner),
-            cell,
-            " ".repeat(layout.name.saturating_sub(cell_width)),
-            self.size_cell(bytes, layout),
-            self.paint(theme::CYAN, word)
-        );
-
+        let sent = item.measured.as_ref().map(Counter::done);
         let second = match current {
-            Some((operation, counter)) => self.count_line(operation, counter, now, layout, cols),
+            Some((operation, counter)) => {
+                self.count_line(operation, counter, sent, now, layout, cols)
+            }
             None => format!("    {}", self.moving_bar(now, layout.bar)),
         };
-        [first.trim_end().to_string(), second]
+        let word = current.map_or("", |(operation, _)| Self::operation_word(operation));
+        let end = visible_width(&second);
+
+        // Room for the name: the line up to the column where the second
+        // line ends, less the mark, the gap and the word.
+        let room = end
+            .saturating_sub(4 + GAP + word.width())
+            .max(MIN_NAME)
+            .min(layout.name);
+        let (cell, cell_width) = self.name_cell(
+            &item.name,
+            item.label.as_deref(),
+            room.saturating_sub(prefix.width()),
+        );
+        let cell = format!("{prefix}{cell}");
+        let cell_width = cell_width + prefix.width();
+        let first = if word.is_empty() {
+            format!("  {} {}", self.paint(theme::CYAN, spinner), cell)
+        } else {
+            let gap = end.saturating_sub(4 + cell_width + word.width()).max(GAP);
+            format!(
+                "  {} {}{}{}",
+                self.paint(theme::CYAN, spinner),
+                cell,
+                " ".repeat(gap),
+                self.paint(theme::CYAN, word)
+            )
+        };
+        [first, second]
     }
 
-    /// The second line of a card whose operation has a counter.
+    /// The second line of a card whose operation has a counter. A piece that
+    /// reports the bytes it has sent leads the count with them.
     fn count_line(
         &self,
         operation: Operation,
         counter: &Counter,
+        sent: Option<u64>,
         now: Duration,
         layout: &Layout,
         cols: usize,
@@ -722,7 +738,7 @@ impl Cards {
         let (done, total) = (counter.done(), counter.total());
         let proportional = total > 0 && (count.percent || done <= total);
         let mut line;
-        let text;
+        let mut text;
         if proportional {
             let done = done.min(total);
             // A card whose counter is at its total is still working: the
@@ -741,6 +757,14 @@ impl Cards {
         } else {
             line = format!("    {}", self.moving_bar(now, layout.bar));
             text = (count.text)(done, None);
+        }
+        if let Some(sent) = sent {
+            let size = decimal_size(sent);
+            text = if text.is_empty() {
+                size
+            } else {
+                format!("{size} {} {text}", self.symbols().separator)
+            };
         }
         if layout.detail && !text.is_empty() {
             let detail = format!("  {}", self.paint(theme::DIM, &text));

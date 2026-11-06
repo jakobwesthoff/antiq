@@ -2197,7 +2197,8 @@ terminal print the lines they print without cards. The warnings and notes
 of the run follow the result as always.
 
 A piece that is working has a card of two lines. The first has a mark that
-turns, the piece in bold, its size and the operation: `packing`,
+turns, the piece in bold and the operation, which ends in the column where
+the second line ends: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
 `unearth`, `extracting` and `verifying` for `fork`, `verifying` for `rebuild`. The second has a bar,
@@ -2295,12 +2296,12 @@ table of what was sent.
 
 A `push` on a terminal that moves the cursor is one run of rsync over the
 whole collection, so it has one card, named `Pushing to <target>`. Its
-first line has the size sent so far and `storing`, which becomes
-`removing` once rsync starts to delete. The size adds the length of each
-file when rsync names it, so it grows by a whole file at once. Its second
-line has a bar and a count without a percentage: `N of T entries`, where N
-is the number of entries rsync has listed, directories and unchanged
-entries included, and T is the total rsync reports. The bar is
+first line has `storing`, which becomes `removing` once rsync starts to
+delete. Its second line has a bar and a count without a percentage that
+starts with the size sent so far, `412 MB · N of T entries`. The size adds
+the length of each file when rsync names it, so it grows by a whole file at
+once. N is the number of entries rsync has listed, directories and
+unchanged entries included, and T is the total rsync reports. The bar is
 proportional while T is known and not below N. Before rsync reports a
 total, or when the total falls behind N, the bar moves and the count reads
 `N entries`. While rsync deletes, the count is the number of entries

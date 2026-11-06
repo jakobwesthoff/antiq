@@ -347,19 +347,37 @@ fn the_region_holds_the_running_cards_and_the_waiting_line() {
     assert_eq!(
         cards.region(secs(7), MOCKUP, 24),
         [
-            format!(
-                "  ⠋ {:<54}  {:>8}  verifying",
-                "projects/recipe-api", "48 MB"
-            ),
+            format!("  ⠋ {:<50}verifying", "projects/recipe-api"),
             format!("    {}   80%  12/15 files", bar(32, 7)),
             format!(
-                "  ⠋ {:<54}  {:>8}  packing",
-                "archive/2019/client-work/acme-warehouse-dashboard", "1.8 GB"
+                "  ⠋ {:<54}packing",
+                "archive/2019/client-work/acme-warehouse-dashboard"
             ),
             format!("    {}   41%  214/518 files", bar(16, 23)),
             "  ○ 1 waiting".to_string(),
         ]
     );
+}
+
+#[test]
+fn the_operation_ends_the_first_line_in_the_column_where_the_second_line_ends() {
+    let mut cards = cards(ARCHIVE);
+    cards.apply(started("projects/recipe-api", 48_300_000), secs(0));
+    let (packing, _a) = operation("projects/recipe-api", Operation::Packing, 12, 15);
+    cards.apply(packing, secs(0));
+    cards.apply(started("scanner", 150_000_000), secs(0));
+    let (verifying, _b) = operation("scanner", Operation::Verifying, 3, 4);
+    cards.apply(verifying, secs(0));
+    let region = cards.region(secs(0), MOCKUP, 24);
+    assert!(
+        region[0].starts_with("  ⠋ projects/recipe-api  "),
+        "{:?}",
+        region[0]
+    );
+    assert!(region[0].ends_with("  packing"), "{:?}", region[0]);
+    assert_eq!(region[0].width(), region[1].width());
+    assert!(region[2].ends_with("  verifying"), "{:?}", region[2]);
+    assert!(!region[0].contains("MB"), "{:?}", region[0]);
 }
 
 #[test]
@@ -739,19 +757,6 @@ fn an_unknown_size_is_blank_on_the_card_and_on_the_finished_line_while_a_real_ze
     cards.apply(extracting, secs(0));
     let (extracting, _b) = operation("empty", Operation::Extracting, 1, 4);
     cards.apply(extracting, secs(0));
-    let region = cards.region(secs(1), MOCKUP, 24);
-    assert!(
-        region
-            .iter()
-            .any(|line| line.contains("empty") && line.contains("0 B")),
-        "{region:#?}"
-    );
-    assert!(
-        region
-            .iter()
-            .any(|line| line.contains("unknown") && !line.contains(" B ")),
-        "{region:#?}"
-    );
     // The finished line keeps the size the piece started with, whatever the
     // message of the finish carries.
     cards.apply(finished("unknown", 0, Outcome::Files(2)), secs(2));
@@ -932,16 +937,16 @@ fn a_line_of_the_region_that_is_still_too_wide_is_cut_without_breaking_its_colou
 }
 
 #[test]
-fn a_narrow_terminal_drops_the_detail_then_the_size() {
+fn a_narrow_terminal_drops_the_detail_of_a_card_and_keeps_the_operation_at_its_end() {
     let mut cards = cards(ARCHIVE);
     cards.apply(started("tools/pdf-merge", 3_100_000), secs(0));
     let (msg, _k) = operation("tools/pdf-merge", Operation::Packing, 1, 4);
     cards.apply(msg, secs(0));
     let sixty = cards.region(secs(0), 59, 24);
-    assert!(sixty[0].contains("3.1 MB"));
+    assert!(sixty[0].ends_with("  packing"), "{:?}", sixty[0]);
     assert_eq!(sixty[1], format!("    ━━━╸{}   25%", "─".repeat(8)));
     let forty = cards.region(secs(0), 40, 24);
-    assert!(!forty[0].contains("3.1 MB"));
+    assert!(forty[0].ends_with("  packing"), "{:?}", forty[0]);
     assert_eq!(forty[1], format!("    ━━━╸{}   25%", "─".repeat(8)));
 }
 
@@ -1175,17 +1180,39 @@ fn a_long_name_is_cut_behind_the_prefix() {
 }
 
 #[test]
-fn the_size_of_a_running_card_is_the_bytes_measured_and_grows() {
+fn the_count_of_a_running_card_leads_with_the_bytes_measured_and_grows() {
     let mut cards = cards(UNEARTH);
     cards.apply(started("a", 0), secs(0));
     let (storing, _k) = operation("a", Operation::Storing, 1, 4);
     cards.apply(storing, secs(0));
     let (msg, bytes) = measured("a", 3_100_000);
     cards.apply(msg, secs(0));
-    assert!(cards.region(secs(0), MOCKUP, 24)[0].contains("3.1 MB"));
+    let region = cards.region(secs(0), MOCKUP, 24);
+    assert!(region[1].ends_with("25%  3.1 MB · 1/4 files"), "{region:?}");
+    assert!(!region[0].contains("MB"), "{region:?}");
 
     bytes.add(45_200_000);
-    assert!(cards.region(secs(1), MOCKUP, 24)[0].contains("48 MB"));
+    assert!(
+        cards.region(secs(1), MOCKUP, 24)[1].ends_with("25%  48 MB · 1/4 files"),
+        "{:?}",
+        cards.region(secs(1), MOCKUP, 24)
+    );
+}
+
+#[test]
+fn the_bytes_measured_stand_alone_where_the_count_has_no_text() {
+    let mut cards = cards(PUSH);
+    cards.apply(started("a", 0), secs(0));
+    let (storing, _k) = operation("a", Operation::Storing, 0, 0);
+    cards.apply(storing, secs(0));
+    let (msg, _bytes) = measured("a", 412_000_000);
+    cards.apply(msg, secs(0));
+    assert!(
+        cards.region(secs(0), MOCKUP, 24)[1].ends_with("━  412 MB")
+            || cards.region(secs(0), MOCKUP, 24)[1].ends_with("─  412 MB"),
+        "{:?}",
+        cards.region(secs(0), MOCKUP, 24)
+    );
 }
 
 #[test]

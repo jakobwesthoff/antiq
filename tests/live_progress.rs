@@ -698,10 +698,8 @@ fn push_shows_one_card_for_the_whole_run_that_counts_entries_without_a_percentag
     let mid = replay(&run.stdout[..at + "2 of 3 entries".len()], 100, 24).visible();
     assert_eq!(mid.len(), 2, "{mid:#?}");
     assert!(mid[0].contains("Pushing to "), "{mid:#?}");
-    assert!(
-        mid[0].contains("5 B") && mid[0].ends_with("storing"),
-        "{mid:#?}"
-    );
+    assert!(mid[0].ends_with("storing"), "{mid:#?}");
+    assert!(mid[1].ends_with("5 B · 2 of 3 entries"), "{mid:#?}");
     assert!(!mid[1].contains('%'), "{mid:#?}");
     let end = replay(&run.stdout, 100, 24).lines();
     assert!(
