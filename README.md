@@ -36,8 +36,8 @@ archives are `tar.zst` files, and a listing is a checksum list that
   them again.
 - **The context directories of AI conversations and agent work.** Each run
   of a coding agent or each conversation leaves a folder of transcripts and
-  intermediate data. A pattern in the collection's configuration selects
-  whichever folders your tools write, and the ones nobody has touched for a
+  intermediate data. A [pattern](#which-folders-are-pieces) in the
+  collection's configuration selects whichever folders your tools write, and the ones nobody has touched for a
   while are archived instead of deleted.
 
 ## Installation
@@ -75,24 +75,45 @@ real one, for example with `brew install rsync`. antiq takes the first
 <!-- docs:start -->
 ## A collection
 
-A collection is a folder that antiq looks after, such as the folder where
-your experiments pile up. Each folder inside it that you want archived is
-a piece. The images in these chapters show a folder `experiments` with six
-pieces. Before the first real run on your own folder, read what the dry
-run of "Archiving idle folders" would archive.
-
-Make the folder a collection. `--pattern` says which folders are pieces:
-`*` selects the folders directly inside it.
+A **collection** is a folder that antiq looks after, such as the folder where
+your experiments pile up. Each folder inside it that antiq archives as one
+unit is a **piece**. Make the folder a collection; `--pattern '*'` makes
+every folder directly inside it a piece
+([more on patterns](#which-folders-are-pieces)):
 
 ```bash
 antiq init --pattern '*'
 ```
 
 ![antiq init prints the collection's path and ID and says that the next archive would archive 4 folders](docs/pages/assets/shots/init.png)
+*`init` in the folder `experiments`, which holds six pieces*
 
-`init` wrote `.antiq/config.toml`, the configuration of the collection.
-Commands find the collection by searching upwards from the current
-directory, or from the path given with `-C`.
+`init` changes nothing in your folders and archives nothing. Before the
+first real run, the [dry run](#archiving-idle-folders) shows what
+`archive` would do.
+
+> [!NOTE]
+> The collection keeps its settings in `.antiq/config.toml`. `init` writes
+> every setting there with a comment and its default, ready to change;
+> [Configuration](#configuration) lists them all. antiq finds the
+> collection from any folder inside it, or from the path given with `-C`.
+
+### Which folders are pieces
+
+The **patterns** decide which folders are pieces. They are glob patterns
+relative to the collection, given with `--pattern` (once for each) or as
+`patterns` in `.antiq/config.toml`:
+
+| Patterns | Pieces |
+|---|---|
+| `*` (the default) | every folder directly inside the collection |
+| `projects/*` | every folder inside `projects`, not `projects` itself |
+| `projects/*`, `agents/runs/*` | the folders inside both, nothing else |
+| `*/*` | every folder two levels down, such as `2025/tax-report` |
+
+When two patterns match folders inside each other, the outer folder is
+the piece. A folder whose name starts with a dot is a piece only if a
+pattern names the dot, such as `.notes` or `.*`.
 
 ## What is idle
 
@@ -101,10 +122,12 @@ antiq status
 ```
 
 ![antiq status shows a table: scan-old, scanner, recipe-api and keep-me are due, ledger-cli archives in 2 days](docs/pages/assets/shots/status.png)
+*`status` lists the pieces that have a state*
 
-A piece is due when its idle clock is older than 30 days. The idle clock is
-the newest modification time of the piece's regular files. `ledger-cli`,
-28 days idle, is `soon`: `status` shows that from 3 days before due.
+A piece is due when its idle clock is older than 30 days. The **idle clock** is
+the newest modification time of the piece's regular files. Three days
+before a piece is due, `status` marks it `soon`, like `ledger-cli` after 28
+idle days.
 `fresh-idea` has no state, so it is not listed. `status` lists the pieces
 that are `due`, `soon`, `pinned` or `refused`, each with the reason.
 
@@ -118,8 +141,9 @@ antiq status
 ```
 
 ![antiq pin confirms, and status now lists keep-me as pinned, kept by .antiq-pin](docs/pages/assets/shots/keep.png)
+*`pin` keeps `keep-me`, and `status` lists it as pinned*
 
-`pin` creates a `.antiq-pin` file in the piece. A pinned piece is never
+`pin` creates a `.antiq-pin` file in the piece. A **pinned** piece is never
 archived, and `push` still mirrors it. `unpin` removes the file.
 
 Other ways to keep files out of the way are in the configuration, which
@@ -135,18 +159,19 @@ Other ways to keep files out of the way are in the configuration, which
 - `idle_days` and `soon_days` change the 30 and 3 days.
 
 A piece can also carry `.antiqignore` and `.antiq-timeless` files with the
-same gitignore lines. The reference below has the whole table.
+same gitignore lines. [Configuration](#configuration) has the whole table.
 
 ## Archiving idle folders
 
-Look at what the next run would do before it does it. A dry run, with `-n`,
-changes nothing:
+Look at what the next run would do before it does it. A **dry run**, with
+`-n`, changes nothing:
 
 ```bash
 antiq archive -n
 ```
 
-![antiq archive -n lists the three would archive lines in magenta and ends with a note that nothing was archived](docs/pages/assets/shots/dry-run.png)
+![antiq archive -n lists the three would archive lines in magenta and ends with a DRY RUN badge saying that nothing was archived](docs/pages/assets/shots/dry-run.png)
+*the dry run lists what the next run would archive*
 
 Now archive. On a terminal each piece that is working has a card with a
 progress bar, and a line stays behind for each piece that finished:
@@ -156,16 +181,18 @@ antiq archive
 ```
 
 ![the cards of recipe-api, scan-old and scanner while they pack](docs/pages/assets/shots/archive-live.png)
+*a card for each piece while it packs*
 
 ![the finished lines of the three pieces and the closing line](docs/pages/assets/shots/archive-done.png)
+*the finished lines and the closing line*
 
-For each due piece `archive` packs a `tar.zst` version, reads the archive
+For each due piece `archive` packs a `tar.zst` **version**, reads the archive
 back and compares it with the folder, and only then moves the folder away
 and deletes it. A folder that changed in the meantime is skipped and its
 files are kept. `archive <piece>` archives one piece now, however recently
 it changed.
 
-A piece is refused and never archived when its folder holds a mount point,
+A piece is **refused** and never archived when its folder holds a mount point,
 a nested collection, an unreadable or locked entry, an exclude entry, or a
 control file that is not a regular file. `status` names the reason. A piece
 without a file that counts for the idle check is empty and is not archived
@@ -183,9 +210,11 @@ antiq grep 'main\.rs'
 ```
 
 ![antiq list scan shows the versions of scan-old and scanner; antiq grep lists the main.rs files with the version they are in](docs/pages/assets/shots/find.png)
+*`list` finds versions by name, `grep` by the files they hold*
 
-`grep` reads the listings, so nothing is unpacked. A piece is named by its
-path or by a search word, and a search word has to match exactly one piece.
+`grep` reads the **listings**, the checksum lists antiq keeps beside each
+archive, so nothing is unpacked. A piece is named by its
+path or by a **search word**, and a search word has to match exactly one piece.
 `scan` matches two, so `list` shows both. Commands that take one piece fail
 when the word matches none, and when it matches several they also list the
 candidates. `unearth` and `forget` remove a version, so they act only on a
@@ -200,6 +229,7 @@ antiq fork scanner
 ```
 
 ![antiq fork scanner prints the version it extracted and the path it wrote to](docs/pages/assets/shots/fork.png)
+*`fork` extracts a working copy and keeps the version*
 
 Change a file in the copy and archive the piece again. `archive <piece>`
 works on a piece that is not due, and a piece can have several versions
@@ -212,6 +242,7 @@ antiq list scanner
 ```
 
 ![antiq list scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
+*the two versions of `scanner`*
 
 `unearth <piece> [--version <version>]` brings a version back as a folder
 at the piece's path and **removes that version** once the folder is
@@ -229,7 +260,7 @@ directly as a version and leaves the source in place.
 ## Mirroring
 
 Everything in the collection, the live folders and the versions, can be
-mirrored to one target. Add a `[target]` block to `.antiq/config.toml`,
+mirrored to one **target**. Add a `[target]` block to `.antiq/config.toml`,
 create an empty folder for it, and let `push --init` claim it. The target
 is an absolute path, such as a mounted disk or share, or `[user@]host:path`
 reached over ssh. For a backup disk mounted at `/Volumes/Backup`, with an
@@ -245,8 +276,9 @@ antiq push --init
 ```
 
 ![antiq push --init claims the target and prints a table of what was created for each piece, then a closing line that starts with Claimed](docs/pages/assets/shots/push.png)
+*the first push claims the target*
 
-`--init` wrote the marker `.antiq-target` at the target's root. It holds
+`--init` wrote the **marker** `.antiq-target` at the target's root. It holds
 the collection ID, the machine name and the collection path, and keeps
 another collection from pushing there by mistake. Later runs are `antiq
 push`. `push -n` lists what would change, per piece, and changes nothing.
@@ -274,9 +306,10 @@ elsewhere in `antiq` in the state directory, and the error shows the
 command that reads one: `zstd -dc <path> | less`. antiq keeps the 10 newest
 logs of a collection, and the newest log of a failed push beyond them.
 
-The target is a mirror, not a backup: whatever is deleted in the
-collection is deleted on the target by the next push. The reference below
-says more under "Good to know".
+> [!WARNING]
+> The target is a mirror, not a backup: whatever is deleted in the
+> collection is deleted on the target by the next push.
+> [Good to know](#good-to-know) says more.
 
 ## Running unattended
 
@@ -289,16 +322,17 @@ antiq archive; antiq push --if-reachable
 The push runs after a partial archive too. The scheduler sees only the
 push's exit status. `--if-reachable` makes an unreachable target exit 0
 instead of 4. A held lock, a damaged version or any failure after the
-target was reached still exits 1. The exit codes are in the reference.
+target was reached still exits 1. [Exit codes](#exit-codes) lists them all.
 
 ## Damaged versions
 
-A version is damaged when, among other causes, its archive lacks its
+A version is **damaged** when, among other causes, its archive lacks its
 listing or checksum file. Files deleted by hand and incomplete copies from
 the target cause this. Here the listing of `scan-old` is missing, and
 `antiq push` refuses to run:
 
 ![antiq push is refused: the collection holds damaged versions, and the error names antiq rebuild with the version](docs/pages/assets/shots/error-damaged.png)
+*a damaged version stops `push`*
 
 `push` is stopped by a damaged or incomplete version until you repair it,
 and the error names the command. `rebuild` writes the missing listing after
@@ -309,10 +343,12 @@ antiq rebuild scan-old 20
 ```
 
 ![antiq rebuild scan-old writes the missing listing](docs/pages/assets/shots/rebuild.png)
+*`rebuild` writes the missing listing*
 
 The version argument is a prefix of the version's time, so `20` is the one
-version here. The reference lists what makes a version damaged or
-incomplete, and `forget` removes an incomplete one.
+version here. [Damaged and incomplete versions](#damaged-and-incomplete-versions)
+lists what makes a version damaged or incomplete, and `forget` removes an
+incomplete one.
 
 ## Reading archives without antiq
 
@@ -341,7 +377,7 @@ listing.
   by searching upwards from the current directory, or from the path
   given with `-C`.
 - **Piece:** a folder of the collection that antiq manages. The
-  `patterns` of the configuration select pieces; its path relative to
+  [`patterns`](#which-folders-are-pieces) of the configuration select pieces; its path relative to
   the collection is its identity.
 - **Version:** one archived state of a piece. A piece can have several
   versions side by side.
@@ -428,7 +464,7 @@ comment for every key, and with every key but the collection ID (and
 | Key | Default | Content |
 |-----|---------|---------|
 | `collection.id` | minted at `init` | collection ULID, also written to the target's marker |
-| `collection.patterns` | `["*"]` | glob patterns that select pieces; the shallowest match wins |
+| `collection.patterns` | `["*"]` | glob patterns that select pieces; the shallowest match wins ([examples](#which-folders-are-pieces)) |
 | `collection.exclude` | `[]` | literal paths that are never pieces |
 | `collection.ignore` | `[".DS_Store"]` | gitignore lines for paths that are not packed, not listed and not counted for the idle check |
 | `collection.timeless` | `[]` | gitignore lines for paths that are packed but not counted for the idle check, such as `.git/` |
@@ -565,7 +601,8 @@ versions and come back fully allocated.
 **Symlinks on the target.** A symlink in a piece is copied as a symlink
 and points to whatever its path names on the target.
 
-**Checking a version by hand.** "Reading archives without antiq" shows the
+**Checking a version by hand.**
+[Reading archives without antiq](#reading-archives-without-antiq) shows the
 commands. Use `shasum`: the `sha256sum` that macOS ships is not GNU's and
 fails on a listing.
 
@@ -602,7 +639,7 @@ directory of the collection, it deletes nothing on the target at all
 until the directory is readable. `push` says that no deletion reached
 the target and names the directories.
 
-**Scheduling.** See "Running unattended".
+**Scheduling.** See [Running unattended](#running-unattended).
 
 ### Exit codes
 
