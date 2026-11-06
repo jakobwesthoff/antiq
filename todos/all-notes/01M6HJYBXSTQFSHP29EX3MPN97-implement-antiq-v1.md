@@ -2677,6 +2677,19 @@ the same commit; the lead checks that at acceptance.
   the wording sits in one place and the user sees it rendered with the
   first command that uses it.
 
+### I25
+
+- 2026-11-04 (merged): for I23, I28 and I30, `Rsync::from_machine`
+  probes on every run; `TransferSettings` takes the ssh command as an
+  argument list (I24's session builds it), which I25 joins into `-e`
+  with every part single-quoted and quotes doubled (checked against
+  rsync 3.5.1); source and destination pass verbatim, so the caller
+  escapes a remote path; `run()` returns `TransferStats` with each
+  value an `Option` (missing is unknown); any non-zero exit is
+  `RsyncError::Failed { code, stderr }`, which I23 and I28 wrap and
+  classify (255 from ssh). The probe has no time limit. Tests with the
+  real rsync are opt-in.
+
 ### I12
 
 - 2026-11-04, I12 plan review (ledger `i12-ledger.md`, 8 findings
