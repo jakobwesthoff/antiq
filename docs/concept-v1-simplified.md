@@ -45,7 +45,7 @@ them back, and mirrors the whole collection to one backup target.
 - **Pinned:** a live piece with a `.antiq-pin` file at its top, never
   archived.
 - **Control files:** `.antiqignore` and `.antiq-timeless` (rule files,
-  at any level), `.antiq-pin` and `.antiq-unearthed` (markers, only at
+  at any level), `.antiq-pin` and `.antiq-restored` (markers, only at
   a piece's top; elsewhere they are ordinary files).
 - **Target:** the backup location, a path (a mounted disk or share) or
   `user@host:path` reached over ssh by rsync.
@@ -100,12 +100,12 @@ where noted.
   limit, since `archive` deletes them with the folder. Only packing,
   the listing and the idle check leave them out.
 - **Control files** never count as activity and never make a piece
-  non-empty. The two rule files are packed; `.antiq-unearthed` is not
+  non-empty. The two rule files are packed; `.antiq-restored` is not
   packed and is deleted with the folder; `.antiq-pin` never reaches
   packing, since a pinned piece is not archived.
 - **Idle clock:** the later of (a) the newest modification time of the
   regular files that are not ignored, not timeless and not control
-  files, and (b) the time in `.antiq-unearthed`, if there is one.
+  files, and (b) the time in `.antiq-restored`, if there is one.
   Directories, symlinks and special files do not count. A piece is due
   when its idle clock is older than `idle_days`; a day is 24 hours, and
   a piece exactly that old is not yet due.
@@ -159,7 +159,10 @@ where noted.
   `.tar.zst` without its listing or checksum file is a damaged version:
   it is reported by `status` and `list` and never deleted by antiq;
   `unearth` and `fork` can still extract it, with a warning and without
-  the comparison against the listing.
+  the comparison against the listing. Since antiq itself never leaves
+  this state, it comes from outside: a file deleted by hand, an
+  incomplete copy back from the target, a disk error. `rebuild` repairs
+  it, and `push` refuses to run while it exists.
 - When the last version of a piece goes, its folder under `pieces/` and
   every parent that became empty go with it.
 - There is no state file: everything antiq needs follows from the
@@ -224,7 +227,7 @@ does not work: both tools read it as part of the file name.
 - Every command that changes something has `-n`/`--dry-run`. A dry run
   takes no lock and runs no repairs.
 - **Lock:** every command that changes the collection (`archive`,
-  `unearth`, `fork`, `forget`, `import`, `pin`, `unpin`) and `push`,
+  `unearth`, `fork`, `forget`, `rebuild`, `import`, `pin`, `unpin`) and `push`,
   for its whole rsync run, takes the exclusive lock `.antiq/lock`. A
   held lock fails the command at once, naming the holder. `list`,
   `grep` and `status` take no lock and say when it is held. Without the
@@ -233,7 +236,7 @@ does not work: both tools read it as part of the file name.
 - **Exit codes:** 0 success; 1 error, a held lock included; 2 usage;
   3 partial (some pieces skipped); 4 target unreachable (only `push`,
   and 0 instead under `--if-reachable`).
-- **Naming a version** (`unearth`, `fork`, `forget`): text output shows
+- **Naming a version** (`unearth`, `fork`, `forget`, `rebuild`): text output shows
   local time with seconds, `--json` and pipe output UTC (RFC 3339 in
   JSON, the version stamp in pipes). The input's spelling decides how
   it is matched, and the two are never mixed:
@@ -321,12 +324,12 @@ ordinary live folder again. Archiving it later creates a new version.
   0054). Missing parents are created; a failure before the rename
   removes what was created.
 - **Order:** extract into `.antiq/tmp/`; verify every entry against the
-  listing; write `.antiq-unearthed` at the staged top; check the target
+  listing; write `.antiq-restored` at the staged top; check the target
   path; rename into place; flush the parent; delete the version
   (`.tar.zst` first, then the listing and the checksum file, flushing
-  between); rewrite `.antiq-unearthed` to the time alone.
-- **`.antiq-unearthed`** holds one line,
-  `unearthed <UTC time>[ version <stamp>]`, and is read only as a
+  between); rewrite `.antiq-restored` to the time alone.
+- **`.antiq-restored`** holds one line,
+  `restored <UTC time>[ version <stamp>]`, and is read only as a
   regular file at the piece's top. The idle clock starts at its time.
   The version stamp is there only between the rename and the deletion
   of the version: if a crash falls in between, the repairs finish the
@@ -341,7 +344,7 @@ ordinary live folder again. Archiving it later creates a new version.
 Extracts a working copy of a version, which stays unchanged. Without
 `--name` the copy goes to the original path. The same target rules and
 staging as for `unearth` apply; when the original path is taken, the
-refusal names `--name` as the way out. `fork` writes `.antiq-unearthed`
+refusal names `--name` as the way out. `fork` writes `.antiq-restored`
 with the time alone (no version stamp, so the repairs never treat it as
 an unearth). Archived later, the copy becomes a new version (same path)
 or a new piece (new path); without edits that is an identical version,
@@ -353,6 +356,18 @@ Deletes exactly one version: the `.tar.zst` first, then the listing and
 the checksum file. Deleting every version of a piece takes
 `--all-versions --force`. The next `push` mirrors the deletion to the
 target.
+
+### `rebuild <piece> <version>`
+
+Repairs a damaged version: reads its archive file in full, hashes every
+member and writes the listing and the `.tar.zst.sha256` anew; the
+listing's header gains `# rebuilt <UTC time>`. It cannot tell whether
+the archive changed since the lost listing was written; it only shows
+that the archive reads without error, and says so. It runs only on the
+user's request, never as a repair, since the user is to look at such a
+version first (and may prefer to copy the missing file back from the
+target). It takes the lock and has `-n`. A version that is not damaged
+is refused.
 
 ### `import <folder> [--as <path>] [--time <time>]`
 
@@ -387,8 +402,8 @@ projects/scanner   2026-09-03 12:15:00    1.1 GB  47 980
 tools/scan-old     2025-02-11 19:40:07   40 MB      812
 ```
 
-**Open:** the user decides the exact layout from rendered examples
-before `list` is built.
+The layout above is the one decided from rendered examples: the piece
+in every row, so each row stands on its own after `sort` or `grep`.
 
 ### `grep <pattern>`
 
@@ -446,12 +461,16 @@ Create or remove `.antiq-pin` at the top of a live piece.
 
 Mirrors the collection to the target. **Proposal for the flow:**
 
-1. **Check rsync.** The local rsync's `--version` must name rsync 3.2.4
+1. **Check the store.** While a damaged version exists, `push` refuses
+   with exit 1 and names it: the mirror would otherwise delete the
+   target's copy of the missing file. `rebuild` or `forget` ends the
+   state.
+2. **Check rsync.** The local rsync's `--version` must name rsync 3.2.4
    or newer, the release that added `--fsync` (rsync NEWS.md, section
    3.2.4). openrsync, which macOS ships as `/usr/bin/rsync`, and older
    versions are refused with a message naming the binary and the
    config key `[target] rsync`.
-2. **Pre-check the target.** For a path target with the file system,
+3. **Pre-check the target.** For a path target with the file system,
    for an ssh target with `rsync --list-only <target>/` and its
    message (exit code 23 alone does not tell a missing file from a
    refused permission, so it is never read as "missing"):
@@ -471,7 +490,7 @@ Mirrors the collection to the target. **Proposal for the flow:**
    directory differs by kind of target because an unmounted share on
    macOS takes its `/Volumes/<name>` directory with it, while an ssh
    host that answers but lacks the directory is misconfigured.
-3. **Marker.** `.antiq-target` sits at the target root, outside the
+4. **Marker.** `.antiq-target` sits at the target root, outside the
    collection, and holds the collection ID and the host name. It is
    created only by `push --init`, which is refused together with
    `--if-reachable`; `--init` creates a missing target directory when
@@ -479,7 +498,7 @@ Mirrors the collection to the target. **Proposal for the flow:**
    target is the right one; antiq cannot tell an unmounted mount point
    from a real empty directory. The marker is written from a local temp
    file with rsync; `push -n` never writes it.
-4. **Mirror.** One rsync run:
+5. **Mirror.** One rsync run:
 
    ```text
    rsync -a -x --delete --delete-delay
@@ -498,18 +517,18 @@ Mirrors the collection to the target. **Proposal for the flow:**
    arrives as an empty directory. With `--delete-delay`, deletions
    happen only at the end, so an interrupted run removes nothing that
    was on the target before.
-5. **Second pass.** After a run that deleted anything, `push` runs the
+6. **Second pass.** After a run that deleted anything, `push` runs the
    same command with `-n` and, if it lists transfers, the mirror once
    more. On a case-insensitive target a folder renamed only in case
    (`Foo` to `foo`) is otherwise deleted at the end of the first run
    and copied again only by the next push.
-6. **Result.** rsync exit 0 is success; 24 (files vanished during the
+7. **Result.** rsync exit 0 is success; 24 (files vanished during the
    run) is success with a note naming them. Everything else, including
    any failure after the pre-check, is exit 1 with rsync's message, also
    under `--if-reachable`. A receiver that rejects `--fsync` is reported
    as "the target's rsync is too old for --fsync" with a pointer to
    `fsync = false` and `rsync_path`.
-7. `-n` runs the checks and summarizes rsync's `--itemize-changes` per
+8. `-n` runs the checks and summarizes rsync's `--itemize-changes` per
    piece.
 
 With `--fsync` the target flushes each finished file; without it, a
@@ -580,7 +599,7 @@ something first:
   nothing its listing lacks (an interrupted deletion only removes
   paths); otherwise renames it back to its path, or to
   `.antiq/recovered/` when the path is taken, and reports it;
-- for each live piece whose `.antiq-unearthed` names a version stamp of
+- for each live piece whose `.antiq-restored` names a version stamp of
   a version of that piece that still exists: deletes that version (an
   unearth that died after its rename) and rewrites the marker to the
   time alone.
@@ -612,7 +631,7 @@ The modules below exist on main today (`src/`). How each fares,
 | `remote/rsync.rs`, `remote/marker.rs`, `remote/url.rs` | kept, adapted | base of `push`, its marker and the target URL |
 | `cli/` (without `cli/picker/`), `main.rs`, `lib.rs` | adapted | new command set |
 | `ops/archive/`, `ops/unearth/`, `ops/fork.rs`, `ops/import.rs`, `ops/status.rs`, `ops/init.rs`, `ops/pin.rs` | rewritten | new store and semantics; `ops/archive/unearthed.rs` (reclaim) and `ops/unearth/live.rs`, `ops/unearth/remote.rs` go |
-| `list`, `grep`, `forget`, `push` | new | |
+| `list`, `grep`, `forget`, `rebuild`, `push` | new | |
 | `meta.rs`, `store.rs`, `tracking.rs`, `index.rs`, `tombstone.rs`, `brake.rs` | removed | versioned metadata, object store, tracking state, member index |
 | `remote/` other than the three above (`commit.rs`, `ssh/`, `path.rs`, `policy.rs`, `away.rs`, `cleanup.rs`, `testing.rs`; `mod.rs` shrinks) | removed | rsync replaces the own remote layer |
 | `ops/sync/`, `ops/reconcile/`, `ops/resolve/`, `ops/remote.rs`, `ops/find.rs` and their `cli/cmd/` files, `cli/picker/` | removed | |
@@ -644,10 +663,3 @@ The user documentation, once written, must say:
 - that a folder renamed only in case is copied in a second pass on a
   case-insensitive target;
 - what `push --init` does and when to use it.
-
-## Open questions
-
-1. `fork` writes `.antiq-unearthed` too. Does the marker keep that name,
-   or get one that fits both commands?
-2. The exact layout of `list` (and of `grep` and `status`), decided from
-   rendered examples.

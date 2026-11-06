@@ -354,9 +354,23 @@ disagreement, applied to the concept. User decisions during the review:
 - The user wants rendered display examples before the `list` output is
   decided (chat, 2026-11-04).
 
-Open for the user after round 1: the name of `.antiq-unearthed`, which
-`fork` now writes too; the layout of `list`, `grep` and `status` from
-rendered examples.
+Decided after round 1 (AskUserQuestion in chat, 2026-11-04; the asqr
+session 01M6K9S8XCBHG4Z1EWPAAJVSXN was superseded by it):
+
+- The marker that `unearth` and `fork` write is `.antiq-restored`.
+- `list`: one row per version with the piece in every row (as decided
+  in round 5; shown as rendered images first).
+- `grep` and `status` as in the rendered examples, `status` with
+  `refused` rows and notes below the table.
+- A damaged version (archive file present, listing or checksum missing)
+  is repaired only by an own command (`rebuild`), never automatically.
+  The user's reason: it is an operation the user must look at; done
+  automatically, something could break unnoticed, also on the mirror.
+- `push` refuses while a damaged version exists.
+- A second adversarial review round of the concept runs.
+- The user asked for a detailed rework plan (what is removed, added,
+  changed), to be reviewed adversarially before parallel sonnet agents
+  implement it conductor-style.
 
 ## Presented
 
