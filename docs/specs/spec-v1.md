@@ -1394,7 +1394,8 @@ and the versions (those that have a `.tar.zst`), gives the sum of the
 a state, sorted by path, the state coloured in the first column: `due`
 (archived on the next run), `soon` (due within `soon_days`), `pinned`, and
 `refused` for the pieces `archive` refuses. Plain live folders are only
-counted in the header. A pin wins over a refusal, as it does over the idle
+counted in the header; when no piece has a state, the blank line and the
+table are left out. A pin wins over a refusal, as it does over the idle
 and empty tests (see "Pins").
 
 The columns are STATE, PIECE, IDLE and WHAT. IDLE is the whole days since
@@ -1470,7 +1471,10 @@ be read, a version that cannot be inspected or a spelling that cannot be
 looked up are notes on stderr, each starting `note: `. When the store cannot
 be read, `status` still prints the table of the live pieces, adds the note
 `cannot read the store: <path>: <reason>`, leaves out the versions of the
-header and every note that needs the store, and exits 0.
+header and the notes on versions, on spellings and on files in the store, and
+exits 0. The notes on `recovered/`, `trash/` and `doomed/` stay, each tree
+named by the first component below its stamp, as no version can be matched
+to it.
 
 ### pin and unpin
 
