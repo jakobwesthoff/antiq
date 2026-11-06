@@ -27,7 +27,7 @@ use crate::ops::status::{has_pending_remote_work, status};
 use crate::pack::hashing::HashingReader;
 use crate::pack::live::check_stream;
 use crate::remote::away::{self, with_overdue};
-use crate::remote::{KnownVersions, MetaFile, Reachability, Remote, RemoteError};
+use crate::remote::{MetaFile, Reachability, Remote, RemoteError};
 use crate::report::Warning;
 use crate::store::{Current, Put, Source, Store, Unreadable};
 use jiff::Timestamp;
@@ -443,12 +443,7 @@ pub(crate) fn refresh_with(
     }
 
     let store = Store::new(collection);
-    let mut known = KnownVersions::new();
-    for object in store.objects()? {
-        if let Some(highest) = store.committed_versions(object)?.last() {
-            known.insert(object, *highest);
-        }
-    }
+    let known = crate::tombstone::known_versions(collection)?;
     let remote = refreshed
         .remote
         .as_deref()
@@ -1737,6 +1732,29 @@ pub(in crate::ops::unearth) mod tests {
                 .committed_versions(id(other))
                 .expect("lists")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_pruned_object_is_not_pulled_back() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+        let mut tombstones = crate::tombstone::Tombstones::default();
+        tombstones.record(id(ID), 2);
+        tombstones
+            .write(&scenario.fx.collection, &scenario.fx.lock)
+            .expect("writes");
+
+        let refreshed = scenario.refresh(true).expect("refreshed");
+
+        assert!(
+            refreshed.pulled.is_empty(),
+            "{:?}",
+            refreshed
+                .pulled
+                .iter()
+                .map(|f| f.number)
+                .collect::<Vec<_>>()
         );
     }
 
