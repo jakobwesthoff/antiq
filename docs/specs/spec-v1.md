@@ -1051,7 +1051,9 @@ checks it would make. (ADR 0061)
   true with a warning that names what failed, exits 3, and the repairs of
   the next run finish it. No room for the version (the unpacked size of the
   listing against the free space of `.antiq/tmp/`) skips it before anything
-  is written: exit 3, `unearthed` false.
+  is written: exit 3, `unearthed` false. A volume that runs full during the
+  extraction skips the version the same way: the staging is removed, and
+  `needed` is the unpacked size of the listing.
 - `-n` prints a `Would unearth` line for the unearth and one indented
   `check` line per check. It makes the checks of the version, of the
   destination and of the free space. A tree that repair 4 would give back to
@@ -1067,6 +1069,16 @@ checks it would make. (ADR 0061)
   folder names the piece's path as given.
 - The top of the unearthed folder has the modification time of the last
   write of `.antiq-restored`, not the archived one.
+- On the console a run prints `Unearthed <piece> (version <version>)` on
+  stdout. The repairs that were done (`note: repaired: <repair>`) and the
+  warnings (`note: <warning>`) go to stderr. A skipped version prints
+  `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout
+  line, the sizes in decimal units. In `-n` the `Would skip` line reads
+  `Would skip <piece> (version <version>): <size> needed, <size> free`, and
+  the `check` lines read `the version <version> is sound`, `the destination
+  <path> is free`, `there is room for <size>`, `the member names fit the
+  volume (not run by -n)` and `the extracted tree equals the listing (not
+  run by -n)`; `Nothing to do.` stands for an empty plan.
 - On a terminal the version is named by its local time, with the UTC offset
   where another version of the piece renders alike; in a pipe it is named by
   its stamp.
@@ -1109,6 +1121,24 @@ never treat it as an unearth). Archived later, the copy becomes a new
 version (same path) or a new piece (new path); without edits that is an
 identical version, once due or at once with `archive <piece>`. `-n` names
 the version and the destination path. (ADR 0061)
+
+No room for the version (the unpacked size of the listing against the free
+space of `.antiq/tmp/`) skips it before anything is written, and so does a
+volume that runs full during the extraction: exit 3, `forked` false,
+`skipped.reason` `no_space`, and `needed` null where there is no usable
+listing to read the size from. A version without one is not measured
+beforehand.
+
+On the console a run prints `Forked <piece> (version <version>) to <path>`
+on stdout. The repairs that were done (`note: repaired: <repair>`) and the
+warnings (`note: <warning>`) go to stderr. A skipped version prints
+`Skipped <piece>: <size> needed, <size> free` on stderr and no stdout line,
+or `Skipped <piece>: out of space during the extraction, <size> free` where
+`needed` is null. In `-n` a line reads `Would fork <piece> (version
+<version>) to <path>` with one indented `check` line per check, or `Would
+skip <piece> (version <version>): <size> needed, <size> free`. The `check`
+lines read as those of `unearth`, with `the version <version> is damaged and
+is extracted with a warning` for a damaged version.
 
 ### forget
 
