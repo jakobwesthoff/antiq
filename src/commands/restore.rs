@@ -28,7 +28,7 @@ use crate::relpath::{Name, RelPath};
 use crate::select::Rules;
 use crate::tree::{EntryKind, TreeEntry};
 use crate::versions::VersionsError;
-use crate::versions::damage::{self, Check, Condition, Places};
+use crate::versions::damage::{self, Check, Condition, Damage, Places};
 use crate::versions::naming::{self, Candidate, Lookup};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
@@ -77,6 +77,15 @@ pub enum RestoreError {
         piece: String,
         stamp: String,
         reasons: Vec<String>,
+    },
+    #[error(
+        "version {stamp} of {piece} has several files in one slot ({}); remove the extra ones by hand, or `forget` the version",
+        files.join(", ")
+    )]
+    Doubled {
+        piece: String,
+        stamp: String,
+        files: Vec<String>,
     },
     #[error(
         "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
@@ -137,6 +146,30 @@ pub(crate) struct Chosen {
     pub listing: Listing,
 }
 
+/// A version picked to be extracted, sound or not. `unearth` takes only
+/// sound ones ([`Chosen`]); `fork` also takes a damaged one.
+#[derive(Debug)]
+pub(crate) struct Picked {
+    pub piece: RelPath,
+    pub stamp: Stamp,
+    pub version: StoreVersion,
+    /// The listing, when the version has one that reads to its end.
+    pub listing: Option<Listing>,
+    /// What is wrong with the version; empty for a sound one.
+    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
+    pub damage: Vec<String>,
+}
+
+/// Which versions a choice may return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    /// Sound versions only.
+    Sound,
+    /// Also a damaged version, unless it has a doubled slot.
+    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
+    Damaged,
+}
+
 /// Finds the piece `given` names in the store and the version of it to
 /// bring back, and refuses a version that cannot be: one without an
 /// archive, a damaged one, one of a newer format, and one whose top holds
@@ -149,6 +182,52 @@ pub(crate) fn choose_version(
     version: Option<&str>,
     zone: &TimeZone,
 ) -> Result<Chosen, RestoreError> {
+    let picked = pick(collection, places, cwd, given, version, zone, Policy::Sound)?;
+    Ok(Chosen {
+        piece: picked.piece,
+        stamp: picked.stamp,
+        version: picked.version,
+        listing: picked
+            .listing
+            .expect("a sound version has a listing that reads"),
+    })
+}
+
+/// Like [`choose_version`], but a damaged version is returned with its
+/// damage. Its listing is returned when it reads to its end. Refused are
+/// the versions that cannot be extracted at all: one without an archive,
+/// one of a newer format, one with two files in a slot, and one whose
+/// top holds a marker's name as anything but a file where the listing
+/// shows it.
+#[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
+pub(crate) fn choose_version_to_fork(
+    collection: &Collection,
+    places: &Places,
+    cwd: &Path,
+    given: &OsStr,
+    version: Option<&str>,
+    zone: &TimeZone,
+) -> Result<Picked, RestoreError> {
+    pick(
+        collection,
+        places,
+        cwd,
+        given,
+        version,
+        zone,
+        Policy::Damaged,
+    )
+}
+
+fn pick(
+    collection: &Collection,
+    places: &Places,
+    cwd: &Path,
+    given: &OsStr,
+    version: Option<&str>,
+    zone: &TimeZone,
+    policy: Policy,
+) -> Result<Picked, RestoreError> {
     if given.is_empty() {
         return Err(RestoreError::Usage("the piece is empty".to_string()));
     }
@@ -233,8 +312,8 @@ pub(crate) fn choose_version(
     }
 
     let inspection = damage::inspect(places, &piece, version, Check::Full)?;
-    match inspection.condition {
-        Condition::Sound => {}
+    let damage = match inspection.condition {
+        Condition::Sound => Vec::new(),
         Condition::Incomplete | Condition::BeingStored => {
             return Err(RestoreError::Incomplete {
                 piece: piece_text,
@@ -248,22 +327,86 @@ pub(crate) fn choose_version(
             });
         }
         Condition::Damaged(damages) => {
-            return Err(RestoreError::Damaged {
-                piece: piece_text,
-                stamp: stamp_text,
-                reasons: damages.iter().map(ToString::to_string).collect(),
-            });
+            if policy == Policy::Sound {
+                return Err(RestoreError::Damaged {
+                    piece: piece_text,
+                    stamp: stamp_text,
+                    reasons: damages.iter().map(ToString::to_string).collect(),
+                });
+            }
+            let doubled: Vec<String> = damages
+                .iter()
+                .filter_map(|damage| match damage {
+                    Damage::Doubled { files, .. } => Some(files),
+                    _ => None,
+                })
+                .flatten()
+                .map(|file| file.to_string_lossy().into_owned())
+                .collect();
+            if !doubled.is_empty() {
+                return Err(RestoreError::Doubled {
+                    piece: piece_text,
+                    stamp: stamp_text,
+                    files: doubled,
+                });
+            }
+            damages.iter().map(ToString::to_string).collect()
         }
+    };
+
+    // A version with a damaged listing has none to read. A sound one has
+    // it, or `inspect` would have said so.
+    let listing = match version.listings.first() {
+        Some(listing_name) => read_listing(
+            places,
+            &piece,
+            listing_name,
+            must_read_listing(policy, &damage),
+            &piece_text,
+            &stamp_text,
+        )?,
+        None => None,
+    };
+    if let Some(listing) = &listing
+        && let Some(name) = marker_not_a_file(&listing.entries)
+    {
+        return Err(RestoreError::MarkerNotAFile {
+            piece: piece_text,
+            stamp: stamp_text,
+            name,
+        });
     }
 
+    Ok(Picked {
+        piece,
+        stamp: version.stamp,
+        version: version.clone(),
+        listing,
+        damage,
+    })
+}
+
+/// Whether a listing that does not read ends the pick. It does for a
+/// version `inspect` found no damage in, as that version's listing read
+/// before.
+fn must_read_listing(policy: Policy, damage: &[String]) -> bool {
+    policy == Policy::Sound || damage.is_empty()
+}
+
+/// Reads the listing of a version. With `must_read` a listing that does not
+/// read is an error; without it the version goes on without a listing.
+fn read_listing(
+    places: &Places,
+    piece: &RelPath,
+    listing_name: &OsStr,
+    must_read: bool,
+    piece_text: &str,
+    stamp_text: &str,
+) -> Result<Option<Listing>, RestoreError> {
     let store_root = TreeRoot::open(places.pieces_dir).map_err(|source| RestoreError::Read {
         path: places.pieces_dir.display().to_string(),
         source,
     })?;
-    let listing_name = version
-        .listings
-        .first()
-        .expect("a sound version has a listing");
     let listing_path = piece.join(
         &Name::from_bytes(listing_name.as_encoded_bytes().to_vec())
             .expect("a scanned file name is a valid name"),
@@ -274,21 +417,17 @@ pub(crate) fn choose_version(
             path: listing_path.to_string(),
             source,
         })?;
-    let listing = listing::read_full(file)?;
-    if let Some(name) = marker_not_a_file(&listing.entries) {
-        return Err(RestoreError::MarkerNotAFile {
-            piece: piece_text,
-            stamp: stamp_text,
-            name,
-        });
+    match listing::read_full(file) {
+        Ok(listing) => Ok(Some(listing)),
+        // A newer listing next to other damage is classed as damaged; it is
+        // still one this antiq cannot read.
+        Err(ListingError::FormatTooNew { .. }) => Err(RestoreError::FormatTooNew {
+            piece: piece_text.to_string(),
+            stamp: stamp_text.to_string(),
+        }),
+        Err(error) if must_read => Err(error.into()),
+        Err(_) => Ok(None),
     }
-
-    Ok(Chosen {
-        piece,
-        stamp: version.stamp,
-        version: version.clone(),
-        listing,
-    })
 }
 
 /// The first entry at the top of the piece that has a marker's name and is
@@ -799,6 +938,8 @@ impl Hooks for RealHooks {}
 /// Why a version was not brought back although nothing is wrong with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Skipped {
+    /// `needed` is 0 when the version has no listing to read the size from
+    /// and the volume ran full during the extraction.
     NoSpace { needed: u64, available: u64 },
 }
 
@@ -856,16 +997,49 @@ fn summarize(mut differences: Vec<String>) -> Vec<String> {
     differences
 }
 
-/// Brings the chosen version back as a folder at the piece's own path:
-/// extracts it into staging below `.antiq/tmp/extract/`, compares the tree
-/// with the listing, writes `.antiq-restored`, makes the tree durable,
-/// renames it into place and flushes what the rename changed. The version
-/// is not touched. Whatever fails before the rename removes the staging
-/// and the folders above the destination that this run made.
-///
-/// A full volume anywhere before the rename ends in [`Brought::Skipped`]
-/// with nothing left behind. After the rename the folder is in place, and a
-/// failure from there on comes back in [`Brought::Done`] as `failure`.
+/// What `bring_back_to` extracts and what it checks the tree against.
+pub(crate) struct Source<'a> {
+    /// The piece the version belongs to: where its archive is stored.
+    pub piece: &'a RelPath,
+    pub version: &'a StoreVersion,
+    /// The listing, if the version has one that reads. Without it neither
+    /// the free space nor the extracted tree is checked.
+    pub listing: Option<&'a Listing>,
+    /// Whether the extracted tree is compared with the listing. A damaged
+    /// version is not: its listing may not describe its archive.
+    pub compare: bool,
+}
+
+impl<'a> Source<'a> {
+    pub(crate) fn sound(chosen: &'a Chosen) -> Source<'a> {
+        Source {
+            piece: &chosen.piece,
+            version: &chosen.version,
+            listing: Some(&chosen.listing),
+            compare: true,
+        }
+    }
+
+    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
+    pub(crate) fn picked(picked: &'a Picked) -> Source<'a> {
+        Source {
+            piece: &picked.piece,
+            version: &picked.version,
+            listing: picked.listing.as_ref(),
+            compare: picked.damage.is_empty(),
+        }
+    }
+}
+
+/// Where the folder goes and what `.antiq-restored` records.
+pub(crate) struct Placement<'a> {
+    pub destination: &'a RelPath,
+    /// The stamp of the version, for an unearth; none for a fork.
+    pub marker_version: Option<Stamp>,
+}
+
+/// Brings the chosen version back as a folder at the piece's own path;
+/// see [`bring_back_to`].
 pub(crate) fn bring_back(
     collection: &Collection,
     places: &Places,
@@ -875,16 +1049,50 @@ pub(crate) fn bring_back(
     now: Timestamp,
     hooks: &dyn Hooks,
 ) -> Result<Brought, RestoreError> {
+    bring_back_to(
+        collection,
+        places,
+        rules,
+        &Source::sound(chosen),
+        &Placement {
+            destination: &chosen.piece,
+            marker_version,
+        },
+        now,
+        hooks,
+    )
+}
+
+/// Extracts the version into staging below `.antiq/tmp/extract/`, compares
+/// the tree with the listing, writes `.antiq-restored`, makes the tree
+/// durable, renames it into place and flushes what the rename changed. The
+/// version is not touched. Whatever fails before the rename removes the
+/// staging and the folders above the destination that this run made.
+///
+/// A full volume anywhere before the rename ends in [`Brought::Skipped`]
+/// with nothing left behind. After the rename the folder is in place, and a
+/// failure from there on comes back in [`Brought::Done`] as `failure`.
+pub(crate) fn bring_back_to(
+    collection: &Collection,
+    places: &Places,
+    rules: &Rules,
+    source: &Source,
+    placement: &Placement,
+    now: Timestamp,
+    hooks: &dyn Hooks,
+) -> Result<Brought, RestoreError> {
     let root =
         TreeRoot::open(collection.root()).map_err(io_at("open", collection.root().display()))?;
-    let needed = chosen.listing.bytes;
     let tmp = collection.tmp_dir();
-    let available = hooks.available_space(&tmp)?;
-    if available < needed {
-        return Ok(Brought::Skipped {
-            reason: Skipped::NoSpace { needed, available },
-            warnings: Vec::new(),
-        });
+    if let Some(listing) = source.listing {
+        let needed = listing.bytes;
+        let available = hooks.available_space(&tmp)?;
+        if available < needed {
+            return Ok(Brought::Skipped {
+                reason: Skipped::NoSpace { needed, available },
+                warnings: Vec::new(),
+            });
+        }
     }
     hooks.reached(Step::SpaceChecked)?;
 
@@ -894,8 +1102,8 @@ pub(crate) fn bring_back(
         collection,
         places,
         rules,
-        chosen,
-        marker_version,
+        source,
+        placement,
         time,
         hooks,
         &root,
@@ -917,7 +1125,7 @@ pub(crate) fn bring_back(
             if space::is_out_of_space(&error) {
                 Ok(Brought::Skipped {
                     reason: Skipped::NoSpace {
-                        needed,
+                        needed: source.listing.map_or(0, |listing| listing.bytes),
                         available: hooks.available_space(&tmp).unwrap_or(0),
                     },
                     warnings: placed.warnings,
@@ -963,14 +1171,14 @@ fn place(
     collection: &Collection,
     places: &Places,
     rules: &Rules,
-    chosen: &Chosen,
-    marker_version: Option<Stamp>,
+    source: &Source,
+    placement: &Placement,
     time: Timestamp,
     hooks: &dyn Hooks,
     root: &TreeRoot,
     placed: &mut Placed,
 ) -> Result<(), RestoreError> {
-    let target = &chosen.piece;
+    let target = placement.destination;
     let extract = RelPath::parse(EXTRACT).expect("a valid path");
     create_dir_chain(hooks.durable(), root, &extract)?;
     let staged = make_staging(root, &extract)?;
@@ -989,44 +1197,57 @@ fn place(
     check_same_volume(root, hooks, &extract, target, &missing)?;
     check_destination_names(target, &missing, &volume)?;
 
-    let archive_name = chosen
+    let archive_name = source
         .version
         .archives
         .first()
         .expect("a sound version has an archive");
     let archive = places
         .pieces_dir
-        .join(OsStr::from_bytes(target.as_bytes()))
+        .join(OsStr::from_bytes(source.piece.as_bytes()))
         .join(archive_name);
     let flush = TreeFlush::begin_with(&collection.tmp_dir().join("extract"), hooks.platform())
         .map_err(io_at("start the flush in", &extract))?;
     let unpacked = unpack_flushed(&archive, &staging, &volume, &flush)?;
     hooks.reached(Step::Extracted)?;
 
-    let compared = compare_with_listing(
-        &chosen.listing.entries,
-        &staging,
-        &WalkRules {
-            staged: true,
-            ..WalkRules::default()
-        },
-    )?;
-    if !compared.differences().is_empty() {
-        return Err(RestoreError::Differs {
-            differences: summarize(
-                compared
-                    .differences()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-            ),
+    if let Some(listing) = source.listing
+        && source.compare
+    {
+        let compared = compare_with_listing(
+            &listing.entries,
+            &staging,
+            &WalkRules {
+                staged: true,
+                ..WalkRules::default()
+            },
+        )?;
+        if !compared.differences().is_empty() {
+            return Err(RestoreError::Differs {
+                differences: summarize(
+                    compared
+                        .differences()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+            });
+        }
+    }
+    if !source.compare
+        && let Some(name) = marker_in_tree_not_a_file(root, &staged)?
+    {
+        return Err(RestoreError::MarkerNotAFile {
+            piece: source.piece.to_string(),
+            stamp: source.version.stamp.to_string(),
+            name,
         });
     }
     hooks.reached(Step::Verified)?;
 
     let marker = Restored {
         time,
-        version: marker_version,
+        version: placement.marker_version,
     };
     markers::put(
         root,
@@ -1071,6 +1292,30 @@ fn place(
     flush_dir_of(hooks.durable(), root, &parent)?;
     hooks.reached(Step::ParentFlushed)?;
     Ok(())
+}
+
+/// The first marker name at the top of the extracted tree that is not what
+/// that marker is, as [`marker_not_a_file`] judges the listing. A tree that
+/// is not compared with a listing is judged by what was extracted.
+fn marker_in_tree_not_a_file(
+    root: &TreeRoot,
+    staged: &RelPath,
+) -> Result<Option<String>, RestoreError> {
+    for name in [RESTORED_FILE, PIN_FILE] {
+        let at = staged.join(&Name::from_bytes(name.into()).expect("a marker name is a name"));
+        let Some(found) = look_at(root, &at)? else {
+            continue;
+        };
+        let fits = match found.kind {
+            EntryKind::File => true,
+            EntryKind::Symlink => name == PIN_FILE,
+            _ => false,
+        };
+        if !fits {
+            return Ok(Some(name.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Makes the first unused numbered folder below `extract`.
@@ -2121,8 +2366,10 @@ mod destination_tests {
 mod bring_tests {
     use super::*;
     use crate::archive::names::{LengthUnit, NameLimit};
+    use crate::testing::package::{RawMember, compress, raw_tar};
     use crate::testing::tree::{TempCollection, Tree, snapshot};
-    use crate::testing::versions::Store;
+    use crate::testing::versions::{Store, StoredVersion};
+    use crate::versions::names::VersionFile;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -2399,16 +2646,21 @@ mod bring_tests {
 
     impl World {
         fn new() -> World {
+            World::new_with_version().0
+        }
+
+        fn new_with_version() -> (World, StoredVersion) {
             let source = piece_source();
             let mut store = Store::new();
-            store.add_version(&source, "projects/scanner", STAMP);
-            World {
+            let version = store.add_version(&source, "projects/scanner", STAMP);
+            let world = World {
                 collection: TempCollection::minimal(),
                 store,
                 source,
                 rules: Rules::new(&["projects/*".to_string()], &[]).expect("rules"),
                 now: "2026-11-05T10:00:00.7Z".parse().expect("a time"),
-            }
+            };
+            (world, version)
         }
 
         fn root(&self) -> &Path {
@@ -3100,5 +3352,479 @@ mod bring_tests {
             world.extract_dir().join("1").is_dir(),
             "an old folder stays"
         );
+    }
+
+    // ----- bringing a version back somewhere else, or without its listing
+
+    impl World {
+        fn chosen(&self) -> Chosen {
+            let collection = Collection::find(self.root()).expect("collection");
+            choose_version(
+                &collection,
+                &self.store.places(),
+                self.root(),
+                OsStr::new("projects/scanner"),
+                None,
+                &TimeZone::UTC,
+            )
+            .expect("the version is chosen")
+        }
+
+        fn run_source(
+            &self,
+            source: &Source,
+            destination: &str,
+            hooks: &dyn Hooks,
+        ) -> Result<Brought, RestoreError> {
+            let collection = Collection::find(self.root()).expect("collection");
+            let rules = self
+                .rules
+                .clone()
+                .bind(&TreeRoot::open(self.root()).expect("root"))
+                .expect("bound");
+            let destination = rel(destination);
+            bring_back_to(
+                &collection,
+                &self.store.places(),
+                &rules,
+                source,
+                &Placement {
+                    destination: &destination,
+                    marker_version: None,
+                },
+                self.now,
+                hooks,
+            )
+        }
+    }
+
+    #[test]
+    fn a_version_comes_back_at_another_path_and_the_store_keeps_it() {
+        let world = World::new();
+        let chosen = world.chosen();
+        done(world.run_source(&Source::sound(&chosen), "projects/copy", &world.spy()));
+        let mut expected = snapshot(&world.source.path("projects/scanner"));
+        let mut found = snapshot(&world.root().join("projects/copy"));
+        assert!(found.remove(".antiq-restored").is_some());
+        expected.remove(".antiq-restored");
+        assert_eq!(found, expected);
+        assert!(
+            !world.destination().exists(),
+            "the original path stays free"
+        );
+        assert!(
+            world
+                .store
+                .scan()
+                .pieces
+                .iter()
+                .any(|piece| !piece.versions.is_empty()),
+            "the version is still in the store"
+        );
+        let text = fs::read_to_string(world.root().join("projects/copy/.antiq-restored"))
+            .expect("the marker");
+        assert!(
+            text.starts_with("restored ") && !text.contains("version"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_folders_above_another_path_are_made() {
+        let mut world = World::new();
+        world.rules = Rules::new(&["projects/*/*".to_string()], &[]).expect("rules");
+        let chosen = world.chosen();
+        done(world.run_source(&Source::sound(&chosen), "projects/a/copy", &world.spy()));
+        assert!(world.root().join("projects/a/copy/main.rs").is_file());
+    }
+
+    #[test]
+    fn a_destination_that_is_taken_is_refused_whatever_the_piece_is() {
+        let world = World::new();
+        fs::create_dir_all(world.root().join("projects/copy")).expect("takes the place");
+        let chosen = world.chosen();
+        let error = world
+            .run_source(&Source::sound(&chosen), "projects/copy", &world.spy())
+            .expect_err("taken");
+        let RestoreError::Target { path, problem } = error else {
+            panic!("expected a target problem");
+        };
+        assert_eq!(path.to_string(), "projects/copy");
+        assert_eq!(problem, TargetProblem::Taken);
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
+    }
+
+    fn without_listing(chosen: &Chosen) -> Source<'_> {
+        Source {
+            piece: &chosen.piece,
+            version: &chosen.version,
+            listing: None,
+            compare: false,
+        }
+    }
+
+    #[test]
+    fn without_a_listing_no_room_is_asked_for_and_the_tree_is_not_compared() {
+        let world = World::new();
+        let chosen = world.chosen();
+        let mut spy = world.spy();
+        spy.space = Some(0);
+        done(world.run_source(&without_listing(&chosen), "projects/copy", &spy));
+        assert!(world.root().join("projects/copy/main.rs").is_file());
+        assert!(
+            spy.entries().contains(&"SpaceChecked".to_string()),
+            "{:?}",
+            spy.entries()
+        );
+    }
+
+    #[test]
+    fn a_full_volume_without_a_listing_skips_and_says_no_size_is_needed() {
+        let world = World::new();
+        let chosen = world.chosen();
+        let mut spy = world.spy().fault(|kind, _| (kind == "file").then(enospc));
+        spy.mode = Mode::PerItem;
+        let Skipped::NoSpace { needed, .. } =
+            skipped(world.run_source(&without_listing(&chosen), "projects/copy", &spy));
+        assert_eq!(needed, 0);
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
+        assert!(!world.root().join("projects").exists());
+    }
+
+    /// A listing that names a file the archive does not hold.
+    fn wrong_listing(chosen: &Chosen) -> Listing {
+        let mut listing = chosen.listing.clone();
+        listing.entries[0].path = rel("elsewhere.rs");
+        listing
+    }
+
+    #[test]
+    fn a_damaged_version_is_not_compared_with_its_listing_but_a_sound_one_is() {
+        let world = World::new();
+        let chosen = world.chosen();
+        let listing = wrong_listing(&chosen);
+        let source = |compare| Source {
+            piece: &chosen.piece,
+            version: &chosen.version,
+            listing: Some(&listing),
+            compare,
+        };
+        let error = world
+            .run_source(&source(true), "projects/copy", &world.spy())
+            .expect_err("a sound version must equal its listing");
+        assert!(matches!(error, RestoreError::Differs { .. }), "{error:?}");
+        done(world.run_source(&source(false), "projects/copy", &world.spy()));
+        assert!(world.root().join("projects/copy/main.rs").is_file());
+    }
+
+    /// A damaged version without a listing, whose archive holds `main.rs`
+    /// and `members` at its top. `pack` refuses a marker's name that is not
+    /// a file, so the archive is written by hand.
+    fn broken_with_top(members: Vec<RawMember<'_>>) -> (World, Picked) {
+        let (world, version) = World::new_with_version();
+        let mut all = vec![
+            RawMember::dir(b"scanner/"),
+            RawMember::file(b"scanner/main.rs", b"fn main() {}"),
+        ];
+        all.extend(members);
+        version.overwrite(VersionFile::Archive, &compress(&raw_tar(&all)));
+        version.overwrite(VersionFile::Listing, b"not a zstd stream");
+        let collection = Collection::find(world.root()).expect("collection");
+        let picked = choose_version_to_fork(
+            &collection,
+            &world.store.places(),
+            world.root(),
+            OsStr::new("projects/scanner"),
+            None,
+            &TimeZone::UTC,
+        )
+        .expect("a damaged version is picked");
+        assert!(picked.listing.is_none() && !picked.damage.is_empty());
+        (world, picked)
+    }
+
+    fn marker_name_refused(name: &str, members: Vec<RawMember<'_>>) {
+        let (world, picked) = broken_with_top(members);
+        let error = world
+            .run_source(&Source::picked(&picked), "projects/copy", &world.spy())
+            .expect_err("the marker name is refused");
+        match error {
+            RestoreError::MarkerNotAFile { name: found, .. } => assert_eq!(found, name),
+            other => panic!("expected MarkerNotAFile, got {other:?}"),
+        }
+        assert!(!world.extract_dir().exists(), "extract/ is gone");
+        assert!(!world.root().join("projects/copy").exists());
+    }
+
+    #[test]
+    fn an_unchecked_tree_with_a_restored_marker_name_as_a_folder_is_refused() {
+        marker_name_refused(
+            ".antiq-restored",
+            vec![RawMember::dir(b"scanner/.antiq-restored/")],
+        );
+    }
+
+    #[test]
+    fn an_unchecked_tree_with_a_restored_marker_name_as_a_symlink_is_refused() {
+        marker_name_refused(
+            ".antiq-restored",
+            vec![RawMember::link(
+                b"scanner/.antiq-restored",
+                b'2',
+                b"main.rs",
+            )],
+        );
+    }
+
+    #[test]
+    fn an_unchecked_tree_with_a_pin_name_as_a_folder_is_refused() {
+        marker_name_refused(".antiq-pin", vec![RawMember::dir(b"scanner/.antiq-pin/")]);
+    }
+
+    #[test]
+    fn an_unchecked_tree_with_a_pin_file_or_symlink_comes_back() {
+        for member in [
+            RawMember::file(b"scanner/.antiq-pin", b""),
+            RawMember::link(b"scanner/.antiq-pin", b'2', b"main.rs"),
+        ] {
+            let (world, picked) = broken_with_top(vec![member]);
+            done(world.run_source(&Source::picked(&picked), "projects/copy", &world.spy()));
+            assert!(world.root().join("projects/copy/main.rs").is_file());
+        }
+    }
+
+    #[test]
+    fn a_damaged_version_with_a_listing_still_needs_room_for_its_bytes() {
+        let world = World::new();
+        let chosen = world.chosen();
+        let mut spy = world.spy();
+        spy.space = Some(5);
+        let source = Source {
+            compare: false,
+            ..Source::sound(&chosen)
+        };
+        let Skipped::NoSpace { needed, available } =
+            skipped(world.run_source(&source, "projects/copy", &spy));
+        assert!(needed > 5);
+        assert_eq!(available, 5);
+        assert!(!spy.entries().contains(&"StagingMade".to_string()));
+        assert!(!world.root().join("projects").exists());
+    }
+}
+
+#[cfg(test)]
+mod fork_choice_tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::testing::tree::{TempCollection, Tree};
+    use crate::testing::versions::{Store, StoredVersion};
+    use crate::versions::names::VersionFile;
+
+    const NEW: &str = "2026-11-04T090211";
+
+    struct World {
+        collection: TempCollection,
+        store: Store,
+    }
+
+    impl World {
+        fn with(source: &Tree) -> (World, StoredVersion) {
+            let mut store = Store::new();
+            let version = store.add_version(source, "projects/scanner", NEW);
+            let world = World {
+                collection: TempCollection::minimal(),
+                store,
+            };
+            (world, version)
+        }
+
+        fn scanner() -> (World, StoredVersion) {
+            let mut source = Tree::new();
+            source.file("projects/scanner/main.rs", "fn main() {}");
+            World::with(&source)
+        }
+
+        fn picks(&self) -> Result<Picked, RestoreError> {
+            let collection =
+                Collection::find(self.collection.root()).expect("the collection is found");
+            choose_version_to_fork(
+                &collection,
+                &self.store.places(),
+                self.collection.root(),
+                OsStr::new("projects/scanner"),
+                None,
+                &TimeZone::UTC,
+            )
+        }
+    }
+
+    #[test]
+    fn a_sound_version_is_picked_with_its_listing_and_no_damage() {
+        let (world, _) = World::scanner();
+        let picked = world.picks().expect("picked");
+        assert!(picked.damage.is_empty(), "{:?}", picked.damage);
+        assert_eq!(picked.listing.expect("a listing").entries.len(), 1);
+    }
+
+    #[test]
+    fn a_damaged_checksum_file_is_picked_with_the_damage_and_the_listing() {
+        let (world, version) = World::scanner();
+        version.overwrite(VersionFile::Checksum, b"not a checksum line");
+        let picked = world.picks().expect("a damaged version is picked");
+        assert_eq!(picked.damage.len(), 1, "{:?}", picked.damage);
+        assert!(
+            picked.damage[0].contains("checksum file"),
+            "{:?}",
+            picked.damage
+        );
+        assert!(picked.listing.is_some());
+    }
+
+    #[test]
+    fn a_missing_listing_is_picked_without_a_listing() {
+        let (world, version) = World::scanner();
+        version.remove(VersionFile::Listing);
+        let picked = world.picks().expect("a damaged version is picked");
+        assert!(picked.listing.is_none());
+        assert!(
+            picked
+                .damage
+                .iter()
+                .any(|d| d.contains("listing is missing")),
+            "{:?}",
+            picked.damage
+        );
+    }
+
+    #[test]
+    fn a_listing_that_does_not_read_to_its_end_is_picked_without_a_listing() {
+        let (world, version) = World::scanner();
+        version.cut_listing();
+        let picked = world.picks().expect("a damaged version is picked");
+        assert!(picked.listing.is_none());
+        assert!(
+            picked
+                .damage
+                .iter()
+                .any(|d| d.contains("listing is damaged")),
+            "{:?}",
+            picked.damage
+        );
+    }
+
+    #[test]
+    fn a_newer_listing_next_to_other_damage_is_still_refused_as_too_new() {
+        let (world, version) = World::scanner();
+        version.edit_listing(|text| text.replacen("# antiq listing 1", "# antiq listing 2", 1));
+        version.remove(VersionFile::Checksum);
+        let error = world.picks().expect_err("a newer format is refused");
+        assert!(
+            matches!(error, RestoreError::FormatTooNew { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            Error::from(crate::commands::unearth::UnearthError::from(error)).kind(),
+            ErrorKind::FormatTooNew
+        );
+    }
+
+    #[test]
+    fn a_doubled_slot_is_refused_naming_the_files_and_not_suggesting_fork() {
+        let (world, version) = World::scanner();
+        let twin = version.add_twin(VersionFile::Archive, "other");
+        let error = world.picks().expect_err("a doubled slot is refused");
+        assert!(matches!(error, RestoreError::Doubled { .. }), "{error:?}");
+        let text = error.to_string();
+        let twin = twin
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(text.contains(&twin), "{text}");
+        assert!(
+            text.contains("by hand") && text.contains("`forget`"),
+            "{text}"
+        );
+        assert!(!text.contains("`fork`"), "{text}");
+    }
+
+    #[test]
+    fn a_version_without_an_archive_is_refused() {
+        let (world, version) = World::scanner();
+        version.remove(VersionFile::Archive);
+        let error = world.picks().expect_err("an incomplete version is refused");
+        assert!(
+            matches!(error, RestoreError::OnlyIncomplete { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_marker_name_that_is_a_folder_is_refused_when_the_listing_shows_it() {
+        let mut source = Tree::new();
+        source.file("projects/scanner/src/main.rs", "fn main() {}");
+        let (world, version) = World::with(&source);
+        // The head's counts stay as they are: directories count for neither.
+        version.edit_listing(|text| text.replacen("  src/", "  .antiq-pin/", 1));
+        version.overwrite(VersionFile::Checksum, b"not a checksum line");
+        let error = world.picks().expect_err("the marker name is refused");
+        assert!(
+            matches!(error, RestoreError::MarkerNotAFile { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_plain_choice_still_refuses_a_damaged_version() {
+        let (world, version) = World::scanner();
+        version.overwrite(VersionFile::Checksum, b"not a checksum line");
+        let collection = Collection::find(world.collection.root()).expect("the collection");
+        let error = choose_version(
+            &collection,
+            &world.store.places(),
+            world.collection.root(),
+            OsStr::new("projects/scanner"),
+            None,
+            &TimeZone::UTC,
+        )
+        .expect_err("refused");
+        assert!(matches!(error, RestoreError::Damaged { .. }), "{error:?}");
+    }
+
+    fn unreadable_listing(
+        world: &World,
+        version: &StoredVersion,
+        must_read: bool,
+    ) -> Result<Option<Listing>, RestoreError> {
+        version.overwrite(VersionFile::Listing, b"not a zstd stream");
+        read_listing(
+            &world.store.places(),
+            &version.piece,
+            OsStr::new(version.names.of(VersionFile::Listing)),
+            must_read,
+            "projects/scanner",
+            NEW,
+        )
+    }
+
+    #[test]
+    fn a_listing_that_does_not_read_is_an_error_when_it_must() {
+        let (world, version) = World::scanner();
+        let error = unreadable_listing(&world, &version, true).expect_err("must read");
+        assert!(matches!(error, RestoreError::Listing(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_listing_that_does_not_read_is_none_when_it_need_not() {
+        let (world, version) = World::scanner();
+        let listing = unreadable_listing(&world, &version, false).expect("goes on");
+        assert!(listing.is_none());
+    }
+
+    #[test]
+    fn a_listing_must_read_for_the_plain_choice_and_for_a_version_without_damage() {
+        assert!(must_read_listing(Policy::Sound, &["damage".to_string()]));
+        assert!(must_read_listing(Policy::Damaged, &[]));
+        assert!(!must_read_listing(Policy::Damaged, &["damage".to_string()]));
     }
 }
