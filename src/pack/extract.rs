@@ -108,10 +108,7 @@ impl fmt::Display for Refusal {
                 f,
                 "it lies more than {MAX_DEPTH} levels below the top-level directory"
             ),
-            Refusal::OversizedRecord => write!(
-                f,
-                "a record that describes it is larger than {MAX_RECORD} bytes"
-            ),
+            Refusal::OversizedRecord => write!(f, "it is larger than {MAX_RECORD} bytes"),
             Refusal::PaxSizeMismatch => {
                 f.write_str("a pax size record disagrees with the size in its header")
             }
@@ -181,7 +178,7 @@ fn locate(
             let below = &full.as_bytes()[top.len()..];
             if below.is_empty() {
                 // The container again.
-                return Err(Refusal::InvalidPath);
+                return Err(Refusal::Duplicate);
             }
             RelPath::from_bytes(below[1..].to_vec()).map_err(|_| Refusal::InvalidPath)
         }
@@ -461,10 +458,7 @@ impl<'a> Extraction<'a> {
     /// first: a directory's time changes whenever an entry is created in
     /// it, and its mode may keep the owner from entering it.
     fn finish(mut self) -> Result<Unpacked, PackError> {
-        let (top_mode, top_mtime) = self.top.ok_or_else(|| PackError::Refused {
-            member: String::new(),
-            refusal: Refusal::NoContainer,
-        })?;
+        let (top_mode, top_mtime) = self.top.ok_or(PackError::NoMembers)?;
         self.directories.sort_by(|a, b| b.path.cmp(&a.path));
         for record in &self.directories {
             let at = failed_at(&record.path);
@@ -574,6 +568,8 @@ fn scan(package: &Path) -> Result<(), PackError> {
     // The size a pax record set for the next member; `Some(None)` when
     // the record's value is not a number.
     let mut pending: Option<Option<u64>> = None;
+    // Members seen so far, the container included.
+    let mut members = 0;
     for entry in archive.entries().map_err(PackError::Archive)?.raw(true) {
         let mut entry = entry.map_err(PackError::Archive)?;
         let entry_type = entry.header().entry_type();
@@ -585,7 +581,15 @@ fn scan(package: &Path) -> Result<(), PackError> {
         let is_pax = entry_type.is_pax_local_extensions();
         if entry_type.is_gnu_longname() || entry_type.is_gnu_longlink() || is_pax {
             if entry.size() > MAX_RECORD {
-                return Err(refuse(Refusal::OversizedRecord));
+                // The record has no name of its own worth showing; the
+                // member it describes is the one that follows.
+                return Err(PackError::Refused {
+                    member: format!(
+                        "a long-name, long-link or pax record before member {}",
+                        members + 1
+                    ),
+                    refusal: Refusal::OversizedRecord,
+                });
             }
             if is_pax {
                 pending = pax_size(&mut entry)
@@ -602,6 +606,7 @@ fn scan(package: &Path) -> Result<(), PackError> {
         {
             return Err(refuse(Refusal::PaxSizeMismatch));
         }
+        members += 1;
     }
     drain(archive)
 }
@@ -624,6 +629,9 @@ fn gather(package: &Path) -> Result<Vec<RelPath>, PackError> {
         }
     }
     drain(archive)?;
+    if container.is_none() {
+        return Err(PackError::NoMembers);
+    }
     Ok(paths)
 }
 
@@ -1233,7 +1241,7 @@ mod tests {
         archive
             .dir("proj/", 0o755, 1_000_000_000)
             .dir("proj/", 0o755, 1_000_000_000);
-        assert_eq!(refusal_of(&archive), Refusal::InvalidPath);
+        assert_eq!(refusal_of(&archive), Refusal::Duplicate);
     }
 
     #[test]
@@ -1248,8 +1256,28 @@ mod tests {
     }
 
     #[test]
-    fn an_archive_without_members_is_refused() {
-        assert_eq!(refusal_of(&RawArchive::new()), Refusal::NoContainer);
+    fn an_archive_without_members_is_refused_before_anything_is_written() {
+        let sandbox = sandbox();
+        let error = unpack_bytes(&RawArchive::new().finish(), &sandbox.staging)
+            .expect_err("there is nothing to extract");
+        assert!(matches!(error, PackError::NoMembers), "{error:?}");
+        assert_eq!(error.to_string(), "the package holds no members");
+    }
+
+    #[test]
+    fn a_refused_record_is_named_by_the_member_it_precedes() {
+        let mut archive = container();
+        archive
+            .record(b'L', &vec![b'a'; 70_000])
+            .file("proj/ok", 0o644, 1_000_000_000, b"x");
+        let (_dir, staged) = staging();
+        let error = unpack_bytes(&archive.finish(), &staged).expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "the package holds a member that cannot be extracted: \
+             `a long-name, long-link or pax record before member 2`: \
+             it is larger than 65536 bytes"
+        );
     }
 
     #[test]
@@ -1335,7 +1363,7 @@ mod tests {
                 "its symlink target is missing, empty or holds a NUL byte",
                 "its mode field is not valid",
                 "it lies more than 512 levels below the top-level directory",
-                "a record that describes it is larger than 65536 bytes",
+                "it is larger than 65536 bytes",
                 "a pax size record disagrees with the size in its header",
             ]
         );

@@ -873,7 +873,8 @@ judged by the names the archive carries, including those of GNU long-name
 and pax records, and by their exact bytes, so `a/x` is not placed in a
 directory `A`. Long-name, long-link and pax records above 64 KiB, sparse
 members, and a pax `size` that differs from the member's header size are
-refused as well. The package is decompressed three times: once for the
+refused as well, and so is a package without members. The package is
+decompressed three times: once for the
 records, once for the members and once to extract. (ADR 0050)
 
 ### Verifying

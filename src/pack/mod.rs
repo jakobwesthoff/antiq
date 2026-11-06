@@ -316,6 +316,8 @@ pub enum PackError {
     Differs(Vec<verify::Difference>),
     #[error("cannot read the package")]
     Archive(#[source] std::io::Error),
+    #[error("the package holds no members")]
+    NoMembers,
     #[error("the package holds a member that cannot be extracted: `{member}`: {refusal}")]
     Refused {
         /// The member's path as the archive spells it, in escaped form.
