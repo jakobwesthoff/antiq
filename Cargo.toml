@@ -17,6 +17,7 @@ glob = "0.3.4"
 ignore = "0.4.34"
 jiff = { version = "0.2.39", features = ["serde"] }
 libc = "0.2.191"
+miette = { version = "7.6.0", default-features = false, features = ["derive"] }
 nucleo = "0.5.0"
 regex = "1.13.1"
 rustix = { version = "1.1.6", features = ["fs", "process", "system", "termios"] }

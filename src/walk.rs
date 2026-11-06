@@ -15,7 +15,7 @@ use rustix::io::Errno;
 use std::io::{self, Read};
 
 /// Errors of the piece walk.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum WalkError {
     #[error("out of file descriptors while reading {path} in {piece}")]
     OutOfDescriptors {

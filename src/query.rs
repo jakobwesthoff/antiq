@@ -9,7 +9,7 @@ use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32String};
 
 /// Why a query failed. Nothing in it can fail yet.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum QueryError {}
 
 impl HasKind for QueryError {}

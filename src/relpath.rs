@@ -258,7 +258,7 @@ fn shown(path: &Path) -> String {
 }
 
 /// Errors of paths and names.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RelPathError {
     #[error("`{0}` has an incomplete `%` escape")]
     BadEscape(String),

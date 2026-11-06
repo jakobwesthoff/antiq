@@ -16,7 +16,7 @@ mod usage;
 
 use self::console::block::Block;
 use self::console::rich::Rich;
-use self::output::Output;
+use self::output::{ErrorReport, Output};
 use antiq::error::ErrorKind;
 use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -261,9 +261,13 @@ fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> 
     let _ = if cli.json {
         out.json_error(
             Some("forget"),
-            ErrorKind::Usage,
-            "the following required arguments were not provided: --force",
-            &Map::new(),
+            &ErrorReport {
+                kind: ErrorKind::Usage,
+                code: None,
+                message: "the following required arguments were not provided: --force",
+                fix: None,
+                details: &Map::new(),
+            },
         )
     } else {
         let confirm = unresolved::forget_confirmation(cli);
@@ -370,7 +374,23 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     };
     // When the output itself fails there is nowhere left to report that.
     let _ = if cli.json {
-        out.json_error(Some(cli.command.name()), kind, &description.root, &details)
+        let explained = description
+            .library_error
+            .and_then(|error| antiq::error::explanation(error));
+        out.json_error(
+            Some(cli.command.name()),
+            &ErrorReport {
+                kind,
+                code: explained
+                    .and_then(|link| link.code())
+                    .map(|code| code.to_string()),
+                message: &description.root,
+                fix: explained
+                    .and_then(|link| link.help())
+                    .map(|help| help.to_string()),
+                details: &details,
+            },
+        )
     } else if let Some(parts) = out
         .stderr_env()
         .rich
@@ -407,7 +427,16 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     }
     let message = first_paragraph(&error.render().to_string());
     let command = guess_command(args);
-    let _ = out.json_error(command.as_deref(), ErrorKind::Usage, &message, &Map::new());
+    let _ = out.json_error(
+        command.as_deref(),
+        &ErrorReport {
+            kind: ErrorKind::Usage,
+            code: None,
+            message: &message,
+            fix: None,
+            details: &Map::new(),
+        },
+    );
     code
 }
 
@@ -580,10 +609,37 @@ mod tests {
         assert_eq!(code, 1);
         assert!(
             stdout.ends_with(
-                "\"error\":{\"kind\":\"lock_held\",\
+                "\"error\":{\"kind\":\"lock_held\",\"code\":\"antiq::lock::held\",\
                  \"message\":\"another run holds the lock (pid 4242, started 2026-11-03T10:00:00Z)\",\
                  \"pid\":4242,\"started\":\"2026-11-03T10:00:00Z\"}}\n"
             ),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn the_json_error_of_a_wrapped_error_carries_the_code_of_its_explanation() {
+        let cli = parse(&["--json", "push"]);
+        let wrapped: anyhow::Error = antiq::Error::from(antiq::commands::push::PushError::Run(
+            antiq::run::RunError::Lock(LockError::HeldUnknown),
+        ))
+        .into();
+        let (_, stdout, _) = finish_captured(&cli, Err(wrapped));
+        assert!(
+            stdout.contains(
+                "\"kind\":\"lock_held\",\"code\":\"antiq::lock::held_unknown\",\"message\""
+            ),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn a_json_error_without_a_code_leaves_the_key_out() {
+        let cli = parse(&["--json", "status"]);
+        let error: anyhow::Error = antiq::Error::Usage("bad".into()).into();
+        let (_, stdout, _) = finish_captured(&cli, Err(error));
+        assert!(
+            stdout.ends_with("\"error\":{\"kind\":\"usage\",\"message\":\"bad\"}}\n"),
             "{stdout}"
         );
     }
@@ -629,6 +685,7 @@ mod tests {
         assert!(
             stdout.ends_with(
                 "\"error\":{\"kind\":\"ambiguous_reference\",\
+                 \"code\":\"antiq::reference::ambiguous\",\
                  \"message\":\"cannot find the piece: `scan` matches 2 pieces\",\
                  \"candidates\":[{\"path\":\"projects/scanner\"},{\"path\":\"tools/scan-old\"}]}}\n"
             ),

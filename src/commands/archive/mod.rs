@@ -718,12 +718,20 @@ pub(crate) fn stored_spelling_of(
 
 /// Why archiving a piece failed. Each variant names the step and the
 /// place, and carries the cause as its source.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ArchiveError {
     #[error("cannot start the run")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot resolve the piece")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     #[error("the piece to archive is empty")]
     EmptyReference,
     #[error("cannot open the collection {path}")]
@@ -733,11 +741,23 @@ pub enum ArchiveError {
         source: std::io::Error,
     },
     #[error("cannot select the pieces")]
-    Select(#[from] SelectError),
+    Select(
+        #[from]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot read the ignore and timeless rules")]
-    Rules(#[from] RulesError),
+    Rules(
+        #[from]
+        #[diagnostic_source]
+        RulesError,
+    ),
     #[error("cannot size the pool of workers")]
-    Pool(#[source] SysmemError),
+    Pool(
+        #[source]
+        #[diagnostic_source]
+        SysmemError,
+    ),
     #[error("cannot open {path}")]
     OpenStore {
         path: String,
@@ -748,12 +768,14 @@ pub enum ArchiveError {
     Spelling {
         piece: String,
         #[source]
+        #[diagnostic_source]
         source: ReferenceError,
     },
     #[error("cannot walk {piece}")]
     Walk {
         piece: String,
         #[source]
+        #[diagnostic_source]
         source: WalkError,
     },
     #[error("{piece} needs {needed} bytes in .antiq/ and {available} are free")]
@@ -763,7 +785,11 @@ pub enum ArchiveError {
         available: u64,
     },
     #[error("cannot read the free space of .antiq/")]
-    Space(#[source] FilesystemError),
+    Space(
+        #[source]
+        #[diagnostic_source]
+        FilesystemError,
+    ),
     #[error("cannot choose a version stamp for {piece}")]
     Stamp {
         piece: String,
@@ -775,6 +801,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: FilesystemError,
     },
     #[error("cannot pack {piece} into tmp/pack/{stamp}")]
@@ -782,6 +809,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: PackError,
     },
     #[error("cannot write {file} in tmp/pack/{stamp}/{piece}")]
@@ -797,6 +825,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: ListingError,
     },
     #[error("cannot make {file} in tmp/pack/{stamp}/{piece} durable")]
@@ -812,6 +841,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: PackError,
     },
     #[error("cannot move the version {stamp} of {piece} into the store")]
@@ -826,6 +856,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: FilesystemError,
     },
     #[error(
@@ -851,6 +882,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: FilesystemError,
     },
     #[error("cannot move {piece} into doomed/{stamp}, so the folder {went}")]
@@ -866,6 +898,7 @@ pub enum ArchiveError {
         piece: String,
         stamp: String,
         #[source]
+        #[diagnostic_source]
         source: FilesystemError,
     },
 }

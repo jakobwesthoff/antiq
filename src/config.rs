@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut};
 
 /// Errors of the config file.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ConfigError {
     #[error("cannot read the config file {}: {source}", path.display())]
     Read {

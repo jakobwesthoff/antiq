@@ -22,7 +22,7 @@ use std::fmt;
 const DAY_NS: i128 = 86_400_000_000_000;
 
 /// Why a survey of the live pieces failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum SurveyError {
     #[error("cannot open the collection {path}: {source}")]
     Root {
@@ -31,11 +31,23 @@ pub enum SurveyError {
         source: std::io::Error,
     },
     #[error("cannot select the pieces: {0}")]
-    Select(#[from] SelectError),
+    Select(
+        #[from]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot use the ignore and timeless rules: {0}")]
-    Rules(#[from] RulesError),
+    Rules(
+        #[from]
+        #[diagnostic_source]
+        RulesError,
+    ),
     #[error("cannot walk a piece: {0}")]
-    Walk(#[from] WalkError),
+    Walk(
+        #[from]
+        #[diagnostic_source]
+        WalkError,
+    ),
 }
 
 impl HasKind for SurveyError {}

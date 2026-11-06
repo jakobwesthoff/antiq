@@ -22,17 +22,33 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 /// Why pin or unpin failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PinCommandError {
     /// The lock is held, or the machine has no name to write into it.
     #[error("cannot start the run")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot find the piece")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     #[error("cannot select the pieces")]
-    Select(#[from] SelectError),
+    Select(
+        #[from]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot change the pin")]
-    Pin(#[from] PinError),
+    Pin(
+        #[from]
+        #[diagnostic_source]
+        PinError,
+    ),
     #[error("cannot open the collection {path}: {source}")]
     Root {
         path: String,

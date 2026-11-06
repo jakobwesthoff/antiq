@@ -163,7 +163,7 @@ fn the_json_of_an_unknown_piece_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"message\":\"cannot find the piece: `scnaer` matches no piece\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"code\":\"antiq::reference::unknown\",\"message\":\"cannot find the piece: `scnaer` matches no piece\"}}\n"
     );
 }
 
@@ -174,7 +174,7 @@ fn the_json_of_an_ambiguous_version_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"code\":\"antiq::version::ambiguous\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\"}}\n"
     );
 }
 

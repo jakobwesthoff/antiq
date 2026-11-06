@@ -174,7 +174,7 @@ impl Repair {
 
 /// Why one repair failed: what it was doing, where, and the cause. A
 /// failing repair is a warning and never fails the run.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("cannot {step} {place}: {source}")]
 pub struct RepairError {
     pub step: &'static str,

@@ -15,13 +15,15 @@ use jiff::Timestamp;
 const DAY_NS: i128 = 86_400_000_000_000;
 
 /// Errors of the idle check.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum IdleError {
     #[error("the piece has entries the walk could not read or may not enter")]
     Problems,
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Pin(#[from] PinError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Marker(#[from] MarkerError),
 }
 

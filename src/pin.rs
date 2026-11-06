@@ -16,7 +16,7 @@ use std::io;
 pub const PIN_FILE: &str = ".antiq-pin";
 
 /// Errors of pin files.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PinError {
     #[error("cannot look for the pin file {path}: {source}")]
     Stat {
@@ -28,18 +28,21 @@ pub enum PinError {
     Create {
         path: RelPath,
         #[source]
+        #[diagnostic_source]
         source: MarkerError,
     },
     #[error("cannot remove the pin file {path}: {source}")]
     Remove {
         path: RelPath,
         #[source]
+        #[diagnostic_source]
         source: MarkerError,
     },
     #[error("cannot make the pin of {path} durable: {source}")]
     Flush {
         path: RelPath,
         #[source]
+        #[diagnostic_source]
         source: FilesystemError,
     },
     #[error("{path} is neither a file nor a symlink, so it is no pin file")]

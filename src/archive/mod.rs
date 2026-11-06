@@ -277,7 +277,7 @@ impl Packager for TarZstd {
 }
 
 /// Errors of packing and unpacking.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PackError {
     #[error("cannot read `{path}`")]
     Read {
@@ -294,7 +294,11 @@ pub enum PackError {
     #[error("the walk of the piece found a problem: {0:?}")]
     TreeHasProblems(Problem),
     #[error("cannot walk the piece")]
-    Walk(#[from] crate::walk::WalkError),
+    Walk(
+        #[from]
+        #[diagnostic_source]
+        crate::walk::WalkError,
+    ),
     #[error("cannot open the package")]
     OpenPackage(#[source] std::io::Error),
     #[error("the package is damaged: {0}")]

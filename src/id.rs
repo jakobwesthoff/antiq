@@ -118,7 +118,7 @@ impl IdSource for SeqIds {
 }
 
 /// Errors of object IDs.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum IdError {
     #[error("`{0}` is not an object ID")]
     Invalid(String),

@@ -26,7 +26,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Errors of the `init` command.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum InitError {
     #[error("{} is already a collection", root.display())]
     AlreadyACollection { root: PathBuf },
@@ -40,10 +40,13 @@ pub enum InitError {
     )]
     NestedCollections { roots: Vec<PathBuf> },
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Select(#[from] SelectError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Filesystem(#[from] FilesystemError),
 }
 

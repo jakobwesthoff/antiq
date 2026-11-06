@@ -17,7 +17,7 @@ use super::url::TargetUrl;
 use crate::config::TargetConfig;
 
 /// Errors of finding and running rsync.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RsyncError {
     #[error("`[target] rsync` must be an absolute path, not {}", .0.display())]
     RelativePath(PathBuf),

@@ -21,7 +21,7 @@ pub const IGNORE_FILE: &[u8] = b".antiqignore";
 pub const TIMELESS_FILE: &[u8] = b".antiq-timeless";
 
 /// Why a rule or a rule file failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RulesError {
     #[error("cannot read the rule file: {0}")]
     Unreadable(#[source] io::Error),

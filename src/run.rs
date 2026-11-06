@@ -17,11 +17,13 @@ use crate::repair::{self, Repair};
 use crate::report::Warning;
 
 /// Errors of the run guard.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RunError {
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Lock(#[from] LockError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Machine(#[from] MachineError),
 }
 

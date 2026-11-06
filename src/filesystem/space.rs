@@ -18,11 +18,12 @@ pub(crate) fn available_space(path: &Path) -> Result<u64, FilesystemError> {
 }
 
 /// Why bytes could not be reserved.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub(crate) enum ReserveError {
     #[error("{needed} bytes are needed and {available} are free")]
     Short { needed: u64, available: u64 },
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Free(#[from] FilesystemError),
 }
 

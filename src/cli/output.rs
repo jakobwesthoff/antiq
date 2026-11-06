@@ -82,9 +82,24 @@ struct ErrorPayload<'a> {
 #[derive(Serialize)]
 struct ErrorBody<'a> {
     kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'a str>,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix: Option<&'a str>,
     #[serde(flatten)]
     details: &'a Map<String, Value>,
+}
+
+/// What the JSON error object of a failed run says.
+pub struct ErrorReport<'a> {
+    pub kind: ErrorKind,
+    /// The code of the diagnostic that explains the error, if one does.
+    pub code: Option<String>,
+    pub message: &'a str,
+    /// The help of that diagnostic.
+    pub fix: Option<String>,
+    pub details: &'a Map<String, Value>,
 }
 
 /// The width a console is laid out for when nothing says otherwise.
@@ -196,18 +211,14 @@ impl Output {
     }
 
     /// Writes the error object of a failed run to stdout.
-    pub fn json_error(
-        &mut self,
-        command: Option<&str>,
-        kind: ErrorKind,
-        message: &str,
-        details: &Map<String, Value>,
-    ) -> io::Result<()> {
+    pub fn json_error(&mut self, command: Option<&str>, error: &ErrorReport) -> io::Result<()> {
         let payload = ErrorPayload {
             error: ErrorBody {
-                kind: kind.as_str(),
-                message,
-                details,
+                kind: error.kind.as_str(),
+                code: error.code.as_deref(),
+                message: error.message,
+                fix: error.fix.as_deref(),
+                details: error.details,
             },
         };
         self.json(command, &payload)
@@ -726,18 +737,28 @@ mod tests {
     }
 
     #[test]
-    fn an_error_object_carries_kind_message_and_details() {
+    fn an_error_object_carries_kind_code_message_fix_and_details() {
         let capture = Capture::default();
         let mut details = Map::new();
         details.insert("pid".into(), json!(4242));
         capture
             .output()
-            .json_error(Some("archive"), ErrorKind::LockHeld, "held", &details)
+            .json_error(
+                Some("archive"),
+                &ErrorReport {
+                    kind: ErrorKind::LockHeld,
+                    code: Some("antiq::lock::held".into()),
+                    message: "held",
+                    fix: Some("wait".into()),
+                    details: &details,
+                },
+            )
             .expect("memory accepts writes");
         assert_eq!(
             capture.stdout(),
             "{\"format\":1,\"command\":\"archive\",\"error\":\
-             {\"kind\":\"lock_held\",\"message\":\"held\",\"pid\":4242}}\n"
+             {\"kind\":\"lock_held\",\"code\":\"antiq::lock::held\",\
+             \"message\":\"held\",\"fix\":\"wait\",\"pid\":4242}}\n"
         );
         assert_eq!(capture.stderr(), "");
     }

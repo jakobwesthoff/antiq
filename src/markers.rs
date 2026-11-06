@@ -22,10 +22,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const RESTORED_FILE: &str = ".antiq-restored";
 
 /// Why a marker operation failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum MarkerError {
     #[error("{0}")]
-    Filesystem(#[from] FilesystemError),
+    Filesystem(
+        #[from]
+        #[diagnostic_source]
+        FilesystemError,
+    ),
     #[error("{path}: {reason}")]
     Invalid { path: RelPath, reason: String },
     #[error("cannot write a marker into {path}: mount point")]

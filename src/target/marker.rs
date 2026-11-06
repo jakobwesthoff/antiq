@@ -15,10 +15,11 @@ pub const FILE_NAME: &str = ".antiq-target";
 const CURRENT: u64 = 1;
 
 /// Why a marker cannot be used.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum MarkerError {
     #[error("the marker {FILE_NAME} cannot be read: {reason}")]
     Invalid { reason: String },
+    #[diagnostic(code(antiq::target::marker_too_new))]
     #[error("the marker {FILE_NAME} has format {found}, written by a newer antiq than this one")]
     TooNew { found: u64 },
 }

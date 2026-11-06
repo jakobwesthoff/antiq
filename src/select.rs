@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io;
 
 /// Errors of piece selection.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum SelectError {
     #[error("pattern {pattern} is invalid: {reason}")]
     InvalidPattern { pattern: String, reason: String },

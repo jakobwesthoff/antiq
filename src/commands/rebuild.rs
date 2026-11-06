@@ -43,28 +43,45 @@ use std::path::Path;
 const STAGING: &str = "rebuild";
 
 /// Why rebuild failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RebuildError {
     /// The lock is held, or the machine has no name to write into it.
     #[error("cannot start the run")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot find the piece")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     /// A file of the store could not be read for another reason than being
     /// gone. The source says which.
     #[error("cannot read the versions in the store")]
-    Versions(#[from] VersionsError),
+    Versions(
+        #[from]
+        #[diagnostic_source]
+        VersionsError,
+    ),
     /// The piece or the version on the command line is empty.
     #[error("{0}")]
     Usage(&'static str),
     #[error("{0}")]
-    Version(#[from] VersionLookupError),
+    Version(
+        #[from]
+        #[diagnostic_source]
+        VersionLookupError,
+    ),
     #[error("version {stamp} of {piece} is not damaged, there is nothing to rebuild")]
     NotDamaged { piece: String, stamp: String },
     #[error(
         "version {stamp} of {piece} has no archive, so rebuild cannot repair it: `antiq forget {piece} {stamp}` removes it"
     )]
     Incomplete { piece: String, stamp: String },
+    #[diagnostic(code(antiq::rebuild::format_too_new))]
     #[error("the listing of version {stamp} of {piece} is of a newer format than antiq reads")]
     FormatTooNew { piece: String, stamp: String },
     /// The version cannot be repaired, or its files show that it must not
@@ -78,9 +95,17 @@ pub enum RebuildError {
         reason: String,
     },
     #[error("cannot read the archive")]
-    Archive(#[from] PackError),
+    Archive(
+        #[from]
+        #[diagnostic_source]
+        PackError,
+    ),
     #[error("cannot write the listing")]
-    Listing(#[from] ListingError),
+    Listing(
+        #[from]
+        #[diagnostic_source]
+        ListingError,
+    ),
     #[error("cannot {action} {path}")]
     Io {
         action: &'static str,
@@ -89,7 +114,11 @@ pub enum RebuildError {
         source: io::Error,
     },
     #[error("cannot put the rebuilt files into the store")]
-    Store(#[source] VersionsError),
+    Store(
+        #[source]
+        #[diagnostic_source]
+        VersionsError,
+    ),
 }
 
 impl HasKind for RebuildError {

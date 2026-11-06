@@ -24,7 +24,7 @@ use std::path::Path;
 use tree::TreeRoot;
 
 /// Errors of the filesystem primitives.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum FilesystemError {
     #[error("cannot {action} {path}: {source}")]
     Io {

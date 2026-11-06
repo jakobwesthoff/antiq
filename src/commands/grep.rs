@@ -23,12 +23,16 @@ use std::sync::{Mutex, PoisonError};
 
 /// Why grep failed. A listing that cannot be searched is not an error: its
 /// version is skipped and reported in [`GrepReport::skipped`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum GrepError {
     #[error("the pattern is not a valid regular expression: {0}")]
     InvalidPattern(#[source] regex::Error),
     #[error("cannot read the store: {0}")]
-    Store(#[source] VersionsError),
+    Store(
+        #[source]
+        #[diagnostic_source]
+        VersionsError,
+    ),
 }
 
 impl HasKind for GrepError {

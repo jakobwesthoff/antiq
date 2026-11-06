@@ -26,22 +26,38 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// Why forget failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ForgetError {
     /// The lock is held, or the machine has no name to write into it.
     #[error("cannot start the run")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot find the piece")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     /// A file of the store could not be read for another reason than being
     /// gone. The source says which.
     #[error("cannot read the versions in the store")]
-    Versions(#[from] VersionsError),
+    Versions(
+        #[from]
+        #[diagnostic_source]
+        VersionsError,
+    ),
     /// The piece or the version on the command line is empty.
     #[error("{0}")]
     Usage(&'static str),
     #[error("{0}")]
-    Version(#[from] VersionLookupError),
+    Version(
+        #[from]
+        #[diagnostic_source]
+        VersionLookupError,
+    ),
 }
 
 impl HasKind for ForgetError {

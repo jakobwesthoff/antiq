@@ -210,40 +210,71 @@ impl ImportPlan {
 // =========================================================
 
 /// Why import failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ImportError {
     #[error("cannot start the run")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot resolve the path")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     #[error("cannot select the pieces")]
-    Select(#[from] SelectError),
+    Select(
+        #[from]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot read the ignore and timeless rules")]
-    Rules(#[from] RulesError),
+    Rules(
+        #[from]
+        #[diagnostic_source]
+        RulesError,
+    ),
     #[error("cannot size the pool of workers")]
-    Pool(#[source] SysmemError),
+    Pool(
+        #[source]
+        #[diagnostic_source]
+        SysmemError,
+    ),
     #[error("cannot walk {folder}")]
     Walk {
         folder: String,
         #[source]
+        #[diagnostic_source]
         source: WalkError,
     },
     #[error("cannot look for a pin in {folder}")]
     Pin {
         folder: String,
         #[source]
+        #[diagnostic_source]
         source: PinError,
     },
     #[error("the name of the folder is not a valid piece name")]
-    Name(#[from] RelPathError),
+    Name(
+        #[from]
+        #[diagnostic_source]
+        RelPathError,
+    ),
     #[error("`{given}` is not a path: {source}")]
     AsNotAPath {
         given: String,
         #[source]
+        #[diagnostic_source]
         source: RelPathError,
     },
     #[error("cannot prepare the import")]
-    Archive(#[from] ArchiveError),
+    Archive(
+        #[from]
+        #[diagnostic_source]
+        ArchiveError,
+    ),
     #[error("cannot choose a version stamp")]
     Stamp(#[source] Box<VersionsError>),
     #[error("cannot look at {path}")]

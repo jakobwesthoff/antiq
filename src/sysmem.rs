@@ -5,7 +5,7 @@
 //! Physical memory of the machine.
 
 /// Errors of reading the physical memory.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum SysmemError {
     #[error("the operating system does not report the physical memory")]
     Unavailable,

@@ -2104,7 +2104,11 @@ on one line of stdout. `<name>` is the command's name. A command line that
 fails to parse before naming a command has `"command": null`. An error is
 `{"format": 1, "command": ..., "error": {"kind": ..., "message": ...}}`,
 where `message` is the text of the error without the context lines a
-console shows. Some kinds add keys to the error object. A `--dry-run` plan
+console shows. When the error is one that antiq explains, the object has a
+`code` after `kind`, the stable name of the explanation such as
+`antiq::lock::held`; the key is absent for an error without one. For a
+wrapper error such as `push` over a held lock, `code` is the innermost
+code in the chain. Some kinds add keys to the error object. A `--dry-run` plan
 carries `"dry_run": true` and an `actions` list after it (`lock_held`
 stands between the two while another run holds the lock); repairs come
 first in it, as actions of kind `repair`. A real run has neither

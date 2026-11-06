@@ -499,7 +499,7 @@ fn mode_of(mode: RawMode) -> u32 {
 /// What a [`TreeRoot`] reports about an entry that its caller can tell
 /// apart from an error of the filesystem. It travels inside an
 /// `io::Error`; [`TreeError::of`] finds it there.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum TreeError {
     /// The entry changed while it was being read, twice in a row.
     #[error("the entry changed while it was read")]

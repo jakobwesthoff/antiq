@@ -14,7 +14,7 @@ pub mod stamp;
 pub mod store;
 
 /// Why an operation on versions failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum VersionsError {
     #[error("`{0}` is not a version stamp")]
     InvalidStamp(String),
@@ -43,6 +43,7 @@ pub enum VersionsError {
         source: crate::filesystem::FilesystemError,
     },
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Filesystem(#[from] crate::filesystem::FilesystemError),
     #[error("cannot {action} {path}: {source}")]
     Io {

@@ -24,10 +24,14 @@ use std::io;
 
 /// Why status failed. A store or a leftover directory that cannot be read
 /// is a note of the report, not a failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum StatusError {
     #[error("cannot judge the live pieces: {0}")]
-    Survey(#[from] SurveyError),
+    Survey(
+        #[from]
+        #[diagnostic_source]
+        SurveyError,
+    ),
 }
 
 impl HasKind for StatusError {}

@@ -18,12 +18,16 @@ use serde::{Serialize, Serializer};
 use std::num::NonZeroUsize;
 
 /// Why list failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ListError {
     /// A file of the store could not be read for another reason than being
     /// gone. The source says which.
     #[error("cannot read the versions in the store")]
-    Versions(#[from] VersionsError),
+    Versions(
+        #[from]
+        #[diagnostic_source]
+        VersionsError,
+    ),
 }
 
 impl HasKind for ListError {}

@@ -27,14 +27,16 @@ pub enum Lookup {
 }
 
 /// Why an input names no single version of a piece.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum VersionLookupError {
+    #[diagnostic(code(antiq::version::no_such))]
     #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
     NoSuch {
         piece: String,
         input: String,
         stamps: Vec<String>,
     },
+    #[diagnostic(code(antiq::version::ambiguous))]
     #[error("`{input}` matches several versions of {piece}: {}", stamps.join(", "))]
     Ambiguous {
         piece: String,

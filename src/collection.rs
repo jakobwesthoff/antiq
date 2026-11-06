@@ -125,8 +125,9 @@ impl Collection {
 }
 
 /// Errors of finding a collection.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum CollectionError {
+    #[diagnostic(code(antiq::collection::not_a_collection))]
     #[error("{} is not inside a collection", start.display())]
     NotACollection { start: PathBuf },
     #[error("cannot look for a collection at {}: {source}", path.display())]
@@ -135,6 +136,7 @@ pub enum CollectionError {
         source: std::io::Error,
     },
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Config(#[from] ConfigError),
 }
 

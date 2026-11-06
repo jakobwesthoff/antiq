@@ -43,20 +43,36 @@ use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
 /// Why a restore failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RestoreError {
     #[error("{0}")]
     Usage(String),
     #[error("cannot find the piece: {0}")]
-    Reference(#[from] ReferenceError),
+    Reference(
+        #[from]
+        #[diagnostic_source]
+        ReferenceError,
+    ),
     #[error("cannot read the store: {0}")]
-    Versions(#[from] VersionsError),
+    Versions(
+        #[from]
+        #[diagnostic_source]
+        VersionsError,
+    ),
     #[error("cannot read the listing: {0}")]
-    Listing(#[from] ListingError),
+    Listing(
+        #[from]
+        #[diagnostic_source]
+        ListingError,
+    ),
     #[error("cannot read {path}: {source}")]
     Read { path: String, source: io::Error },
     #[error("{0}")]
-    Version(#[from] VersionLookupError),
+    Version(
+        #[from]
+        #[diagnostic_source]
+        VersionLookupError,
+    ),
     #[error("version {stamp} of {piece} has no archive; `forget` removes what is left of it")]
     Incomplete { piece: String, stamp: String },
     #[error(
@@ -77,6 +93,7 @@ pub enum RestoreError {
         stamp: String,
         files: Vec<String>,
     },
+    #[diagnostic(code(antiq::restore::format_too_new))]
     #[error("version {stamp} of {piece} has a listing of a newer format than this antiq reads")]
     FormatTooNew { piece: String, stamp: String },
     #[error("version {stamp} of {piece} holds `{name}` at its top, and it is not a file")]
@@ -97,11 +114,23 @@ pub enum RestoreError {
         source: io::Error,
     },
     #[error("{0}")]
-    Filesystem(#[from] FilesystemError),
+    Filesystem(
+        #[from]
+        #[diagnostic_source]
+        FilesystemError,
+    ),
     #[error("{0}")]
-    Marker(#[from] MarkerError),
+    Marker(
+        #[from]
+        #[diagnostic_source]
+        MarkerError,
+    ),
     #[error("cannot extract the archive: {0}")]
-    Pack(#[from] PackError),
+    Pack(
+        #[from]
+        #[diagnostic_source]
+        PackError,
+    ),
     #[error("the extracted tree differs from the listing: {}", differences.join("; "))]
     Differs { differences: Vec<String> },
 }

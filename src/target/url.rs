@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Why a text is no target URL.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
 pub enum UrlError {
     #[error("the target URL is empty")]
     Empty,

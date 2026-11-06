@@ -29,14 +29,26 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Why fork failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ForkError {
     #[error("{0}")]
-    Run(#[from] RunError),
+    Run(
+        #[from]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("{0}")]
-    Restore(#[from] RestoreError),
+    Restore(
+        #[from]
+        #[diagnostic_source]
+        RestoreError,
+    ),
     #[error("cannot read the patterns of the collection: {0}")]
-    Select(#[from] SelectError),
+    Select(
+        #[from]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot open {path}: {source}")]
     Open {
         path: String,

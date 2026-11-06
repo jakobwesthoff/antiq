@@ -44,6 +44,7 @@ use crate::sysmem::SysmemError;
 use crate::versions::VersionsError;
 use crate::walk::WalkError;
 use jiff::Timestamp;
+use miette::Diagnostic;
 use serde_json::{Map, Value};
 
 /// The kind of an error as scripts see it in the JSON error object, and
@@ -118,77 +119,111 @@ pub trait HasKind {
 }
 
 /// Any error of the library.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Error {
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Collection(#[from] CollectionError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Filesystem(#[from] FilesystemError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Id(#[from] IdError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Idle(#[from] IdleError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Init(#[from] InitError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Listing(#[from] ListingError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Lock(#[from] LockError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Machine(#[from] MachineError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Pack(#[from] PackError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Pin(#[from] PinError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Reference(#[from] ReferenceError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     RelPath(#[from] RelPathError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Run(#[from] RunError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Select(#[from] SelectError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Sysmem(#[from] SysmemError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Archive(#[from] ArchiveError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Forget(#[from] ForgetError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Fork(#[from] ForkError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Grep(#[from] GrepError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Import(#[from] ImportError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     List(#[from] ListError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     PinCommand(#[from] PinCommandError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Push(#[from] PushError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Rebuild(#[from] RebuildError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Restore(#[from] RestoreError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Status(#[from] StatusError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Survey(#[from] SurveyError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Unearth(#[from] UnearthError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Marker(#[from] MarkerError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Query(#[from] QueryError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Rules(#[from] RulesError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Versions(#[from] VersionsError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Walk(#[from] WalkError),
 }
 
@@ -314,6 +349,24 @@ impl Error {
         }
         details
     }
+}
+
+/// The link of the diagnostic chain of `error` that explains it: the
+/// innermost one that has a code.
+///
+/// Wrappers such as `cannot start the run` have no code, so a lock held
+/// under a push is explained as the lock. An error without any code has no
+/// explanation, and its message is all there is to show.
+pub fn explanation(error: &dyn Diagnostic) -> Option<&dyn Diagnostic> {
+    let mut explained = None;
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if current.code().is_some() {
+            explained = Some(current);
+        }
+        link = current.diagnostic_source();
+    }
+    explained
 }
 
 /// The error and its sources in one line, each cause once: see
@@ -805,6 +858,332 @@ mod tests {
         wraps::<crate::commands::push::PushError>();
         wraps::<crate::commands::survey::SurveyError>();
         wraps::<crate::commands::restore::RestoreError>();
+    }
+
+    // =====================================================
+    // The explanation of an error
+    // =====================================================
+
+    fn held_lock() -> LockError {
+        held()
+    }
+
+    fn version_ambiguous() -> crate::versions::naming::VersionLookupError {
+        crate::versions::naming::VersionLookupError::Ambiguous {
+            piece: "projects/a".into(),
+            input: "2026".into(),
+            stamps: vec!["20261103T100000Z".into()],
+        }
+    }
+
+    fn marker_too_new() -> crate::target::marker::MarkerError {
+        crate::target::marker::MarkerError::TooNew { found: 9 }
+    }
+
+    /// Every error that carries a code, reached directly and through each
+    /// wrapper that can hold it, with the code its explanation has and the
+    /// kind the JSON error object names.
+    fn coded_errors() -> Vec<(&'static str, Error, &'static str, ErrorKind)> {
+        use crate::commands::{
+            archive, forget, fork, import, pin, push, rebuild, restore, unearth,
+        };
+        let lock = || RunError::Lock(held_lock());
+        let piece = || String::from("projects/a");
+        let stamp = || String::from("20261103T100000Z");
+        let unknown = || ReferenceError::Unknown {
+            reference: "alpha".into(),
+            closest: Vec::new(),
+        };
+        let outside = || ReferenceError::Outside {
+            path: "/elsewhere".into(),
+            root: "/collection".into(),
+        };
+        let restore_too_new = || restore::RestoreError::FormatTooNew {
+            piece: piece(),
+            stamp: stamp(),
+        };
+        let cases: Vec<(&'static str, Error, &'static str, ErrorKind)> = vec![
+            (
+                "collection",
+                CollectionError::NotACollection { start: "/x".into() }.into(),
+                "antiq::collection::not_a_collection",
+                ErrorKind::NotACollection,
+            ),
+            (
+                "ambiguous reference",
+                ambiguous().into(),
+                "antiq::reference::ambiguous",
+                ErrorKind::AmbiguousReference,
+            ),
+            (
+                "unknown reference",
+                unknown().into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "only incomplete",
+                ReferenceError::OnlyIncomplete {
+                    reference: "alpha".into(),
+                    piece: piece(),
+                }
+                .into(),
+                "antiq::reference::only_incomplete",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "outside",
+                outside().into(),
+                "antiq::reference::outside",
+                ErrorKind::OutsideCollection,
+            ),
+            (
+                "lock held",
+                held_lock().into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "lock held unknown",
+                LockError::HeldUnknown.into(),
+                "antiq::lock::held_unknown",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "run over lock",
+                lock().into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "archive over lock",
+                archive::ArchiveError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "forget over lock",
+                forget::ForgetError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "rebuild over lock",
+                rebuild::RebuildError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "pin over lock",
+                pin::PinCommandError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "import over lock",
+                import::ImportError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "push over lock",
+                push::PushError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "unearth over lock",
+                unearth::UnearthError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "fork over lock",
+                fork::ForkError::Run(lock()).into(),
+                "antiq::lock::held",
+                ErrorKind::LockHeld,
+            ),
+            (
+                "archive over reference",
+                archive::ArchiveError::Reference(unknown()).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "forget over reference",
+                forget::ForgetError::Reference(unknown()).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "rebuild over reference",
+                rebuild::RebuildError::Reference(unknown()).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "pin over reference",
+                pin::PinCommandError::Reference(outside()).into(),
+                "antiq::reference::outside",
+                ErrorKind::OutsideCollection,
+            ),
+            (
+                "import over reference",
+                import::ImportError::Reference(unknown()).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "restore over reference",
+                restore::RestoreError::Reference(unknown()).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "unearth over restore over reference",
+                unearth::UnearthError::Restore(restore::RestoreError::Reference(unknown())).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "fork over restore over reference",
+                fork::ForkError::Restore(restore::RestoreError::Reference(unknown())).into(),
+                "antiq::reference::unknown",
+                ErrorKind::UnknownReference,
+            ),
+            (
+                "listing",
+                ListingError::FormatTooNew { found: 2 }.into(),
+                "antiq::listing::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "restore over listing",
+                restore::RestoreError::Listing(ListingError::FormatTooNew { found: 2 }).into(),
+                "antiq::listing::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "restore",
+                restore_too_new().into(),
+                "antiq::restore::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "unearth over restore",
+                unearth::UnearthError::Restore(restore_too_new()).into(),
+                "antiq::restore::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "fork over restore",
+                fork::ForkError::Restore(restore_too_new()).into(),
+                "antiq::restore::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "rebuild",
+                rebuild::RebuildError::FormatTooNew {
+                    piece: piece(),
+                    stamp: stamp(),
+                }
+                .into(),
+                "antiq::rebuild::format_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+            (
+                "version",
+                version_ambiguous().into_error_in_restore(),
+                "antiq::version::ambiguous",
+                ErrorKind::Other,
+            ),
+            (
+                "no target",
+                push::PushError::NoTarget.into(),
+                "antiq::push::no_target",
+                ErrorKind::NoTarget,
+            ),
+            (
+                "unreachable",
+                push::PushError::Unreachable {
+                    reason: "down".into(),
+                }
+                .into(),
+                "antiq::push::unreachable",
+                ErrorKind::TargetUnreachable,
+            ),
+            (
+                "marker mismatch",
+                push::PushError::MarkerMismatch {
+                    marker_host: "a".into(),
+                    marker_path: "/a".into(),
+                    host: "b".into(),
+                    path: "/b".into(),
+                }
+                .into(),
+                "antiq::push::marker_mismatch",
+                ErrorKind::Other,
+            ),
+            (
+                "damaged store",
+                push::PushError::DamagedStore {
+                    lines: vec!["a".into()],
+                }
+                .into(),
+                "antiq::push::damaged_store",
+                ErrorKind::Other,
+            ),
+            (
+                "push over marker",
+                push::PushError::MarkerFormat(marker_too_new()).into(),
+                "antiq::target::marker_too_new",
+                ErrorKind::FormatTooNew,
+            ),
+        ];
+        cases
+    }
+
+    trait IntoErrorInRestore {
+        fn into_error_in_restore(self) -> Error;
+    }
+
+    impl IntoErrorInRestore for crate::versions::naming::VersionLookupError {
+        fn into_error_in_restore(self) -> Error {
+            RestoreError::Version(self).into()
+        }
+    }
+
+    #[test]
+    fn every_coded_error_is_explained_with_its_code_and_kind() {
+        for (name, error, code, kind) in coded_errors() {
+            let explained = explanation(&error)
+                .unwrap_or_else(|| panic!("{name}: no explanation in `{error}`"));
+            assert_eq!(
+                explained.code().map(|code| code.to_string()).as_deref(),
+                Some(code),
+                "code of {name}"
+            );
+            assert_eq!(error.kind(), kind, "kind of {name}");
+        }
+    }
+
+    #[test]
+    fn an_explanation_is_the_innermost_coded_link() {
+        let error: Error = crate::commands::push::PushError::Run(RunError::Lock(held())).into();
+        let explained = explanation(&error).expect("the lock explains it");
+        assert!(explained.to_string().contains("4242"), "{explained}");
+    }
+
+    #[test]
+    fn an_error_without_a_code_has_no_explanation() {
+        assert!(explanation(&Error::Usage("bad".into())).is_none());
+        let io: Error = crate::config::ConfigError::Read {
+            path: "c".into(),
+            source: std::io::Error::other("disk"),
+        }
+        .into();
+        assert!(explanation(&io).is_none());
+        assert!(io.code().is_none());
     }
 
     #[test]

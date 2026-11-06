@@ -29,14 +29,19 @@ mod store;
 mod summary;
 
 /// Why push failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PushError {
+    #[diagnostic(code(antiq::push::no_target))]
     #[error(
         "no target is configured: set `[target] url` in the config, then run `antiq push --init` on an empty directory of the target"
     )]
     NoTarget,
     #[error("the `[target] url` is not usable")]
-    Url(#[source] UrlError),
+    Url(
+        #[source]
+        #[diagnostic_source]
+        UrlError,
+    ),
     #[error(
         "the collection path {} is not valid UTF-8, which the target marker cannot record",
         .path.display()
@@ -45,13 +50,29 @@ pub enum PushError {
     // The wrapped error is a source and not transparent, so that the
     // holder of a held lock stays visible to the error details.
     #[error("cannot use the local rsync")]
-    Rsync(#[source] RsyncError),
+    Rsync(
+        #[source]
+        #[diagnostic_source]
+        RsyncError,
+    ),
     #[error("cannot start the run")]
-    Run(#[source] RunError),
+    Run(
+        #[source]
+        #[diagnostic_source]
+        RunError,
+    ),
     #[error("cannot read the store")]
-    Versions(#[source] VersionsError),
+    Versions(
+        #[source]
+        #[diagnostic_source]
+        VersionsError,
+    ),
     #[error("cannot select the pieces")]
-    Select(#[source] SelectError),
+    Select(
+        #[source]
+        #[diagnostic_source]
+        SelectError,
+    ),
     #[error("cannot open the collection {}", .path.display())]
     Root {
         path: PathBuf,
@@ -64,6 +85,7 @@ pub enum PushError {
         #[source]
         source: std::io::Error,
     },
+    #[diagnostic(code(antiq::push::damaged_store))]
     #[error("the store holds versions that are damaged or incomplete:\n{}", .lines.join("\n"))]
     DamagedStore { lines: Vec<String> },
     #[error(
@@ -80,8 +102,10 @@ pub enum PushError {
     #[error("{problem}")]
     Target { problem: String },
     /// The target cannot be reached, which `--if-reachable` accepts.
+    #[diagnostic(code(antiq::push::unreachable))]
     #[error("{reason}")]
     Unreachable { reason: String },
+    #[diagnostic(code(antiq::push::marker_mismatch))]
     #[error(
         "the target's marker {} names host `{marker_host}` and path `{marker_path}`, this run is host `{host}` and path `{path}`; push with --force to overwrite the target once, or edit the marker",
         marker::FILE_NAME
@@ -93,7 +117,11 @@ pub enum PushError {
         path: String,
     },
     #[error("cannot use the target's marker")]
-    MarkerFormat(#[source] MarkerError),
+    MarkerFormat(
+        #[source]
+        #[diagnostic_source]
+        MarkerError,
+    ),
     #[error("cannot prepare the target's marker in {}", .path.display())]
     Scratch {
         path: PathBuf,
@@ -105,7 +133,11 @@ pub enum PushError {
     #[error("sending the marker to the target failed: {detail}")]
     MarkerRun { detail: String },
     #[error("cannot name this machine")]
-    Machine(#[source] MachineError),
+    Machine(
+        #[source]
+        #[diagnostic_source]
+        MachineError,
+    ),
 }
 
 impl HasKind for PushError {

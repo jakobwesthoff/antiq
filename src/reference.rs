@@ -25,13 +25,15 @@ pub struct Candidate {
 }
 
 /// Errors of resolving a piece reference.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ReferenceError {
+    #[diagnostic(code(antiq::reference::ambiguous))]
     #[error("`{reference}` matches {} pieces", candidates.len())]
     Ambiguous {
         reference: String,
         candidates: Vec<Candidate>,
     },
+    #[diagnostic(code(antiq::reference::unknown))]
     #[error("`{reference}` matches no piece")]
     Unknown {
         reference: String,
@@ -39,10 +41,12 @@ pub enum ReferenceError {
         /// The console offers them; they are not part of the JSON error.
         closest: Vec<Candidate>,
     },
+    #[diagnostic(code(antiq::reference::only_incomplete))]
     #[error(
         "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
     )]
     OnlyIncomplete { reference: String, piece: String },
+    #[diagnostic(code(antiq::reference::outside))]
     #[error("`{path}` is outside the collection at `{root}`")]
     Outside { path: String, root: String },
     #[error("cannot look at the collection root {path}: {source}")]
@@ -59,6 +63,7 @@ pub enum ReferenceError {
         source: Box<VersionsError>,
     },
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Path(#[from] RelPathError),
 }
 

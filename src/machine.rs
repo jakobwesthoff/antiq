@@ -5,7 +5,7 @@
 //! The machine name.
 
 /// Errors of the machine name.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum MachineError {
     #[error("cannot determine the machine name: {reason}")]
     Unavailable { reason: String },
