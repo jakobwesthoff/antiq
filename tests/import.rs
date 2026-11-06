@@ -650,7 +650,6 @@ fn a_dry_run_with_a_held_lock_names_the_holder_and_lists_nothing() {
 }
 
 #[test]
-#[ignore = "archive leaves an empty tmp/pack; run it once the fix for that is on main"]
 fn after_an_import_tmp_is_empty_and_a_dry_run_plans_no_repair() {
     let collection = world();
     let tree = source();
@@ -680,4 +679,30 @@ fn a_locked_file_in_the_source_does_not_refuse_it() {
     let run = import(&collection, &["--json"], &[&tree.path("data")]);
 
     assert_eq!(run.code(), 0, "{}", run.stdout);
+}
+
+#[test]
+fn a_real_run_names_its_repairs_and_the_notes_on_the_settings_on_stderr() {
+    let collection = world();
+    let tree = source();
+    let config = collection.path(".antiq/config.toml");
+    let mut text = fs::read_to_string(&config).expect("the config exists");
+    text.push_str("\nmystery = 1\n");
+    fs::write(&config, text).expect("the config is written");
+    fs::create_dir_all(collection.path(".antiq/doomed/2026-11-03T000000/old")).expect("leftover");
+    fs::write(
+        collection.path(".antiq/doomed/2026-11-03T000000/old/f"),
+        "x",
+    )
+    .expect("a file");
+
+    let run = import(&collection, &[], &[&tree.path("data")]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let notes: Vec<&str> = run.stderr.lines().collect();
+    assert!(notes[0].starts_with("note: repaired: "), "{notes:?}");
+    assert_eq!(
+        notes[notes.len() - 1],
+        "note: the key `mystery` under [collection] is unknown and ignored"
+    );
 }

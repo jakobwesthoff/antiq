@@ -1986,4 +1986,63 @@ mod tests {
         assert!(!is_out_of_descriptors(&errno(Errno::ACCESS)));
         assert!(!is_out_of_descriptors(&io::Error::other("no code")));
     }
+    /// Answers every question of the walk with a fixed value.
+    struct Fixed;
+
+    impl Hooks for Fixed {
+        fn device(&self, _path: &RelPath, _reported: u64) -> u64 {
+            7
+        }
+
+        fn mount_root(&self, _path: &RelPath, _reported: bool) -> bool {
+            true
+        }
+
+        fn prefix_mount_root(&self, _prefix: &RelPath, _reported: bool) -> bool {
+            true
+        }
+
+        fn fault(&self, _path: &RelPath, _call: Call) -> Option<io::Error> {
+            Some(io::Error::other("fixed"))
+        }
+
+        fn owner(&self, _path: &RelPath, _reported: u32) -> u32 {
+            8
+        }
+
+        fn listed_kind(&self, _path: &RelPath, _reported: EntryKind) -> EntryKind {
+            EntryKind::Socket
+        }
+
+        fn max_depth(&self) -> usize {
+            9
+        }
+    }
+
+    #[test]
+    fn a_kept_folder_asks_the_hooks_below_it_and_answers_for_its_top_mount_itself() {
+        let kept = KeptFolder(&Fixed);
+        let top = RelPath::root();
+        let below = RelPath::parse("sub").expect("a path");
+
+        assert!(!kept.mount_root(&top, true));
+        assert!(kept.mount_root(&below, false));
+        assert_eq!(kept.device(&below, 1), 7);
+        assert!(kept.prefix_mount_root(&below, false));
+        assert!(kept.fault(&below, Call::Stat).is_some());
+        assert_eq!(kept.owner(&below, 1), 8);
+        assert_eq!(kept.listed_kind(&below, EntryKind::File), EntryKind::Socket);
+        assert_eq!(kept.max_depth(), 9);
+    }
+
+    #[test]
+    fn only_a_locked_entry_and_a_locked_parent_block_a_removal_alone() {
+        let path = RelPath::parse("a").expect("a path");
+
+        assert!(only_blocks_removal(&Problem::Locked { path: path.clone() }));
+        assert!(only_blocks_removal(&Problem::LockedParent {
+            path: path.clone()
+        }));
+        assert!(!only_blocks_removal(&Problem::MountPoint { other: path }));
+    }
 }

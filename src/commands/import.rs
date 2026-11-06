@@ -26,7 +26,7 @@ use crate::plan::{HeldDryRun, PlanAction, Step};
 use crate::reference::{ReferenceError, resolve_path};
 use crate::relpath::{Name, RelPath, RelPathError};
 use crate::repair::Repair;
-use crate::report::{CommandReport, Warning, setting_notes};
+use crate::report::{Warning, setting_notes};
 use crate::rules::{PieceRules, RulesError};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::{Rules, SelectError};
@@ -116,17 +116,7 @@ pub struct ImportReport {
 impl ImportReport {
     /// 3 when the import was skipped, else 0.
     pub fn exit_code(&self) -> u8 {
-        if self.partial() { 3 } else { 0 }
-    }
-}
-
-impl CommandReport for ImportReport {
-    fn partial(&self) -> bool {
-        self.skipped.is_some()
-    }
-
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
+        if self.skipped.is_some() { 3 } else { 0 }
     }
 }
 
@@ -188,25 +178,12 @@ impl ImportPlan {
         if let Some(skipped) = &self.skipped {
             lines.push(format!("Would skip {}: {}", skipped.piece, skipped.message));
         }
-        if lines.is_empty() {
-            lines.push("Nothing to do.".to_string());
-        }
         lines
     }
 
     /// 3 when the import would be skipped, as the real run would exit.
     pub fn exit_code(&self) -> u8 {
         if self.skipped.is_some() { 3 } else { 0 }
-    }
-}
-
-impl CommandReport for ImportPlan {
-    fn partial(&self) -> bool {
-        self.skipped.is_some()
-    }
-
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
     }
 }
 
@@ -786,6 +763,7 @@ mod tests {
     use crate::filesystem::atomic::{Durable, RealDurable};
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
+    use crate::walk::RealFs;
     use std::fs;
     use std::io;
     use std::path::Path;
@@ -881,6 +859,10 @@ mod tests {
     #[derive(Default)]
     struct Probe {
         free: Option<u64>,
+        /// Reading the free space fails.
+        free_fails: bool,
+        /// The walk of the folder runs out of file descriptors.
+        exhausts: bool,
         recording: Option<Recording>,
         before_verify: Option<Change>,
         /// Paths below the top that report a mount, `.` for the top itself.
@@ -889,7 +871,8 @@ mod tests {
 
     impl Hooks for Probe {
         fn fault(&self, _path: &RelPath, _call: crate::walk::Call) -> Option<io::Error> {
-            None
+            self.exhausts
+                .then(|| io::Error::from_raw_os_error(libc::EMFILE))
         }
 
         fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
@@ -911,6 +894,11 @@ mod tests {
         }
 
         fn free(&self, dir: &Path) -> Result<u64, FilesystemError> {
+            if self.free_fails {
+                return Err(crate::filesystem::io_error("read the free space of", dir)(
+                    io::Error::from_raw_os_error(libc::EIO),
+                ));
+            }
             match self.free {
                 Some(free) => Ok(free),
                 None => RealSeams.free(dir),
@@ -1159,13 +1147,114 @@ mod tests {
         let world = world();
         fs::create_dir_all(world.source.path().join("cache/deep")).expect("folders");
         fs::write(world.source.path().join("cache/deep/x"), "x").expect("a file");
-        fs::write(world.source.path().join(".antiqignore"), "cache/\n").expect("rules");
+        fs::write(world.source.path().join("debug.log"), "x").expect("a file");
+        fs::write(world.source.path().join(".antiqignore"), "cache/\n*.log\n").expect("rules");
 
         let plan = plan_with(&world, &RealSeams).expect("the plan ends");
 
         let Some(Step::Command(ImportAction::Import { left_out, .. })) = plan.actions.last() else {
             panic!("an import is planned: {:?}", plan.actions);
         };
-        assert_eq!(left_out, &["cache/"]);
+        assert_eq!(left_out, &["cache/", "debug.log"]);
+    }
+    #[test]
+    fn free_space_that_cannot_be_read_is_an_error_in_a_dry_run_and_a_skip_in_a_real_run() {
+        let world = world();
+        let probe = Probe {
+            free_fails: true,
+            ..Probe::default()
+        };
+
+        let planned = plan_with(&world, &probe).expect_err("the dry run fails");
+        let report = execute_with(&world, &probe).expect("the import ends");
+
+        assert!(matches!(
+            planned,
+            ImportError::Archive(ArchiveError::Space(_))
+        ));
+        assert_eq!(report.skipped.expect("skipped").reason, SkipReason::Error);
+        store_is_empty(&world);
+    }
+
+    #[test]
+    fn a_walk_that_runs_out_of_descriptors_is_an_error() {
+        let world = world();
+        let probe = Probe {
+            exhausts: true,
+            ..Probe::default()
+        };
+
+        let error = execute_with(&world, &probe).expect_err("the walk fails");
+
+        assert!(matches!(error, ImportError::Walk { .. }), "{error}");
+        store_is_empty(&world);
+    }
+
+    #[test]
+    fn a_folder_that_does_not_exist_is_an_error_naming_it() {
+        let world = world();
+        let mut missing = request(&world, true);
+        missing.folder = world.source.path().join("gone/deeper");
+
+        let error = prepare(
+            &collection(&world),
+            &FixedClock::new(Timestamp::now()),
+            &missing,
+            None,
+            &RealFs,
+        )
+        .err()
+        .expect("the folder is missing");
+
+        assert!(matches!(error, ImportError::Open { .. }), "{error}");
+        assert!(format!("{error:?}").contains("gone"), "{error:?}");
+    }
+
+    #[test]
+    fn a_folder_given_with_dot_dot_is_resolved_before_it_is_used() {
+        let world = world();
+        let mut dotted = request(&world, true);
+        dotted.folder = world.source.path().join("sub/..");
+
+        let prepared = prepare(
+            &collection(&world),
+            &FixedClock::new(Timestamp::now()),
+            &dotted,
+            None,
+            &RealFs,
+        )
+        .expect("the folder is the source");
+
+        assert_eq!(
+            PathBuf::from(&prepared.source),
+            fs::canonicalize(world.source.path()).expect("the source exists")
+        );
+    }
+
+    /// Gives the folder its mode back, also when a test fails.
+    struct Mode(PathBuf, u32);
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1));
+        }
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let world = world();
+        let _restore = Mode(world.source.path().to_path_buf(), 0o755);
+        fs::set_permissions(world.source.path(), fs::Permissions::from_mode(0o000))
+            .expect("the mode changes");
+        assert!(
+            fs::read_dir(world.source.path()).is_err(),
+            "the test runs as a user the mode applies to"
+        );
+
+        let error = execute_with(&world, &RealSeams).expect_err("the folder does not open");
+
+        assert!(matches!(error, ImportError::Open { .. }), "{error}");
     }
 }

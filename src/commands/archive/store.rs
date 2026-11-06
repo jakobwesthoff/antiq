@@ -921,6 +921,45 @@ mod tests {
     }
 
     #[test]
+    fn a_live_folder_that_is_gone_fails_naming_the_open_and_leaves_nothing() {
+        let world = world();
+        let collection = Collection::find(world.temp.root()).expect("a collection");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let gone = path("gone");
+        let tree = PieceTree::new(gone.clone(), Vec::new(), Vec::new());
+        let zstd = |_workers: u32| ZstdSettings::fast();
+        let context = StoreContext {
+            collection: &collection,
+            clock: &world.clock,
+            pool: shared_pool(),
+            ledger: &world.ledger,
+            seams: &RealSeams,
+            run_dirs: &world.run_dirs,
+            zstd: &zstd,
+        };
+        let request = StoreRequest {
+            folder: Folder::Live(&gone),
+            stored: &gone,
+            tree: &tree,
+            rules: &rules,
+            imported: None,
+            time: None,
+        };
+
+        let failure = store_version(&context, &request)
+            .err()
+            .expect("the folder is gone");
+
+        assert!(
+            describe(&failure).contains("action: \"open\""),
+            "{}",
+            describe(&failure)
+        );
+        staging_is_gone(&world);
+        store_is_empty(&world);
+    }
+
+    #[test]
     fn a_folder_outside_that_is_a_mount_root_is_verified_and_stored() {
         let world = world();
         let source = outside_source();
