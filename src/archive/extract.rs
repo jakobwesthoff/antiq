@@ -331,6 +331,7 @@ struct Extraction<'a> {
     /// path order, so most members find their parent open here.
     parent: Option<(RelPath, TreeRoot)>,
     members: usize,
+    files: u64,
     chunk: Vec<u8>,
     placement: Placement,
 }
@@ -401,6 +402,7 @@ impl<'a> Extraction<'a> {
             directories: Vec::new(),
             parent: None,
             members: 0,
+            files: 0,
             chunk: vec![0; READ_CHUNK],
             placement: Placement::new(),
         }
@@ -457,6 +459,7 @@ impl<'a> Extraction<'a> {
                     .map_err(at)?;
                 self.flush.file(&file, &path).map_err(at)?;
                 drop(file);
+                self.files += 1;
             }
             Kind::Symlink(target) => {
                 parent.create_symlink(&leaf, &target).map_err(at)?;
@@ -507,6 +510,7 @@ impl<'a> Extraction<'a> {
             top_mode,
             top_mtime,
             members: self.members,
+            files: self.files,
         })
     }
 }
@@ -1016,6 +1020,9 @@ mod tests {
         let expected = walk(&source);
         let found = walk(&staged);
         assert_eq!(unpacked.members, expected.len() - 1);
+        // Three regular files; the two symlinks and the hard link are members
+        // but not files.
+        assert_eq!(unpacked.files, 3);
         let paths = |entries: &[TreeEntry]| -> Vec<RelPath> {
             entries.iter().map(|entry| entry.path.clone()).collect()
         };
@@ -1061,6 +1068,7 @@ mod tests {
                 top_mode: 0o751,
                 top_mtime: 1_234_567_890,
                 members: 1,
+                files: 1,
             }
         );
         assert_eq!(seconds_of(&staged, &RelPath::root()), 1_234_567_890);

@@ -188,6 +188,9 @@ pub struct Unpacked {
     pub top_mtime: u64,
     /// Members extracted below the top-level directory.
     pub members: usize,
+    /// Regular files among them: symlinks, hard links and directories do
+    /// not count, as in the `files` of a listing.
+    pub files: u64,
 }
 
 /// Packs, verifies, lists and unpacks one package format.

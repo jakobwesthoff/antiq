@@ -14,7 +14,7 @@ use crate::commands::unearth::{complete_stamps, concerns, gives_back_to};
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step as PlanStep, serialize_repairs};
-use crate::progress::Tracker;
+use crate::progress::{Observer, Outcome as Progress, Silent, Tracker};
 use crate::reference::{self, ReferenceError};
 use crate::relpath::RelPath;
 use crate::repair::Repair;
@@ -187,15 +187,39 @@ pub fn fork(
     clock: &dyn Clock,
     zone: &TimeZone,
 ) -> Result<Outcome, ForkError> {
-    fork_with(collection, request, clock, zone, &RealHooks)
+    fork_watched(collection, request, clock, zone, &RealHooks, None)
 }
 
+/// [`fork`], telling `observer` what a real run does. A dry run has
+/// nothing to tell.
+pub fn fork_observed(
+    collection: &Collection,
+    request: &ForkRequest,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+    observer: &dyn Observer,
+) -> Result<Outcome, ForkError> {
+    fork_watched(collection, request, clock, zone, &RealHooks, Some(observer))
+}
+
+#[cfg(test)]
 pub(crate) fn fork_with(
     collection: &Collection,
     request: &ForkRequest,
     clock: &dyn Clock,
     zone: &TimeZone,
     hooks: &dyn Hooks,
+) -> Result<Outcome, ForkError> {
+    fork_watched(collection, request, clock, zone, hooks, None)
+}
+
+fn fork_watched(
+    collection: &Collection,
+    request: &ForkRequest,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+    hooks: &dyn Hooks,
+    observer: Option<&dyn Observer>,
 ) -> Result<Outcome, ForkError> {
     let started = run::start(collection, clock, request.dry_run)?;
     if let Started::DryRun {
@@ -225,6 +249,7 @@ pub(crate) fn fork_with(
         places: &places,
         rules: &rules,
         root: &root,
+        observer,
     };
     match started {
         Started::DryRun {
@@ -241,6 +266,7 @@ struct Run<'a> {
     places: &'a Places<'a>,
     rules: &'a Rules,
     root: &'a TreeRoot,
+    observer: Option<&'a dyn Observer>,
 }
 
 impl Run<'_> {
@@ -414,6 +440,15 @@ impl Run<'_> {
         let picked = self.choose()?;
         let destination = named.unwrap_or_else(|| picked.piece.clone());
         warnings.extend(self.notes(&picked));
+        // The card names the piece that is extracted, not the copy.
+        let name = picked.piece.to_string();
+        let tracker = Tracker::new(self.observer.unwrap_or(&Silent), &name);
+        let bytes = picked.listing.as_ref().map_or(0, |listing| listing.bytes);
+        let siblings: Vec<String> = complete_stamps(self.places, &picked.piece)
+            .iter()
+            .map(Stamp::to_string)
+            .collect();
+        tracker.started(bytes, Some(&picked.stamp.to_string()), &siblings);
         let brought = bring_back_to(
             self.collection,
             self.places,
@@ -422,7 +457,7 @@ impl Run<'_> {
             &Placement {
                 destination: &destination,
                 marker_version: None,
-                tracker: Tracker::silent(),
+                tracker,
             },
             clock.now(),
             hooks,
@@ -452,21 +487,41 @@ impl Run<'_> {
                     available,
                 });
                 warnings.extend(more.into_iter().map(Warning::new));
+                tracker.finished(
+                    bytes,
+                    &match needed {
+                        Some(needed) => Progress::NoRoom { needed, available },
+                        // TODO: the console words the free space in decimal
+                        // units once `NoRoom` can carry an unknown `needed`.
+                        None => Progress::Skipped(format!(
+                            "out of space during the extraction, {available} bytes free"
+                        )),
+                    },
+                );
             }
             Brought::Done {
                 warnings: more,
                 failure,
+                files,
                 ..
             } => {
                 report.forked = true;
                 warnings.extend(more.into_iter().map(Warning::new));
+                let mut outcome = Progress::Files(match &picked.listing {
+                    // Only a sound version was compared with its listing.
+                    Some(listing) if picked.damage.is_empty() => listing.files,
+                    _ => files,
+                });
                 if let Some(error) = failure {
                     report.unfinished = true;
-                    warnings.push(Warning::marked(
+                    let warning = Warning::marked(
                         &destination,
                         format!(" is in place, but it could not be made durable: {error}"),
-                    ));
+                    );
+                    outcome = Progress::Unfinished(warning.message.clone());
+                    warnings.push(warning);
                 }
+                tracker.finished(bytes, &outcome);
             }
         }
         report.warnings = warnings;
@@ -680,6 +735,213 @@ mod tests {
 
     fn texts(report: &ForkReport) -> Vec<String> {
         report.warnings.iter().map(|w| w.message.clone()).collect()
+    }
+
+    // ----- progress events
+
+    use crate::testing::recording::Recorder;
+
+    impl World {
+        fn observed(&self, request: &ForkRequest, hooks: &dyn Hooks, recorder: &Recorder) {
+            let _ = fork_watched(
+                &self.collection(),
+                request,
+                &*self.clock,
+                &TimeZone::UTC,
+                hooks,
+                Some(recorder),
+            );
+        }
+    }
+
+    #[test]
+    fn a_fork_reports_its_operations_with_counters_that_reach_their_totals() {
+        let world = World::new(&[NEW]);
+        let recorder = Recorder::new();
+
+        world.observed(&world.request(None, false), &Probe::default(), &recorder);
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 25 2026-11-04T090211",
+                "projects/scanner Extracting 2/2",
+                "projects/scanner Verifying 2/2",
+                "finished projects/scanner 25 Files(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_with_a_name_reports_the_piece_and_not_the_copy() {
+        let world = World::new(&[NEW]);
+        let recorder = Recorder::new();
+
+        world.observed(
+            &world.request(Some("tools/copy"), false),
+            &Probe::default(),
+            &recorder,
+        );
+
+        assert!(
+            recorder
+                .lines()
+                .iter()
+                .all(|line| !line.contains("tools/copy")),
+            "{:?}",
+            recorder.lines()
+        );
+        assert_eq!(recorder.lines_of("projects/scanner").len(), 4);
+    }
+
+    #[test]
+    fn a_fork_without_room_ends_as_skipped_after_it_started() {
+        let world = World::new(&[NEW]);
+        let probe = Probe::default();
+        probe.space.set(Some(3));
+        let recorder = Recorder::new();
+
+        world.observed(&world.request(None, false), &probe, &recorder);
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 25 2026-11-04T090211",
+                "finished projects/scanner 25 NoRoom { needed: 25, available: 3 }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_of_a_version_without_a_listing_counts_the_files_it_extracted() {
+        let world = World::new(&[NEW]);
+        fs::remove_file(world.version_path(VersionFile::Listing)).expect("removes");
+        let recorder = Recorder::new();
+
+        world.observed(
+            &world.request(Some("tools/copy"), false),
+            &Probe::default(),
+            &recorder,
+        );
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 0 2026-11-04T090211",
+                "projects/scanner Extracting 2/0",
+                "finished projects/scanner 0 Files(2)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_that_ran_full_without_a_listing_ends_as_skipped() {
+        let world = World::new(&[NEW]);
+        fs::remove_file(world.version_path(VersionFile::Listing)).expect("removes");
+        let probe = Probe::default();
+        probe.callbacks.borrow_mut().push((
+            Step::Extracted,
+            Box::new(|| {
+                Err(RestoreError::Io {
+                    action: "write",
+                    path: String::new(),
+                    source: io::Error::from_raw_os_error(28),
+                })
+            }),
+        ));
+        let recorder = Recorder::new();
+
+        world.observed(&world.request(Some("tools/copy"), false), &probe, &recorder);
+
+        let lines = recorder.lines();
+        let last = lines.last().expect("events came");
+        assert!(
+            last.starts_with(
+                "finished projects/scanner 0 Skipped(\"out of space during the extraction"
+            ),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn a_fork_of_a_damaged_version_counts_the_files_and_not_what_the_listing_says() {
+        let world = World::new(&[NEW]);
+        // The listing is well formed but records a third file that the
+        // archive does not hold.
+        let listing = world.version_path(VersionFile::Listing);
+        let text =
+            zstd::stream::decode_all(&fs::read(&listing).expect("reads")[..]).expect("decodes");
+        let text = String::from_utf8(text).expect("text");
+        let entry = text
+            .lines()
+            .position(|line| line.starts_with("# file") && line.ends_with("main.rs"))
+            .expect("main.rs has an entry");
+        let lines: Vec<&str> = text.lines().collect();
+        let extra =
+            [lines[entry], lines[entry + 1]].map(|line| line.replace("main.rs", "extra.rs"));
+        let text = text
+            .replace("# files         2", "# files         3")
+            .replace("# bytes         25", "# bytes         37")
+            + &extra.join("\n")
+            + "\n";
+        fs::write(
+            &listing,
+            zstd::stream::encode_all(text.as_bytes(), 3).expect("compresses"),
+        )
+        .expect("writes");
+        fs::write(world.version_path(VersionFile::Checksum), "no checksum").expect("writes");
+        let recorder = Recorder::new();
+
+        world.observed(
+            &world.request(Some("tools/copy"), false),
+            &Probe::default(),
+            &recorder,
+        );
+
+        let lines = recorder.lines();
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("finished projects/scanner 37 Files(2)"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_fork_refused_after_it_started_ends_without_a_finish() {
+        let world = World::new(&[NEW]);
+        fs::create_dir_all(world.root().join("projects/scanner")).expect("makes");
+        fs::write(world.root().join("projects/scanner/mine"), "x").expect("writes");
+        let recorder = Recorder::new();
+
+        world.observed(&world.request(None, false), &Probe::default(), &recorder);
+
+        let lines = recorder.lines();
+        assert!(
+            lines[0].starts_with("started projects/scanner"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.starts_with("finished")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_fork_whose_folder_cannot_be_made_durable_ends_as_unfinished() {
+        let world = World::new(&[NEW]);
+        let probe = Probe::default();
+        probe.stop_at(Step::Renamed);
+        let recorder = Recorder::new();
+
+        world.observed(&world.request(None, false), &probe, &recorder);
+
+        let lines = recorder.lines();
+        let last = lines.last().expect("events came");
+        assert!(
+            last.starts_with("finished projects/scanner 25 Unfinished(")
+                && last.contains("is in place"),
+            "{last}"
+        );
     }
 
     // ----- the copy

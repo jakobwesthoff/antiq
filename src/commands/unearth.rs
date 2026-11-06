@@ -470,6 +470,7 @@ impl Run<'_> {
                 time,
                 warnings: more,
                 failure,
+                ..
             } => {
                 report.unearthed = true;
                 warnings.extend(more.into_iter().map(Warning::new));

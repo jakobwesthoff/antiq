@@ -948,6 +948,9 @@ pub(crate) enum Brought {
         time: Timestamp,
         warnings: Vec<String>,
         failure: Option<RestoreError>,
+        /// The regular files the extraction wrote: symlinks and hard links
+        /// are not files, as in the `files` of a listing.
+        files: u64,
     },
     Skipped {
         reason: Skipped,
@@ -967,6 +970,7 @@ struct Placed {
     /// then on the folder is in place and nothing is taken back.
     renamed: bool,
     warnings: Vec<String>,
+    files: u64,
 }
 
 fn io_at(action: &'static str, path: impl ToString) -> impl FnOnce(io::Error) -> RestoreError {
@@ -1115,11 +1119,13 @@ pub(crate) fn bring_back_to(
             time,
             warnings: placed.warnings,
             failure: None,
+            files: placed.files,
         }),
         Err(error) if placed.renamed => Ok(Brought::Done {
             time,
             warnings: placed.warnings,
             failure: Some(error),
+            files: placed.files,
         }),
         Err(error) => {
             take_back(&root, &mut placed);
@@ -1219,6 +1225,7 @@ fn place(
         extracting.set_total(items as u64);
     }
     let unpacked = unpack_counted(&archive, &staging, &volume, &flush, &extracting)?;
+    placed.files = unpacked.files;
     hooks.reached(Step::Extracted)?;
 
     if let Some(listing) = source.listing
@@ -2775,6 +2782,17 @@ mod bring_tests {
         match result.expect("the run ends without an error") {
             Brought::Skipped { reason, .. } => reason,
             other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_files_written_are_the_regular_files_and_not_the_links() {
+        let world = World::new();
+        match world.run(&world.spy()).expect("the version comes back") {
+            // main.rs and src/lib.rs; the symlink and the hard link are
+            // members of the archive but not files.
+            Brought::Done { files, .. } => assert_eq!(files, 2),
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 
