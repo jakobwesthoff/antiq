@@ -7,14 +7,14 @@
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
-use crate::fsx::atomic::{flush_dir, write_atomic};
+use crate::fsx::atomic::{flush_dir, flush_file, write_atomic};
 use crate::id::ObjectId;
 use crate::lock::RunLock;
-use crate::meta::{self, MetaError, Metadata};
+use crate::meta::{self, FileName, MetaError, Metadata};
 use crate::pack::hashing::hex;
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -97,6 +97,14 @@ pub enum Promoted {
     /// The version was already in place; the leftover `meta.pending` is
     /// gone now.
     AlreadyCommitted,
+}
+
+/// What [`Store::put_file`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Put {
+    Stored,
+    /// The same bytes were in place already; the source was left alone.
+    AlreadyPresent,
 }
 
 /// The objects below `.antiq/objects/`.
@@ -364,6 +372,77 @@ impl<'c> Store<'c> {
     }
 
     // =========================================================
+    // Payloads and listings
+    // =========================================================
+
+    /// The path of a payload or listing of the object.
+    pub fn file_path(&self, id: ObjectId, name: &FileName) -> PathBuf {
+        self.collection.object_dir(id).join(name.as_str())
+    }
+
+    /// Moves the payload or listing `from`, written in `.antiq/tmp/` and
+    /// hashing to `sha256`, under its final `name` in the object's
+    /// directory. Files there are never replaced: a name that is taken
+    /// accepts the put only when the file in place has the same full
+    /// SHA-256, and then `from` is left to its owner. The name carries only
+    /// 16 digits of it, so the full hash is what tells a repeated put from
+    /// a different file with the same name.
+    ///
+    /// The file is flushed before it is renamed and the directory after,
+    /// so a name in place always has all its bytes. Nothing else writes in
+    /// the directory while the run lock is held, so the check for the name
+    /// and the rename cannot race. A failure leaves `from` where it was.
+    ///
+    /// ```compile_fail,E0061
+    /// use antiq::id::ObjectId;
+    /// use antiq::meta::FileName;
+    /// use antiq::store::Store;
+    /// use std::path::Path;
+    ///
+    /// // As for `write_pending`: the lock proof is a parameter that cannot
+    /// // be forged, so a put without it does not compile.
+    /// fn put(store: &Store<'_>, id: ObjectId, name: &FileName, from: &Path) {
+    ///     let _ = store.put_file(id, name, from, "0");
+    /// }
+    /// ```
+    pub fn put_file(
+        &self,
+        _lock: &RunLock,
+        id: ObjectId,
+        name: &FileName,
+        from: &Path,
+        sha256: &str,
+    ) -> Result<Put, StoreError> {
+        // Only the names of the remote layout go through here, so that a
+        // metadata file cannot be put in place as if it were a payload.
+        let text = name.as_str();
+        if !meta::is_payload_file_name(text) && !meta::is_listing_file_name(text) {
+            return Err(StoreError::NotAStoredName {
+                name: text.to_string(),
+            });
+        }
+
+        let target = self.file_path(id, name);
+        if target.exists() {
+            let present = file_sha256(&target).map_err(io_error("read", &target))?;
+            return if present == sha256 {
+                Ok(Put::AlreadyPresent)
+            } else {
+                Err(StoreError::PayloadConflict {
+                    name: text.to_string(),
+                })
+            };
+        }
+
+        let source = File::open(from).map_err(io_error("open", from))?;
+        let dir = self.ensure_object_dir(id)?;
+        flush_file(&source, from)?;
+        fs::rename(from, &target).map_err(io_error("move", from))?;
+        flush_dir(&dir)?;
+        Ok(Put::Stored)
+    }
+
+    // =========================================================
     // Directories
     // =========================================================
 
@@ -430,6 +509,19 @@ fn version_number(name: &str) -> Option<u32> {
 
 fn sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
+}
+
+/// The SHA-256 of a file, read in chunks: payloads do not fit in memory.
+fn file_sha256(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        match file.read(&mut chunk)? {
+            0 => return Ok(hex(&hasher.finalize())),
+            read => hasher.update(&chunk[..read]),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1090,5 +1182,140 @@ mod tests {
             "{error:?}"
         );
         assert!(fx.collection.meta_pending_path(id(ID)).exists());
+    }
+
+    // ---------------------------------------------------------
+    // Payloads and listings
+    // ---------------------------------------------------------
+
+    const PAYLOAD: &str = "0123456789abcdef-a.tar.zst";
+    const LISTING: &str = "0123456789abcdef.listing.zst";
+
+    fn file_name(text: &str) -> FileName {
+        FileName::new(text).expect("a plain name")
+    }
+
+    /// Puts `contents` into `.antiq/tmp/` as `source`.
+    fn staged(fx: &mut Fixture, source: &str, contents: &[u8]) -> PathBuf {
+        fx.temp
+            .tree()
+            .file(&format!(".antiq/tmp/{source}"), contents)
+    }
+
+    fn put(fx: &Fixture, name: &str, from: &Path, contents: &[u8]) -> Result<Put, StoreError> {
+        fx.store()
+            .put_file(&fx.lock, id(ID), &file_name(name), from, &sha256(contents))
+    }
+
+    #[test]
+    fn a_payload_is_moved_under_its_final_name_into_a_directory_that_is_made() {
+        let mut fx = Fixture::new();
+        let from = staged(&mut fx, "upload", b"payload bytes");
+        assert!(!fx.object_dir(ID).exists());
+        assert_eq!(
+            put(&fx, PAYLOAD, &from, b"payload bytes").expect("puts"),
+            Put::Stored
+        );
+        assert_eq!(
+            fs::read(fx.object_dir(ID).join(PAYLOAD)).expect("a file"),
+            b"payload bytes"
+        );
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn the_same_payload_again_is_already_there_and_its_source_stays() {
+        let mut fx = Fixture::new();
+        let first = staged(&mut fx, "one", b"payload bytes");
+        put(&fx, PAYLOAD, &first, b"payload bytes").expect("puts");
+        let second = staged(&mut fx, "two", b"payload bytes");
+        assert_eq!(
+            put(&fx, PAYLOAD, &second, b"payload bytes").expect("puts"),
+            Put::AlreadyPresent
+        );
+        assert!(second.exists());
+        assert_eq!(
+            fs::read(fx.object_dir(ID).join(PAYLOAD)).expect("a file"),
+            b"payload bytes"
+        );
+    }
+
+    #[test]
+    fn the_same_listing_again_is_already_there() {
+        let mut fx = Fixture::new();
+        let first = staged(&mut fx, "one", b"listing bytes");
+        put(&fx, LISTING, &first, b"listing bytes").expect("puts");
+        let second = staged(&mut fx, "two", b"listing bytes");
+        assert_eq!(
+            put(&fx, LISTING, &second, b"listing bytes").expect("puts"),
+            Put::AlreadyPresent
+        );
+    }
+
+    #[test]
+    fn other_bytes_under_an_existing_name_are_refused_and_nothing_is_replaced() {
+        let mut fx = Fixture::new();
+        let first = staged(&mut fx, "one", b"payload bytes");
+        put(&fx, PAYLOAD, &first, b"payload bytes").expect("puts");
+        let second = staged(&mut fx, "two", b"different bytes");
+        let error = put(&fx, PAYLOAD, &second, b"different bytes").expect_err("refused");
+        assert!(
+            matches!(&error, StoreError::PayloadConflict { name } if name == PAYLOAD),
+            "{error:?}"
+        );
+        assert!(second.exists());
+        assert_eq!(
+            fs::read(fx.object_dir(ID).join(PAYLOAD)).expect("a file"),
+            b"payload bytes"
+        );
+    }
+
+    fn assert_not_a_stored_name(name: &str) {
+        let mut fx = Fixture::new();
+        let from = staged(&mut fx, "upload", b"x");
+        let error = put(&fx, name, &from, b"x").expect_err("refused");
+        assert!(
+            matches!(error, StoreError::NotAStoredName { .. }),
+            "{error:?}"
+        );
+        assert!(from.exists());
+        assert!(!fx.object_dir(ID).exists());
+    }
+
+    #[test]
+    fn a_version_of_the_metadata_does_not_go_through_the_payload_put() {
+        assert_not_a_stored_name("meta.5");
+    }
+
+    #[test]
+    fn the_recorded_change_does_not_go_through_the_payload_put() {
+        assert_not_a_stored_name("meta.pending");
+    }
+
+    #[test]
+    fn a_payload_name_with_an_upper_case_digest_is_not_a_stored_name() {
+        assert_not_a_stored_name("0123456789ABCDEF-a.tar.zst");
+    }
+
+    #[test]
+    fn a_source_that_is_missing_is_an_error_naming_it_and_nothing_is_made() {
+        let fx = Fixture::new();
+        let from = fx.collection.tmp_dir().join("missing");
+        let error = put(&fx, PAYLOAD, &from, b"x").expect_err("no source");
+        assert!(
+            matches!(error, StoreError::Io { action: "open", .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("missing"), "{error}");
+        assert!(!fx.object_dir(ID).exists());
+    }
+
+    #[test]
+    fn a_file_is_found_at_its_name_in_the_object_directory() {
+        let fx = Fixture::new();
+        assert_eq!(
+            fx.store().file_path(id(ID), &file_name(PAYLOAD)),
+            fx.object_dir(ID).join(PAYLOAD)
+        );
     }
 }

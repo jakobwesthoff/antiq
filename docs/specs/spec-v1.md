@@ -510,20 +510,25 @@ Remote layout:
 ```
 
 Payload files are never overwritten. A put onto an existing payload name
-succeeds only when the full SHA-256 matches. The name part is the
-piece's name with every byte outside `[A-Za-z0-9._-]` written as `%XX`,
-cut to 64 bytes without splitting an escape; the real name is only in
-the metadata. The listing of a payload is named after it: the first 16 hex
-digits of the payload's SHA-256, followed by `.listing.zst`. Upload temp names are `.<final name>.<machine part>.part`,
+succeeds only when the full SHA-256 matches; for a listing, which the
+metadata records no checksum for, the SHA-256 of its bytes is compared.
+The name part is the piece's name with every byte outside `[A-Za-z0-9._-]`
+written as `%XX`, cut to 64 bytes without splitting an escape; the real
+name is only in the metadata. The listing of a payload is named after it:
+the first 16 hex digits of the payload's SHA-256, followed by
+`.listing.zst`. Upload temp names are `.<final name>.<machine part>.part`,
 where the machine part is the machine name escaped the same way and cut
 to 32 bytes; the same machine reuses the name on its next attempt. One
 writer runs per collection, and the temp name sits in the object's ULID
 directory, so it is unique per object.
 
-Every file antiq writes in `.antiq/` (metadata, listings, manifests,
-tracking, index, config) goes through one atomic write: a temp file in
-the same directory, `sync_all` with a fallback to plain `fsync` on
-`ENOTSUP`, rename, `fsync` of the directory.
+Payloads and listings are written in `.antiq/tmp/`, flushed, and renamed
+into the object's directory, which is then flushed. Every other file antiq
+writes in `.antiq/` (metadata, manifests, tracking, index, config) goes
+through one atomic write: a temp file in the same directory, `sync_all`
+with a fallback to plain `fsync` on `ENOTSUP`, rename, `fsync` of the
+directory. Whenever antiq writes into an object's directory, it flushes
+`objects/` and `.antiq/` as well, so the directory itself is durable.
 
 The index is derived from metadata and listings, kept as plain files,
 rebuildable, and behind a module interface. Listings are fetched
@@ -623,9 +628,10 @@ Cleanup:
 
 When the highest `meta.<N>` does not parse, `status` and `reconcile`
 report it, readers use the highest version that parses, and nothing is
-written on top of it until it is resolved. `reconcile` reports any ID
-whose committed version was written by another machine than the local
-record says.
+written on top of it until it is resolved. An object with no version that
+parses and no recorded change has no readable metadata, which is an
+error. `reconcile` reports any ID whose committed version was written by
+another machine than the local record says.
 
 ## Remotes
 
