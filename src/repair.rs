@@ -1187,7 +1187,7 @@ fn apply(
                 note: given.note,
             });
         }
-        Repair::DeleteRestoredVersion { piece, .. } => unearthed(collection, piece)?,
+        Repair::DeleteRestoredVersion { piece, .. } => unearthed(collection, piece, durable)?,
         Repair::RemoveEmptyFolder { folder } => {
             remove_store_folder(collection, folder)?.then(|| repair.clone())
         }
@@ -1198,7 +1198,11 @@ fn apply(
 /// Deletes what is left of the version a marker names, and only then drops
 /// the stamp from the marker, so a failure leaves the marker to repeat the
 /// repair on the next run.
-fn unearthed(collection: &Collection, piece: &RelPath) -> Result<Option<Repair>, RepairError> {
+fn unearthed(
+    collection: &Collection,
+    piece: &RelPath,
+    durable: &dyn Durable,
+) -> Result<Option<Repair>, RepairError> {
     let read = "read the restored marker";
     let at = format!("{piece}/{RESTORED_FILE}");
     let root =
@@ -1222,6 +1226,13 @@ fn unearthed(collection: &Collection, piece: &RelPath) -> Result<Option<Repair>,
         let found = stored_version(pieces, &folder, &version)
             .map_err(|error| failure(step, piece.to_string(), error))?;
         if holds_files(&found) {
+            // The version is the only copy of the data until the folder
+            // that replaces it is durable, and a crash may have come before
+            // the unearth flushed the rename. A flush that fails leaves the
+            // version and the stamp for the next run.
+            flush_dir_of(durable, &root, piece)
+                .and_then(|()| flush_dir_of(durable, &root, &parent_of(piece)))
+                .map_err(|error| failure(step, piece.to_string(), error))?;
             store::delete_version(pieces, &folder, &found)
                 .map_err(|error| failure(step, piece.to_string(), error))?;
             deleted = true;
@@ -2715,6 +2726,84 @@ mod tests {
             marker_of(&temp, "p/.antiq-restored"),
             format!("restored {T0}\n")
         );
+    }
+
+    mod unearth_flush {
+        use super::*;
+        use crate::filesystem::atomic::recording::{Flush, Recording};
+        use std::sync::{Arc, Mutex};
+
+        fn dirs(recording: &Recording) -> Vec<PathBuf> {
+            recording
+                .flushes()
+                .into_iter()
+                .filter_map(|flush| match flush {
+                    Flush::Dir(path) => Some(path),
+                    Flush::File(_) => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn the_unearthed_folder_and_its_parent_are_flushed_before_the_version_goes() {
+            let mut temp = TempCollection::minimal();
+            lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+            marker(&mut temp, "p", &marked(S));
+            let collection = collection(&temp);
+            let lock = lock_of(&collection);
+            let recording = Recording::new();
+            let store = temp.root().join(".antiq/pieces/p");
+            let stored_at_flush = Arc::new(Mutex::new(Vec::new()));
+            let seen = stored_at_flush.clone();
+            recording.observe(move |_, _| seen.lock().expect("seen").push(store.exists()));
+
+            apply_all(&collection, &lock, plan(&collection), &recording);
+
+            assert_eq!(dirs(&recording), [PathBuf::from("p"), PathBuf::from(".")]);
+            assert_eq!(*stored_at_flush.lock().expect("seen"), [true, true]);
+            assert!(
+                !exists(&temp, ".antiq/pieces/p"),
+                "the version is deleted after"
+            );
+        }
+
+        #[test]
+        fn a_flush_that_fails_keeps_the_version_and_the_stamp_and_warns() {
+            let mut temp = TempCollection::minimal();
+            lay(&mut temp, ".antiq/pieces", "p", S, &WHOLE);
+            marker(&mut temp, "p", &marked(S));
+            let collection = collection(&temp);
+            let lock = lock_of(&collection);
+            let recording = Recording::new();
+            recording.fail_dirs_from(0);
+
+            let outcome = apply_all(&collection, &lock, plan(&collection), &recording);
+
+            assert!(exists(&temp, ".antiq/pieces/p"), "the version stays");
+            assert_eq!(marker_of(&temp, "p/.antiq-restored"), marked(S));
+            assert!(
+                outcome.warnings.iter().any(|w| w
+                    .message
+                    .starts_with("cannot delete the rest of an unearthed version p: ")),
+                "{:?}",
+                outcome.warnings
+            );
+            assert!(outcome.done.is_empty());
+        }
+
+        #[test]
+        fn a_stamp_that_names_nothing_flushes_nothing() {
+            let mut temp = TempCollection::minimal();
+            lay(&mut temp, ".antiq/pieces", "p", "2026-11-04T090212", &WHOLE);
+            marker(&mut temp, "p", &marked(S));
+            let collection = collection(&temp);
+            let lock = lock_of(&collection);
+            let recording = Recording::new();
+
+            apply_all(&collection, &lock, plan(&collection), &recording);
+
+            assert_eq!(dirs(&recording), Vec::<PathBuf>::new());
+        }
     }
 
     #[test]

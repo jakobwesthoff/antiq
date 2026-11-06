@@ -766,7 +766,10 @@ or `doomed/`, the parents that became empty go too. (ADR 0059)
    the marker to the time alone, after the deletion succeeded. A stamp
    that names nothing is simply dropped from the marker. A marker that
    cannot be read is a warning and the piece is skipped. A tree that
-   repair 4 gives back counts as the live piece for this repair. A version
+   repair 4 gives back counts as the live piece for this repair. Before it
+   deletes a version it flushes the piece's folder and the folder above it,
+   as the unearth may have died before it flushed the rename; a flush that
+   fails leaves the version and the stamp for the next run. A version
    copied back by hand between a crash and the next run is deleted, and the
    repair names it.
 6. **Empty store folders:** remove folders under `pieces/` that hold
