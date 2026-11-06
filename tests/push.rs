@@ -367,3 +367,58 @@ fn trash_that_holds_only_empty_folders_does_not_refuse() {
 
     assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
 }
+
+#[test]
+fn a_store_folder_that_cannot_be_read_is_an_error_not_a_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let collection = stored(&[STAMP]);
+    let folder = collection.path(".antiq/pieces/projects/a");
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("locked");
+    assert!(
+        fs::read_dir(&folder).is_err(),
+        "the test runs as a user without access"
+    );
+
+    let run = push(&collection, &[]);
+
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("unlocked");
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other", "{}", run.stdout);
+    assert!(run.error_message().contains("store"), "{}", run.stdout);
+}
+
+#[test]
+fn a_pattern_that_cannot_be_compiled_is_an_error_not_a_pass() {
+    let collection = Collection::build(&Clock::now())
+        .patterns(&["projects/[a"])
+        .piece("projects/a", |piece| {
+            piece.age_days(3).file("a.txt", "a");
+        })
+        .finish();
+    set_url(&collection, "/nonexistent/target");
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other", "{}", run.stdout);
+    assert!(run.error_message().contains("select"), "{}", run.stdout);
+}
+
+#[test]
+fn a_listing_that_cannot_be_read_is_an_error_not_a_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let collection = stored(&[STAMP]);
+    let listing = collection.version_files("projects/a", STAMP).listing;
+    fs::set_permissions(&listing, fs::Permissions::from_mode(0o000)).expect("locked");
+    assert!(
+        fs::File::open(&listing).is_err(),
+        "the test runs as a user without access"
+    );
+
+    let run = push(&collection, &[]);
+
+    fs::set_permissions(&listing, fs::Permissions::from_mode(0o644)).expect("unlocked");
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other", "{}", run.stdout);
+    assert!(run.error_message().contains("store"), "{}", run.stdout);
+}

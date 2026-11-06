@@ -77,10 +77,7 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
     }
 
     let config = &collection.config().collection;
-    let root = TreeRoot::open(collection.root()).map_err(|source| PushError::Root {
-        path: collection.root().to_path_buf(),
-        source,
-    })?;
+    let root = open_root(collection.root())?;
     let rules = Rules::new(&config.patterns, &config.exclude)
         .and_then(|rules| rules.bind(&root))
         .map_err(PushError::Select)?;
@@ -93,6 +90,14 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
         return Err(PushError::TrashNotEmpty { path });
     }
     Ok(())
+}
+
+/// The collection root opened for listing.
+fn open_root(path: &Path) -> Result<TreeRoot, PushError> {
+    TreeRoot::open(path).map_err(|source| PushError::Root {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// The first entry below `dir` that is not a directory, the directories
@@ -463,6 +468,19 @@ mod tests {
 
         let warned = being_stored(&piece, &whole(), &[Warning::new("cannot move x")]);
         assert!(warned.contains("warned: cannot move x"), "{warned}");
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_opened_is_named_in_the_error() {
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let missing = temp.path().join("gone");
+
+        let result = open_root(&missing);
+
+        match result {
+            Err(PushError::Root { path, .. }) => assert_eq!(path, missing),
+            other => panic!("expected a Root error, got {:?}", other.map(|_| ())),
+        }
     }
 
     mod trash {
