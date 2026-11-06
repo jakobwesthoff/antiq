@@ -2072,4 +2072,82 @@ pub(in crate::ops::unearth) mod tests {
         assert!(matches!(error, UnearthError::Remote(_)), "{error}");
         assert!(finished.load(Ordering::SeqCst));
     }
+
+    #[test]
+    fn nothing_is_pulled_from_a_remote_that_is_away() {
+        let scenario = Scenario::new(true);
+        scenario.newer_on_remote();
+
+        refuse_away(&scenario);
+
+        let store = Store::new(&scenario.fx.collection);
+        assert_eq!(store.committed_versions(id(ID)).expect("lists"), [1]);
+    }
+
+    #[test]
+    fn the_unreadable_versions_of_the_store_are_listed_after_the_pulled_ones() {
+        let scenario = Scenario::new(true);
+        let here = scenario.fx.collection.object_dir(id(ID));
+        fs::write(here.join("meta.2"), b"not json").expect("written");
+        scenario.version_on_remote(3, b"not json");
+
+        let error = dry_run_refusal(&scenario);
+
+        assert!(
+            matches!(&error, UnearthError::UnreadableVersions { versions, .. } if versions.starts_with("3 (") && versions.contains(", 2 (")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_fork_needs_the_remote_as_much_as_a_fetch() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.add_live(ID, 2);
+        fx.make_foreign(ID);
+        let planned = fx.plan(&fx.request(ID)).expect("planned");
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.source == UnearthSource::Fork),
+            "{planned:?}"
+        );
+        let refreshed = refresh_with(
+            Err(RemoteError::NoRemote),
+            &fx.collection,
+            None,
+            id(ID),
+            fx.clock.now(),
+        )
+        .expect("a standing");
+
+        let error = refreshed.check_usable(&planned).expect_err("refused");
+
+        assert_eq!(error.kind(), ErrorKind::NoRemote);
+    }
+
+    #[test]
+    fn a_restore_from_a_live_package_needs_the_remote_as_much_as_a_fetch() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.edit_meta(ID, |document| {
+            document["lifecycle"] = serde_json::json!("live")
+        });
+        fx.live_only(ID);
+        let planned = fx.plan(&fx.request(ID)).expect("planned");
+        assert!(
+            matches!(&planned, Planned::Unearth(plan) if plan.source == UnearthSource::LivePackage),
+            "{planned:?}"
+        );
+        let refreshed = refresh_with(
+            Err(RemoteError::NoRemote),
+            &fx.collection,
+            None,
+            id(ID),
+            fx.clock.now(),
+        )
+        .expect("a standing");
+
+        let error = refreshed.check_usable(&planned).expect_err("refused");
+
+        assert_eq!(error.kind(), ErrorKind::NoRemote);
+    }
 }
