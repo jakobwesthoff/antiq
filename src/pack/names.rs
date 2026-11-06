@@ -997,6 +997,8 @@ mod tests {
 #[cfg(test)]
 mod probe_tests {
     use super::*;
+    // Only the macOS volume test builds a name that is not UTF-8.
+    #[cfg(target_os = "macos")]
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
