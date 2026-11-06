@@ -12,3 +12,4 @@ mod grep;
 mod harness;
 mod init;
 mod list;
+mod status;
