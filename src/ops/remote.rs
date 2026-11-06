@@ -4,6 +4,7 @@
 
 //! The `remote add`, `remote show` and `remote remove` commands.
 
+use crate::brake::{self, BrakeError, BrakeHold, BrakeInput};
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::config::{ConfigDoc, ConfigError, RemoteConfig};
@@ -81,6 +82,8 @@ pub enum RemoteOpError {
         source: io::Error,
     },
     #[error(transparent)]
+    Brake(#[from] BrakeError),
+    #[error(transparent)]
     Remote(#[from] RemoteError),
     #[error(transparent)]
     Config(#[from] ConfigError),
@@ -99,6 +102,7 @@ pub enum RemoteOpError {
 impl HasKind for RemoteOpError {
     fn kind(&self) -> ErrorKind {
         match self {
+            RemoteOpError::Brake(error) => error.kind(),
             RemoteOpError::Remote(error) => error.kind(),
             RemoteOpError::Store(error) => error.kind(),
             _ => ErrorKind::Other,
@@ -295,6 +299,9 @@ pub struct RemoveReport {
     /// The pieces whose archive only the remote holds, which cannot be
     /// reached without it.
     pub remote_only: Vec<Candidate>,
+    /// Where the brake would hold, in a dry run that it would hold in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brake: Option<BrakeHold>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
     pub actions: Vec<RemoteAction>,
@@ -304,7 +311,12 @@ pub struct RemoveReport {
 impl RemoveReport {
     /// The lines of a console for a dry run.
     pub fn plan_lines(&self) -> Vec<String> {
-        plan_lines(&self.actions)
+        let mut plan = Plan::new();
+        for action in &self.actions {
+            plan.push(action.clone());
+        }
+        plan.brake = self.brake.clone();
+        plan.lines()
     }
 }
 
@@ -328,26 +340,50 @@ impl CommandReport for RemoveReport {
 
 /// Detaches the remote: the `[[remote]]` entry goes, nothing on the remote
 /// is touched and the local metadata stays.
-pub fn remove(collection: &Collection, started: &Started) -> Result<RemoveReport, RemoteOpError> {
+pub fn remove(
+    collection: &Collection,
+    started: &Started,
+    brake: BrakeInput<'_>,
+) -> Result<RemoveReport, RemoteOpError> {
     let config = collection
         .config()
         .remotes
         .first()
         .ok_or(RemoteError::NoRemote)?;
     let url = config.url.clone();
-    let remote_only = remote_only_pieces(collection)?;
+    let (remote_only, set_size) = remote_only_pieces(collection)?;
     let actions = vec![RemoteAction::DetachRemote { url: url.clone() }];
+    // The set is every object in the store, the ones whose metadata cannot
+    // be read included.
+    let hold = brake::evaluate(
+        collection.config().collection.brake_percent,
+        remote_only.clone(),
+        set_size,
+    );
 
     let Started::Guarded(guard) = started else {
         return Ok(RemoveReport {
             detached: false,
             url,
             remote_only,
+            // With `--force` the brake holds nothing back.
+            brake: hold.filter(|_| !brake.force),
             dry_run: true,
             actions,
             warnings: Vec::new(),
         });
     };
+    brake::gate(
+        hold,
+        brake.force,
+        &|hold| {
+            format!(
+                "Detach the remote? {} of {} objects exist only there.",
+                hold.planned, hold.set_size
+            )
+        },
+        brake.interaction,
+    )?;
     let mut doc = ConfigDoc::read(&collection.config_path())?;
     doc.remove_remote();
     write_atomic(&collection.config_path(), doc.render()?.as_bytes())?;
@@ -355,6 +391,7 @@ pub fn remove(collection: &Collection, started: &Started) -> Result<RemoveReport
         detached: true,
         url,
         remote_only,
+        brake: None,
         dry_run: false,
         actions,
         warnings: guard.warnings().to_vec(),
@@ -364,7 +401,7 @@ pub fn remove(collection: &Collection, started: &Started) -> Result<RemoveReport
 /// The pieces this machine has no archive of, which only the remote holds.
 /// An object whose metadata cannot be read is left out: `status` lists it
 /// as damaged.
-fn remote_only_pieces(collection: &Collection) -> Result<Vec<Candidate>, RemoteOpError> {
+fn remote_only_pieces(collection: &Collection) -> Result<(Vec<Candidate>, usize), RemoteOpError> {
     let store = Store::new(collection);
     let tracked = tracking::read_all(collection)?;
     let root = TreeRoot::open(collection.root()).map_err(|source| RemoteOpError::Io {
@@ -373,7 +410,8 @@ fn remote_only_pieces(collection: &Collection) -> Result<Vec<Candidate>, RemoteO
         source,
     })?;
     let mut pieces = Vec::new();
-    for object in store.objects()? {
+    let objects = store.objects()?;
+    for &object in &objects {
         let Ok(Some(current)) = store.current(object) else {
             continue;
         };
@@ -392,7 +430,7 @@ fn remote_only_pieces(collection: &Collection) -> Result<Vec<Candidate>, RemoteO
             });
         }
     }
-    Ok(pieces)
+    Ok((pieces, objects.len()))
 }
 
 /// Attaches the remote at `request.url`, or creates it with `--init`.
@@ -959,6 +997,7 @@ mod tests {
     use super::*;
     use crate::clock::FixedClock;
     use crate::id::SeqIds;
+    use crate::interact::{Interaction, NonInteractive, ScriptedInteraction};
     use crate::remote::marker::Marker;
     use crate::run;
     use crate::testing::rerun_while_lock_unattributed;
@@ -1722,13 +1761,63 @@ mod tests {
     // =====================================================
 
     impl World {
+        /// Removes with `--force`, which the brake does not hold.
         fn remove(&self, dry_run: bool) -> Result<RemoveReport, RemoteOpError> {
+            self.remove_asking(dry_run, true, &mut NonInteractive)
+        }
+
+        fn remove_asking(
+            &self,
+            dry_run: bool,
+            force: bool,
+            interaction: &mut dyn Interaction,
+        ) -> Result<RemoveReport, RemoteOpError> {
             let collection = self.collection();
             let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
             let started =
                 rerun_while_lock_unattributed(|| run::start(&collection, &clock, dry_run))
                     .expect("the run starts");
-            remove(&collection, &started)
+            remove(&collection, &started, BrakeInput { force, interaction })
+        }
+
+        /// An archived piece whose archive this machine holds: it is in
+        /// the store and not remote-only.
+        fn kept(&self, number: u8, path: &str) -> ObjectId {
+            let object = self.remote_only(number, path);
+            let entry = crate::tracking::TrackingEntry {
+                local_payloads: vec![crate::tracking::LocalPayload {
+                    kind: crate::meta::PayloadKind::Archive,
+                    version: 1,
+                    file: crate::meta::FileName::new("0123456789abcdef-x.tar.zst").expect("a name"),
+                }],
+                ..crate::tracking::TrackingEntry::new(
+                    object,
+                    crate::relpath::RelPath::parse(path).expect("a path"),
+                    crate::tracking::EntryState::Gone,
+                    crate::tracking::VersionTakenOut::Committed(1),
+                    "2026-01-01T00:00:00Z".parse().expect("a time"),
+                )
+            };
+            fs::write(
+                self.collection().tracking_path(object),
+                serde_json::to_vec(&entry).expect("serialises"),
+            )
+            .expect("write");
+            object
+        }
+
+        /// A world with `kept` pieces this machine holds and `only` pieces
+        /// the remote alone holds, a remote attached.
+        fn crowded(&self, kept: u8, only: u8) -> PathBuf {
+            let root = self.remote("antiq");
+            self.add(&root).expect("attached");
+            for number in 0..kept {
+                self.kept(number + 1, &format!("projects/kept-{number}"));
+            }
+            for number in 0..only {
+                self.remote_only(100 + number, &format!("projects/only-{number}"));
+            }
+            root
         }
 
         /// Archived metadata for object `number` at `path`, with no entry
@@ -1879,6 +1968,139 @@ mod tests {
         assert!(report.remote_only.is_empty(), "{:?}", report.remote_only);
     }
 
+    fn detach_title(report_planned: usize, of: usize) -> String {
+        format!("Detach the remote? {report_planned} of {of} objects exist only there.")
+    }
+
+    #[test]
+    fn removing_holds_when_the_remote_only_pieces_exceed_the_brake_and_nobody_answers() {
+        let world = world();
+        world.crowded(7, 3);
+        let before = world.config_text();
+        let error = world
+            .remove_asking(false, false, &mut NonInteractive)
+            .expect_err("the brake holds");
+        let RemoteOpError::Brake(BrakeError::Held(hold)) = &error else {
+            panic!("expected the brake, got {error}");
+        };
+        assert_eq!((hold.planned, hold.set_size), (3, 10));
+        assert_eq!(hold.items().len(), 3);
+        assert_eq!(error.kind(), ErrorKind::Brake);
+        assert_eq!(world.config_text(), before, "the remote stays attached");
+    }
+
+    #[test]
+    fn removing_goes_on_when_the_user_answers_go_and_stops_on_stop() {
+        let world = world();
+        world.crowded(7, 3);
+        let before = world.config_text();
+        let mut stop = ScriptedInteraction::new();
+        stop.expect(&detach_title(3, 10), "stop");
+        let error = world
+            .remove_asking(false, false, &mut stop)
+            .expect_err("stopped");
+        assert!(matches!(error, RemoteOpError::Brake(_)), "{error}");
+        assert_eq!(world.config_text(), before);
+
+        let mut go = ScriptedInteraction::new();
+        go.expect(&detach_title(3, 10), "go");
+        let report = world
+            .remove_asking(false, false, &mut go)
+            .expect("go passes");
+        assert!(report.detached && report.brake.is_none());
+        assert!(world.collection().config().remotes.is_empty());
+    }
+
+    #[test]
+    fn removing_with_force_asks_nothing() {
+        let world = world();
+        world.crowded(7, 3);
+        let report = world
+            .remove_asking(false, true, &mut ScriptedInteraction::new())
+            .expect("forced");
+        assert!(report.detached);
+    }
+
+    #[test]
+    fn removing_below_the_brake_asks_nothing() {
+        let world = world();
+        world.crowded(9, 1);
+        let report = world
+            .remove_asking(false, false, &mut ScriptedInteraction::new())
+            .expect("one of ten passes");
+        assert!(report.detached);
+    }
+
+    #[test]
+    fn the_brake_counts_the_objects_that_cannot_be_read_in_the_set() {
+        let world = world();
+        world.crowded(0, 1);
+        let broken = world.collection().object_dir(id(OTHER_ID));
+        fs::create_dir_all(&broken).expect("dirs");
+        fs::write(broken.join("meta.1"), b"not metadata").expect("write");
+        let error = world
+            .remove_asking(false, false, &mut NonInteractive)
+            .expect_err("1 of 2 holds");
+        let RemoteOpError::Brake(BrakeError::Held(hold)) = &error else {
+            panic!("expected the brake, got {error}");
+        };
+        assert_eq!((hold.planned, hold.set_size), (1, 2));
+    }
+
+    #[test]
+    fn a_dry_run_reports_the_hold_and_asks_nothing() {
+        let world = world();
+        let root = world.crowded(7, 3);
+        let before = world.config_text();
+        let report = world
+            .remove_asking(true, false, &mut ScriptedInteraction::new())
+            .expect("planned");
+        let hold = report.brake.as_ref().expect("the brake would hold");
+        assert_eq!((hold.planned, hold.set_size), (3, 10));
+        let lines = report.plan_lines();
+        assert_eq!(
+            lines[..2],
+            [
+                format!("Would detach the remote at {}", root.display()),
+                "The brake would hold at 3 of 10:".to_string(),
+            ]
+        );
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert_eq!(world.config_text(), before);
+    }
+
+    #[test]
+    fn a_forced_dry_run_reports_no_hold() {
+        let world = world();
+        world.crowded(7, 3);
+        let report = world.remove(true).expect("planned");
+        assert!(report.brake.is_none());
+    }
+
+    #[test]
+    fn a_dry_run_below_the_brake_reports_no_hold() {
+        let world = world();
+        world.crowded(9, 1);
+        let report = world.remove(true).expect("planned");
+        assert!(report.brake.is_none());
+    }
+
+    #[test]
+    fn a_held_brake_keeps_its_numbers_in_the_library_error() {
+        let world = world();
+        world.crowded(7, 3);
+        let error = world
+            .remove_asking(false, false, &mut NonInteractive)
+            .expect_err("held");
+        let error = crate::error::Error::from(error);
+        assert!(matches!(error, crate::error::Error::Brake(_)), "{error}");
+        let details = error.details();
+        assert_eq!(
+            (details["planned"].as_u64(), details["set_size"].as_u64()),
+            (Some(3), Some(10))
+        );
+    }
+
     #[test]
     fn a_dry_run_of_removing_plans_the_detach_and_changes_nothing() {
         let world = world();
@@ -1953,6 +2175,7 @@ mod tests {
             detached: true,
             url: "/x".into(),
             remote_only: Vec::new(),
+            brake: None,
             dry_run: false,
             actions: Vec::new(),
             warnings: vec![Warning::new("two")],

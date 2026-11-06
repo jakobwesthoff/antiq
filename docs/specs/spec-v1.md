@@ -2422,9 +2422,11 @@ for a path remote and for an ssh remote that is away or broken) and
 
 `remote remove` adds `detached`, `url`, `remote_only` (a list of `{id,
 path}` of the pieces whose archive only the remote holds, which cannot be
-reached any more), `dry_run` (present, and true, under `--dry-run`),
-`actions` (one `detach_remote` with the `url`) and `warnings`. Without a
-remote it fails with the error kind `no_remote`.
+reached any more), `brake` (under `--dry-run`, where the brake would hold and
+`--force` is not given), `dry_run` (present, and true,
+under `--dry-run`), `actions` (one `detach_remote` with the `url`) and
+`warnings`. Without a remote it fails with the error kind `no_remote`; a
+held brake with the error kind `brake`.
 
 `reconcile` adds `index` (`written` and `removed`, the numbers of files
 written to and removed from the index, and `skipped`, a list of `{id,

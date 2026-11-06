@@ -210,7 +210,11 @@ pub enum Error {
 
 impl From<RemoteOpError> for Error {
     fn from(error: RemoteOpError) -> Self {
-        Error::RemoteOp(Box::new(error))
+        // The brake keeps its numbers in the JSON error only as `Error::Brake`.
+        match error {
+            RemoteOpError::Brake(brake) => Error::Brake(brake),
+            error => Error::RemoteOp(Box::new(error)),
+        }
     }
 }
 

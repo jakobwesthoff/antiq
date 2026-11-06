@@ -619,6 +619,8 @@ fn a_dry_run_of_removing_prints_the_plan_and_changes_nothing() {
     let shown = run.stdout.replace(path_text(&root), "<remote>");
     insta::assert_snapshot!(shown, @r"
     Would detach the remote at <remote>
+    The brake would hold at 1 of 2:
+      projects/old (01D39ZY06FGSCTVN4T2V9PKHFZ)
     These remote-only pieces would no longer be reachable:
       projects/old (01D39ZY06FGSCTVN4T2V9PKHFZ)
     ");
@@ -633,6 +635,8 @@ fn a_dry_run_of_removing_prints_the_plan_and_changes_nothing() {
     assert!(dry < actions, "{}", json.stdout);
     assert_eq!(json.json()["remote_only"][0]["path"], "projects/old");
     assert_eq!(json.json()["detached"], false);
+    assert_eq!(json.json()["brake"]["planned"], 1);
+    assert_eq!(json.json()["brake"]["set_size"], 2);
 }
 
 #[test]

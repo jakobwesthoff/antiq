@@ -36,6 +36,13 @@ impl BrakeHold {
     }
 }
 
+/// What a step needs to pass the brake: whether `--force` was given and
+/// whom to ask.
+pub struct BrakeInput<'a> {
+    pub force: bool,
+    pub interaction: &'a mut dyn Interaction,
+}
+
 /// Errors of the brake.
 #[derive(Debug, thiserror::Error)]
 pub enum BrakeError {

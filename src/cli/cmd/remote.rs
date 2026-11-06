@@ -7,6 +7,7 @@
 use super::status::sanitize;
 use crate::cli::output::Output;
 use crate::cli::{Context, RemoteAddArgs, RemoteCommand, RemoteRemoveArgs};
+use antiq::brake::BrakeInput;
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::id::RandomIds;
@@ -78,9 +79,12 @@ fn remove_command(ctx: &Context, args: &RemoteRemoveArgs, out: &mut Output) -> a
     let started = run::start(&collection, &clock, args.dry_run)
         .map_err(antiq::Error::from)
         .context("start the run")?;
-    // The brake follows with the item that implements it: until then
-    // `--force` has nothing to hold.
-    let report = remove(&collection, &started)
+    let mut interaction = ctx.interaction();
+    let brake = BrakeInput {
+        force: args.force,
+        interaction: interaction.as_mut(),
+    };
+    let report = remove(&collection, &started, brake)
         .map_err(antiq::Error::from)
         .context("detach the remote")?;
     if ctx.json {
