@@ -128,7 +128,6 @@ fn a_twin_doubles_one_slot_and_leaves_the_files_alone() {
     assert!(twin.is_file());
     let scan = store.scan();
     let found = &scan.pieces[0].versions[0];
-    assert!(found.is_doubled());
     assert_eq!(found.listings.len(), 2);
     assert_eq!(found.archives.len(), 1);
     assert_eq!(found.checksums.len(), 1);

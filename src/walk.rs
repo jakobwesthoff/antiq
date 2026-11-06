@@ -165,6 +165,10 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// that holds it is reported, and the walk goes on.
 /// A directory more than [`MAX_DEPTH`] levels below the top is not entered
 /// and makes the piece unreadable.
+///
+/// The commands walk through [`walk_piece_with`], which takes the hooks that
+/// only the library sees; this entry point is the one the integration
+/// tests, a separate crate, can call.
 pub fn walk_piece(
     collection: &TreeRoot,
     top: &RelPath,

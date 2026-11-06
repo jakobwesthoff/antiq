@@ -498,7 +498,7 @@ impl Planner<'_> {
     }
 
     /// Marks `folder` and the parents above it as gone when nothing is
-    /// left in them, as [`store::remove_empty_chain`] removes them, and
+    /// left in them, as [`store::remove_empty_chain_with`] removes them, and
     /// returns them, the deepest first.
     fn simulate_chain(&mut self, pieces: &TreeRoot, folder: &RelPath) -> Vec<RelPath> {
         let mut removed = Vec::new();

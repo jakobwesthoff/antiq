@@ -29,7 +29,7 @@ use std::path::Path;
 /// One version in a store folder, with the files present for it. A slot
 /// holds several names when files that differ in `<name>` only carry the
 /// same stamp and suffix; antiq cannot tell which of them is the version,
-/// so that is damage of the version ([`StoreVersion::is_doubled`]).
+/// so that is damage of the version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreVersion {
     pub stamp: Stamp,
@@ -72,13 +72,6 @@ impl StoreVersion {
     /// sidecars that are left make an incomplete version.
     pub fn is_incomplete(&self) -> bool {
         self.archives.is_empty()
-    }
-
-    /// Whether two files claim one slot.
-    pub fn is_doubled(&self) -> bool {
-        VersionFile::ALL
-            .into_iter()
-            .any(|kind| self.files(kind).len() > 1)
     }
 }
 
@@ -452,17 +445,6 @@ fn open_if_present(path: &Path) -> Result<Option<TreeRoot>, VersionsError> {
 /// flush the folder after the `.tar.zst` has moved is
 /// [`VersionsError::StoredNotDurable`]: the version is in the store, and the
 /// piece stops there with its live folder untouched.
-pub fn move_in(
-    staging: &TreeRoot,
-    pieces: &TreeRoot,
-    folder: &RelPath,
-    piece: &RelPath,
-    stamp: &Stamp,
-    names: &VersionFileNames,
-) -> Result<(), VersionsError> {
-    move_in_with(&RealDurable, staging, pieces, folder, piece, stamp, names)
-}
-
 pub(crate) fn move_in_with(
     durable: &dyn Durable,
     staging: &TreeRoot,
@@ -586,21 +568,10 @@ pub(crate) fn move_sidecars_in_with(
 /// Moves the files of a version back from the store folder `folder` of
 /// `pieces` into `staging`, the `.tar.zst` first, then the checksum file,
 /// then the listing. A file that is not in the store is skipped, so the
-/// rollback of a [`move_in`] that stopped halfway moves what is there. The
+/// rollback of a [`move_in_with`] that stopped halfway moves what is there. The
 /// store folder stays, empty when nothing else is in it.
 ///
 /// A failure after some file moved is [`VersionsError::PartlyMoved`].
-pub fn move_back(
-    pieces: &TreeRoot,
-    staging: &TreeRoot,
-    folder: &RelPath,
-    piece: &RelPath,
-    stamp: &Stamp,
-    names: &VersionFileNames,
-) -> Result<(), VersionsError> {
-    move_back_with(&RealDurable, pieces, staging, folder, piece, stamp, names)
-}
-
 pub(crate) fn move_back_with(
     durable: &dyn Durable,
     pieces: &TreeRoot,
@@ -752,7 +723,7 @@ fn file_in(dir: &RelPath, name: impl AsRef<OsStr>) -> Result<RelPath, VersionsEr
 /// `pieces`: every `.tar.zst` first, the folder flushed, then the
 /// listings, the folder flushed, then the checksum files, the folder
 /// flushed. A folder left empty goes with the parents that become empty
-/// ([`remove_empty_chain`]). The names to delete come from the scan, so a
+/// ([`remove_empty_chain_with`]). The names to delete come from the scan, so a
 /// version stored under another `<name>` is deleted like any other; a file
 /// that has gone since is an error.
 pub fn delete_version(
@@ -789,13 +760,6 @@ pub(crate) fn delete_version_with(
 /// each removed folder. A folder that holds anything, a file whose name
 /// does not parse included, stops it. A folder that is gone already does
 /// not. Returns the folders it removed, the deepest first.
-pub fn remove_empty_chain(
-    pieces: &TreeRoot,
-    folder: &RelPath,
-) -> Result<Vec<RelPath>, VersionsError> {
-    remove_empty_chain_with(&RealDurable, pieces, folder)
-}
-
 pub(crate) fn remove_empty_chain_with(
     durable: &dyn Durable,
     pieces: &TreeRoot,
@@ -921,7 +885,6 @@ mod tests {
         assert_eq!(lacking.listings.len(), 1);
         assert!(lacking.checksums.is_empty());
         assert!(!lacking.is_incomplete());
-        assert!(!lacking.is_doubled());
         assert!(found.sidecar_only.is_empty());
         assert!(found.strays.is_empty());
         assert!(found.empty_folders.is_empty());
@@ -1007,7 +970,6 @@ mod tests {
         assert!(found.strays.is_empty());
         let version = &found.pieces[0].versions[0];
         assert_eq!(found.pieces[0].versions.len(), 1);
-        assert!(version.is_doubled());
         assert_eq!(
             version.archives,
             [
@@ -1030,7 +992,6 @@ mod tests {
             &[VersionFile::Checksum],
         );
         let version = &scan_of(&tree).pieces[0].versions[0];
-        assert!(version.is_doubled());
         assert_eq!(version.checksums.len(), 2);
     }
 
@@ -2043,7 +2004,8 @@ mod tests {
     #[test]
     fn the_plain_move_in_and_move_back_use_the_real_flush() {
         let env = Env::new();
-        move_in(
+        move_in_with(
+            &RealDurable,
             &env.staging(),
             &env.pieces(),
             &path("p"),
@@ -2053,7 +2015,8 @@ mod tests {
         )
         .expect("moved");
         assert_eq!(env.stored("p"), all_three());
-        move_back(
+        move_back_with(
+            &RealDurable,
             &env.pieces(),
             &env.staging(),
             &path("p"),
@@ -2236,7 +2199,7 @@ mod tests {
         env.tree.file("pieces/p/q--2026-11-04T090211.tar.zst", b"x");
         let found = scan(&env.tree.path("pieces")).expect("scan");
         let version = found.pieces[0].versions[0].clone();
-        assert!(version.is_doubled());
+        assert_eq!(version.archives.len(), 2);
         let recording = Recording::new();
         let seen = watch(&recording, env.tree.path("pieces/p"));
         delete_version_with(&recording, &env.pieces(), &path("p"), &version).expect("deleted");
@@ -2306,7 +2269,8 @@ mod tests {
         delete_version(&env.pieces(), &path("a/b"), &version).expect("deleted");
         assert!(!env.tree.path("pieces/a").exists());
         std::fs::create_dir_all(env.tree.path("pieces/c/d")).expect("dirs");
-        let removed = remove_empty_chain(&env.pieces(), &path("c/d")).expect("removed");
+        let removed =
+            remove_empty_chain_with(&RealDurable, &env.pieces(), &path("c/d")).expect("removed");
         assert_eq!(removed, [path("c/d"), path("c")]);
     }
 
