@@ -88,6 +88,10 @@ const DEFAULT_WIDTH: usize = 80;
 pub struct Style {
     pub width: usize,
     pub color: bool,
+    /// Whether the stream is a terminal. Output that differs between a
+    /// terminal and a pipe asks this, not `color`, which `NO_COLOR` turns
+    /// off on a terminal too.
+    pub terminal: bool,
 }
 
 impl Style {
@@ -100,6 +104,7 @@ impl Style {
             return Style {
                 width: DEFAULT_WIDTH,
                 color: false,
+                terminal: false,
             };
         }
         Style {
@@ -107,6 +112,7 @@ impl Style {
                 .filter(|columns| *columns > 0)
                 .map_or(DEFAULT_WIDTH, usize::from),
             color: !no_color,
+            terminal: true,
         }
     }
 
@@ -162,6 +168,7 @@ impl Output {
             stdout_style: Style {
                 width: DEFAULT_WIDTH,
                 color: false,
+                terminal: false,
             },
         }
     }
@@ -512,7 +519,8 @@ mod tests {
             Style::for_terminal(None, false, false),
             Style {
                 width: 80,
-                color: false
+                color: false,
+                terminal: false
             }
         );
         // A size reported for a stream that is no terminal does not count.
@@ -520,7 +528,8 @@ mod tests {
             Style::for_terminal(Some(200), false, false),
             Style {
                 width: 80,
-                color: false
+                color: false,
+                terminal: false
             }
         );
     }
@@ -531,7 +540,8 @@ mod tests {
             Style::for_terminal(Some(120), false, true),
             Style {
                 width: 120,
-                color: true
+                color: true,
+                terminal: true
             }
         );
     }
@@ -542,7 +552,8 @@ mod tests {
             Style::for_terminal(Some(0), false, true),
             Style {
                 width: 80,
-                color: true
+                color: true,
+                terminal: true
             }
         );
         assert_eq!(Style::for_terminal(None, false, true).width, 80);
@@ -554,7 +565,8 @@ mod tests {
             Style::for_terminal(Some(100), true, true),
             Style {
                 width: 100,
-                color: false
+                color: false,
+                terminal: true
             }
         );
     }
@@ -615,7 +627,8 @@ mod tests {
             Style::of(&reader),
             Style {
                 width: 80,
-                color: false
+                color: false,
+                terminal: false
             }
         );
         let null = std::fs::File::open("/dev/null").expect("/dev/null opens");
@@ -628,6 +641,7 @@ mod tests {
         let style = Style {
             width: 120,
             color: true,
+            terminal: true,
         };
         let out = capture.output(false).with_stdout_style(style);
         assert_eq!(out.stdout_style(), style);

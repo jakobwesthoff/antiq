@@ -59,6 +59,33 @@ pub(super) fn pad_left(text: &str, width: usize) -> String {
     format!("{}{text}", spaces(width.saturating_sub(text.width())))
 }
 
+/// A size in decimal units (1 kB = 1000 bytes), with one decimal below 10
+/// and none from 10 on.
+#[allow(dead_code, reason = "used by the list command (C10) and C1")]
+pub(crate) fn decimal_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let bytes = u128::from(bytes);
+    let mut divisor: u128 = 1000;
+    let mut unit = 0;
+    loop {
+        let tenths = (bytes * 10 + divisor / 2) / divisor;
+        if tenths < 100 {
+            return format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit]);
+        }
+        let whole = (bytes + divisor / 2) / divisor;
+        // Rounding up to a thousand belongs to the next unit; terabytes are
+        // the last one, so their count may pass a thousand.
+        if whole < 1000 || unit + 1 == UNITS.len() {
+            return format!("{whole} {}", UNITS[unit]);
+        }
+        divisor *= 1000;
+        unit += 1;
+    }
+}
+
 /// Shows control characters of a name in the escaped form of the spec, so
 /// that a name cannot move the cursor or end a line.
 #[allow(dead_code, reason = "used again by C1")]
@@ -208,6 +235,37 @@ mod tests {
         assert_eq!(sanitize("\x1b[31m"), "%1B[31m");
         // U+0085 is a control character that takes two bytes in UTF-8.
         assert_eq!(sanitize("x\u{85}y"), "x%C2%85y");
+    }
+
+    #[test]
+    fn decimal_size_counts_bytes_below_a_thousand() {
+        assert_eq!(decimal_size(0), "0 B");
+        assert_eq!(decimal_size(812), "812 B");
+        assert_eq!(decimal_size(999), "999 B");
+    }
+
+    #[test]
+    fn decimal_size_has_one_decimal_below_ten_and_none_from_ten() {
+        assert_eq!(decimal_size(1_000), "1.0 kB");
+        assert_eq!(decimal_size(9_949), "9.9 kB");
+        assert_eq!(decimal_size(9_950), "10 kB");
+        assert_eq!(decimal_size(40_000_000), "40 MB");
+        assert_eq!(decimal_size(1_100_000_000), "1.1 GB");
+        assert_eq!(decimal_size(1_040_000_000), "1.0 GB");
+    }
+
+    #[test]
+    fn decimal_size_moves_to_the_next_unit_when_the_rounding_reaches_a_thousand() {
+        assert_eq!(decimal_size(999_499), "999 kB");
+        assert_eq!(decimal_size(999_500), "1.0 MB");
+        // Terabytes are the last unit, so the count itself passes a thousand.
+        assert_eq!(decimal_size(999_500_000_000_000), "1000 TB");
+    }
+
+    #[test]
+    fn decimal_size_stops_at_terabytes() {
+        assert_eq!(decimal_size(1_000_000_000_000), "1.0 TB");
+        assert_eq!(decimal_size(u64::MAX), "18446744 TB");
     }
 
     #[test]
