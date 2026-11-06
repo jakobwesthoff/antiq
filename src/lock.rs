@@ -156,10 +156,16 @@ pub fn holder(lock_file: &Path) -> Result<Option<Holder>, LockError> {
 /// Whether a process with this pid exists. A process of another user
 /// answers with a refusal, which also says it exists.
 fn process_exists(pid: u32) -> bool {
+    process_exists_with(pid, &test_kill_process)
+}
+
+/// `signal_check` is the seam for the answer of the system: a test cannot
+/// rely on a process of another user to exist wherever it runs.
+fn process_exists_with(pid: u32, signal_check: &dyn Fn(Pid) -> Result<(), Errno>) -> bool {
     let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;
     };
-    match test_kill_process(pid) {
+    match signal_check(pid) {
         Ok(()) => true,
         Err(errno) => errno == Errno::PERM,
     }
@@ -380,7 +386,18 @@ mod tests {
     }
 
     #[test]
-    fn a_process_of_another_user_still_counts_as_existing() {
+    fn a_refused_signal_still_means_the_process_exists() {
+        let answering = |errno: Option<Errno>| move |_: Pid| errno.map_or(Ok(()), Err);
+        assert!(process_exists_with(7, &answering(None)));
+        assert!(process_exists_with(7, &answering(Some(Errno::PERM))));
+        assert!(!process_exists_with(7, &answering(Some(Errno::SRCH))));
+    }
+
+    /// The system's own answer for a process of another user: launchd is
+    /// owned by root.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_process_of_another_user_counts_as_existing() {
         assert!(
             !rustix::process::getuid().is_root(),
             "the test needs a non-root user, who is refused a signal to pid 1"
