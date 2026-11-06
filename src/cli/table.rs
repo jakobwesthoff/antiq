@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub(super) const WIDE_FROM: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "the variants that list does not use belong to C1")]
+#[allow(dead_code, reason = "variants no command uses yet")]
 pub(super) enum Color {
     Plain,
     Dim,
@@ -135,7 +135,6 @@ pub(crate) fn mid(text: &str, width: usize) -> String {
 
 /// Breaks `text` into lines of at most `width` columns at spaces; a word
 /// longer than a line is cut.
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();

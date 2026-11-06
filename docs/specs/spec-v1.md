@@ -1145,32 +1145,92 @@ on the settings of the collection.
 ### status
 
 `status` is local only: it takes no lock and writes nothing below
-`.antiq/`. It prints one row per piece that has a state, sorted by path,
-the state coloured in the first column: `due` (archived on the next run),
-`soon` (due within `soon_days`), `pinned`, and `refused` for the pieces
-`archive` refuses, with their reason (mount point, nested collection,
-unreadable entry, exclude entry, locked entry, unreadable marker, a
-control file that is not a file, broken rule file). Plain live folders are
-only counted in the header. Below the table: files and markers with times
-in the future, damaged and incomplete versions, folders in `recovered/`,
-trees left in `trash/` and leftovers in `doomed/`, live folders whose
-spelling differs from the stored one, directories that selection could not
-read ("unreadable: <dir>"), and files in store folders whose
-names do not parse.
+`.antiq/`. It exits 0 whatever state it reports: pieces that `archive`
+refuses, damaged versions and every note below are output, not failures. A held lock
+is a note on stderr that names the holder (pid, machine, start time).
+
+The first line counts the live folders (every piece, plain ones included)
+and the versions (those that have a `.tar.zst`), gives the sum of the
+`archive-bytes` their listings record in decimal units, and repeats
+`idle_days`. A blank line and the table follow: one row per piece that has
+a state, sorted by path, the state coloured in the first column: `due`
+(archived on the next run), `soon` (due within `soon_days`), `pinned`, and
+`refused` for the pieces `archive` refuses. Plain live folders are only
+counted in the header. A pin wins over a refusal, as it does over the idle
+and empty tests (see "Pins").
+
+The columns are STATE, PIECE, IDLE and WHAT. IDLE is the whole days since
+the idle clock, `0d` for a clock in the future, and `-` when the clock
+cannot be told: the piece has no file that counts, the walk could not read
+all of it, or its marker cannot be read. WHAT is `archives next run`,
+`archives in N days` (the started days until the piece is due, at least
+one), `kept by .antiq-pin`, or, for `refused`, every reason of the piece
+joined by `; `. A reason is one of these, with paths relative to the
+collection root:
+
+- `mount point: <path>`
+- `nested collection: <dir>`, the directory that holds the nested marker
+- `unreadable entry: <path>`, the first entry that failed
+- `exclude entry: <path>`
+- `locked: <path>`, also for the directory that holds the piece's top
+- `rule file: <path>:<line>`, without `:<line>` when the file cannot be
+  read or is no text
+- `<name> is not a file`, a marker name at the top
+- `unreadable marker: <path>`, a marker that cannot be read or parsed
+
+On a terminal of 100 columns or more the path column shows full paths;
+on a narrower one a path that does not fit is cut in the middle and a
+long WHAT wraps below its column.
 
 ```text
-13 folders · 214 versions (38.2 GB) · archive after 30 days idle
+13 folders · 214 versions (38 GB) · archive after 30 days idle
 
-STATE    PIECE                                 IDLE  WHAT
-due      experiments/rust-gpu                   33d  archives next run
-due      old/client-site                       141d  archives next run
-refused  media/camera-import                    52d  mount point: media/camera-import/card
-pinned   projects/antiq                        120d  kept by .antiq-pin
-soon     tools/scan-old                         28d  archives in 2 days
+STATE    PIECE                 IDLE  WHAT
+due      experiments/rust-gpu   33d  archives next run
+due      old/client-site       141d  archives next run
+refused  media/camera-import    52d  mount point: media/camera-import/card
+pinned   projects/antiq        120d  kept by .antiq-pin
+soon     tools/scan-old         28d  archives in 2 days
 
 ! 1 file with a time in the future: notes/plan.md (2027-01-12)
 ! 1 damaged version: tools/scan-old 2024-06-30 08:12:45 (no listing)
 ```
+
+Below the table, after a blank line, each kind of note has a line that
+starts with `! ` and counts its items. One item stays on that line;
+several are indented below it. The kinds, in this order:
+
+- files and markers with a time in the future, with the local date
+  (`<path> (2027-01-12)`);
+- damaged versions, with the reasons joined by `; `: `no listing`,
+  `no checksum file`, or the description of the damage (see "Damage");
+- incomplete versions;
+- versions in a newer format;
+- folders in `recovered/`;
+- trees left in `trash/`;
+- leftovers in `doomed/`: the tree, its first entry in walk order (the byte
+  order of the whole path) and what keeps it from being deleted, as far as
+  `status` can read it: `locked` for an immutable or append-only flag,
+  `its directory cannot be written`;
+- live folders whose spelling differs from the stored one
+  (`<live> (stored as <stored>)`);
+- directories that selection could not read, one line each
+  (`unreadable: <dir>`);
+- files in store folders whose names do not parse.
+
+Versions are shown by their local time with seconds, with the UTC offset
+added where two versions of a piece render alike. A tree in `trash/` or
+`recovered/` is named by the piece whose version has the tree's stamp,
+matched by the volume's name equality, and by the first component below the
+stamp when no version has it. Paths of these trees and of files in the
+store are shown relative to `.antiq/`.
+
+Warnings about the config, an unreadable lock file, a directory that cannot
+be read, a version that cannot be inspected or a spelling that cannot be
+looked up are notes on stderr, each starting `note: `. When the store cannot
+be read, `status` still prints the table of the live pieces, adds the note
+`cannot read the store: <path>: <reason>`, leaves out the versions of the
+header and every note that needs the store, and exits 0.
 
 ### pin and unpin
 
@@ -1500,4 +1560,24 @@ it as stamps, newest first; it is empty for a piece whose name matches.
 skipped version and the lock note appear only in the object, while the note
 that nothing matched is on stderr as in text output.
 
-The keys that the other commands add are not yet established.
+`status` has these keys, all of them present with an empty list when there
+is nothing to list: `folders`, `versions` and `archive_bytes` (the last two
+`null` when the store cannot be read), `idle_days`, `soon_days`, `pieces`,
+`future_times`, `damaged_versions`, `incomplete_versions`,
+`newer_format_versions`, `recovered`, `trash`, `doomed`, `spelling`,
+`unreadable_directories`, `unparsable_files`, `warnings` and `store_error`
+(`null` or the text of the note). `pieces` lists the pieces that have a
+state, sorted by path, each as `{"piece", "state", "idle_for_days",
+"reasons"}` with the state `due`, `soon`, `pinned` or `refused`;
+`idle_for_days` is a whole number or `null`; a `soon` piece adds
+`"due_in_days"`; a reason is `{"kind", "path", "text"}` plus `"line"` for a
+rule file, with the kind `mount_point`, `nested_collection`,
+`unreadable_entry`, `exclude_entry`, `locked`, `rule_file`, `not_a_file` or
+`unreadable_marker`. `future_times` holds `{"path", "time"}` (RFC 3339 in
+UTC). The version lists hold `{"piece", "version"}` with the version stamp,
+and `damaged_versions` adds `"reasons"`, a list of texts. `doomed` holds
+`{"path", "first_entry", "cause"}` with the cause `locked`,
+`directory_not_writable` or `null`; `spelling` holds `{"live", "stored"}`.
+`recovered`, `trash`, `unparsable_files` and the paths of `doomed` are
+relative to `.antiq/`. While the lock is held, a `note` field names the
+holder. The keys that the other commands add are not yet established.
