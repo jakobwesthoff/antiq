@@ -349,6 +349,9 @@ pub(crate) struct StatusRequest<'a> {
     pub collection: &'a Collection,
     pub clock: &'a dyn Clock,
     pub probes: &'a dyn Probes,
+    /// The caller holds the run lock itself, so a lock file naming a
+    /// holder is no other run to warn about.
+    pub own_lock: bool,
 }
 
 /// Shows every piece of `collection` as of `clock`'s now.
@@ -357,6 +360,7 @@ pub fn status(collection: &Collection, clock: &dyn Clock) -> Result<StatusReport
         collection,
         clock,
         probes: &RealProbes,
+        own_lock: false,
     })
 }
 
@@ -364,7 +368,14 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     let collection = request.collection;
     let own = collection.id();
     let config = &collection.config().collection;
-    let mut warnings = report::notes_with(collection, request.probes.fs_kind(collection.root()));
+    // A caller that holds the lock is the holder the file names, so it
+    // gets the notes without the one about the lock.
+    let fs_kind = request.probes.fs_kind(collection.root());
+    let mut warnings = if request.own_lock {
+        report::setting_notes_with(collection, fs_kind)
+    } else {
+        report::notes_with(collection, fs_kind)
+    };
     let last_sync = read_last_sync(collection, &mut warnings);
 
     // =====================================================
@@ -655,7 +666,7 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
 
 /// The junk list as names. An entry that is no file name cannot match
 /// anything and gives a warning.
-fn junk_names(junk: &[String], warnings: &mut Vec<Warning>) -> Vec<Name> {
+pub(crate) fn junk_names(junk: &[String], warnings: &mut Vec<Warning>) -> Vec<Name> {
     junk.iter()
         .filter_map(|entry| match Name::from_bytes(entry.clone().into_bytes()) {
             Ok(name) => Some(name),
@@ -1234,6 +1245,7 @@ mod tests {
             collection,
             clock: &clock(),
             probes,
+            own_lock: false,
         })
     }
 
@@ -1364,6 +1376,33 @@ mod tests {
         assert_eq!(states(&report), [("scratch".into(), PieceKind::New)]);
         assert_eq!(report.pieces[0].id, None);
         assert_eq!(report.pieces[0].name.to_string(), "scratch");
+    }
+
+    #[test]
+    fn a_guarded_run_does_not_report_its_own_lock() {
+        let world = world();
+        let _lock = lock::acquire(&world.collection.lock_path(), "laptop", &clock())
+            .expect("the lock is free");
+        let clock = clock();
+        let probes = Probed(RemoteState::None);
+        let request = |own_lock| StatusRequest {
+            collection: &world.collection,
+            clock: &clock,
+            probes: &probes,
+            own_lock,
+        };
+        let messages = |report: StatusReport| -> Vec<String> {
+            report.warnings.into_iter().map(|w| w.message).collect()
+        };
+        let others = messages(status_with(&request(false)).expect("status runs"));
+        assert!(
+            others
+                .iter()
+                .any(|m| m.contains("another run holds the lock")),
+            "{others:?}"
+        );
+        let own = messages(status_with(&request(true)).expect("status runs"));
+        assert!(own.is_empty(), "{own:?}");
     }
 
     #[test]

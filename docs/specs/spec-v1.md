@@ -1776,7 +1776,11 @@ true, under `--dry-run`. Without a terminal, or with `--json`, it creates
 nothing and prints the plan, the same keys without `id`, unless `--yes` is
 given, and exits 3. Under `--json` nothing goes to stderr.
 
-`archive` has no payload defined yet.
+`archive --dry-run` has `dry_run` (true), `actions` and `warnings`, in
+that order. An action is `{action: "archive", path, id, size}` for each
+idle piece the next `archive` takes, in path order. `id` is null for a
+new piece and `size` is the piece's apparent size in bytes (a file with
+several names counts once).
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before
 and for a piece that was skipped), `id`, `path` (where the piece is, or
