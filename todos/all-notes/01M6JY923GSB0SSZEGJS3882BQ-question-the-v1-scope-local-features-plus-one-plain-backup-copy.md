@@ -52,7 +52,42 @@ open, so the discussion survives without the conversation.
 - Old versions: `find` searches the newest; a key or flag adds all
   versions.
 
-## Open, under discussion (round 4, asqr 01M6K12ZP94T9VNSDT80ZY080W)
+## Decided in round 4 (asqr 01M6K12ZP94T9VNSDT80ZY080W, 2026-11-04)
+
+- `unearth` moves the piece out: after a successful extraction the
+  archive is deleted, and the folder is an ordinary folder again.
+- `fork` restores a working copy while the archive stays unchanged.
+  `--name` is optional; without it the copy goes to the original path.
+  Archiving it later gives a new version next to the old one.
+- No picker in v1 unless `unearth` turns out uncomfortable without
+  one. Every command has JSON output for scripts. `find` goes away.
+  `list` and `grep` replace it, and `grep` searches the full paths,
+  including the archive folder name and the position.
+- No `status` command for now. The user asked what else it could
+  show and where `-n` comes from.
+- File names: normalize the path into the name and collapse repeated
+  `-`.
+
+## Open after round 4 (asqr round 5)
+
+- `list <query>`: is the query fuzzy? Does it show all versions, or a
+  count with `--versions` for details, or always all?
+- `unearth` should take an unambiguous identifier, not a numbered
+  choice. Which one: an exact path, path plus version, or a fuzzy name
+  that must match exactly one piece?
+- The name of `sync`: it is now a one-way backup to a configured
+  target (maybe several targets later) and never fetches anything
+  back, so it needs no conflict handling.
+- The listing format. The user's idea is that the listing is itself a
+  checksum file that standard tools can check, with antiq's metadata in
+  comment lines. Verified on 2026-11-04: macOS `shasum -a 256 -c` and
+  GNU `sha256sum -c` (coreutils 9.12, also with `--strict`) both skip
+  lines that start with `#` and exit 0.
+- The checksum: SHA-256 against BLAKE3 (`b3sum` is installed here).
+- Two archives of the same path within the same second: rare, but it
+  needs a rule.
+
+## Earlier open points (round 4, now mostly decided above), asqr 01M6K12ZP94T9VNSDT80ZY080W)
 
 - `unearth` semantics. The user called "the archive stays and
   re-archiving makes a new version" wrong. Options put:
