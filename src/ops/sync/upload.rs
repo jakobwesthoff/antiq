@@ -7,7 +7,7 @@
 use super::{SyncContext, SyncError, ends_run, run_bounded};
 use crate::collection::Collection;
 use crate::id::ObjectId;
-use crate::meta::{FileName, Metadata};
+use crate::meta::{FileName, Metadata, PayloadKind};
 use crate::pack::hashing::hex;
 use crate::relpath::{Name, temp_name};
 use crate::remote::Upload;
@@ -25,11 +25,16 @@ pub(super) struct UploadFile {
     pub size: u64,
     /// The name it is written under until it is complete.
     pub temp: String,
+    /// The file of the remote's current live package, which a remote with
+    /// delta transfer starts a new live package from.
+    pub seed: Option<String>,
 }
 
 impl UploadFile {
     pub fn as_upload(&self, id: ObjectId) -> Upload<'_> {
-        Upload::new(id, &self.temp, self.name.as_str(), &self.path, &self.sha256)
+        let mut upload = Upload::new(id, &self.temp, self.name.as_str(), &self.path, &self.sha256);
+        upload.seed = self.seed.as_deref();
+        upload
     }
 }
 
@@ -73,6 +78,14 @@ pub(super) fn files_to_upload(
                 .any(|payload| &payload.file == name || payload.listing.as_ref() == Some(name))
         })
     };
+    // A new live package starts from the one the remote has now.
+    let seed = base.and_then(|base| {
+        base.payloads
+            .iter()
+            .filter(|payload| payload.kind == PayloadKind::Live)
+            .max_by_key(|payload| payload.version)
+            .map(|payload| payload.file.as_str().to_string())
+    });
     let mut files = Vec::new();
     for payload in &pending.payloads {
         let named = std::iter::once((&payload.file, true))
@@ -98,6 +111,11 @@ pub(super) fn files_to_upload(
                 sha256,
                 size,
                 temp,
+                seed: if payload.kind == PayloadKind::Live && is_payload {
+                    seed.clone()
+                } else {
+                    None
+                },
             });
         }
     }
@@ -212,6 +230,67 @@ mod tests {
         fs::remove_file(anna.collection.object_dir(id).join(listing.as_str())).expect("removed");
         let stored = files_to_upload(&anna.collection, "anna", id, &pending, None).expect("lists");
         assert_eq!(stored.len(), 1, "only the payload is stored here");
+    }
+
+    /// A pending change whose only payload is a live package, over a base
+    /// whose live package has another file name.
+    fn live_over_live(machine: &Machine, id: ObjectId) -> (Metadata, Metadata) {
+        let mut pending = pending_of(machine, id);
+        pending.payloads[0].kind = crate::meta::PayloadKind::Live;
+        let mut base = pending.clone();
+        base.payloads[0].file =
+            FileName::new("1111111111111111-old.tar.zst").expect("a plain file name");
+        (pending, base)
+    }
+
+    #[test]
+    fn a_new_live_package_is_seeded_from_the_current_one() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let id = anna.import_piece("notes", "hello");
+        let (pending, base) = live_over_live(&anna, id);
+
+        let files =
+            files_to_upload(&anna.collection, "anna", id, &pending, Some(&base)).expect("lists");
+
+        let package = files
+            .iter()
+            .find(|file| file.name == pending.payloads[0].file)
+            .expect("the package is listed");
+        assert_eq!(
+            package.seed.as_deref(),
+            Some("1111111111111111-old.tar.zst")
+        );
+        let upload = package.as_upload(id);
+        assert_eq!(upload.seed, Some("1111111111111111-old.tar.zst"));
+    }
+
+    #[test]
+    fn a_live_package_without_a_current_one_has_no_seed() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let id = anna.import_piece("notes", "hello");
+        let (pending, _) = live_over_live(&anna, id);
+
+        let files = files_to_upload(&anna.collection, "anna", id, &pending, None).expect("lists");
+
+        assert!(files.iter().all(|file| file.seed.is_none()));
+    }
+
+    #[test]
+    fn an_archive_is_never_seeded() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let id = anna.import_piece("notes", "hello");
+        let (pending, mut base) = live_over_live(&anna, id);
+        let mut archive = pending.clone();
+        archive.payloads[0].kind = crate::meta::PayloadKind::Archive;
+        base.payloads[0].kind = crate::meta::PayloadKind::Live;
+
+        let files =
+            files_to_upload(&anna.collection, "anna", id, &archive, Some(&base)).expect("lists");
+
+        assert!(files.iter().all(|file| file.seed.is_none()));
     }
 
     #[test]
