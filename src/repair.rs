@@ -3241,13 +3241,13 @@ mod tests {
         let planned = plan(&collection(&temp));
 
         assert!(created_folders(&planned.repairs).is_empty());
-        assert!(
-            messages(&planned)
-                .iter()
-                .any(|message| message.starts_with("cannot read .antiq/tmp: ")),
-            "{:?}",
-            messages(&planned)
-        );
+        // The look-up of the folder itself and the repair that reads `tmp/`
+        // both fail on it.
+        let about_tmp = messages(&planned)
+            .iter()
+            .filter(|message| message.starts_with("cannot read .antiq/tmp: "))
+            .count();
+        assert_eq!(about_tmp, 2, "{:?}", messages(&planned));
     }
 
     #[test]

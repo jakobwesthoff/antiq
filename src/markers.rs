@@ -884,6 +884,22 @@ mod tests {
     }
 
     #[test]
+    fn a_tmp_that_cannot_be_looked_at_is_reported_naming_it() {
+        let tree = collection();
+        let root = open(&tree);
+        let _restore = RestoreModes(vec![tree.path(".antiq")]);
+        fs::set_permissions(tree.path(".antiq"), fs::Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(tree.path(".antiq")).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let error = ensure_same_device(&root, &path("p"), &Probe::default()).expect_err("denied");
+
+        assert!(error.to_string().contains(".antiq/tmp"), "{error}");
+    }
+
+    #[test]
     fn a_rename_across_devices_is_a_mount_point_too() {
         let tree = collection();
         let probe = Probe::default();
