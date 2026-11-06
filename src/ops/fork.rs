@@ -2302,6 +2302,30 @@ mod tests {
     }
 
     #[test]
+    fn with_a_name_a_stopped_fork_is_finished_once_the_folder_is_renamed_back() {
+        let fx = unearthed();
+        crash_at(&fx, Some("b"), Step::OldEntry);
+        fs::rename(fx.at("projects/b"), fx.at(PIECE)).expect("the folder is renamed back");
+        next_run(&fx);
+        assert_eq!(state_of(&fx, id(ID)), PieceState::Unearthed);
+
+        let report = forked(&fx, None);
+
+        assert_eq!(report.id, minted());
+        let forks = current(&fx, id(ID))
+            .metadata
+            .history
+            .iter()
+            .filter(|entry| entry.action == "fork")
+            .count();
+        assert_eq!(forks, 1);
+        assert_eq!(current(&fx, report.id).metadata.created, fork_time());
+        let entry = entry_of(&fx, report.id);
+        assert_eq!((entry.state, entry.path), (EntryState::Live, path(PIECE)));
+        assert!(fx.at("projects/a/notes.txt").exists());
+    }
+
+    #[test]
     fn with_a_name_a_crash_before_the_new_metadata_leaves_the_old_id_archived() {
         let fx = unearthed();
         let error = crash_at(&fx, Some("b"), Step::NewMetadata);

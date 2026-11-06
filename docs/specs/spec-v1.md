@@ -1377,8 +1377,10 @@ The old ID becomes archived, and its entry `gone` keeps its local
 payloads. A diverged folder and a replacing-with-loss decision belong to
 the folder, so the new ID has neither and the old entry drops both; a
 version conflict and a superseded archive are about the old ID and stay
-on it. The old ID's live package is deleted. Unearthing the old ID
-afterwards needs `--to`, as its path belongs to the new ID.
+on it. The old ID's live package is deleted. Without `--name`,
+unearthing the old ID afterwards needs `--to`, as its path belongs to the
+new ID. With `--name` the old path is empty, and `unearth` restores
+there.
 
 `--name` renames the folder within its parent before anything is
 written. The name is one name: not empty, not `.` or `..`, without `/`
@@ -1398,8 +1400,12 @@ folder stays there. A fork that stops after the rename and before the
 old ID's metadata is written leaves the old ID unchanged and the folder
 under its new name, a new piece as after any rename; `unearth` of the
 old ID restores its archive to the old path. A fork that stops after
-the old ID's metadata is written is finished by running `fork` again,
-which records one `fork` history entry. A fork that stops after the old
+the old ID's metadata is written is finished, without `--name`, by running
+`fork` again, which records one `fork` history entry. With `--name` the
+folder is a new piece under its new name and `fork` of the old ID is
+refused, as there is no folder at its path; a fork that stopped between
+the old ID's metadata and its entry is finished by `fork` again once the
+folder is renamed back to the old path. A fork that stops after the old
 ID's entry is written, before the new ID's metadata, leaves the old ID
 archived and the folder a new piece next to it. A fork that stops
 between the new ID's metadata and its entry loses the unearthed time:
