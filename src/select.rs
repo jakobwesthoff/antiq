@@ -44,7 +44,8 @@ impl crate::error::HasKind for SelectError {}
 pub struct Rules {
     patterns: Vec<Vec<Part>>,
     exclude: HashSet<RelPath>,
-    /// `(device, inode)` of the exclude entries that exist; see `bind`.
+    /// `(device, inode)` of the exclude entries that exist and are
+    /// directories; see `bind`.
     identities: HashSet<(u64, u64)>,
 }
 
@@ -88,9 +89,9 @@ impl Rules {
         })
     }
 
-    /// Looks up the exclude entries that exist in `collection`, so that
-    /// they are recognised by the directory they are and not only by their
-    /// spelling.
+    /// Looks up the exclude entries that exist in `collection`, so that an
+    /// excluded directory is recognised by the directory it is and not
+    /// only by its spelling.
     pub fn bind(self, collection: &TreeRoot) -> Result<Rules, SelectError> {
         self.bind_with(collection, &RealFs)
     }
@@ -106,8 +107,12 @@ impl Rules {
                 None => collection.lstat(path),
             };
             match result {
+                // A file is excluded by its path only: another link to it
+                // is a file of its own.
                 Ok(entry) => {
-                    self.identities.insert((entry.device, entry.inode));
+                    if entry.kind == EntryKind::Directory {
+                        self.identities.insert((entry.device, entry.inode));
+                    }
                 }
                 Err(error) if is_out_of_descriptors(&error) => {
                     return Err(SelectError::OutOfDescriptors {
@@ -125,7 +130,8 @@ impl Rules {
     }
 
     /// Whether the entry at `path`, relative to the collection root, with
-    /// this `device` and `inode`, is on the exclude list.
+    /// this `device` and `inode`, is on the exclude list. The identity
+    /// matches an excluded directory; a file is on the list by its path.
     pub(crate) fn excludes(&self, path: &RelPath, device: u64, inode: u64) -> bool {
         self.exclude.contains(path) || self.identities.contains(&(device, inode))
     }
@@ -453,7 +459,8 @@ impl<'a> Selector<'a> {
             .expect("a listed name is a valid path of one component");
 
         // The kind a listing reports can be missing, and the identity of
-        // a directory needs a stat.
+        // a directory needs a stat. Only directories have an identity on
+        // the exclude list.
         let mut kind = self.hooks.listed_kind(&child, listed.kind);
         let must_stat = kind == EntryKind::Unknown
             || (kind == EntryKind::Directory && !self.rules.identities.is_empty());
@@ -678,6 +685,32 @@ mod tests {
         let expected = &both[usize::from(insensitive)..];
         let selection = select_in(&tree, &["*"], &["Archive"]);
         assert_eq!(pieces(&selection), expected);
+    }
+
+    #[test]
+    fn only_an_exclude_entry_that_is_a_directory_is_recognised_by_its_identity() {
+        let mut tree = Tree::new();
+        tree.dir("archive");
+        tree.file("notes.txt", "x");
+        tree.symlink("link", "archive");
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        let exclude: Vec<RelPath> = ["archive", "notes.txt", "link"]
+            .iter()
+            .map(|name| RelPath::parse(name).expect("valid path"))
+            .collect();
+
+        let rules = Rules::new(&[], &exclude)
+            .expect("no patterns are valid")
+            .bind(&root)
+            .expect("binds");
+
+        let archive = root
+            .lstat(&RelPath::parse("archive").expect("valid path"))
+            .expect("the directory exists");
+        assert_eq!(
+            rules.identities,
+            HashSet::from([(archive.device, archive.inode)])
+        );
     }
 
     #[test]

@@ -1740,6 +1740,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_link_of_an_excluded_file_is_not_excluded() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/keep.txt", "x");
+        tree.hard_link("piece/sub/keep.txt", "piece/sub/linked.txt");
+        let walked = walk_excluding(&tree, &["piece/sub/keep.txt"]);
+        assert_eq!(
+            walked.problems(),
+            [Problem::Excluded {
+                path: path("sub/keep.txt")
+            }]
+        );
+        assert!(paths(&walked).contains(&"sub/linked.txt".to_string()));
+    }
+
+    #[test]
     fn directories_below_the_depth_cap_make_the_piece_unreadable_and_are_not_entered() {
         let mut tree = Tree::new();
         tree.file("piece/a/b/c/d/f", "x");
