@@ -1914,6 +1914,32 @@ of the index, is named in the report and ends the run with exit code 3. A
 dry run lists the rebuild of the index and neither runs nor lists the
 repairs.
 
+The remote part runs after the local part. A remote that is away ends the
+run with exit code 4 and one that is broken with the error kind
+`remote_broken`; the local part stands, and `--if-reachable` and `away_warn_days` change
+the exit code of an away remote as under "Remotes". An open error counts
+as broken. On the console the report of the local part
+comes first and then the error; under `--json` only the error envelope is
+printed. A reachable remote is recorded as such, an away remote as away.
+
+With a reachable remote, a real run pulls the metadata versions this
+machine lacks, removes leftovers with the cleanup of the commit protocol
+and marks pieces. A piece is marked missing on the remote when its
+current metadata is committed, this machine holds no archive of it, and
+the current archive file is not in the object's directory on the remote or
+the remote does not list the object. The mark clears once the file is
+back. A remote that cannot be listed ends the remote part with its error
+and leaves the marks as they are. The upload temp files of this machine
+for pieces that are pending upload are kept. A dry run reads the remote
+without pulling, lists the marks and the removals, and writes nothing; a
+removal that depends on the age of a file is listed as such.
+
+`reconcile` names each piece whose highest committed version is above the
+version this machine took out and above every version it lists as
+committed, with the machine that wrote it, until `sync` or `resolve`
+brings the piece up to date. A committed version that cannot be read is
+listed with its reason and does not change the exit code.
+
 ### status
 
 `status` is read-only: it takes no lock and writes nothing below
@@ -2431,9 +2457,16 @@ held brake with the error kind `brake`.
 
 `reconcile` adds `index` (`written` and `removed`, the numbers of files
 written to and removed from the index, and `skipped`, a list of `{id,
-reason}` for the objects whose listing could not be read) and `warnings`.
-Its dry-run action is `rebuild_index` with `member_lists`, the number of
-listings stored on this machine.
+reason}` for the objects whose listing could not be read), `remote` (left
+out without a remote or when the remote part stopped: `pulled`, the
+metadata versions stored, `removed` and `skipped`, the leftovers removed
+and the ones the second look did not confirm, and `left_alone`, a list of
+`{id, reason}`), `marked` and `unmarked` (lists of `{id, path}`),
+`changed_elsewhere` (`{id, path, version, machine}`), `unreadable_versions`
+(`{id, version, reason}`) and `warnings`. Its dry-run actions are
+`rebuild_index` with `member_lists`, the number of listings stored on this
+machine, `mark_missing` and `clear_missing` with `id` and `path`, and
+`remove` and `age_unknown` with `id`, `name` and `what`.
 
 `import` adds `imported`, the files that became objects, as `{id, file,
 path, name, created, size, sha256, payload_version}`; `skipped`, as `{file,

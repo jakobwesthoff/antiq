@@ -782,7 +782,7 @@ const ARCHIVING: [HistoryAction; 4] = [
 
 /// The current archive of an object: its newest payload that is not
 /// superseded.
-fn current_archive(metadata: &Metadata) -> Option<&Payload> {
+pub(crate) fn current_archive(metadata: &Metadata) -> Option<&Payload> {
     metadata
         .payloads
         .iter()
@@ -841,9 +841,17 @@ fn note_fields(piece: &mut Piece, entry: Option<&TrackingEntry>, current: &Curre
     {
         piece.flags.push(Flag::Superseded);
     }
-    // An archive that is only here, or whose copy on the remote was never
-    // checked, still has to go up; so has a change nobody committed yet.
-    let archive = current_archive(metadata);
+    if is_pending_upload(entry, current) {
+        piece.flags.push(Flag::PendingUpload);
+    }
+}
+
+/// Whether the piece still has something to upload: an archive that is
+/// only here, or whose copy on the remote was never checked, or a change
+/// nobody committed yet. `reconcile` keeps the upload temp files of such
+/// a piece through the same test.
+pub(crate) fn is_pending_upload(entry: Option<&TrackingEntry>, current: &Current) -> bool {
+    let archive = current_archive(&current.metadata);
     let held = entry.zip(archive).is_some_and(|(entry, archive)| {
         entry
             .local_payloads
@@ -851,9 +859,7 @@ fn note_fields(piece: &mut Piece, entry: Option<&TrackingEntry>, current: &Curre
             .any(|held| held.kind == PayloadKind::Archive && held.file == archive.file)
     });
     let unconfirmed = archive.is_some_and(|archive| !matches!(archive.verified, Some(Some(_))));
-    if current.source == Source::Pending || (held && unconfirmed) {
-        piece.flags.push(Flag::PendingUpload);
-    }
+    current.source == Source::Pending || (held && unconfirmed)
 }
 
 /// Whether remote work waits for any piece: an upload that has not

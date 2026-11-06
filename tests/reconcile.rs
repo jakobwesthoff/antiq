@@ -257,24 +257,8 @@ fn a_dry_run_names_the_run_that_holds_the_lock() {
 }
 
 // =========================================================
-// What the remote part will do
+// What a prune will do
 // =========================================================
-
-/// The id of a remote in a config.
-const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
-
-fn attach_a_remote(temp: &TempCollection) {
-    fs::write(
-        temp.root().join(".antiq/config.toml"),
-        format!(
-            "[collection]\nid = \"{COLLECTION_ID}\"\n\n\
-             [[remote]]\nurl = \"ssh://nas/srv/antiq\"\nid = \"{REMOTE_ID}\"\n"
-        ),
-    )
-    .expect("a config can be written");
-}
-
-const NOT_DONE: &str = "the remote part of reconcile is not done yet";
 
 #[test]
 fn pruning_is_not_implemented_yet() {
@@ -293,39 +277,6 @@ fn force_and_if_reachable_change_nothing_without_a_remote() {
     succeeded(&run);
     assert_eq!(run.stdout, "Rebuilt the index: 2 written, 0 removed\n");
     assert_eq!(run.stderr, "");
-}
-
-#[test]
-fn with_a_remote_a_note_says_that_its_part_is_not_done() {
-    let temp = world();
-    attach_a_remote(&temp);
-    let run = antiq_in(&temp, &["reconcile"]);
-    succeeded(&run);
-    assert_eq!(run.stdout, "Rebuilt the index: 2 written, 0 removed\n");
-    assert_eq!(run.stderr, format!("note: {NOT_DONE}\n"));
-}
-
-#[test]
-fn with_a_remote_the_json_carries_the_warning_and_stderr_stays_empty() {
-    let temp = world();
-    attach_a_remote(&temp);
-    let run = antiq_in(&temp, &["--json", "reconcile"]);
-    succeeded(&run);
-    assert_eq!(run.json()["warnings"], json!([{"message": NOT_DONE}]));
-    assert_eq!(run.stderr, "");
-}
-
-#[test]
-fn with_a_remote_a_dry_run_notes_it_on_the_console_only() {
-    let temp = world();
-    attach_a_remote(&temp);
-    let run = antiq_in(&temp, &["reconcile", "--dry-run"]);
-    succeeded(&run);
-    assert_eq!(run.stderr, format!("note: {NOT_DONE}\n"));
-    let run = antiq_in(&temp, &["--json", "reconcile", "--dry-run"]);
-    succeeded(&run);
-    assert_eq!(run.stderr, "");
-    assert!(!run.stdout.contains("warnings"), "{}", run.stdout);
 }
 
 // =========================================================

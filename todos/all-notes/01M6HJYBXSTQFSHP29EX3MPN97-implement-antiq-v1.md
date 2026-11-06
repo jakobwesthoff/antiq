@@ -3154,6 +3154,15 @@ Notes for the items that call the strict verify and the listing comparison
   `Store::objects` and `tracking::read_all` leave a pruned object out
   while its record is in force, so a command that lists through them
   needs no check of its own.
+- 2026-11-04: the remote part of `reconcile` is
+  `src/ops/reconcile/remote_part.rs`. `reconcile` takes an opener
+  (`Opener`, `antiq::remote::open` in the command) so that tests inject
+  a `FaultRemote`. The test for a piece pending upload is
+  `status::is_pending_upload`, shared with the flag of `status`;
+  `status::current_archive` is `pub(crate)`. A remote part that stops
+  returns its error in `ReconcileReport::stop` (and `Reconciled::Planned`),
+  which the command prints after the report and returns, so the local
+  part stands.
 
 ## Relations
 

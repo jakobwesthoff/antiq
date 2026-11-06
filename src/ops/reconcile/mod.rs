@@ -12,13 +12,21 @@ use crate::id::ObjectId;
 use crate::index::{self, Index};
 use crate::lock::Holder;
 use crate::plan::{Plan, PlanAction};
+use crate::remote::away::AwayError;
+use crate::remote::cleanup::{LeftAlone, Step, What};
+use crate::remote::{Remote, RemoteError};
 use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, Started};
 use serde::Serialize;
 
+mod remote_part;
+
 /// Errors of the `reconcile` command.
 #[derive(Debug, thiserror::Error)]
-pub enum ReconcileError {}
+pub enum ReconcileError {
+    #[error(transparent)]
+    Away(#[from] AwayError),
+}
 
 impl crate::error::HasKind for ReconcileError {}
 
@@ -28,11 +36,69 @@ impl crate::error::HasKind for ReconcileError {}
 pub enum ReconcileAction {
     /// Empty the index and build it again from the stored listings.
     RebuildIndex { member_lists: usize },
+    /// Note that the archive of a piece is gone from the remote.
+    MarkMissing { id: ObjectId, path: String },
+    /// Clear that note, as the archive is back.
+    ClearMissing { id: ObjectId, path: String },
+    /// Remove a leftover from the remote.
+    Remove {
+        id: ObjectId,
+        name: String,
+        what: What,
+    },
+    /// Remove a leftover from the remote if it is old enough, which a dry
+    /// run cannot tell.
+    AgeUnknown {
+        id: ObjectId,
+        name: String,
+        what: What,
+    },
+}
+
+impl ReconcileAction {
+    fn from_mark(piece: PieceRef) -> ReconcileAction {
+        ReconcileAction::MarkMissing {
+            id: piece.id,
+            path: piece.path,
+        }
+    }
+
+    fn from_unmark(piece: PieceRef) -> ReconcileAction {
+        ReconcileAction::ClearMissing {
+            id: piece.id,
+            path: piece.path,
+        }
+    }
+
+    fn from_step(step: Step) -> ReconcileAction {
+        match step {
+            Step::Remove { id, name, what } => ReconcileAction::Remove { id, name, what },
+            Step::AgeUnknown { id, name, what } => ReconcileAction::AgeUnknown { id, name, what },
+        }
+    }
 }
 
 impl PlanAction for ReconcileAction {
     fn describe(&self) -> String {
         match self {
+            ReconcileAction::MarkMissing { path, .. } => {
+                format!("mark {path} as missing on the remote")
+            }
+            ReconcileAction::ClearMissing { path, .. } => {
+                format!("clear the missing mark of {path}")
+            }
+            ReconcileAction::Remove { id, name, what } => Step::Remove {
+                id: *id,
+                name: name.clone(),
+                what: *what,
+            }
+            .describe(),
+            ReconcileAction::AgeUnknown { id, name, what } => Step::AgeUnknown {
+                id: *id,
+                name: name.clone(),
+                what: *what,
+            }
+            .describe(),
             ReconcileAction::RebuildIndex { member_lists: 1 } => {
                 "rebuild the index (1 member list)".to_string()
             }
@@ -61,11 +127,53 @@ pub struct IndexReport {
     pub skipped: Vec<SkippedObject>,
 }
 
+/// What the remote part did to the remote.
+#[derive(Debug, Default, Serialize)]
+pub struct RemoteReport {
+    pub pulled: usize,
+    pub removed: usize,
+    pub skipped: usize,
+    pub left_alone: Vec<LeftAlone>,
+}
+
+/// A piece named in the report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PieceRef {
+    pub id: ObjectId,
+    pub path: String,
+}
+
+/// A piece whose newest committed version another machine wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangedElsewhere {
+    pub id: ObjectId,
+    pub path: String,
+    pub version: u32,
+    pub machine: String,
+}
+
+/// A committed version that cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnreadableVersion {
+    pub id: ObjectId,
+    pub version: u32,
+    pub reason: String,
+}
+
 /// What a run of `reconcile` did.
 #[derive(Debug, Serialize)]
 pub struct ReconcileReport {
     pub index: IndexReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteReport>,
+    pub marked: Vec<PieceRef>,
+    pub unmarked: Vec<PieceRef>,
+    pub changed_elsewhere: Vec<ChangedElsewhere>,
+    pub unreadable_versions: Vec<UnreadableVersion>,
     pub warnings: Vec<Warning>,
+    /// Why the remote part stopped, after the local part was done.
+    #[serde(skip)]
+    pub stop: Option<Error>,
 }
 
 impl CommandReport for ReconcileReport {
@@ -88,22 +196,27 @@ pub enum Reconciled {
         plan: Plan<ReconcileAction>,
         notes: Vec<Warning>,
         holder: Option<Holder>,
+        /// Why the remote part stopped, after the local part was listed.
+        stop: Option<Error>,
     },
     Done(ReconcileReport),
 }
 
-/// What a collection with a remote is told, since the remote's share of
-/// the work is not done by this command.
-pub const REMOTE_PART_NOT_DONE: &str = "the remote part of reconcile is not done yet";
-
-/// What `reconcile` tells about the collection: the notes of every command
-/// and, with a remote attached, that its part is left undone.
+/// What `reconcile` tells about the collection: the notes of every
+/// command.
 fn collection_notes(collection: &Collection) -> Vec<Warning> {
-    let mut notes = report::setting_notes(collection);
-    if !collection.config().remotes.is_empty() {
-        notes.push(Warning::new(REMOTE_PART_NOT_DONE));
-    }
-    notes
+    report::setting_notes(collection)
+}
+
+/// Opens the remote of a collection; tests pass their own.
+pub type Opener<'a> = &'a dyn Fn(&Collection) -> Result<Box<dyn Remote>, RemoteError>;
+
+/// What a run of `reconcile` was asked to do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReconcileRequest {
+    pub prune: bool,
+    pub force: bool,
+    pub dry_run: bool,
 }
 
 /// Brings the index in line with the stored metadata. `prune` asks for the
@@ -115,9 +228,10 @@ fn collection_notes(collection: &Collection) -> Vec<Warning> {
 pub fn reconcile(
     collection: &Collection,
     clock: &dyn Clock,
-    prune: bool,
-    dry_run: bool,
+    opener: Opener,
+    request: ReconcileRequest,
 ) -> Result<Reconciled, Error> {
+    let ReconcileRequest { prune, dry_run, .. } = request;
     if prune {
         return Err(Error::NotImplemented {
             command: "reconcile --prune".to_string(),
@@ -134,16 +248,25 @@ pub fn reconcile(
                 .count();
             let mut plan = Plan::new();
             plan.push(ReconcileAction::RebuildIndex { member_lists });
+            let part = remote_part::run(collection, clock, opener, None);
+            for action in part.actions {
+                plan.push(action);
+            }
+            let mut notes = collection_notes(collection);
+            notes.extend(part.warnings);
             Ok(Reconciled::Planned {
                 plan,
-                notes: collection_notes(collection),
+                notes,
                 holder,
+                stop: part.stop,
             })
         }
         Started::Guarded(guard) => {
             let rebuilt = index::rebuild(collection, guard.lock())?;
+            let part = remote_part::run(collection, clock, opener, Some(guard.lock()));
             let mut warnings = collection_notes(collection);
             warnings.extend_from_slice(guard.warnings());
+            warnings.extend(part.warnings);
             Ok(Reconciled::Done(ReconcileReport {
                 index: IndexReport {
                     written: rebuilt.written,
@@ -154,7 +277,13 @@ pub fn reconcile(
                         .map(|(id, reason)| SkippedObject { id, reason })
                         .collect(),
                 },
+                remote: part.remote,
+                marked: part.marked,
+                unmarked: part.unmarked,
+                changed_elsewhere: part.changed_elsewhere,
+                unreadable_versions: part.unreadable_versions,
                 warnings,
+                stop: part.stop,
             }))
         }
     }
@@ -171,7 +300,35 @@ mod tests {
                 removed: 0,
                 skipped,
             },
+            remote: None,
+            marked: Vec::new(),
+            unmarked: Vec::new(),
+            changed_elsewhere: Vec::new(),
+            unreadable_versions: Vec::new(),
             warnings: vec![Warning::new("a repair did something")],
+            stop: None,
+        }
+    }
+
+    #[test]
+    fn the_actions_of_a_cleanup_step_read_as_the_step_does() {
+        let id: ObjectId = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("a ULID");
+        for step in [
+            Step::Remove {
+                id,
+                name: ".meta.2.studio.part".into(),
+                what: What::TempFile,
+            },
+            Step::AgeUnknown {
+                id,
+                name: ".meta.2.studio.part".into(),
+                what: What::TempFile,
+            },
+        ] {
+            assert_eq!(
+                ReconcileAction::from_step(step.clone()).describe(),
+                step.describe()
+            );
         }
     }
 
