@@ -732,6 +732,15 @@ mod tests {
     fn special_mode_bits_of_the_top_come_back() {
         let tree = collection();
         let _restore = read_only_top(&tree);
+        // The system drops the setgid bit of a directory whose group the
+        // user is not in, and a directory takes the group of the folder it
+        // is made in, which can be one of another group.
+        std::os::unix::fs::chown(
+            tree.path("p"),
+            None,
+            Some(rustix::process::getegid().as_raw()),
+        )
+        .expect("the directory goes to the group of the user");
         fs::set_permissions(tree.path("p"), fs::Permissions::from_mode(0o2555)).expect("setgid");
         let probe = Probe::default();
 
