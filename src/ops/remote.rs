@@ -1299,7 +1299,10 @@ mod tests {
         // A first run makes the lock file, which a run in a directory that
         // cannot be written needs to find in place.
         let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-        drop(run::start(&world.collection(), &clock, false).expect("the run starts"));
+        drop(
+            rerun_while_lock_unattributed(|| run::start(&world.collection(), &clock, false))
+                .expect("the run starts"),
+        );
         fs::set_permissions(&antiq, fs::Permissions::from_mode(0o555)).expect("chmod");
         let denied = fs::write(antiq.join("probe"), "").is_err();
         let error = world.init(&root).expect_err("no config write");
@@ -1739,7 +1742,8 @@ mod tests {
         put_version(&root, OTHER_ID, 2, b"newer");
         let collection = world.collection();
         let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-        let started = run::start(&collection, &clock, false).expect("the run starts");
+        let started = rerun_while_lock_unattributed(|| run::start(&collection, &clock, false))
+            .expect("the run starts");
         let Started::Guarded(guard) = &started else {
             panic!("a real run holds the lock");
         };
@@ -2159,7 +2163,10 @@ mod tests {
         world.add(&root).expect("attached");
         let antiq = world.collection().antiq_dir();
         let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-        drop(run::start(&world.collection(), &clock, false).expect("the run starts"));
+        drop(
+            rerun_while_lock_unattributed(|| run::start(&world.collection(), &clock, false))
+                .expect("the run starts"),
+        );
         fs::set_permissions(&antiq, fs::Permissions::from_mode(0o555)).expect("chmod");
         let denied = fs::write(antiq.join("probe"), "").is_err();
         let error = world.remove(false).expect_err("no config write");
@@ -2239,7 +2246,10 @@ mod tests {
         let root = world.remote("antiq");
         let antiq = world.collection().antiq_dir();
         let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-        drop(run::start(&world.collection(), &clock, false).expect("the run starts"));
+        drop(
+            rerun_while_lock_unattributed(|| run::start(&world.collection(), &clock, false))
+                .expect("the run starts"),
+        );
         fs::set_permissions(&antiq, fs::Permissions::from_mode(0o555)).expect("chmod");
         let denied = fs::write(antiq.join("probe"), "").is_err();
         let error = world.add(&root).expect_err("no config write");
@@ -2459,7 +2469,8 @@ mod tests {
             };
             let collection = world.collection();
             let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-            let started = run::start(&collection, &clock, false).expect("the run starts");
+            let started = rerun_while_lock_unattributed(|| run::start(&collection, &clock, false))
+                .expect("the run starts");
             let request = AddRequest {
                 url: "ssh://nas/srv/fresh",
                 init: true,
