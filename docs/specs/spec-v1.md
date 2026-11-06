@@ -1880,7 +1880,9 @@ of the counts, with `repairs` and `warnings` after them, and the console
 prints `note: <reason>` on stderr and nothing on stdout. Without `--if-reachable` it is the error kind
 `target_unreachable`. In text the repairs that were done go to stderr as
 `note: repaired: <repair>` lines, after the `note: <reason>` of an
-unreachable target.
+unreachable target, and the warnings follow as `note: <message>` lines. The
+warnings hold the notes on the settings of the collection (an unknown key
+under `[target]` among them) besides those of the repairs.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
 collection, as `{message}` objects) and, while a run holds the lock, `note`

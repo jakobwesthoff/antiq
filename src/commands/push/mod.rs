@@ -10,6 +10,7 @@ use crate::error::{ErrorKind, HasKind};
 use crate::machine::MachineError;
 use crate::plan::{HeldDryRun, Plan};
 use crate::relpath::RelPath;
+use crate::report::setting_notes;
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
 use crate::target::marker::{self, Marker, MarkerError};
@@ -193,6 +194,10 @@ pub fn push(
             (Some(guard), done, warnings, folders)
         }
     };
+
+    let mut notes = setting_notes(collection);
+    notes.extend(warnings);
+    let warnings = notes;
 
     let rsync = local_rsync(collection)?;
     let identity = identity(collection, crate::machine::detect())?;

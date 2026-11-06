@@ -51,6 +51,10 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     out.note(&format!("note: repaired: {}", repair.describe()))
                         .context("print the result")?;
                 }
+                for warning in &report.warnings {
+                    out.note(&format!("note: {}", warning.message))
+                        .context("print the result")?;
+                }
                 for line in report.lines() {
                     out.line(&line).context("print the result")?;
                 }
