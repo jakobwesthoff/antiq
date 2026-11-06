@@ -2627,8 +2627,9 @@ the same commit; the lead checks that at acceptance.
 - 2026-11-04: what a live package left out reaches other machines
   through a payload key `left_out` (escaped paths, live payloads only,
   omitted when empty), not through the `encoder` record. I14's packer
-  returns the list; I32 adds the key to `Payload` and to spec
-  "Metadata" when it writes live payloads; I34 warns on it.
+  returns the list; I32 writes it into `Payload::extra["left_out"]`
+  (lead decision 2026-11-04: no typed field, `meta.rs` stays as it is)
+  and names the key in spec "Metadata"; I34 warns on it.
 - 2026-11-04 (merged): for I32, `pack_live(source, first_tree,
   settings, out_path)` returns `Packed`, `NoPackage`, `Stale` or
   `Blocked`; `live::manifest_of(walk, exclude)` is the one filter for
@@ -3102,7 +3103,7 @@ Notes for the items that call the strict verify and the listing comparison
   rename that fails then leaves nothing behind. The three crash points
   have a repair test each (`ops::unearth::live`).
 - What a live package left out is read from `Payload::extra["left_out"]`
-  in `live.rs`; I32's typed field replaces it (TODO there).
+  in `live.rs`, the key I32 writes.
 - `listing::Reader` has no cap on the length of a line or the number of
   entries, so a listing fetched from the remote is read whole. Left for a
   follow-up.
