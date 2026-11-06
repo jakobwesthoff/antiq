@@ -22,17 +22,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-/// The highest committed version of each object this machine has.
-fn known_versions(store: &Store<'_>) -> Result<KnownVersions, SyncError> {
-    let mut known = KnownVersions::new();
-    for id in store.objects()? {
-        if let Some(highest) = store.committed_versions(id)?.last() {
-            known.insert(id, *highest);
-        }
-    }
-    Ok(known)
-}
-
 /// How the read of the remote's metadata ended when it failed.
 pub(super) enum PullFailure {
     /// The remote is gone, which ends the run.
@@ -69,8 +58,7 @@ pub(super) fn pull_files(
 /// Returns whether the remote's metadata could not be read, in which case
 /// nothing that depends on what other machines committed may be committed.
 pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<bool, SyncError> {
-    let store = Store::new(ctx.collection);
-    let known = known_versions(&store)?;
+    let known = crate::tombstone::known_versions(ctx.collection)?;
     let files = match pull_files(ctx.remote, &known) {
         Ok(files) => files,
         Err(PullFailure::RunEnds(error)) => return Err(error.into()),
@@ -222,7 +210,7 @@ pub(super) fn plan_pull(
     notes: &mut Vec<Warning>,
 ) -> Result<Option<BTreeMap<ObjectId, Versions>>, SyncError> {
     let store = Store::new(collection);
-    let files = match pull_files(remote, &known_versions(&store)?) {
+    let files = match pull_files(remote, &crate::tombstone::known_versions(collection)?) {
         Ok(files) => files,
         Err(PullFailure::RunEnds(error)) => return Err(error.into()),
         Err(PullFailure::Failed(error)) => {
@@ -397,5 +385,65 @@ mod tests {
         };
 
         assert!(plan.is_empty());
+    }
+
+    /// Records the pruning of `id` up to `version` on `ben`.
+    fn prune(ben: &Machine, id: ObjectId, version: u32) {
+        let lock = lock::acquire(&ben.collection.lock_path(), "ben", &ben.clock).expect("free");
+        let mut tombstones = crate::tombstone::Tombstones::default();
+        tombstones.record(id, version);
+        tombstones.write(&ben.collection, &lock).expect("written");
+    }
+
+    fn pulled_by_a_real_run(ben: &Machine) -> Vec<(ObjectId, u32)> {
+        match super::super::sync_with(&ben.collection, &ben.clock, &ben.remote(), false)
+            .expect("runs")
+        {
+            super::super::Synced::Done(report) => report
+                .pulled
+                .iter()
+                .map(|pulled| (pulled.id, pulled.version))
+                .collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pruned_object_is_not_pulled_back() {
+        let (_shared, ben, id) = two_machines_with_a_listing();
+        prune(&ben, id, 1);
+
+        assert_eq!(pulled_by_a_real_run(&ben), vec![]);
+        assert!(
+            ben.store()
+                .committed_versions(id)
+                .expect("lists")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_newer_version_lifts_the_record_of_a_pruned_object() {
+        let (shared, ben, id) = two_machines_with_a_listing();
+        let there = shared.objects().join(id.to_string());
+        fs::copy(there.join("meta.1"), there.join("meta.2")).expect("a newer version");
+        prune(&ben, id, 1);
+
+        assert_eq!(pulled_by_a_real_run(&ben), vec![(id, 2)]);
+    }
+
+    #[test]
+    fn a_dry_run_does_not_plan_to_pull_a_pruned_object_back() {
+        let (_shared, ben, id) = two_machines_with_a_listing();
+        prune(&ben, id, 1);
+
+        let plan = match super::super::sync_with(&ben.collection, &ben.clock, &ben.remote(), true)
+            .expect("plans")
+        {
+            super::super::Synced::Planned { plan, .. } => plan,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(plan.is_empty(), "{:?}", plan.dry_run());
     }
 }
