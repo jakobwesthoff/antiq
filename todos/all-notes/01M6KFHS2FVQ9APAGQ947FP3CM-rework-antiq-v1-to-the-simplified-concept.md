@@ -1900,6 +1900,22 @@ Scenarios and the items each needs merged first:
 Not chosen: an interrupted run repaired by the next one, two runs at
 once.
 
+Depth chosen by the user (asqr 01M6KYYV6Q0PYXD0KKD2EV13Z0, 2026-11-04):
+- init, medium: the config is written and parses to the defaults, the
+  due count is named, a second `init` is refused.
+- find, deep: `list scan` finds both pieces, `list scanner` one, a word
+  with no hit says so on stderr with exit 0; plus smart case, a path
+  instead of a word, and an ambiguous word with `unearth` once it exists.
+- list, medium plus the repeated hour of daylight saving time: newest
+  first, local time on a terminal, stamps in a pipe, UTC in JSON,
+  damaged versions marked; plus two versions in the repeated hour shown
+  with their offsets.
+- grep, medium: grouped terminal output, one pipe line per hit and
+  version, a piece name match, no hit with exit 0.
+- status, medium plus future times: every state in the table, a damaged
+  version as a note, nothing written below `.antiq/`; plus a file with a
+  time in the future (pinned joins once `pin` exists).
+
 Work: item E0 built the harness (main 0693f5b, `tests/support/scenario/`,
 how to write a scenario is in its module documentation; scenarios go to
 `tests/scenarios/<group>.rs`); the lead starts a scenario agent for each
