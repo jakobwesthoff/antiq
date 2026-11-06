@@ -91,6 +91,10 @@ impl<R: io::Read> io::Read for Counted<R> {
 const END_MARKER: u64 = 1024;
 
 /// Reads `package` to its end.
+///
+/// The package must be one antiq wrote in this run or one that passed
+/// the scan of `unpack` or `check_structure`: the tar reader
+/// loads a long-name or pax record whole, whatever size its header gives.
 pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
     read_package_from(file)
@@ -102,6 +106,8 @@ pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
 /// end of the archive, so a stream of several frames that was cut between
 /// two frames would read as a smaller, complete archive. The end blocks
 /// are what tells the two apart.
+///
+/// The precondition of [`read_package`] holds here too.
 pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackError> {
     let decoder = zstd::decoder(source).map_err(damaged)?;
     let count = Rc::new(Cell::new(0));

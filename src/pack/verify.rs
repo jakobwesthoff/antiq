@@ -163,6 +163,9 @@ impl Compared {
 }
 
 /// Compares `package` with the tree below `root`.
+///
+/// The package must be one antiq wrote in this run or one that passed the
+/// structure check of `extract`, as it is read with `read_package`.
 pub fn verify_strict(
     package: &Path,
     root: &TreeRoot,

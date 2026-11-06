@@ -432,10 +432,12 @@ fn prepare_file(
     let walked = frames::walk(&handle)?;
     stopped(hooks, Step::Walked, "the frame walk")?;
     let log = RefCell::new(Vec::new());
+    // The structure check refuses an oversized long-name or pax record by
+    // its header; the tar reader behind `read_package_from` would load it.
+    let members = check_structure(|| pass(&handle, &log))?;
     let package = read_package_from(
         pass(&handle, &log).map_err(|error| refused(format!("cannot read it: {error}")))?,
     )?;
-    let members = check_structure(|| pass(&handle, &log))?;
     for seen in log.borrow().iter() {
         let seen = seen.borrow();
         if seen.bytes != walked.size || hex(&seen.hasher.clone().finalize()) != walked.sha256 {
@@ -1360,6 +1362,21 @@ mod tests {
     }
 
     #[test]
+    fn a_long_name_record_above_the_cap_is_refused_as_such_before_it_is_read() {
+        let world = World::new();
+        let mut tar = raw_tar(&[RawMember::dir(b"proj/")]);
+        tar.truncate(512);
+        let mut header = tar::Header::new_gnu();
+        header.as_old_mut().name[..13].copy_from_slice(b"././@LongLink");
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_size(1 << 30);
+        header.set_cksum();
+        tar.extend_from_slice(header.as_bytes());
+        let file = world.input("a.tar.zst", &compress(&tar));
+        refused_with(&world, file, "is larger than");
+    }
+
+    #[test]
     fn two_top_level_folders_are_refused() {
         let world = World::new();
         let tar = raw_tar(&[
@@ -1369,7 +1386,11 @@ mod tests {
             RawMember::file(b"other/b", b"2"),
         ]);
         let file = world.input("a.tar.zst", &compress(&tar));
-        refused_with(&world, file, "outside the top-level directory");
+        refused_with(
+            &world,
+            file,
+            "lies outside the archive's top-level directory",
+        );
     }
 
     #[test]
@@ -1388,7 +1409,7 @@ mod tests {
         let world = World::new();
         let tar = raw_tar(&[RawMember::dir(b"proj/"), RawMember::file(b"/etc/x", b"1")]);
         let file = world.input("a.tar.zst", &compress(&tar));
-        refused_with(&world, file, "outside the top-level directory");
+        refused_with(&world, file, "its path is absolute");
     }
 
     #[test]
@@ -1404,7 +1425,7 @@ mod tests {
         let world = World::new();
         let tar = raw_tar(&[RawMember::file(b"proj", b"1")]);
         let file = world.input("a.tar.zst", &compress(&tar));
-        refused_with(&world, file, "first member is not a directory");
+        refused_with(&world, file, "first member is not the directory");
     }
 
     #[test]
