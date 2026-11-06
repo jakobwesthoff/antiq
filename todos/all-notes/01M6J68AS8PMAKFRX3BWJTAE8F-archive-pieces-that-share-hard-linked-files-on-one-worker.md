@@ -22,7 +22,3 @@ Group candidates whose trees share a (device, inode) with a link count
 above one and run each group on one worker in path order. The step 0 walk
 already records link count, device and inode, so the grouping needs
 either a pre-walk or a scheduling decision deferred until the walk.
-
-## Relations
-
-- Part of: [Rework antiq v1 to the simplified concept](01M6KFHS2FVQ9APAGQ947FP3CM-rework-antiq-v1-to-the-simplified-concept.md)

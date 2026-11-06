@@ -17,7 +17,3 @@ so a damaged or hostile listing can make them allocate without bound. Found in t
 Which caps: a line length (a path is at most the platform's limits plus
 escaping) and an entry count tied to something measurable. A cap needs
 a number with a source; none is chosen yet.
-
-## Relations
-
-- Part of: [Rework antiq v1 to the simplified concept](01M6KFHS2FVQ9APAGQ947FP3CM-rework-antiq-v1-to-the-simplified-concept.md)
