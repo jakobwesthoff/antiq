@@ -1517,11 +1517,16 @@ that check the folder before and after its removal.
 A reclaim records its metadata change first (lifecycle `archived`, live
 payload removed, a `reclaim` history entry), then sets the entry to
 `removing` naming the archive payload, then removes the folder by steps 3
-to 5 above. A reclaim that stops half way is finished by the repairs of the
-next run. A change that an earlier run recorded is not recorded twice. A
-trash tree in the way of the move skips the reclaim before anything is
-written. A folder that is no longer the archive when it is walked in the
-trash goes back as unearthed at the same version.
+to 5 above. A reclaim that stops once the entry says `removing` is finished
+by the repairs of the next run. One that stops after the metadata change and
+before that leaves the entry `live`, the folder in place and the `reclaim`
+history entry, which records that the folder was found equal to the
+archive. The next run compares the folder again; a change that an earlier
+run recorded is not recorded twice, and a replacement of a folder that
+differs by then adds its own history entry. A trash tree in the way of the
+move skips the reclaim before anything is written. A folder that is no
+longer the archive when it is walked in the trash goes back as unearthed at
+the same version.
 
 A reclaim needs the archive payload: it must be in the store and pass the
 stream check with the size and SHA-256 of the metadata, or the metadata
