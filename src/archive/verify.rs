@@ -149,7 +149,7 @@ impl LstatRecord {
 ///
 /// ```compile_fail
 /// // The differences are only read: a caller that could edit them could
-/// // get a `Verified` for a folder that differs.
+/// // hide a difference from the code that acts on them.
 /// fn forge(mut compared: antiq::archive::verify::Compared) {
 ///     compared.differences.clear();
 /// }
@@ -158,7 +158,6 @@ impl LstatRecord {
 pub struct Compared {
     differences: Vec<Difference>,
     record: Vec<LstatRecord>,
-    listing: Vec<ListingEntry>,
 }
 
 impl Compared {
@@ -170,18 +169,6 @@ impl Compared {
     /// The `lstat` of every entry of the folder, in path order.
     pub fn record(&self) -> &[LstatRecord] {
         &self.record
-    }
-
-    /// The proof that the folder equals the listing, or the differences.
-    pub fn into_verified(self) -> Result<Verified, Vec<Difference>> {
-        if self.differences.is_empty() {
-            Ok(Verified {
-                record: self.record,
-                listing: self.listing,
-            })
-        } else {
-            Err(self.differences)
-        }
     }
 }
 
@@ -398,7 +385,6 @@ fn compare_with_listing_observed(
     Ok(Compared {
         differences,
         record: folder.record,
-        listing: listing.to_vec(),
     })
 }
 
@@ -1082,23 +1068,20 @@ mod tests {
     }
 
     #[test]
-    fn a_comparison_without_differences_gives_the_proof_and_with_them_the_differences() {
+    fn a_comparison_lists_no_differences_for_an_equal_folder_and_the_differences_otherwise() {
         let tree = mixed();
         let listing = packed(&tree);
         let root = TreeRoot::open(&tree.path("proj")).expect("opens");
-        let equal = compare_with_listing(&listing, &root, &WalkRules::default())
-            .expect("runs")
-            .into_verified()
-            .expect("the folder equals the listing");
-        assert_eq!(equal.listing(), listing);
+        let equal = compare_with_listing(&listing, &root, &WalkRules::default()).expect("runs");
+        assert_eq!(equal.differences(), []);
         assert_eq!(equal.record().len(), 6);
 
         std::fs::remove_file(tree.path("proj/notes.txt")).expect("removed");
-        let differences = compare_with_listing(&listing, &root, &WalkRules::default())
-            .expect("runs")
-            .into_verified()
-            .expect_err("the folder differs");
-        assert_eq!(differences, [Difference::Removed(path("notes.txt"))]);
+        let differing = compare_with_listing(&listing, &root, &WalkRules::default()).expect("runs");
+        assert_eq!(
+            differing.differences(),
+            [Difference::Removed(path("notes.txt"))]
+        );
     }
 
     /// Compares while `change` runs at the chosen stage for `path`.
