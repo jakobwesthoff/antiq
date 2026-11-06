@@ -487,16 +487,10 @@ fn size_sums(tree: &PieceTree) -> (u64, u64) {
     (apparent, allocated)
 }
 
-/// By how many bytes the apparent size of the piece exceeds its allocated
-/// size. Block rounding can make the allocated size the larger one, which
-/// gives 0; the difference is taken on the sums, not file by file.
-pub fn sparse_excess(tree: &PieceTree) -> u64 {
-    let (apparent, allocated) = size_sums(tree);
-    apparent.saturating_sub(allocated)
-}
-
 /// The warning for a piece whose apparent size exceeds its allocated size
-/// by more than 1 GiB.
+/// by more than 1 GiB. Block rounding can make the allocated size the larger
+/// one, which counts as no excess; the difference is taken on the sums, not
+/// file by file.
 pub fn sparse_warning(tree: &PieceTree) -> Option<SparseWarning> {
     let (apparent, allocated) = size_sums(tree);
     (apparent.saturating_sub(allocated) > SPARSE_WARNING_BYTES).then_some(SparseWarning {
@@ -1148,7 +1142,6 @@ mod tests {
     #[test]
     fn the_warning_fires_only_above_1_gib_of_excess() {
         let exactly = tree_of(vec![sparse_file("a", GIB + 4096, 4096)]);
-        assert_eq!(sparse_excess(&exactly), GIB);
         assert_eq!(sparse_warning(&exactly), None);
 
         let above = tree_of(vec![sparse_file("a", GIB + 4097, 4096)]);
@@ -1166,14 +1159,13 @@ mod tests {
         let mut ignored = sparse_file("a", 2 * GIB, 0);
         ignored.class = crate::tree::Class::Ignored;
         let tree = tree_of(vec![ignored]);
-        assert_eq!(sparse_excess(&tree), 0);
         assert_eq!(sparse_warning(&tree), None);
     }
 
     #[test]
     fn block_rounding_does_not_count_as_excess() {
         let rounded = tree_of(vec![sparse_file("a", 1, 4096)]);
-        assert_eq!(sparse_excess(&rounded), 0);
+        assert_eq!(sparse_warning(&rounded), None);
     }
 
     #[test]
@@ -1185,7 +1177,6 @@ mod tests {
             sparse_file("a", GIB + 4096, 0),
             sparse_file("b", 0, 8192),
         ]);
-        assert_eq!(sparse_excess(&tree), GIB - 4096);
         assert_eq!(sparse_warning(&tree), None);
     }
 
@@ -1196,7 +1187,6 @@ mod tests {
         let mut second = sparse_file("b", GIB, 0);
         second.nlink = 2;
         let tree = tree_of(vec![first, second]);
-        assert_eq!(sparse_excess(&tree), GIB);
         assert_eq!(sparse_warning(&tree), None);
     }
 
@@ -1206,7 +1196,7 @@ mod tests {
         directory.size = 2 * GIB;
         let mut link = symlink("l", b"x");
         link.size = 2 * GIB;
-        assert_eq!(sparse_excess(&tree_of(vec![directory, link])), 0);
+        assert_eq!(sparse_warning(&tree_of(vec![directory, link])), None);
     }
 
     #[test]
@@ -1220,7 +1210,8 @@ mod tests {
             "the file system makes this file sparse"
         );
         let walked = tree_of(vec![file]);
-        assert!(sparse_excess(&walked) > 0);
+        let (apparent, allocated) = size_sums(&walked);
+        assert!(allocated < apparent);
         assert_eq!(sparse_warning(&walked), None, "far below 1 GiB");
     }
 
