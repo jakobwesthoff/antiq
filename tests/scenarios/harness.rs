@@ -113,6 +113,22 @@ fn files_carry_the_age_of_their_piece_and_their_own_when_given() {
 }
 
 #[test]
+fn symlinks_carry_the_age_of_their_piece() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("projects/scanner", |piece| {
+            piece
+                .age_days(40)
+                .file("src/main.rs", "fn main() {}")
+                .symlink("src/latest", "main.rs");
+        })
+        .finish();
+    let link = fs::symlink_metadata(collection.path("projects/scanner/src/latest"))
+        .expect("the link exists");
+    assert_eq!(link.mtime(), clock.days_ago(40));
+}
+
+#[test]
 fn directories_carry_the_fixed_directory_time() {
     let clock = Clock::now();
     let collection = Collection::build(&clock)

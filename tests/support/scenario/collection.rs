@@ -177,7 +177,16 @@ impl PieceBuilder {
                     tree.dir(&format!("{piece}/{relative}"));
                 }
                 Entry::Symlink { relative, target } => {
-                    tree.symlink(&format!("{piece}/{relative}"), target);
+                    let path = tree.symlink(&format!("{piece}/{relative}"), target);
+                    // A symlink keeps the time it was created at unless set,
+                    // and the archive stores it, so two builds a second apart
+                    // would pack different bytes.
+                    filetime::set_symlink_file_times(
+                        &path,
+                        FileTime::from_unix_time(clock.days_ago(self.age), 0),
+                        FileTime::from_unix_time(clock.days_ago(self.age), 0),
+                    )
+                    .expect("the time can be set");
                 }
                 Entry::HardLink { existing, relative } => {
                     tree.hard_link(
