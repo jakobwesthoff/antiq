@@ -18,6 +18,13 @@ process-wide panic hook being shared between tests. The log shows only
 `FAILED` without the panic text of the assertion. Not reproduced yet, so
 whether it is a flaky test or a race in the live console is unknown.
 
+On Linux (Docker image `rust:latest`, Rust 1.99.1, 2026-11-06) it failed
+in one of eight `cargo test --bin antiq` runs, together with
+`cli::emblem::tmux::tests::tmux_is_asked_for_the_format_and_its_answer_is_read`
+and no other test; the other seven runs passed all 464 tests. The failing
+run was the first one in a fresh container. Both failures showed only
+`FAILED` in the filtered output, so their panic text was not kept.
+
 ## To do
 
 Run the test in a loop under load (`cargo test --bin antiq` several
