@@ -164,6 +164,60 @@ impl Layout {
     }
 }
 
+/// `line` cut to `cols` columns. A cut that falls inside a coloured stretch
+/// ends it, so the colour does not run into the line below.
+fn cut_to_width(line: &str, cols: usize) -> String {
+    if visible_width(line) <= cols {
+        return line.to_string();
+    }
+    let mut cut = String::new();
+    let mut used = 0;
+    let mut coloured = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            cut.push(c);
+            for end in chars.by_ref() {
+                cut.push(end);
+                if end == 'm' {
+                    break;
+                }
+            }
+            coloured = !cut.ends_with("\x1b[0m");
+            continue;
+        }
+        let room = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + room > cols {
+            break;
+        }
+        used += room;
+        cut.push(c);
+    }
+    if coloured {
+        cut.push_str("\x1b[0m");
+    }
+    cut
+}
+
+/// The columns `line` takes on a terminal. The colour sequences of the
+/// cards (`ESC [ ... m`) take none.
+fn visible_width(line: &str) -> usize {
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for end in chars.by_ref() {
+                if end == 'm' {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    plain.width()
+}
+
 impl Cards {
     pub(crate) fn new(config: Config) -> Cards {
         Cards {
@@ -550,7 +604,10 @@ impl Cards {
     }
 
     /// The two lines of a running piece.
-    fn card(&self, item: &Item, now: Duration, layout: &Layout) -> [String; 2] {
+    ///
+    /// The detail of the second line goes first when it does not fit in
+    /// `cols`: the bar and the percentage are what the line is for.
+    fn card(&self, item: &Item, now: Duration, layout: &Layout, cols: usize) -> [String; 2] {
         let symbols = self.symbols();
         let spinner = symbols.spinner[Self::frame(now) % symbols.spinner.len()];
         let (cell, cell_width) = self.name_cell(&item.name, item.label.as_deref(), layout.name);
@@ -585,11 +642,16 @@ impl Cards {
                 self.paint(theme::BOLD, &format!("{percent:>3}%"))
             );
             if layout.detail {
-                line.push_str("  ");
-                line.push_str(&self.paint(
-                    theme::DIM,
-                    &format!("{done}/{total} {}", self.unit(operation)),
-                ));
+                let detail = format!(
+                    "  {}",
+                    self.paint(
+                        theme::DIM,
+                        &format!("{done}/{total} {}", self.unit(operation)),
+                    )
+                );
+                if visible_width(&line) + visible_width(&detail) <= cols {
+                    line.push_str(&detail);
+                }
             }
             line
         };
@@ -646,7 +708,8 @@ impl Cards {
     /// The lines the screen shows while the run goes on: the cards of the
     /// pieces that are working, then one line for the others. The region
     /// never has more than `rows - 1` lines, so the line above it stays on
-    /// the screen.
+    /// the screen, and no line is wider than `cols`, so each is one row and
+    /// the redraw moves up by exactly the number of lines.
     pub(crate) fn region(&self, now: Duration, cols: usize, rows: usize) -> Vec<String> {
         let layout = Layout::of(cols);
         let mut running: Vec<&Item> = self
@@ -672,7 +735,7 @@ impl Cards {
 
         let mut lines = Vec::new();
         for item in &running[..shown] {
-            lines.extend(self.card(item, now, &layout));
+            lines.extend(self.card(item, now, &layout, cols));
         }
         let mut counts = Vec::new();
         if waiting > 0 {
@@ -688,7 +751,7 @@ impl Cards {
                 self.paint(theme::DIM, &counts.join(", "))
             ));
         }
-        lines
+        lines.iter().map(|line| cut_to_width(line, cols)).collect()
     }
 }
 

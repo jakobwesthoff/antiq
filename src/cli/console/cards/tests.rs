@@ -727,6 +727,54 @@ fn no_line_of_the_region_is_wider_than_the_terminal() {
 }
 
 #[test]
+fn a_card_with_big_counts_keeps_both_lines_within_the_terminal_by_dropping_the_detail() {
+    for color in [false, true] {
+        for cols in [70, 72, 75] {
+            // The line takes 52 columns before the detail.
+            for (kind, operation_kind, unit) in [
+                (Kind::Archive, Operation::Removing, "entries"),
+                (Kind::Push, Operation::Storing, "created"),
+                (Kind::Archive, Operation::Packing, "files"),
+            ] {
+                let detail_fits = 52 + "123456/654321 ".len() + unit.len() <= cols;
+                let mut cards = with_style(kind, style(color, true));
+                cards.apply(started("tools/pdf-merge", 3_100_000), secs(0));
+                let (msg, _k) = operation("tools/pdf-merge", operation_kind, 123_456, 654_321);
+                cards.apply(msg, secs(0));
+                let region = cards.region(secs(0), cols, 24);
+                for line in &region {
+                    assert!(visible_width(line) <= cols, "{cols} {unit}: {line:?}");
+                }
+                assert!(region[1].contains("19%"), "{cols} {unit}: {:?}", region[1]);
+                if detail_fits {
+                    assert!(region[1].contains(unit), "{cols} {unit}: {:?}", region[1]);
+                } else {
+                    assert!(!region[1].contains(unit), "{cols} {unit}: {:?}", region[1]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_line_of_the_region_that_is_still_too_wide_is_cut_without_breaking_its_colour() {
+    let mut cards = with_style(Kind::Unearth, style(true, true));
+    cards.apply(
+        Msg::Started {
+            name: "projects/recipe-api".to_string(),
+            bytes: 5,
+            label: Some("2026-11-05 13:02:11".to_string()),
+        },
+        secs(0),
+    );
+    let (msg, _k) = operation("projects/recipe-api", Operation::Extracting, 1, 4);
+    cards.apply(msg, secs(0));
+    let region = cards.region(secs(0), 20, 24);
+    assert!(visible_width(&region[0]) <= 20, "{:?}", region[0]);
+    assert!(region[0].ends_with("\x1b[0m"), "{:?}", region[0]);
+}
+
+#[test]
 fn a_narrow_terminal_drops_the_detail_then_the_size() {
     let mut cards = cards(Kind::Archive);
     cards.apply(started("tools/pdf-merge", 3_100_000), secs(0));
