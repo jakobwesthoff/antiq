@@ -2074,9 +2074,14 @@ no piece, adds a table and an info after the block (see "Piece references").
 A usage error of the command line parser is a block too. An
 unknown argument, an unknown command, a missing argument and two arguments
 that exclude each other get a title of their own and the parser's usage line
-and a pointer to `--help` under "How to fix it"; every other usage error
-has the parser's first paragraph as its title and the parser's tip and
-usage line under "How to fix it".
+and a pointer to `--help` under "How to fix it". When the parser suggests
+a command or an option, "How to fix it" starts with "Did you mean ...?", and
+the line on passing a word that starts with a dash as a value (`-- <word>`)
+is given only where the parser gives it. Every other usage error has the
+parser's first paragraph as its title and the parser's tip and usage line
+under "How to fix it". `antiq` without any argument prints the help and
+exits 2. Help, version and the usage errors of a stream that is not a
+terminal are plain text, whatever `CLICOLOR_FORCE` says.
 
 On a pipe the error is plain lines. An error line gives the title,
 prefixed `error:`; it is followed by a `  why:` and a `  fix:` line where

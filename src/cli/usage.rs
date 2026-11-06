@@ -23,21 +23,11 @@ pub fn block_for(error: &clap::Error, args: &[OsString]) -> Block {
 
     let block = match (error.kind(), context(ContextKind::InvalidArg)) {
         (ErrorKind::UnknownArgument, Some(argument)) => {
-            let mut block = Block::error(Rich::new().text("Unexpected argument ").path(&argument))
-                .why(
-                    Rich::new()
-                        .path(&argv0)
-                        .text(" does not take this argument."),
-                );
-            if argument.starts_with('-') {
-                block = block.how(
-                    Rich::new()
-                        .text("To pass it as a value, write ")
-                        .cmd(&format!("-- {argument}"))
-                        .text("."),
-                );
-            }
-            block
+            Block::error(Rich::new().text("Unexpected argument ").path(&argument)).why(
+                Rich::new()
+                    .path(&argv0)
+                    .text(" does not take this argument."),
+            )
         }
         (ErrorKind::MissingRequiredArgument, Some(missing)) => {
             let noun = if missing.contains(", ") {
@@ -62,6 +52,9 @@ pub fn block_for(error: &clap::Error, args: &[OsString]) -> Block {
             _ => return fallback(&rendered),
         },
     };
+    let block = suggestions(error, &argument_of(error))
+        .into_iter()
+        .fold(block, Block::how);
     let block = match usage_line(&rendered) {
         Some(usage) => block.how(Rich::new().text(&usage)),
         None => block,
@@ -75,6 +68,50 @@ pub fn block_for(error: &clap::Error, args: &[OsString]) -> Block {
             .text(" to see what it takes.")
     };
     block.how(help)
+}
+
+/// The argument clap could not place, if the error names one.
+fn argument_of(error: &clap::Error) -> String {
+    error
+        .get(ContextKind::InvalidArg)
+        .and_then(context_text)
+        .unwrap_or_default()
+}
+
+/// What clap suggests as a fix, in the order clap prints it: the command
+/// or option it thinks was meant, then its tips. Clap's tip for passing a
+/// dash-led word as a value (`-- <word>`) is the one tip antiq words
+/// itself; it is recognised by the text clap starts it with. Any other tip
+/// is passed on in clap's words.
+fn suggestions(error: &clap::Error, argument: &str) -> Vec<Rich> {
+    let mut fixes = Vec::new();
+    for kind in [ContextKind::SuggestedSubcommand, ContextKind::SuggestedArg] {
+        if let Some(name) = error.get(kind).and_then(context_text) {
+            fixes.push(Rich::new().text("Did you mean ").cmd(&name).text("?"));
+        }
+    }
+    if let Some(ContextValue::StyledStrs(tips)) = error.get(ContextKind::Suggested) {
+        for tip in tips {
+            let tip = tip.to_string();
+            if tip.starts_with("to pass '") {
+                fixes.push(
+                    Rich::new()
+                        .text("To pass it as a value, write ")
+                        .cmd(&format!("-- {argument}"))
+                        .text("."),
+                );
+            } else {
+                let mut letters = tip.chars();
+                let first = letters.next().map(|c| c.to_uppercase().to_string());
+                fixes.push(Rich::new().text(&format!(
+                    "{}{}.",
+                    first.unwrap_or_default(),
+                    letters.as_str()
+                )));
+            }
+        }
+    }
+    fixes
 }
 
 /// The text of a clap context value, if it has one.
@@ -138,6 +175,63 @@ mod tests {
                 "▌   To pass it as a value, write -- --everything.",
                 "▌   Usage: antiq archive [OPTIONS] [PIECE]",
                 "▌   Run antiq archive --help to see what it takes.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_misspelled_option_gets_clap_s_suggestion_first() {
+        assert_eq!(
+            rich(&["antiq", "archive", "--dryrun"]),
+            [
+                " ✖ ERROR",
+                "▌ Unexpected argument --dryrun",
+                "▌",
+                "▌ Why it happened",
+                "▌   antiq archive does not take this argument.",
+                "▌",
+                "▌ How to fix it",
+                "▌   Did you mean --dry-run?",
+                "▌   Usage: antiq archive --dry-run [PIECE]",
+                "▌   Run antiq archive --help to see what it takes.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_misspelled_command_gets_clap_s_suggestion_first() {
+        assert_eq!(
+            rich(&["antiq", "unerth"]),
+            [
+                " ✖ ERROR",
+                "▌ Unknown command unerth",
+                "▌",
+                "▌ Why it happened",
+                "▌   antiq has no command of that name.",
+                "▌",
+                "▌ How to fix it",
+                "▌   Did you mean unearth?",
+                "▌   Usage: antiq [OPTIONS] <COMMAND>",
+                "▌   Run antiq --help for the list of commands.",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_value_tip_is_given_only_where_clap_gives_it() {
+        // `status` takes no value, so there is nothing to pass `--x` as.
+        assert_eq!(
+            rich(&["antiq", "status", "--x"]),
+            [
+                " ✖ ERROR",
+                "▌ Unexpected argument --x",
+                "▌",
+                "▌ Why it happened",
+                "▌   antiq status does not take this argument.",
+                "▌",
+                "▌ How to fix it",
+                "▌   Usage: antiq status [OPTIONS]",
+                "▌   Run antiq status --help to see what it takes.",
             ]
         );
     }

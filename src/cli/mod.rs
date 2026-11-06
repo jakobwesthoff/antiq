@@ -386,19 +386,22 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
 
 /// Reports an error of clap. Help and version are not errors: clap prints
 /// them and they exit 0, also under `--json`. Every other error is a usage
-/// error, which `--json` turns into an envelope on stdout.
+/// error, which `--json` turns into an envelope on stdout. A bare `antiq`
+/// exits 2 as the usage error it is, but what it prints is the help, which
+/// asks for no error block.
 fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) -> u8 {
     let code = u8::try_from(error.exit_code()).unwrap_or(ErrorKind::Usage.exit_code());
-    if code == 0 {
-        // A closed terminal leaves nowhere to print to.
-        let _ = error.print();
+    let shows_help =
+        error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand;
+    if code == 0 || (shows_help && !asks_for_json(args)) {
+        print_clap(error, out);
         return code;
     }
     if !asks_for_json(args) {
         if out.stderr_env().rich {
             let _ = out.blocks(&[usage::block_for(error, args)]);
         } else {
-            let _ = error.print();
+            print_clap(error, out);
         }
         return code;
     }
@@ -406,6 +409,31 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     let command = guess_command(args);
     let _ = out.json_error(command.as_deref(), ErrorKind::Usage, &message, &Map::new());
     code
+}
+
+/// Prints what clap rendered: help and version to stdout, an error to
+/// stderr. A terminal gets clap's own styling, which follows `NO_COLOR`
+/// and the terminal. A stream that is not a terminal gets the text without
+/// any escape sequence, whatever `CLICOLOR_FORCE` says.
+fn print_clap(error: &clap::Error, out: &mut Output) {
+    let to_stderr = error.use_stderr();
+    let rich = if to_stderr {
+        out.stderr_env().rich
+    } else {
+        out.stdout_env().rich
+    };
+    // A closed terminal leaves nowhere to print to.
+    if rich {
+        let _ = error.print();
+        return;
+    }
+    for line in error.render().to_string().lines() {
+        let _ = if to_stderr {
+            out.note(line)
+        } else {
+            out.line(line)
+        };
+    }
 }
 
 /// Whether `--json` is among the arguments. Arguments cannot be trusted
