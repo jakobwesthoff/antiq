@@ -333,12 +333,16 @@ pub fn sync_with(
             }
             Started::DryRun { holder } => {
                 let mut plan = Plan::new();
-                let would_pull = pull::plan_pull(collection, remote, &mut plan)?;
-                commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
+                let mut notes = report::setting_notes(collection);
+                if let Some(would_pull) =
+                    pull::plan_pull(collection, remote, &mut plan, &mut notes)?
+                {
+                    commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
+                }
                 plan_cleanup(collection, remote, &machine, &mut plan)?;
                 Ok(Synced::Planned {
                     plan,
-                    notes: report::setting_notes(collection),
+                    notes,
                     holder: holder.clone(),
                 })
             }
@@ -878,6 +882,67 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::RemoteAway);
         assert_eq!(remote.count(Op::PullMetadata), 2);
+    }
+
+    #[test]
+    fn a_dry_run_whose_metadata_read_fails_twice_plans_no_commit_and_notes_the_failure() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Io);
+        remote.fail(Op::PullMetadata, 2, Fault::Io);
+
+        let synced = sync_with(&anna.collection, &anna.clock, &remote, true).expect("plans");
+
+        let Synced::Planned { plan, notes, .. } = synced else {
+            panic!("expected a plan");
+        };
+        let described: Vec<String> = plan.actions.iter().map(PlanAction::describe).collect();
+        assert!(described.is_empty(), "{described:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.message.contains("cannot read the metadata")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_whose_metadata_read_finds_the_remote_gone_fails_like_the_real_run() {
+        let shared = Shared::new();
+        let ben = Machine::new(&shared, "ben");
+        let remote = ben.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Away);
+        remote.fail(Op::Reachability, 2, Fault::Away);
+
+        let error =
+            sync_with(&ben.collection, &ben.clock, &remote, true).expect_err("the remote is gone");
+
+        assert_eq!(error.kind(), ErrorKind::RemoteAway);
+    }
+
+    #[test]
+    fn a_dry_run_asks_a_failed_metadata_read_once_more() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let ben = Machine::new(&shared, "ben");
+        let id = anna.import_piece("notes", "hello");
+        anna.publish_by_hand(&shared, id, 1);
+        let remote = ben.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Io);
+
+        let synced = sync_with(&ben.collection, &ben.clock, &remote, true).expect("plans");
+
+        let Synced::Planned { plan, notes, .. } = synced else {
+            panic!("expected a plan");
+        };
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.describe() == format!("pull version 1 of {id}"))
+        );
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]

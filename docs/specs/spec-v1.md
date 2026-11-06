@@ -1526,7 +1526,9 @@ the current metadata names and that is not stored here, and brings the
 member index up to date. A version whose number is stored here with other
 bytes, and a listing that does not parse, leave their object alone for
 the run and make it exit 3. A read of the remote's metadata that fails is
-repeated once; when it fails again the run warns and pulls nothing.
+repeated once; when it fails again the run warns and pulls nothing. A
+dry run repeats the read the same way; when it fails again the plan
+holds the cleanup only and the failure is a note.
 
 After the pull, each object with a recorded change is classified once. A
 change that equals a committed version is recorded as committed when no

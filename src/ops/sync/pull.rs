@@ -16,6 +16,7 @@ use crate::meta::{self, FileName, Metadata, PayloadKind};
 use crate::pack::hashing::hex;
 use crate::plan::Plan;
 use crate::remote::{KnownVersions, MetaFile, Remote, RemoteError};
+use crate::report::Warning;
 use crate::store::Store;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,7 +75,7 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<bool
         Ok(files) => files,
         Err(PullFailure::RunEnds(error)) => return Err(error.into()),
         Err(PullFailure::Failed(error)) => {
-            report.warnings.push(crate::report::Warning::new(format!(
+            report.warnings.push(Warning::new(format!(
                 "cannot read the metadata on the remote: {error}"
             )));
             return Ok(true);
@@ -210,13 +211,27 @@ fn fetch_listing(ctx: &SyncContext<'_>, id: ObjectId, name: &FileName) -> Result
 /// The pull part of a dry run: the versions that would be pulled and the
 /// listings that would be fetched, judged on the versions as they would be
 /// stored.
+///
+/// A read of the remote's metadata that fails twice is a note and nothing
+/// is planned for the metadata, as the real run pulls nothing and commits
+/// nothing then; the result is `None`.
 pub(super) fn plan_pull(
     collection: &Collection,
     remote: &dyn Remote,
     plan: &mut Plan<SyncAction>,
-) -> Result<BTreeMap<ObjectId, Versions>, SyncError> {
+    notes: &mut Vec<Warning>,
+) -> Result<Option<BTreeMap<ObjectId, Versions>>, SyncError> {
     let store = Store::new(collection);
-    let files = remote.pull_metadata(&known_versions(&store)?)?;
+    let files = match pull_files(remote, &known_versions(&store)?) {
+        Ok(files) => files,
+        Err(PullFailure::RunEnds(error)) => return Err(error.into()),
+        Err(PullFailure::Failed(error)) => {
+            notes.push(Warning::new(format!(
+                "cannot read the metadata on the remote: {error}"
+            )));
+            return Ok(None);
+        }
+    };
     let mut would_pull: BTreeMap<ObjectId, Versions> = BTreeMap::new();
     for file in &files {
         would_pull
@@ -260,7 +275,7 @@ pub(super) fn plan_pull(
             });
         }
     }
-    Ok(would_pull)
+    Ok(Some(would_pull))
 }
 
 #[cfg(test)]
