@@ -8,6 +8,7 @@
 use super::PushError;
 use crate::archive::TargetRules;
 use crate::archive::names::fold_path;
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
@@ -143,12 +144,16 @@ pub(super) fn check(collection: &Collection, mode: &Mode) -> Result<Vec<RelPath>
     let inspections = inspect_all(&places, &items, Check::Full, workers);
 
     let mut lines = Vec::new();
+    let mut commands = Vec::new();
     for ((piece, version), inspection) in items.iter().zip(inspections) {
         let inspection = inspection.map_err(PushError::Versions)?;
-        lines.extend(verdict(piece, version, &inspection.condition, mode));
+        if let Some(refusal) = verdict(piece, version, &inspection.condition, mode) {
+            lines.push(refusal.line);
+            commands.extend(refusal.commands);
+        }
     }
     if !lines.is_empty() {
-        return Err(PushError::DamagedStore { lines });
+        return Err(PushError::DamagedStore { lines, commands });
     }
 
     let store_folders: Vec<RelPath> = store
@@ -228,7 +233,50 @@ fn first_non_directory(
     Ok(None)
 }
 
-/// The line that refuses a version in the condition `condition`, if any.
+/// A command of antiq that the line of a refused version tells to run.
+///
+/// The line writes it for a shell in the directory of the collection. A
+/// console that knows how antiq was started can swap it for one that
+/// works from anywhere, so the line and the swap come from the same data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionCommand {
+    /// The command, such as `rebuild` or `forget`.
+    pub verb: &'static str,
+    pub piece: RelPath,
+    pub stamp: Stamp,
+}
+
+impl VersionCommand {
+    /// The words after `antiq`, with the piece as it is.
+    pub fn words(&self) -> Vec<String> {
+        vec![
+            self.verb.to_string(),
+            self.piece.to_string(),
+            self.stamp.to_string(),
+        ]
+    }
+
+    /// The command as the line of the version writes it: a code span, with
+    /// the piece quoted for a shell.
+    pub fn written(&self) -> String {
+        CodeSpan(format!(
+            "antiq {} {} {}",
+            self.verb,
+            shell_quote(&self.piece.to_string()),
+            self.stamp
+        ))
+        .to_string()
+    }
+}
+
+/// A line that refuses a version and the commands it tells to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Refusal {
+    pub line: String,
+    pub commands: Vec<VersionCommand>,
+}
+
+/// The refusal of a version in the condition `condition`, if any.
 /// A staged archive is the repairs' business: a real run refuses it only
 /// when a repair failed, and a dry run does not count it, since the
 /// repairs it lists finish the move.
@@ -237,11 +285,12 @@ fn verdict(
     version: &StoreVersion,
     condition: &Condition,
     mode: &Mode,
-) -> Option<String> {
+) -> Option<Refusal> {
     match (condition, mode) {
-        (Condition::BeingStored, Mode::Real { warnings }) => {
-            Some(being_stored(piece, version, warnings))
-        }
+        (Condition::BeingStored, Mode::Real { warnings }) => Some(Refusal {
+            line: being_stored(piece, version, warnings),
+            commands: Vec::new(),
+        }),
         (Condition::BeingStored, Mode::DryRun(_)) => None,
         _ => refusal(piece, version, condition),
     }
@@ -270,17 +319,26 @@ pub(super) fn refusal(
     piece: &RelPath,
     version: &StoreVersion,
     condition: &Condition,
-) -> Option<String> {
-    let quoted = shell_quote(&piece.to_string());
+) -> Option<Refusal> {
     let stamp = version.stamp;
-    let forget = format!("`antiq forget {quoted} {stamp}`");
+    let command = |verb| VersionCommand {
+        verb,
+        piece: piece.clone(),
+        stamp,
+    };
+    let forget = command("forget");
+    let rebuild = command("rebuild");
     let copy_back = "or copy the version back from the target";
     let damages = match condition {
         Condition::Sound | Condition::NewerFormat | Condition::BeingStored => return None,
         Condition::Incomplete => {
-            return Some(format!(
-                "{piece} {stamp}: the archive is missing. Run {forget}, {copy_back}."
-            ));
+            return Some(Refusal {
+                line: format!(
+                    "{piece} {stamp}: the archive is missing. Run {}, {copy_back}.",
+                    forget.written()
+                ),
+                commands: vec![forget],
+            });
         }
         Condition::Damaged(damages) => damages,
     };
@@ -292,7 +350,10 @@ pub(super) fn refusal(
     // is for `forget`, which wins over `rebuild` when both would apply.
     let needs_forget = |damage: &Damage| !matches!(damage, Damage::NoListing | Damage::NoChecksum);
     if !damages.iter().any(needs_forget) {
-        return Some(format!("{head}. Run `antiq rebuild {quoted} {stamp}`."));
+        return Some(Refusal {
+            line: format!("{head}. Run {}.", rebuild.written()),
+            commands: vec![rebuild],
+        });
     }
 
     // A sidecar that is damaged and not doubled can be deleted so that
@@ -310,22 +371,25 @@ pub(super) fn refusal(
                 _ => continue,
             };
             for file in files {
-                let file = format!("`{}`", file.to_string_lossy());
+                let file = CodeSpan(file.to_string_lossy()).to_string();
                 if !deletable.contains(&file) {
                     deletable.push(file);
                 }
             }
         }
     }
-    let mut line = format!("{head}. Run {forget}, {copy_back}");
+    let mut line = format!("{head}. Run {}, {copy_back}", forget.written());
+    let mut commands = vec![forget];
     if !deletable.is_empty() {
         line.push_str(&format!(
-            ", or delete {} and run `antiq rebuild {quoted} {stamp}`",
-            deletable.join(" and ")
+            ", or delete {} and run {}",
+            deletable.join(" and "),
+            rebuild.written()
         ));
+        commands.push(rebuild);
     }
     line.push('.');
-    Some(line)
+    Some(Refusal { line, commands })
 }
 
 /// The two shortest paths that one name on the target's volume would
@@ -408,7 +472,9 @@ mod tests {
     }
 
     fn line(piece: &str, version: &StoreVersion, condition: &Condition) -> String {
-        refusal(&path(piece), version, condition).expect("a refusal")
+        refusal(&path(piece), version, condition)
+            .expect("a refusal")
+            .line
     }
 
     #[test]
@@ -609,7 +675,8 @@ mod tests {
             &Condition::BeingStored,
             &real,
         )
-        .expect("refused");
+        .expect("refused")
+        .line;
         assert!(line.contains("cannot move x"), "{line}");
 
         let dry = Mode::DryRun(Planned::default());

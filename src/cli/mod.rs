@@ -382,7 +382,7 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
 /// Only the CLI knows the invocation, so the command that fixes a refused
 /// `forget --all-versions` is added here to the help the library gives.
 fn plain_report(cli: &Cli, description: &Description, kind: ErrorKind) -> Vec<Block> {
-    let mut block = error_block::block_for(description);
+    let mut block = error_block::block_for(description, cli.directory.as_deref());
     let refused_for_force = description
         .library_error
         .and_then(error_block::find::<forget::ForgetError>)

@@ -13,7 +13,7 @@ use crate::cli::output::{Output, Style};
 use crate::cli::table::{
     Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, painted, sanitize, spaces, wrap,
 };
-use crate::cli::unresolved::shell_word;
+use crate::cli::unresolved::pasteable_line;
 use antiq::clock::{Clock, SystemClock, whole_seconds};
 use antiq::code_span::CodeSpan;
 use antiq::collection::Collection;
@@ -328,13 +328,11 @@ fn pasteable(meaning: &StatusFinding, help: String, directory: Option<&Path>) ->
         return help;
     };
     let written = CodeSpan(format!("antiq {}", words.join(" "))).to_string();
-    let mut line = vec!["antiq".to_string()];
-    if let Some(directory) = directory {
-        line.push("-C".to_string());
-        line.push(shell_word(&directory.to_string_lossy()));
-    }
-    line.extend(words.iter().map(|word| shell_word(word)));
-    help.replacen(&written, &CodeSpan(line.join(" ")).to_string(), 1)
+    help.replacen(
+        &written,
+        &CodeSpan(pasteable_line(directory, &words)).to_string(),
+        1,
+    )
 }
 
 /// One note: a single item stays on the line of the note, several are

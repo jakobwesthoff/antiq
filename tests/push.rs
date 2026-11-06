@@ -490,6 +490,26 @@ fn a_version_without_its_listing_is_mended_by_rebuild() {
 }
 
 #[test]
+fn the_commands_of_a_refused_push_carry_the_directory_option_on_a_console_only() {
+    let collection = stored(&[STAMP]);
+    collection.damage_remove_listing("projects/a", STAMP);
+    let root = collection.root();
+
+    let text = push_text(&collection, &[]);
+    assert_eq!(text.code(), 1, "{}", text.stderr);
+    let pasteable = format!("antiq -C {} rebuild projects/a {STAMP}", root.display());
+    assert!(text.stderr.contains(&pasteable), "{}", text.stderr);
+
+    let json = push(&collection, &[]);
+    let fix = json.error_fix();
+    assert!(
+        fix.contains(&format!("`antiq rebuild projects/a {STAMP}`")),
+        "{fix}"
+    );
+    assert!(!fix.contains("-C"), "{fix}");
+}
+
+#[test]
 fn an_archive_of_the_wrong_size_is_forgotten_or_copied_back() {
     let collection = stored(&[STAMP]);
     collection.damage_truncate_archive("projects/a", STAMP);

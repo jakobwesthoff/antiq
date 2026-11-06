@@ -70,12 +70,19 @@ fn a_damaged_version_stops_push_until_rebuild_repairs_it() {
 
             // `push` stops, names the command that repairs the version and
             // sends nothing.
-            let command = format!("antiq rebuild tools/scan-old {DAMAGED}");
+            // The console writes the command for pasting from anywhere, with
+            // the `-C` of the run; the JSON fix names it without.
+            let plain_command = format!("antiq rebuild tools/scan-old {DAMAGED}");
+            let pasteable_command = format!(
+                "antiq -C {} rebuild tools/scan-old {DAMAGED}",
+                world.collection().root().display()
+            );
             world.assert_unchanged(|| {
                 let refused = world.run(&["push"]);
                 refused.expect_code(1);
                 let text = format!("{}{}", refused.stdout, refused.stderr);
-                assert!(text.contains(&command), "{text}");
+                refused.json_only(|_| assert!(text.contains(&plain_command), "{text}"));
+                refused.text_only(|_| assert!(text.contains(&pasteable_command), "{text}"));
             });
 
             // `rebuild` writes the missing listing and says on what the

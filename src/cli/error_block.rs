@@ -7,17 +7,20 @@
 use super::Description;
 use super::console::block::{Block, Para};
 use super::console::rich::Rich;
+use super::unresolved::pasteable_line;
+use antiq::code_span::CodeSpan;
 use antiq::commands::push::PushError;
 use antiq::error::explanation;
 use antiq::versions::naming::VersionLookupError;
 use miette::Diagnostic;
+use std::path::Path;
 
 /// The error block for `description`: the message of the diagnostic that
 /// explains the error as the title, its help as the fix, the candidates
 /// of an ambiguous reference, and the steps the run was in.
 ///
 /// An error without an explanation shows the text of its whole chain.
-pub fn block_for(description: &Description) -> Block {
+pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
     let explained = description
         .library_error
         .and_then(|error| explanation(error));
@@ -27,7 +30,12 @@ pub fn block_for(description: &Description) -> Block {
         .is_some_and(|error| matches!(error, PushError::Unreachable { .. }));
     let mut block = match explained {
         Some(explained) if free_text => plain_block(explained),
-        Some(explained) => explained_block(explained),
+        Some(explained) => {
+            let help = explained.help().map(|help| {
+                pasteable_commands(help.to_string(), description.library_error, directory)
+            });
+            titled_block(explained, Rich::parse(&explained.to_string()), help)
+        }
         None => Block::error(Rich::new().text(&description.root)),
     };
     let candidates = description
@@ -56,24 +64,50 @@ pub fn block_for(description: &Description) -> Block {
 /// The error block for a diagnostic: its message as the title and its
 /// help as the fix. The message is read for code spans.
 pub(super) fn explained_block(explained: &dyn Diagnostic) -> Block {
-    titled_block(explained, Rich::parse(&explained.to_string()))
+    titled_block(
+        explained,
+        Rich::parse(&explained.to_string()),
+        explained.help().map(|help| help.to_string()),
+    )
 }
 
 /// [`explained_block`] with the message as plain text. The reason of an
 /// unreachable target comes from the system, such as the output of ssh,
 /// and can hold backticks that are no code spans.
 fn plain_block(explained: &dyn Diagnostic) -> Block {
-    titled_block(explained, Rich::new().text(&explained.to_string()))
+    titled_block(
+        explained,
+        Rich::new().text(&explained.to_string()),
+        explained.help().map(|help| help.to_string()),
+    )
 }
 
-fn titled_block(explained: &dyn Diagnostic, title: Rich) -> Block {
+fn titled_block(explained: &dyn Diagnostic, title: Rich, help: Option<String>) -> Block {
     let mut block = Block::error(title).message(&explained.to_string());
-    if let Some(help) = explained.help() {
-        for paragraph in help_paragraphs(&help.to_string()) {
+    if let Some(help) = help {
+        for paragraph in help_paragraphs(&help) {
             block = block.how(paragraph);
         }
     }
     block
+}
+
+/// `help` with each command that the damaged versions of a refused push
+/// name written the way to paste it: quoted for a shell and with the `-C`
+/// of the run. Only the CLI knows how antiq was started, so the library
+/// writes the commands without it.
+fn pasteable_commands(
+    help: String,
+    error: Option<&antiq::Error>,
+    directory: Option<&Path>,
+) -> String {
+    let Some(PushError::DamagedStore { commands, .. }) = error.and_then(find::<PushError>) else {
+        return help;
+    };
+    commands.iter().fold(help, |help, command| {
+        let pasteable = CodeSpan(pasteable_line(directory, &command.words())).to_string();
+        help.replace(&command.written(), &pasteable)
+    })
 }
 
 /// The paragraphs of a help: blank lines separate them, and a paragraph
@@ -115,14 +149,17 @@ mod tests {
     use super::super::describe;
     use super::block_for;
     use antiq::collection::CollectionError;
-    use antiq::commands::push::PushError;
+    use antiq::commands::push::{PushError, VersionCommand};
     use antiq::commands::rebuild::RebuildError;
     use antiq::commands::restore::RestoreError;
     use antiq::listing::ListingError;
     use antiq::lock::LockError;
     use antiq::reference::ReferenceError;
+    use antiq::relpath::RelPath;
     use antiq::run::RunError;
     use antiq::versions::naming::VersionLookupError;
+    use antiq::versions::stamp::Stamp;
+    use std::path::Path;
 
     /// The rich lines of the block for `error`, run through the steps
     /// `doing` (innermost first), on a terminal 100 columns wide.
@@ -131,7 +168,7 @@ mod tests {
         for step in doing {
             error = error.context(step.to_string());
         }
-        block_for(&describe(&error)).render(&Env::new(true, false, true, 100))
+        block_for(&describe(&error), None).render(&Env::new(true, false, true, 100))
     }
 
     fn plain(error: impl Into<antiq::Error>, doing: &[&str]) -> Vec<String> {
@@ -139,7 +176,7 @@ mod tests {
         for step in doing {
             error = error.context(step.to_string());
         }
-        block_for(&describe(&error)).render_plain()
+        block_for(&describe(&error), None).render_plain()
     }
 
     #[test]
@@ -303,6 +340,7 @@ mod tests {
                 "tools/scan-old 2026-11-05T120211: the listing is missing; run `antiq rebuild tools/scan-old 2026-11-05T120211`".into(),
                 "experiments/synth-toy 2026-11-05T120211: the archive is missing".into(),
             ],
+            commands: Vec::new(),
         };
         assert_eq!(
             rich(error, &["push the antiq collection"]),
@@ -320,6 +358,38 @@ mod tests {
                 "▌ What antiq was doing",
                 "▌   Attempting to push the antiq collection.",
             ]
+        );
+    }
+
+    #[test]
+    fn the_commands_of_a_damaged_store_are_pasteable_from_another_directory() {
+        let piece = RelPath::parse("my docs/scan").expect("a path");
+        let stamp = Stamp::parse("2026-11-05T120211").expect("a stamp");
+        let command = VersionCommand {
+            verb: "rebuild",
+            piece: piece.clone(),
+            stamp,
+        };
+        let error = antiq::Error::from(PushError::DamagedStore {
+            lines: vec![format!(
+                "my docs/scan 2026-11-05T120211: the listing is missing. Run {}.",
+                command.written()
+            )],
+            commands: vec![command],
+        });
+        let error = anyhow::Error::new(error);
+        let description = describe(&error);
+
+        let lines = block_for(&description, Some(Path::new("/work/my coll"))).render_plain();
+        assert_eq!(lines[1], "  fix: Repair or remove these versions first:");
+        assert_eq!(
+            lines[2],
+            "         my docs/scan 2026-11-05T120211: the listing is missing. Run `antiq -C '/work/my coll' rebuild 'my docs/scan' 2026-11-05T120211`."
+        );
+        let plain = block_for(&description, None).render_plain();
+        assert!(
+            plain[2].ends_with("Run `antiq rebuild 'my docs/scan' 2026-11-05T120211`."),
+            "{plain:?}"
         );
     }
 

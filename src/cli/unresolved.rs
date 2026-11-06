@@ -449,6 +449,18 @@ pub(super) fn shell_word(word: &str) -> String {
     }
 }
 
+/// `antiq` followed by `words`, quoted for a shell, with the `-C` of the
+/// run when it had one. The command can be pasted from anywhere.
+pub(super) fn pasteable_line(directory: Option<&std::path::Path>, words: &[String]) -> String {
+    let mut line = vec!["antiq".to_string()];
+    if let Some(directory) = directory {
+        line.push("-C".to_string());
+        line.push(shell_word(&directory.to_string_lossy()));
+    }
+    line.extend(words.iter().map(|word| shell_word(word)));
+    line.join(" ")
+}
+
 /// The command line the user ran, with the piece and the version replaced
 /// by the given ones where there are any.
 fn command_line(cli: &Cli, piece: Option<&str>, version: Option<&str>) -> String {

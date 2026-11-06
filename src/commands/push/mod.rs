@@ -21,6 +21,7 @@ use crate::versions::VersionsError;
 use std::path::{Path, PathBuf};
 
 pub use outcome::{PushAction, PushOutcome, PushReport};
+pub use store::VersionCommand;
 use summary::Changes;
 
 mod mirror;
@@ -96,7 +97,11 @@ pub enum PushError {
     #[error(
         "push is refused: the antiq collection holds versions that are damaged or incomplete, and push copies them as they are"
     )]
-    DamagedStore { lines: Vec<String> },
+    DamagedStore {
+        lines: Vec<String>,
+        /// The commands the lines tell to run, one for each mention.
+        commands: Vec<VersionCommand>,
+    },
     #[error(
         "`{first}` and `{second}` differ only in case or Unicode normalization, which the target's volume treats as one name"
     )]

@@ -1645,7 +1645,9 @@ target. `--init` and `--force` are each refused together with
 1. **Repairs** run first, under the lock (see "Operations").
 2. **Check the store.** While a damaged or incomplete version exists,
    `push` refuses with exit 1 and prints the exact `forget` or `rebuild`
-   command for each; a version whose archive is still staged in
+   command for each. On the console the command is written to paste, with
+   the `-C` of the run and each word quoted for a shell where it needs
+   that; the JSON `fix` names it without `-C`. A version whose archive is still staged in
    `.antiq/tmp/pack/` after a failed repair counts, in a real run, and a
    listing of a newer format does not. It also refuses, naming both, when two piece paths
    or two store folders of the collection differ only in case or Unicode

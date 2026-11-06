@@ -1137,6 +1137,7 @@ mod tests {
                 "damaged store",
                 push::PushError::DamagedStore {
                     lines: vec!["a".into()],
+                    commands: Vec::new(),
                 }
                 .into(),
                 "antiq::push::damaged_store",
