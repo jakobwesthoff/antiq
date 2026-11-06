@@ -904,3 +904,27 @@ fn a_dry_run_reports_what_a_real_run_would_refuse() {
         });
     });
 }
+
+#[test]
+fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, three_versions);
+        let config = world.collection().path(".antiq/config.toml");
+        let mut text = fs::read_to_string(&config).expect("the config exists");
+        text.push_str("colour = \"red\"\n");
+        fs::write(&config, text).expect("the config is written");
+        let note = "the key `colour` under [collection] is unknown and ignored";
+
+        for args in [
+            &["forget", "projects/scanner", SCANNER_NEW, "-n"][..],
+            &["forget", "projects/scanner", SCANNER_NEW][..],
+        ] {
+            let run = world.run(args);
+            run.expect_code(0);
+            run.text_only(|_| assert_eq!(run.stderr, format!("note: {note}\n")));
+            run.json_only(|json| {
+                assert_eq!(json["warnings"], serde_json::json!([{"message": note}]));
+            });
+        }
+    }
+}

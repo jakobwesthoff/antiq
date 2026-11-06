@@ -132,7 +132,7 @@ fn render(report: &ForgetReport, terminal: bool, zone: &TimeZone) -> Lines {
     }
     stderr.extend(
         report
-            .warnings
+            .warnings()
             .iter()
             .map(|warning| format!("note: {}", warning.message)),
     );
