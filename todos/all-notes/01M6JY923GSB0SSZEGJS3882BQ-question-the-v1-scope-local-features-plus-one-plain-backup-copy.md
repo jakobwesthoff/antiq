@@ -194,6 +194,71 @@ open, so the discussion survives without the conversation.
   The user is also asked which topics still need a round before the
   concept.
 
+## Decided in round 11 (asqr 01M6K4TY1JS8DQZ1QA1NKBFJ6W, 2026-11-04)
+
+- A grep match that lies wholly in the piece path gives one row for
+  the piece, "piece name matches", with its versions and file count, and
+  no file list. A match in the in-piece path, or one that spans the
+  boundary (`scanner/src`), lists the file. In a pipe, a name match is
+  `piece  version  -`, one line per version.
+- The user wanted to talk through the `archive` flow, the `push` flow
+  and the configuration. Round 12 (asqr 01M6K4ZR68X7M4PW3ZF0Y9KW82)
+  proposed them but was withdrawn unanswered, because the user then
+  asked for the concept document first, with these points as its open
+  questions.
+
+## NEXT STEP (user order, 2026-11-04): write the concept document
+
+The user asked for the concept document now, written as proposed. The
+remaining open points, and any that come up while writing, are
+discussed afterwards. Write it as a design document in the repository,
+for example `docs/concept-v1-simplified.md`, and commit it. The user
+reviews it in asqr. Include:
+- what stays, what goes, what is rewritten;
+- the store layout;
+- the listing format;
+- every command with its output: `init`, `archive`, `unearth`, `fork`,
+  `forget`, `import`, `list`, `grep`, `status`, `pin`/`unpin`, `push`,
+  `reconcile` if still needed;
+- the `push` flow and the target marker;
+- the configuration;
+- the repairs and lock that remain;
+- what happens to the built code and the paused branches;
+- an open-questions section.
+
+Proposals from the withdrawn round 12, to put in the concept as
+proposals with open questions:
+- **archive flow:**
+  1. pieces are the folders matched by `patterns` (default `*`, each
+     folder directly under the collection) minus `exclude`;
+  2. due when the newest mtime, ignoring `ignore` lines, is older than
+     `idle_days`; pinned folders (`.antiq-pin`) never;
+  3. pack into `.antiq/tmp/` (`.tar.zst`, `.sha256.zst` listing,
+     `.tar.zst.sha256`);
+  4. verify by reading the whole archive against the listing and the
+     folder; a folder that changes meanwhile is skipped;
+  5. move into `.antiq/pieces/<path>/` and flush;
+  6. then delete the folder through a trash inside `.antiq/`;
+  7. one output line per folder and a summary; `-n` only shows.
+- **`idle_days` default:** the spec says 14 today, the user's status
+  example used 90; proposal 90, open.
+- **push flow:**
+  1. check the target marker: a foreign collection aborts, another
+     host warns, a missing marker on an empty target is created, a
+     missing marker on a non-empty target aborts;
+  2. one `rsync -a --delete --delete-delay <collection>/ <target>/`
+     without `.antiq/tmp/` and the lock (with `--delete-delay` an
+     aborted run removes nothing that was there before);
+  3. the target is a path (mounted NAS) or `user@host:path`;
+  4. `-n` summarizes `--itemize-changes` per piece;
+  5. the time and result of the push are recorded locally.
+- **Verification:** open between checking only newly sent archives on
+  the target, a separate `antiq verify` command, both, or neither.
+- **Configuration:** `[collection]` with `id`, `patterns`, `exclude`,
+  `ignore`, `idle_days` (90), `soon_days` (3); `[target]` with `url`
+  and an optional `rsync` path. Everything tied to tiers, claims, live
+  packages, the remote brake and the own ssh layer goes.
+
 ## Presented
 
 - The grep study was presented in round 8
