@@ -2711,6 +2711,15 @@ the same commit; the lead checks that at acceptance.
   (unknown keys, SMB/NFS, lock holder) live in `src/report.rs`.
   `find --print` writes the raw path bytes, since shells consume it;
   table and JSON keep the escaped form.
+- 2026-11-04 (merged): `report::{notes, notes_with, setting_notes,
+  lock_note}` hold the notes every command prints; I20 and I21 switch
+  their lock note to `report::lock_note`. I35 adds the remote part in
+  `ops/reconcile.rs` and `cli/cmd/reconcile.rs` and removes
+  `REMOTE_PART_NOT_DONE` and the `--prune` refusal. I36 replaces the
+  table branch in `cli/cmd/find.rs` `run()`. `find` matches names too,
+  since `import --path` makes a name differ from its path; it lists
+  objects only, so a new piece without an ID is not in it. Test
+  fixtures live in `tests/support/objects.rs`.
 
 ### I19
 
