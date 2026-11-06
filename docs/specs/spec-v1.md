@@ -1097,19 +1097,37 @@ On a terminal the hits are grouped by piece, each in-piece path once with
 the versions that hold it, the match highlighted:
 
 ```text
-projects/scanner                       2 versions, newest 2026-11-04
-  src/main.rs                          both versions
-  tools/bench/main.rs                  2026-09-03
-tools/scan-old                         1 version, 2025-02-11
-  cli/src/main.rs                      2025-02-11
+projects/scanner        2 versions, newest 2026-11-04
+  src/main.rs           both versions
+  tools/bench/main.rs   2026-09-03
+tools/scan-old          1 version, 2025-02-11
+  cli/src/main.rs       2025-02-11
 
 3 files in 2 pieces · antiq unearth <piece> [--version <version>]
 ```
 
+A piece row counts the searched versions. The versions of a path read `both
+versions` when it is in both of two, `all N versions` when it is in every one
+of more than two, the date of the version when the piece has a single
+searched version, and otherwise the dates of the versions that hold it,
+newest first. A date is a local date. Where two versions of a piece share a
+local date, searched or not, every version of that piece is named by its
+local time with seconds instead, with the UTC offset added as `list` does.
+The last line counts the files with hits and the pieces they are in, and the
+pieces whose name matched.
+
+The left column is as wide as the longest piece or indented path, and three
+spaces separate it from the right column. On a terminal of 100 columns or
+more a path is never cut. On a narrower one the left column gets the width
+that the longest right text leaves, but at least 20 columns, and a longer
+path is cut in the middle and not highlighted.
+
 The pattern is matched against the unescaped path bytes; text output shows
-the path with the comment-line escapes, the pipe form prints the raw path.
-A piece whose name matches gives one row, "piece name matches", with the
-version count and the file count and no file list. The name matches when the
+the path with the comment-line escapes, any other control character as `%XX`
+of its bytes and a byte that is not UTF-8 as `%XX`, and the pipe form prints
+the raw path. A piece whose name matches gives one row, `piece name matches,
+2 versions, newest 2026-11-04, 48 211 files`, with the version count and the
+file count and no file list. The name matches when the
 leftmost match of the pattern in `<piece>/`, the piece path and a slash, ends
 before the slash. `scanner` matches the piece `projects/scanner`; `scanner$`
 and `scanner.*` do not, and `scanner.*` lists the files below the piece. Only
