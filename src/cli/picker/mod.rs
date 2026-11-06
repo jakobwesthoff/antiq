@@ -22,6 +22,8 @@
 
 mod layout;
 mod state;
+#[cfg_attr(not(test), allow(dead_code))]
+mod tree;
 
 use std::io::{self, Write};
 
