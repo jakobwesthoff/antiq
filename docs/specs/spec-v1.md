@@ -1201,9 +1201,9 @@ Read-only commands and `--dry-run` never touch these directories.
 Before packing a piece, `archive` checks free space in `.antiq/`
 against the piece's apparent size, and parallel pieces reserve their
 sum. `archive` works on as many pieces at a time as the machine has
-cores. A piece's reservation ends when its package has left `.antiq/tmp/`
-for the object store or has been removed. `unearth` checks for the archive's size, when it has to be fetched,
-plus the listing's total size. A piece without enough space is skipped,
+cores. A piece's reservation lasts until the piece's package and listing are
+stored or removed. `unearth` checks for the archive's size, when it has
+to be fetched, plus the listing's total size. A piece without enough space is skipped,
 and `ENOSPC` during a step removes that step's temp output and skips the
 piece; the run exits 3.
 
@@ -1223,16 +1223,29 @@ For each idle, unpinned piece:
    `.antiq/trash/<ulid>`.
 4. Walk the trashed tree and compare it with the lstat record from the
    verify. On any difference, rename it back and treat it as unearthed
-   at the committed version; when its path is taken by then, move it to
+   at the version of the new payload; when its path is taken by then, move it to
    `.antiq/recovered/<ulid>-<time>/` and list it in `status`.
 5. Delete it and set the entry to `gone`, keeping its local payloads.
 
 When a rename fails, the folder is walked and compared in place and then
 deleted there, with the entry `removing`, and a warning names the refusal.
-A folder that differs from the
-record of the verify stays and is unearthed. A process that still holds a
-file open can write after the walk; that write is lost. Uploading is
-left to the next `sync`. (ADR 0032)
+A folder that differs from the record of the verify stays and is
+unearthed at the version of the new payload. Uploading is left to the next
+`sync`. (ADR 0032)
+
+A write after the walk of the removal is lost. After the rename into the
+trash, only a process that held a file of the folder open before the
+rename, or has its working directory inside it, can still write. When the
+rename is refused, the folder is deleted at its path, and any write by path
+between its walk and the deletion is lost as well. The deletion lists each
+directory before it deletes the entries. A file created after the deletion
+listed its directory survives; the deletion then fails and the next run
+finds it.
+
+Pieces that share hard-linked files change each other's change times when
+one of them is removed. When such pieces are archived in the same run, the
+outcome of each depends on timing: it can be kept as unearthed or skipped
+with reason `differs` instead of being removed.
 
 The pieces `archive` takes are the ones `status` marks `idle` that are new
 or live. Right before packing, each is walked again with the collection's
