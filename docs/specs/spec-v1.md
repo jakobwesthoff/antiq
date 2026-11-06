@@ -1851,9 +1851,10 @@ target. `--init` and `--force` are each refused together with
    output: <path of the run log>` and the command that reads it (see
    "Run log"). The JSON error carries the same as `program_said`,
    `{"program": "rsync", "groups": [{"count": <n>, "line": "...",
-   "example": "..." | null}, ...]}` with all groups, and `log`, the path
-   of the log or `null`, and `log_warning` where the log is missing or
-   incomplete. A failure that has a log but no
+   "example": "..." | null}, ...]}` with all groups. `log`, the path of
+   the log or `null`, and `log_warning`, why the log is missing or
+   incomplete, are present where a program started or the log could not be
+   written. A failure that has a log but no
    words of rsync, such as a refused rsync, names the log in a section
    "Run log" (`log:` in a pipe). With exit 23
    and the line `IO error encountered -- skipping file deletion`, push
@@ -1907,8 +1908,12 @@ left out. The log is a zstd stream; `zstd -dc <path> | less` reads it.
 
 The logs are in `~/Library/Logs/antiq` on macOS, else in `antiq` in the
 state directory (`$XDG_STATE_HOME`, else `~/.local/state`). Each collection
-has a directory named by its folder name and 8 hex digits of the hash of
-its canonical path, and each log is `<command>-<local time>.log.zst` in it.
+has a directory named by its folder name and its ID (`id` in
+`.antiq/config.toml`), `<folder>-<ID>`. The directory is found by the ID: one
+whose name ends with `-<ID>` is used as it is, so a collection that was moved
+or renamed keeps its logs together, and a copy of a collection with the same
+ID shares them, as it shares the marker of the target. Each log is
+`<command>-<local time>.log.zst` in it.
 Directories are mode 0700 and files 0600. `push` keeps the 10 newest logs
 of a collection, and a run that fails renames its log to end in
 `-failed.log.zst`; the newest such log is kept beyond the 10. A log that

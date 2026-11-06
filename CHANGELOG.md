@@ -40,7 +40,7 @@ target.
 - A failed `push` names a compressed log of everything rsync printed
   (`zstd -dc <path> | less` reads it) and groups similar error lines
   under the exit code's meaning; antiq keeps the last 10 logs of a
-  collection
+  collection and the newest one of a failed push
 - Progress cards with a bar for every piece on a terminal, plain lines in
   a pipe, and one JSON object with `--json`
 - `-n` / `--dry-run` on every command that changes something

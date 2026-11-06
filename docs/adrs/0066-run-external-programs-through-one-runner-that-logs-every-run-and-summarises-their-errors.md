@@ -35,8 +35,11 @@ capped. The program's environment is not logged.
 shows them. Elsewhere they are in `antiq` in the state directory
 (`$XDG_STATE_HOME`, else `~/.local/state`). The `directories` crate finds the
 home and the state directory. Each collection has a directory of its own,
-named by the collection's folder name and the first 8 hex digits of the
-SHA-256 of its canonical path. A file is named `<command>-<local time>.log.zst`
+`<folder name>-<collection ID>`. The directory is found by the ID: one whose
+name ends with `-<ID>` is used as it is, otherwise it is created. A collection
+that is moved or renamed therefore keeps its logs together and retention keeps
+working. A copy of a collection with the same ID shares the directory, as it
+shares the marker of the target. A file is named `<command>-<local time>.log.zst`
 and is a zstd stream, read with `zstd -dc <path> | less`. Directories are
 private to the user (mode 0700) and files too (0600), as a log lists every
 path of the collection.
