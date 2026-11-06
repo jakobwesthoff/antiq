@@ -117,6 +117,36 @@ pub fn tree(
     cap: usize,
     mut highlight: impl FnMut(&str) -> Vec<u32>,
 ) -> Tree {
+    let Walk { mut lines, total } = walk(entries, matched, cap + 1);
+    if lines.len() > cap {
+        lines.truncate(cap.saturating_sub(1));
+    }
+    let shown: usize = lines.iter().map(|(_, counted)| counted).sum();
+    Tree {
+        lines: lines
+            .into_iter()
+            .map(|(mut line, _)| {
+                line.highlights = highlight(&line.text);
+                line
+            })
+            .collect(),
+        more: total - shown,
+        matched: total,
+    }
+}
+
+/// What the walk over the tree found.
+struct Walk {
+    /// The first `limit` lines with the number of entries each counts.
+    lines: Vec<(TreeLine, usize)>,
+    /// The entries the whole tree counts.
+    total: usize,
+}
+
+/// Walk the tree depth first and collect its lines, stopping after `limit`
+/// of them: a listing of many thousand members costs no more than the lines
+/// that fit. The entries are counted over the whole tree regardless.
+fn walk(entries: &[Member], matched: Option<&[bool]>, limit: usize) -> Walk {
     let mut nodes = nodes(entries);
     let is_match = |node: &Node| match (matched, node.entry) {
         (Some(matched), Some(entry)) => matched[entry],
@@ -154,33 +184,19 @@ pub fn tree(
         nodes: &nodes,
         leaf: &leaf,
         counts: &counts,
-        limit: cap + 1,
+        limit,
         lines: Vec::new(),
         total: 0,
     };
     for &top in &nodes[0].children {
         walker.count(top);
     }
-    let total = walker.total;
     for &top in &nodes[0].children {
         walker.line(top, 0);
     }
-
-    let mut lines = walker.lines;
-    if lines.len() > cap {
-        lines.truncate(cap.saturating_sub(1));
-    }
-    let shown: usize = lines.iter().map(|(_, counted)| counted).sum();
-    Tree {
-        lines: lines
-            .into_iter()
-            .map(|(mut line, _)| {
-                line.highlights = highlight(&line.text);
-                line
-            })
-            .collect(),
-        more: total - shown,
-        matched: total,
+    Walk {
+        lines: walker.lines,
+        total: walker.total,
     }
 }
 
@@ -189,8 +205,7 @@ struct Walker<'a> {
     nodes: &'a [Node],
     leaf: &'a dyn Fn(&Node) -> bool,
     counts: &'a dyn Fn(&Node) -> usize,
-    /// The number of lines after which the walk stops: one more than the
-    /// cap, enough to know whether the tree was cut.
+    /// The number of lines after which the walk stops.
     limit: usize,
     /// The lines with the number of entries each counts.
     lines: Vec<(TreeLine, usize)>,
@@ -473,5 +488,13 @@ mod tests {
         });
         assert_eq!(asked, ["a.rs", "b.rs"]);
         assert_eq!(tree.lines[0].highlights, [0]);
+    }
+
+    #[test]
+    fn the_walk_stops_at_its_limit_however_long_the_listing_is() {
+        let entries: Vec<Member> = (0..1000).map(|n| file(&format!("f{n}"), 1)).collect();
+        let walked = walk(&entries, None, 4);
+        assert_eq!(walked.lines.len(), 4);
+        assert_eq!(walked.total, 1000, "the entries are counted in full");
     }
 }
