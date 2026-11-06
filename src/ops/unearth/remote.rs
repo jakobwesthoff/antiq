@@ -216,14 +216,22 @@ fn copy_from_remote(
 ) -> Result<bool, UnearthError> {
     match remote.get_payload(plan.id, name.as_str(), part) {
         Ok(_) => Ok(true),
-        Err(RemoteError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
-            Err(UnearthError::NotOnRemote {
+        Err(error) if is_out_of_space(&error) => Ok(false),
+        Err(error) => Err(remote_failure(error, plan, name)),
+    }
+}
+
+/// A file of the object that is gone from the remote tells the user to
+/// unearth again; any other failure passes through.
+fn remote_failure(error: RemoteError, plan: &UnearthPlan, name: &FileName) -> UnearthError {
+    match error {
+        RemoteError::Io { source, .. } if source.kind() == ErrorKind::NotFound => {
+            UnearthError::NotOnRemote {
                 file: name.as_str().to_string(),
                 path: plan.target.clone(),
-            })
+            }
         }
-        Err(error) if is_out_of_space(&error) => Ok(false),
-        Err(error) => Err(error.into()),
+        other => other.into(),
     }
 }
 
@@ -571,7 +579,9 @@ impl Refreshed {
         if held.exists() {
             return Ok(Planned::Unearth(plan));
         }
-        let bytes = remote.read_file(plan.id, name.as_str())?;
+        let bytes = remote
+            .read_file(plan.id, name.as_str())
+            .map_err(|error| remote_failure(error, &plan, name))?;
         plan.needed += extracted_size(&listing::read_all(bytes.as_slice())?);
         let available = available_space(&collection.staging_dir())?;
         plan.shortfall = (available < plan.needed).then_some(Shortfall {
@@ -1964,6 +1974,22 @@ pub(in crate::ops::unearth) mod tests {
 
         assert!(first.load(Ordering::SeqCst));
         assert!(!second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_dry_run_names_a_listing_the_remote_lost_as_not_on_the_remote() {
+        let scenario = Scenario::new(false);
+        fs::remove_file(scenario.on_remote(&scenario.listing)).expect("the listing is lost");
+        let dry = scenario.refresh(false).expect("refreshed");
+
+        let error = dry
+            .plan(&scenario.fx.collection, &scenario.fx.request(ID))
+            .expect_err("refused");
+
+        assert!(
+            matches!(&error, UnearthError::NotOnRemote { file, .. } if file == scenario.listing.as_str()),
+            "{error}"
+        );
     }
 
     #[test]
