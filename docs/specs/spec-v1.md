@@ -1079,12 +1079,19 @@ the collection, the lock, nothing to list, the faults of damaged versions.
 
 ### grep
 
-`grep <pattern>` searches the paths of every archived file, as
-`<piece>/<path>`, in all listings of existing versions (incomplete
-versions are skipped), with a regular expression (`regex::bytes` over each
-decoded listing, the files in parallel on all cores but two). A listing
-that does not decode is skipped with a warning naming the version; the
-exit code stays 0.
+`grep <pattern>` searches the paths of the archived files in the listings of
+all versions that have an archive, with a case-sensitive regular expression
+(`regex::bytes`, the listings in parallel on all cores but two). A version
+without an archive is incomplete and not searched. A path is searched as
+`<piece>/<path>`, in its unescaped bytes. Files, symbolic links and hard
+links are searched, directory entries are not.
+
+A version that cannot be searched is skipped with a warning naming the piece
+and the version, and the exit code stays 0. That is a version with no
+listing file or two, a listing that cannot be opened or read, one that does
+not decode, one of a newer format, and one with a line that is not an entry;
+a listing that fails part of the way through reports none of its hits. A
+doubled archive or checksum file does not stop the search.
 
 On a terminal the hits are grouped by piece, each in-piece path once with
 the versions that hold it, the match highlighted:
@@ -1101,8 +1108,13 @@ tools/scan-old                         1 version, 2025-02-11
 
 The pattern is matched against the unescaped path bytes; text output shows
 the path with the comment-line escapes, the pipe form prints the raw path.
-A match wholly inside the piece path gives one row, "piece name matches",
-with the version and file counts and no file list. In a pipe every hit and
+A piece whose name matches gives one row, "piece name matches", with the
+version count and the file count and no file list. The name matches when the
+leftmost match of the pattern in `<piece>/`, the piece path and a slash, ends
+before the slash. `scanner` matches the piece `projects/scanner`; `scanner$`
+and `scanner.*` do not, and `scanner.*` lists the files below the piece. Only
+the heads of the listings of such a piece are read, and the file count is the
+one of its newest searched version. In a pipe every hit and
 version is one tab-separated line `piece  stamp  path`, with the full
 version stamp (`-` as the path for a name match). With no hit `grep` exits
 0 and says so on stderr; a pattern that is not a valid regular expression

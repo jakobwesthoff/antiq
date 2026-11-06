@@ -74,6 +74,7 @@ dependencies = [
  "jiff",
  "libc",
  "nucleo",
+ "regex",
  "rustix",
  "serde",
  "serde_json",
