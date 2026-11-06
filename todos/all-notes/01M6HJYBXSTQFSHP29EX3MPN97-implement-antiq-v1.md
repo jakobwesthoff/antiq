@@ -1998,6 +1998,29 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Depends on: I15 (listing search), I36.
 - Size: M.
 
+#### I41 Live progress rows
+
+- Goal: long runs show their pieces as live rows on a terminal.
+- Implements: spec "Command line" (one row per piece with path, size,
+  bar, operation and one detail, on one line when the path fits and on
+  two otherwise; `sync` shows its phases as a checklist, finished phases
+  as one line, the running one with its rows, later ones dimmed; without
+  a terminal only the finished lines), U2 (pictures
+  `n80-archive-h1-oneline.png`, `n80-archive-h1-twoline.png`,
+  `n80-sync-s2-oneline.png`, `n80-sync-s2-twoline.png`,
+  `progress-k-h1.png`, `progress-o-sync-phases.png`).
+- Content: progress callbacks in `Packager::pack`, `verify_strict`,
+  extraction and the transfers, passed through by `archive`, `unearth`,
+  `sync` and fetching; the rows reuse the finished-row formatting of
+  I19. Until this item lands, those commands print finished rows on a
+  terminal too (lead decision, 2026-11-04, I19 plan question: no item
+  owned the live rows).
+- Depends on: I19, I20, I30, I34.
+- Tests: console snapshots of the live rows at 80 and 120 columns
+  against the pictures; a redraw test with a scripted terminal; without
+  a terminal only finished lines.
+- Size: M.
+
 ## 6. Dependency graph and waves
 
 The added dependency edges (I04 for I08, I09 and I17; I03 for I10; I28
@@ -2038,6 +2061,7 @@ I01 lands in two merges; wave 2 starts after part B.
 | I38 | I05, I06, I23, I28; after wave 9 | 10 |
 | I39 | all others | 11 |
 | I40 | I15, I36 | 8 |
+| I41 | I19, I20, I30, I34 | 9 |
 
 Waves and the files that keep them apart:
 
@@ -2051,7 +2075,7 @@ Waves and the files that keep them apart:
 | 6 | I22 to I25 | disjoint; I23 fills the `remote::probe_state` stub, no edit of `status.rs` |
 | 7 | I26 to I29, I36 | I26 edits I19's `ops/archive/mod.rs` routing and `cli/cmd/archive.rs`; I28 edits I23's `remote/mod.rs` arm, `ops/remote.rs` and `cli/cmd/remote.rs`; I36 edits I18's `cli/cmd/find.rs` and is the only `Cargo.toml` editor |
 | 8 | I30, I34, I35, I40 | I40 only in `src/cli/picker/`; `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
-| 9 | I31, I32, I33 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs` |
+| 9 | I31, I32, I33, I41 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs`; I41 adds progress parameters to the pack, verify, extract and transfer calls and threads them through their callers, rebased after the others |
 | 10 | I37, I38 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs` |
 | 11 | I39 | |
 
@@ -2676,6 +2700,56 @@ the same commit; the lead checks that at acceptance.
   lines, as JSON `{"dry_run": true, "actions": [...], "brake"?}`;
   the wording sits in one place and the user sees it rendered with the
   first command that uses it.
+
+### I18
+
+- 2026-11-04 (lead, plan questions): `reconcile --dry-run` lists only the
+  index rebuild; no dry run runs or lists the start-of-run repairs (spec
+  "Dry runs"). `--prune` answers `not_implemented` until I35; `--force`
+  and `--if-reachable` change nothing without a remote. The `status`
+  text helpers are `pub(super)`; the notes every command prints
+  (unknown keys, SMB/NFS, lock holder) live in `src/report.rs`.
+  `find --print` writes the raw path bytes, since shells consume it;
+  table and JSON keep the escaped form.
+
+### I19
+
+- 2026-11-04 (lead, plan section 9): finished rows only, on a terminal
+  too; live rows are I41. `StatusRequest` gains `own_lock`. Step 4
+  compares directory times as well. A new piece first adopts an object
+  of this machine at its path that has metadata but no entry, when the
+  folder matches its listing, and resumes at step 6. The move back or
+  into `recovered/` is one function shared with `repair.rs`. A payload
+  without metadata is the todo "Remove local payloads that no metadata
+  names".
+
+### I20
+
+- 2026-11-04 (lead, plan questions): `--to` sets metadata `path` and
+  `name` (spec "Metadata changes" row extended). A crash after the
+  rename or the `live` entry and before the metadata change is closed by
+  a new start-of-run repair in `src/repair.rs`: a `live` entry with an
+  unearthing time and payload version whose metadata does not record
+  the unearth gets the change written from the entry. The name probe
+  runs on the staging volume, as the spec says.
+
+### I21
+
+- 2026-11-04 (lead, plan section 0): each input file stands alone; a
+  refused file is named and skipped, the rest are imported, exit 3. The
+  metadata name is the last component of the stored path. The ID time
+  comes from `id::id_time` over all member times. Skippable frames are
+  accepted, a non-zero dictionary ID refuses. The duplicate check
+  completes a missing tracking entry after a crash between metadata and
+  entry. `read::{read_package, Package, Container}` become `pub(crate)`.
+
+### I23
+
+- 2026-11-04 (lead, plan section 6): `remote add --init` accepts a
+  non-empty directory but refuses one that already holds a name of the
+  remote layout. A configured ssh remote probes as broken until I28;
+  I23 writes no `remote-state.json` (I29 owns the format); the metadata
+  copy runs after the config entry, and `sync` finishes a failed copy.
 
 ### I24
 
