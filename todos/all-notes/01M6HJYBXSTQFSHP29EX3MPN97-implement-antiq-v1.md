@@ -2196,6 +2196,13 @@ plan keeps them in wave 6.
   in the review with `launchctl limit`), so a scheduled run can hit
   `EMFILE`. `main` raises the soft limit (I01), and `EMFILE` fails the
   run instead of marking pieces unreadable (I05).
+- R13 Fork match after a commit (I32). `sync` finds the new ID of a fork
+  by the fork entry it starts with: the same machine and the time of the
+  old ID's fork entry. A commit stamps each ID's entry with the time of
+  its own commit, so two commits in different seconds leave the times
+  unequal. Without `--name` the one fork at the old ID's path is taken
+  then. With `--name` no ID is found, and the old live package stays on
+  the remote until cleanup removes it, which loses nothing.
 
 ## 8. Technical decisions
 

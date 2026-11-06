@@ -791,6 +791,10 @@ fn plan_removals(
         if metadata.collection != collection.id() {
             continue;
         }
+        if let Some(fork) = fork_entry(metadata, machine) {
+            plan_fork_removal(collection, machine, &current, &fork, plan);
+            continue;
+        }
         let mut after = metadata.clone();
         if after.lifecycle == Lifecycle::Archived {
             after.payloads.retain(|payload| {
@@ -823,6 +827,61 @@ fn plan_removals(
         }
     }
     Ok(())
+}
+
+/// The live package of an object a fork archived, which a real run deletes
+/// once the new ID has a package committed: that is the case already, or
+/// the plan packs the new ID or its recorded change names a package. Before
+/// the fork is committed the package is the newest committed version's;
+/// afterwards it is the one before, and the manifest is the sign that it is
+/// still there.
+fn plan_fork_removal(
+    collection: &Collection,
+    machine: &str,
+    current: &Current,
+    fork: &HistoryEntry,
+    plan: &mut Plan<SyncAction>,
+) {
+    let store = Store::new(collection);
+    let metadata = &current.metadata;
+    let id = metadata.id;
+    let Ok(versions) = store.committed_versions(id) else {
+        return;
+    };
+    let before = match current.source {
+        Source::Pending => versions.last().copied(),
+        Source::Committed(_) => {
+            if names_live(metadata) || !collection.manifest_path(id).exists() {
+                return;
+            }
+            versions.len().checked_sub(2).map(|index| versions[index])
+        }
+    };
+    let Some(files) = before
+        .and_then(|number| read_version(&store, id, number))
+        .map(|version| live_files(&version, machine))
+    else {
+        return;
+    };
+    let Some(heir) = heir_of(collection, &store, metadata, fork) else {
+        return;
+    };
+    let packed_by_this_run = plan
+        .actions
+        .iter()
+        .any(|action| matches!(action, SyncAction::PackLive { id, .. } if *id == heir))
+        || store.current(heir).ok().flatten().is_some_and(|heir| {
+            heir.source == Source::Pending && !live_files(&heir.metadata, machine).is_empty()
+        });
+    if !has_committed_package(&store, heir, machine) && !packed_by_this_run {
+        return;
+    }
+    for file in files {
+        plan.push(SyncAction::RemoveLive {
+            id,
+            file: file.as_str().to_string(),
+        });
+    }
 }
 
 // =========================================================
@@ -1024,7 +1083,12 @@ fn delete_files(
 /// version, and the fork was made by `machine`.
 fn forked_away(store: &Store<'_>, id: ObjectId, machine: &str) -> Option<HistoryEntry> {
     let newest = *store.committed_versions(id).ok()?.last()?;
-    let metadata = read_version(store, id, newest)?;
+    fork_entry(&read_version(store, id, newest)?, machine)
+}
+
+/// The last history entry of `metadata` when it is a fork by `machine` that
+/// archived the object.
+fn fork_entry(metadata: &Metadata, machine: &str) -> Option<HistoryEntry> {
     let last = metadata.history.last()?;
     (metadata.lifecycle == Lifecycle::Archived
         && last.machine == machine
@@ -1058,7 +1122,7 @@ fn delete_after_forks(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<
         let Some(fork) = forked_away(&store, id, ctx.machine) else {
             continue;
         };
-        let Some(heir) = heir_of(ctx, &store, metadata, &fork) else {
+        let Some(heir) = heir_of(ctx.collection, &store, metadata, &fork) else {
             continue;
         };
         if !has_committed_package(&store, heir, ctx.machine) {
@@ -1090,7 +1154,7 @@ fn delete_after_forks(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<
 /// the one such object at the old ID's path is taken. More than one
 /// candidate in either step means no heir is known.
 fn heir_of(
-    ctx: &SyncContext<'_>,
+    collection: &Collection,
     store: &Store<'_>,
     old: &Metadata,
     fork: &HistoryEntry,
@@ -1106,7 +1170,7 @@ fn heir_of(
             continue;
         };
         if id == old.id
-            || metadata.collection != ctx.collection.id()
+            || metadata.collection != collection.id()
             || metadata.created_source != CreatedSource::Fork
             || first.machine != fork.machine
             || first.action != HistoryAction::Fork.as_str()
@@ -1115,7 +1179,7 @@ fn heir_of(
         }
         if first.time == fork.time {
             same_time.push(id);
-        } else if tracking::read(ctx.collection, id)
+        } else if tracking::read(collection, id)
             .ok()
             .flatten()
             .is_some_and(|entry| entry.path == old.path)
@@ -2757,6 +2821,15 @@ mod tests {
         id: ObjectId,
         edit: impl FnOnce(&mut crate::meta::Metadata),
     ) {
+        record_keeping_folder(machine, id, edit);
+        fs::remove_dir_all(machine.collection.root().join("proj")).expect("the folder goes");
+    }
+
+    fn record_keeping_folder(
+        machine: &Machine,
+        id: ObjectId,
+        edit: impl FnOnce(&mut crate::meta::Metadata),
+    ) {
         let mut metadata = machine
             .store()
             .current(id)
@@ -2774,8 +2847,6 @@ mod tests {
             .store()
             .write_pending(&lock, &metadata)
             .expect("recorded");
-        drop(lock);
-        fs::remove_dir_all(machine.collection.root().join("proj")).expect("the folder goes");
     }
 
     /// The change `archive` records: the lifecycle `archived` with the live
@@ -3006,6 +3077,75 @@ mod tests {
 
         assert_eq!(live_payloads(&anna, new).len(), 1);
         assert!(!shared.names(old).contains(&file));
+    }
+
+    fn removals(actions: &[SyncAction], id: ObjectId) -> Vec<&SyncAction> {
+        actions
+            .iter()
+            .filter(
+                |action| matches!(action, SyncAction::RemoveLive { id: found, .. } if *found == id),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_old_package_of_a_fork_whose_new_id_would_get_its_package() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let new = fork_by_hand(&anna, old, "proj", None);
+
+        let actions = anna.plan();
+
+        assert!(
+            actions.contains(&SyncAction::PackLive {
+                id: new,
+                path: path("proj")
+            }),
+            "{actions:?}"
+        );
+        assert_eq!(
+            removals(&actions, old),
+            [&SyncAction::RemoveLive { id: old, file }],
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_for_a_fork_whose_new_id_gets_no_package() {
+        let shared = Shared::new();
+        let (mut anna, old, _) = backed_up(&shared);
+        anna.set_setting("backup_live = false");
+        fork_by_hand(&anna, old, "proj", None);
+
+        let actions = anna.plan();
+
+        assert!(removals(&actions, old).is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_old_package_of_a_fork_committed_earlier_whose_marker_is_still_there() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        fork_by_hand(&anna, old, "proj", None);
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&remote);
+        let remote = anna.remote();
+        remote.fail(Op::Delete, 1, Fault::Io);
+        anna.sync_with(&remote);
+        assert!(shared.names(old).contains(&file));
+
+        let actions = anna.plan();
+
+        assert_eq!(
+            removals(&actions, old),
+            [&SyncAction::RemoveLive { id: old, file }],
+            "{actions:?}"
+        );
+        assert!(
+            !actions.contains(&SyncAction::Commit { id: old }),
+            "{actions:?}"
+        );
     }
 
     #[test]
@@ -3254,6 +3394,113 @@ mod tests {
         assert_eq!(payloads[0].machine, "ben");
     }
 
+    /// `anna`'s piece with her committed package, joined by a package of
+    /// `ben` in the next committed version.
+    fn with_package_of_ben(shared: &Shared) -> (Machine, ObjectId, String, String) {
+        let (anna, id, anna_file) = backed_up(shared);
+        let ben_file = "ffffffffffffffff-proj.tar.zst".to_string();
+        fs::write(
+            anna.collection.object_dir(id).join(&ben_file),
+            shared.read(id, &anna_file),
+        )
+        .expect("written");
+        let now = anna.clock.now();
+        let copy = ben_file.clone();
+        record_keeping_folder(&anna, id, |metadata| {
+            let mut other = metadata.payloads[0].clone();
+            other.machine = "ben".into();
+            other.version = 2;
+            other.file = crate::meta::FileName::new(copy).expect("a payload name");
+            metadata.payloads.push(other);
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Sync,
+            ));
+        });
+        anna.sync();
+        assert!(shared.names(id).contains(&ben_file));
+        assert!(shared.names(id).contains(&anna_file));
+        (anna, id, anna_file, ben_file)
+    }
+
+    #[test]
+    fn a_change_that_drops_the_packages_of_two_machines_deletes_only_this_machines() {
+        let shared = Shared::new();
+        let (anna, id, anna_file, ben_file) = with_package_of_ben(&shared);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            metadata.lifecycle = Lifecycle::Archived;
+            metadata.payloads.retain(|p| p.kind != PayloadKind::Live);
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Archive,
+            ));
+        });
+
+        let report = anna.sync();
+
+        assert_eq!(
+            report
+                .removed_live
+                .iter()
+                .map(|removed| removed.file.as_str())
+                .collect::<Vec<_>>(),
+            [anna_file.as_str()],
+            "{report:?}"
+        );
+        let names = shared.names(id);
+        assert!(!names.contains(&anna_file), "{names:?}");
+        assert!(names.contains(&ben_file), "{names:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_for_an_archive_that_leaves_another_machines_package() {
+        let shared = Shared::new();
+        let (anna, id, _, _) = with_package_of_ben(&shared);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            metadata.lifecycle = Lifecycle::Archived;
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Archive,
+            ));
+        });
+
+        let actions = anna.plan();
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SyncAction::RemoveLive { .. })),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_sync_after_unearthing_makes_one_package_and_the_second_transfers_nothing() {
+        let shared = Shared::new();
+        let (anna, id, _) = backed_up(&shared);
+        let folder = anna.collection.root().join("proj");
+        anna.record_history(id, HistoryAction::Unearth);
+        change(&folder, "a.txt", "hello again");
+        let remote = anna.remote();
+
+        let first = anna.sync_with(&remote);
+
+        assert_eq!(remote.count(Op::PutPayload), 1, "{first:?}");
+        assert_eq!(first.uploaded.len(), 1, "{first:?}");
+        let second_remote = anna.remote();
+
+        let second = anna.sync_with(&second_remote);
+
+        assert_eq!(second_remote.count(Op::PutPayload), 0, "{second:?}");
+        assert!(second.committed.is_empty(), "{second:?}");
+        assert_eq!(live_payloads(&anna, id).len(), 1);
+    }
+
     #[test]
     fn a_committed_archive_that_still_names_a_live_package_is_stripped_in_a_new_version() {
         let shared = Shared::new();
@@ -3378,7 +3625,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_lists_no_removal_for_a_live_piece_or_an_archive_of_another_machines_package() {
+    fn a_dry_run_lists_no_removal_for_a_live_piece() {
         let shared = Shared::new();
         let anna = Machine::new(&shared, "anna");
         let folder = anna.folder("proj", "a.txt", "hello");
