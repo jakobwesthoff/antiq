@@ -2165,19 +2165,25 @@ mod tests {
     }
 
     /// The GNU `sha256sum` of this machine: Apple's own `sha256sum`, where
-    /// one is on the path, is not it.
+    /// one is on the path, is not it, and neither is the uutils one that
+    /// Ubuntu installs as `sha256sum` from 25.10 on. Brew's coreutils name
+    /// GNU's `gsha256sum`, Ubuntu's gnu-coreutils `gnusha256sum`.
     fn gnu_sha256sum() -> Option<String> {
-        ["sha256sum", "gsha256sum"].into_iter().find_map(|tool| {
-            let output = Command::new(tool).arg("--version").output().ok()?;
-            String::from_utf8_lossy(&output.stdout)
-                .contains("GNU coreutils")
-                .then(|| tool.to_string())
-        })
+        ["sha256sum", "gsha256sum", "gnusha256sum"]
+            .into_iter()
+            .find_map(|tool| {
+                let output = Command::new(tool).arg("--version").output().ok()?;
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("GNU coreutils")
+                    .then(|| tool.to_string())
+            })
     }
 
     fn require_gnu_sha256sum() -> String {
         gnu_sha256sum()
-            .expect("GNU coreutils sha256sum (or gsha256sum) is needed on the path for this test")
+            .expect(
+            "GNU coreutils sha256sum (or gsha256sum, gnusha256sum) is needed on the path for this test",
+        )
     }
 
     fn check_with_tools(names: &[&[u8]], tools: &[String]) {

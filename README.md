@@ -674,8 +674,9 @@ deletes again.
 
 The tests need rsync 3.2.4 or newer, found in `PATH`,
 `/opt/homebrew/bin` or `/usr/local/bin`, `shasum`, and a GNU
-`sha256sum` (named `gsha256sum` by brew's coreutils on macOS). They fail
-with a message naming the missing tool.
+`sha256sum`. brew's coreutils on macOS name it `gsha256sum`, Ubuntu's
+gnu-coreutils from 25.10 on `gnusha256sum`. The tests fail with a message
+naming the missing tool.
 
 The tasks live in the `Justfile` (`just --list` shows them). `just check`
 runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and

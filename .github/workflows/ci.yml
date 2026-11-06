@@ -36,13 +36,17 @@ jobs:
         with:
           tool: just
       # The push tests run the real rsync, 3.2.4 or newer. macOS ships
-      # openrsync, which antiq refuses, so the runner gets Homebrew's.
+      # openrsync, which antiq refuses, so the runner gets Homebrew's. The
+      # listing tests check with GNU's sha256sum, which brew's coreutils
+      # install as gsha256sum.
       - if: runner.os == 'macOS'
-        run: brew install rsync
+        run: brew install rsync coreutils
       # A packing test sets a user extended attribute, which Linux does
       # with setfattr from the attr package, and the hand checks unpack
-      # with `tar --zstd`, which runs the zstd executable.
+      # with `tar --zstd`, which runs the zstd executable. Ubuntu's
+      # sha256sum is the uutils one, so GNU's comes from gnu-coreutils as
+      # gnusha256sum.
       - if: runner.os == 'Linux'
-        run: sudo apt-get install -y attr zstd
+        run: sudo apt-get install -y attr zstd gnu-coreutils
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: just check
