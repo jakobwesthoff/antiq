@@ -1230,6 +1230,24 @@ deleted there, with the entry `removing`. A process that still holds a
 file open can write after the walk; that write is lost. Uploading is
 left to the next `sync`. (ADR 0032)
 
+The pieces `archive` takes are the ones `status` marks `idle` that are new
+or live. Right before packing, each is walked again with the collection's
+rules and judged again. A piece that is no longer idle is left out of the
+run without a report. A piece whose walk finds an entry it cannot read, a
+mount point, an excluded path or a nested collection is skipped with that
+reason. After packing, the package file is hashed again from the disk and
+must give the hash computed while writing it, and the listing of the
+packing must equal the members the strict verify reads from the package.
+
+A new piece first looks for the object of an earlier run that died after
+it wrote the metadata and before it wrote the tracking entry: an object at
+the piece's path, owned by this collection, with archived metadata and no
+tracking entry, whose newest archive payload was made by this machine.
+The piece takes the object over, and the run goes on with its tracking
+entry, when the payload's checksum is the one in the metadata, the stored listing equals
+the payload's members and the folder equals the payload. Otherwise it gets
+a new ID.
+
 An unearthed piece that has not changed against its listing is
 reclaimed: the folder is removed the same way and the archive stays,
 with no new payload and no upload. (ADR 0035) The listing compared is

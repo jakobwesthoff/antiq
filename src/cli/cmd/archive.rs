@@ -86,6 +86,8 @@ mod tests {
         let report = ArchiveReport {
             dry_run: true,
             plan: Some(plan),
+            archived: None,
+            skipped: None,
             warnings: vec![Warning::new("the collection is on an NFS mount")],
         };
         let lines = render(&report);
@@ -107,6 +109,8 @@ mod tests {
         let report = ArchiveReport {
             dry_run: true,
             plan: Some(Plan::new()),
+            archived: None,
+            skipped: None,
             warnings: Vec::new(),
         };
         assert_eq!(render(&report).stdout, ["Nothing to do."]);

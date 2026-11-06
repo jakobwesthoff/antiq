@@ -13,16 +13,25 @@ pub mod unearthed;
 
 use crate::clock::Clock;
 use crate::collection::Collection;
+use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::device::{self, FsKind};
+use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
-use crate::id::ObjectId;
+use crate::id::{IdSource, ObjectId};
+use crate::index;
+use crate::machine::MachineError;
 use crate::ops::status::{self, Flag, PieceKind, StatusError, StatusRequest};
+use crate::pack::pool::Pool;
+use crate::pack::{PackError, Packager, TarZstd};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
 use crate::remote::RemoteState;
 use crate::report::{CommandReport, Warning};
+use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
+use crate::store::StoreError;
+use crate::tracking::TrackingError;
 use crate::tree::{EntryKind, PieceTree};
 use crate::walk;
 use jiff::Timestamp;
@@ -31,7 +40,9 @@ use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 
-/// Errors of the `archive` command.
+/// Errors of the `archive` command. Only what stops the whole run is an
+/// error; whatever goes wrong with one piece is a `skipped` row of the
+/// report.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error("cannot {action} {path}: {source}")]
@@ -43,30 +54,80 @@ pub enum ArchiveError {
     #[error(transparent)]
     Status(#[from] StatusError),
     #[error(transparent)]
+    Run(#[from] RunError),
+    #[error(transparent)]
+    Machine(#[from] MachineError),
+    #[error(transparent)]
     Select(#[from] SelectError),
     #[error(transparent)]
+    Idle(#[from] crate::idle::IdleError),
+    #[error(transparent)]
     Walk(#[from] walk::WalkError),
+    #[error(transparent)]
+    Pack(#[from] PackError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Tracking(#[from] TrackingError),
 }
 
-impl crate::error::HasKind for ArchiveError {}
+impl HasKind for ArchiveError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            ArchiveError::Run(error) => error.kind(),
+            ArchiveError::Machine(error) => error.kind(),
+            ArchiveError::Store(error) => error.kind(),
+            ArchiveError::Tracking(error) => error.kind(),
+            _ => ErrorKind::Other,
+        }
+    }
+}
 
 // =========================================================
 // Seams
 // =========================================================
 
-/// The calls of a run that a test can answer for: the filesystem the walks
-/// see.
+/// The steps of archiving one piece, in the order they run. A test seam is
+/// asked before each step, and an error it returns is that step's own
+/// failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Walk,
+    Pack,
+    Verify,
+    StorePayload,
+    StoreListing,
+    WriteMetadata,
+    WriteEntry,
+    MarkRemoving,
+}
+
+/// The calls of a run that a test can answer for. The defaults are the
+/// real ones.
 pub(crate) trait Seams: Sync {
-    fn walk_hooks(&self) -> &(dyn walk::Hooks + Sync);
+    /// What the walks see of the filesystem.
+    fn walk_hooks(&self) -> &(dyn walk::Hooks + Sync) {
+        &walk::RealFs
+    }
+
+    /// The bytes free on the volume holding `dir`, for the piece `piece`.
+    fn free_space(&self, _piece: &RelPath, dir: &Path) -> Result<u64, FsxError> {
+        available_space(dir)
+    }
+
+    fn packager(&self) -> &(dyn Packager + Sync) {
+        &TarZstd
+    }
+
+    /// Called before `step` works on `piece`.
+    fn at(&self, _step: Step, _piece: &RelPath) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 struct RealSeams;
 
-impl Seams for RealSeams {
-    fn walk_hooks(&self) -> &(dyn walk::Hooks + Sync) {
-        &walk::RealFs
-    }
-}
+impl Seams for RealSeams {}
 
 /// What `status` asks the world while it picks the candidates: the seams'
 /// walks, the real filesystem kind, and no remote. A remote that is away
@@ -124,6 +185,43 @@ impl PlanAction for ArchiveAction {
     }
 }
 
+/// A piece that was archived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Archived {
+    pub id: ObjectId,
+    pub path: RelPath,
+    /// Apparent size of the folder in bytes.
+    pub size: u64,
+    /// Bytes of the stored payload.
+    pub archive_size: u64,
+    pub payload_version: u32,
+}
+
+/// Why a piece was not archived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    Unreadable,
+    MountPoint,
+    Excluded,
+    NestedCollection,
+    /// The folder differs from what was packed from it.
+    Differs,
+    NoSpace,
+    Error,
+}
+
+/// A piece that was left alone, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Skipped {
+    /// Present only for a piece that had an ID before the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub path: RelPath,
+    pub reason: SkipReason,
+    pub message: String,
+}
+
 /// What `archive` did, or with `--dry-run` would do.
 #[derive(Debug, Serialize)]
 pub struct ArchiveReport {
@@ -131,12 +229,27 @@ pub struct ArchiveReport {
     pub dry_run: bool,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan<ArchiveAction>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<Vec<Archived>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<Vec<Skipped>>,
     pub warnings: Vec<Warning>,
+}
+
+#[cfg(test)]
+impl ArchiveReport {
+    pub(crate) fn partial_for_test(&self) -> bool {
+        self.partial()
+    }
 }
 
 impl CommandReport for ArchiveReport {
     fn partial(&self) -> bool {
-        false
+        self.skipped
+            .as_ref()
+            .is_some_and(|skipped| !skipped.is_empty())
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -222,11 +335,7 @@ pub(crate) fn plan_with(
 ) -> Result<ArchiveReport, ArchiveError> {
     let (candidates, mut warnings) = candidates(collection, clock, seams, false)?;
     let config = &collection.config().collection;
-    let root = TreeRoot::open(collection.root()).map_err(|source| ArchiveError::Io {
-        action: "open",
-        path: collection.root().display().to_string(),
-        source,
-    })?;
+    let root = open_root(collection)?;
     let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
     let junk = status::junk_names(&config.junk, &mut warnings);
     let mut plan = Plan::new();
@@ -242,7 +351,98 @@ pub(crate) fn plan_with(
     Ok(ArchiveReport {
         dry_run: true,
         plan: Some(plan),
+        archived: None,
+        skipped: None,
         warnings,
+    })
+}
+
+// =========================================================
+// The run
+// =========================================================
+
+/// What a run of `archive` needs.
+pub struct ArchiveRequest<'a> {
+    pub collection: &'a Collection,
+    pub clock: &'a dyn Clock,
+    pub ids: &'a dyn IdSource,
+    pub pool: &'a Pool,
+    pub dry_run: bool,
+}
+
+/// Archives every idle piece, or with `dry_run` lists them.
+pub fn archive(request: &ArchiveRequest<'_>) -> Result<ArchiveReport, ArchiveError> {
+    archive_with(request, &RealSeams)
+}
+
+pub(crate) fn archive_with(
+    request: &ArchiveRequest<'_>,
+    seams: &dyn Seams,
+) -> Result<ArchiveReport, ArchiveError> {
+    let collection = request.collection;
+    let guard = match run::start(collection, request.clock, request.dry_run)? {
+        Started::DryRun { .. } => return plan_with(collection, request.clock, seams),
+        Started::Guarded(guard) => guard,
+    };
+
+    let (candidates, found) = candidates(collection, request.clock, seams, true)?;
+    let mut warnings: Vec<Warning> = guard.warnings().to_vec();
+    warnings.extend(found);
+    let mut archived = Vec::new();
+    let mut skipped = Vec::new();
+    if !candidates.is_empty() {
+        let config = &collection.config().collection;
+        let root = open_root(collection)?;
+        let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
+        // `status` has warned about the junk list already.
+        let junk = status::junk_names(&config.junk, &mut Vec::new());
+        let cx = new::Context {
+            collection,
+            lock: guard.lock(),
+            clock: request.clock,
+            ids: request.ids,
+            pool: request.pool,
+            seams,
+            junk,
+            rules,
+            idle: crate::idle::Settings::new(config.idle_days, &config.ignore)?,
+            root,
+            machine: collection.machine_name()?,
+            orphans: if candidates.iter().any(|candidate| candidate.id.is_none()) {
+                new::find_orphans(collection)?
+            } else {
+                Vec::new()
+            },
+        };
+        let mut listing_stored = false;
+        for candidate in &candidates {
+            let result = new::archive_piece(&cx, candidate)?;
+            warnings.extend(result.warnings);
+            listing_stored |= result.listing_stored;
+            match result.outcome {
+                new::PieceOutcome::Dropped => {}
+                new::PieceOutcome::Skipped(row) => skipped.push(row),
+                new::PieceOutcome::Archived(row) => archived.push(row),
+            }
+        }
+        if listing_stored && let Err(error) = index::update(collection, guard.lock()) {
+            warnings.push(Warning::new(format!("cannot update the index: {error}")));
+        }
+    }
+    Ok(ArchiveReport {
+        dry_run: false,
+        plan: None,
+        archived: Some(archived),
+        skipped: Some(skipped),
+        warnings,
+    })
+}
+
+fn open_root(collection: &Collection) -> Result<TreeRoot, ArchiveError> {
+    TreeRoot::open(collection.root()).map_err(|source| ArchiveError::Io {
+        action: "open",
+        path: collection.root().display().to_string(),
+        source,
     })
 }
 
@@ -256,36 +456,36 @@ mod tests {
     use crate::tracking::{EntryState, TrackingEntry, VersionTakenOut};
     use std::fs;
 
-    const NOW: &str = "2026-11-01T12:00:00Z";
+    pub(super) const NOW: &str = "2026-11-01T12:00:00Z";
 
-    fn clock() -> FixedClock {
+    pub(super) fn clock() -> FixedClock {
         FixedClock::new(NOW.parse().expect("a time"))
     }
 
-    fn days_ago(days: i64) -> i64 {
+    pub(super) fn days_ago(days: i64) -> i64 {
         NOW.parse::<Timestamp>().expect("a time").as_second() - days * 86_400
     }
 
     /// A collection whose folders a test lays out.
-    struct World {
-        temp: TempCollection,
-        collection: Collection,
+    pub(super) struct World {
+        pub(super) temp: TempCollection,
+        pub(super) collection: Collection,
     }
 
-    fn world() -> World {
+    pub(super) fn world() -> World {
         let temp = TempCollection::minimal();
         let collection = Collection::find(temp.root()).expect("a collection");
         World { temp, collection }
     }
 
     impl World {
-        fn file(&mut self, relative: &str, age_days: i64) {
+        pub(super) fn file(&mut self, relative: &str, age_days: i64) {
             self.temp
                 .tree()
                 .file_with(relative, "x", 0o644, days_ago(age_days));
         }
 
-        fn configure(&mut self, lines: &str) {
+        pub(super) fn configure(&mut self, lines: &str) {
             fs::write(
                 self.temp.root().join(".antiq/config.toml"),
                 format!("[collection]\nid = \"{COLLECTION_ID}\"\n{lines}\n"),
@@ -313,7 +513,7 @@ mod tests {
 
     /// Live metadata of `owner` and an entry for the piece at `at`; the
     /// entry is changed by `change` before it is written.
-    fn live_piece(
+    pub(super) fn live_piece(
         world: &World,
         number: u8,
         at: &str,
