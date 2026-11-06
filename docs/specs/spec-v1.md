@@ -673,6 +673,15 @@ this commit got past the rename. The commit then writes nothing and
 returns that version, which is how a commit that failed after its rename
 is retried.
 
+When the retry finds a higher committed version too, and that version
+names every payload and listing file the retried metadata names, the
+higher version may have been written on top of the retried one, and the
+metadata records no base version to tell. The retry reports the version
+as landed earlier, and the caller pulls the remote and judges the two
+versions instead of treating a conflict. A higher version that lacks any
+of those files, and any higher version that appears during the attempt
+itself, is a conflict.
+
 A commit that ends before the rename because a named file is missing, a
 higher version appeared or a claim above its own appeared deletes its
 temp name, flushes, and then deletes its claim, unless the version of its number exists. A commit that finds

@@ -74,6 +74,14 @@ pub enum Outcome {
     /// not build on it replaces it. The caller keeps its local archive,
     /// as for `Overtaken`, and looks at the remote again at its next sync.
     Contested { number: NonZeroU32, claim: u32 },
+    /// A call that retried an earlier attempt found `meta.<number>`, which
+    /// that attempt committed, and a higher version that names every file
+    /// this commit names. The higher version may build on this one, and the
+    /// commit cannot tell, as the metadata records no base. The caller
+    /// pulls the remote and judges the two versions, which is a conflict
+    /// only if they differ in more than this commit's change, and keeps its
+    /// local archive until then.
+    Landed { number: NonZeroU32, highest: u32 },
     /// Nothing of this commit is committed.
     Refused(Refusal),
 }
@@ -121,8 +129,11 @@ pub enum Refusal {
 /// - `Committed`: the version is current. The caller may drop what the
 ///   commit made redundant locally.
 /// - `Overtaken`: the version is committed, and a higher committed version
-///   exists. The caller handles a conflict (ADR 0017) and keeps its local
-///   archive.
+///   exists that is not known to build on it. The caller handles a
+///   conflict (ADR 0017) and keeps its local archive.
+/// - `Landed`: a retry finds its version committed by the earlier attempt,
+///   and a higher version that names all its files. The caller pulls the
+///   remote and judges the versions, keeping its local archive until then.
 /// - `Contested`: the version is committed, and a claim above it is open.
 ///   The caller keeps its local archive, treats the version as not settled
 ///   and reads the remote again at the next sync: the claim becomes a
@@ -305,6 +316,11 @@ pub(super) fn read_document(id: ObjectId, bytes: &[u8]) -> Result<meta::Metadata
 
 fn named_files(request: &Request) -> Result<Vec<Named>, Refusal> {
     let metadata = read_document(request.id, request.metadata).map_err(Refusal::InvalidMetadata)?;
+    Ok(files_of(&metadata))
+}
+
+/// The payloads and listings `metadata` names.
+fn files_of(metadata: &meta::Metadata) -> Vec<Named> {
     let mut named = Vec::new();
     for payload in &metadata.payloads {
         named.push(Named {
@@ -318,7 +334,7 @@ fn named_files(request: &Request) -> Result<Vec<Named>, Refusal> {
             });
         }
     }
-    Ok(named)
+    named
 }
 
 /// A file of the object read in full. A read that fails because a
@@ -364,7 +380,7 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
     if found.highest > request.based_on
         && let Some(number) = own_version(remote, request, &found)?
     {
-        return confirm(remote, request, &named, number);
+        return confirm(remote, request, &named, number, true);
     }
     require_base(request.based_on, found.highest)?;
 
@@ -438,7 +454,7 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
         Placement::TargetExists => return Err(Refusal::TargetTaken { number }.into()),
     }
     remote.flush()?;
-    confirm(remote, request, &named, number)
+    confirm(remote, request, &named, number, false)
 }
 
 /// Lists the directory and reads the highest version, which has to be
@@ -602,6 +618,7 @@ fn confirm(
     request: &Request,
     named: &[Named],
     number: u32,
+    retried: bool,
 ) -> Result<Outcome, Stop> {
     let listed = Directory::load(remote, request.id)?;
     let restored = restore_missing(remote, request, named, listed)?;
@@ -615,15 +632,40 @@ fn confirm(
     let highest = restored.directory.highest();
     let number = NonZeroU32::new(number).expect("a version number is above zero");
     Ok(if highest > number.get() {
-        Outcome::Overtaken {
-            number,
-            higher: highest,
+        if retried && builds_on(remote, request, named, highest)? {
+            Outcome::Landed { number, highest }
+        } else {
+            Outcome::Overtaken {
+                number,
+                higher: highest,
+            }
         }
     } else if let Some(&(claim, _)) = restored.directory.claims_above(number.get()).first() {
         Outcome::Contested { number, claim }
     } else {
         Outcome::Committed { number }
     })
+}
+
+/// Whether the committed version `highest` names every file `named` does.
+/// The metadata records no base version, so this is the only sign that a
+/// version was written on top of one that holds these files.
+fn builds_on(
+    remote: &dyn Remote,
+    request: &Request,
+    named: &[Named],
+    highest: u32,
+) -> Result<bool, RemoteError> {
+    let Some(bytes) = read_listed(remote, request.id, &version_name(highest))? else {
+        return Ok(false);
+    };
+    let Ok(metadata) = read_document(request.id, &bytes) else {
+        return Ok(false);
+    };
+    let theirs = files_of(&metadata);
+    Ok(named
+        .iter()
+        .all(|ours| theirs.iter().any(|their| their.file == ours.file)))
 }
 
 #[cfg(test)]
@@ -640,7 +682,7 @@ mod tests {
     use crate::remote::testing::{Call, Fault, FaultRemote, Op, object, path_remote, remote_root};
     use jiff::Timestamp;
     use sha2::{Digest, Sha256};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const PAYLOAD: &str = "0123456789abcdef-a.tar.zst";
     const LISTING: &str = "0123456789abcdef.listing.zst";
@@ -1685,6 +1727,133 @@ mod tests {
         world.commit(0, &bytes).expect_err("the last listing fails");
         assert_eq!(
             world.committed(0, &bytes),
+            Outcome::Overtaken {
+                number: number(1),
+                higher: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_retry_finds_a_higher_version_that_names_our_files_landed() {
+        let world = World::new();
+        let bytes = metadata("a", true);
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            commit_as_studio(inner, 2, &metadata("b", true));
+        });
+        world.remote.fail(Op::ListDir, 4, Fault::Io);
+        world.commit(0, &bytes).expect_err("the last listing fails");
+        assert_eq!(
+            world.committed(0, &bytes),
+            Outcome::Landed {
+                number: number(1),
+                highest: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_retry_without_uploads_finds_a_higher_version_that_names_our_files_landed() {
+        let world = World::new();
+        let bytes = metadata("a", true);
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            commit_as_studio(inner, 2, &metadata("b", true));
+        });
+        world.remote.fail(Op::ListDir, 4, Fault::Io);
+        world.commit(0, &bytes).expect_err("the last listing fails");
+        let outcome = world.commit_with(0, &bytes, &[]).expect("the retry runs");
+        assert_eq!(
+            outcome,
+            Outcome::Landed {
+                number: number(1),
+                highest: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_higher_version_that_names_our_files_during_the_attempt_overtakes() {
+        let world = World::new();
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            commit_as_studio(inner, 2, &metadata("b", true));
+        });
+        let outcome = world.committed(0, &metadata("a", true));
+        assert_eq!(
+            outcome,
+            Outcome::Overtaken {
+                number: number(1),
+                higher: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_retry_that_finds_a_higher_version_without_our_listing_is_overtaken() {
+        let world = World::new();
+        let bytes = metadata("a", true);
+        let partial = String::from_utf8(metadata("b", true))
+            .expect("UTF-8")
+            .replacen(&format!("\"listing\":\"{LISTING}\","), "", 1);
+        assert_ne!(
+            partial.as_bytes(),
+            metadata("b", true),
+            "the listing is cut"
+        );
+        world.remote.after(Op::RenameIntoPlace, 1, move |inner| {
+            commit_as_studio(inner, 2, partial.as_bytes());
+        });
+        world.remote.fail(Op::ListDir, 4, Fault::Io);
+        world.commit(0, &bytes).expect_err("the last listing fails");
+        assert_eq!(
+            world.committed(0, &bytes),
+            Outcome::Overtaken {
+                number: number(1),
+                higher: 2
+            }
+        );
+    }
+
+    /// A retry after version 2 landed, with `change` made to `meta.2` just
+    /// before the retry reads it a second time.
+    fn retry_with_changed_higher_version(
+        change: impl Fn(&Path) + Send + Sync + 'static,
+    ) -> Outcome {
+        let world = World::new();
+        let bytes = metadata("a", true);
+        world.remote.after(Op::RenameIntoPlace, 1, |inner| {
+            commit_as_studio(inner, 2, &metadata("b", true));
+        });
+        world.remote.fail(Op::ListDir, 4, Fault::Io);
+        world.commit(0, &bytes).expect_err("the last listing fails");
+        let reads = world.remote.count(Op::ReadFile);
+        let dir = world.dir();
+        world
+            .remote
+            .before(Op::ReadFile, reads + 3, move |_| change(&dir));
+        world.committed(0, &bytes)
+    }
+
+    #[test]
+    fn a_retry_whose_higher_version_is_removed_before_it_is_read_is_overtaken() {
+        let outcome = retry_with_changed_higher_version(|dir| {
+            std::fs::remove_file(dir.join("meta.2")).expect("removed by a cleanup");
+        });
+        assert_eq!(
+            outcome,
+            Outcome::Overtaken {
+                number: number(1),
+                higher: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_retry_whose_higher_version_does_not_parse_is_overtaken() {
+        let outcome = retry_with_changed_higher_version(|dir| {
+            std::fs::write(dir.join("meta.2"), b"not json").expect("overwritten");
+        });
+        assert_eq!(
+            outcome,
             Outcome::Overtaken {
                 number: number(1),
                 higher: 2
