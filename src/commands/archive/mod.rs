@@ -861,8 +861,13 @@ mod tests {
     ) -> Result<ArchiveReport, ArchiveError> {
         let collection = collection(world);
         let clock = FixedClock::new(now());
-        let Started::Guarded(guard) = run::start(&collection, &clock, false).expect("starts")
-        else {
+        // A run that ended just before has released the lock, but a forked
+        // child of another test may still hold a copy of it for a moment.
+        let started = crate::lock::retry_while_held(
+            |result| matches!(result, Err(RunError::Lock(_))),
+            || run::start(&collection, &clock, false),
+        );
+        let Started::Guarded(guard) = started.expect("starts") else {
             panic!("a real run is guarded");
         };
         let env = Env {

@@ -296,6 +296,7 @@ mod tests {
     use crate::clock::FixedClock;
     use crate::filesystem::atomic::recording::{Flush, Recording};
     use crate::filesystem::tree::TreeRoot;
+    use crate::lock;
     use crate::testing::hold_lock;
     use crate::testing::tree::{COLLECTION_ID, TempCollection, snapshot};
     use std::fs;
@@ -325,7 +326,8 @@ mod tests {
         Collection::find(temp.root()).expect("a collection")
     }
 
-    fn run(
+    /// Runs the command once.
+    fn run_once(
         temp: &TempCollection,
         piece: &str,
         direction: Direction,
@@ -340,20 +342,36 @@ mod tests {
         pin(&request, &clock())
     }
 
+    /// Runs the command again while the lock a run before released still
+    /// reads as held.
+    fn run(
+        temp: &TempCollection,
+        piece: &str,
+        direction: Direction,
+    ) -> Result<PinReport, PinCommandError> {
+        lock::retry_while_held(is_held, || run_once(temp, piece, direction))
+    }
+
     fn run_on(
         temp: &TempCollection,
         piece: &str,
         direction: Direction,
         site: &dyn Site,
     ) -> Result<PinReport, PinCommandError> {
-        let collection = found(temp);
-        let request = PinRequest {
-            collection: &collection,
-            cwd: temp.root(),
-            piece: OsStr::new(piece),
-            direction,
-        };
-        pin_with(&request, &clock(), site)
+        lock::retry_while_held(is_held, || {
+            let collection = found(temp);
+            let request = PinRequest {
+                collection: &collection,
+                cwd: temp.root(),
+                piece: OsStr::new(piece),
+                direction,
+            };
+            pin_with(&request, &clock(), site)
+        })
+    }
+
+    fn is_held(result: &Result<PinReport, PinCommandError>) -> bool {
+        matches!(result, Err(PinCommandError::Run(RunError::Lock(_))))
     }
 
     fn plan_for(
@@ -657,7 +675,7 @@ mod tests {
         let temp = world("");
         let _lock = hold_lock(temp.root());
 
-        let error = run(&temp, "alpha", Direction::Pin).expect_err("the lock is held");
+        let error = run_once(&temp, "alpha", Direction::Pin).expect_err("the lock is held");
 
         assert_eq!(error.kind(), ErrorKind::LockHeld);
         let details = crate::Error::from(error).details();

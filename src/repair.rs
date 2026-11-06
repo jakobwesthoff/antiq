@@ -1658,7 +1658,11 @@ mod tests {
 
     fn lock_of(collection: &Collection) -> RunLock {
         let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
-        lock::acquire(&collection.lock_path(), "test", &clock).expect("the lock is free")
+        lock::retry_while_held(
+            |result: &Result<RunLock, lock::LockError>| result.is_err(),
+            || lock::acquire(&collection.lock_path(), "test", &clock),
+        )
+        .expect("the lock is free")
     }
 
     /// Repairs the collection the way a run does.
