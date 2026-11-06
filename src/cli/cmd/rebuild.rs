@@ -28,8 +28,8 @@ use jiff::tz::TimeZone;
 const RESULT_WIDTH: usize = 18;
 
 /// What the cards of a rebuild count: the content bytes of the files in the
-/// archive, which the size on the card counts too. Where the size is not
-/// known the count shows the bytes checked so far and no total.
+/// archive, the unit of the size on the finished line. Where the total is
+/// not known the count shows the bytes checked so far and no total.
 const COUNTS: &[(Operation, Count)] = &[(
     Operation::Verifying,
     Count {

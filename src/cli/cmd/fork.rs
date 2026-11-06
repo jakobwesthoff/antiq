@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cards_of_a_fork_count_files_while_extracting_and_bytes_while_verifying() {
+    fn the_cards_of_a_fork_show_the_bytes_extracted_and_compared_as_sizes() {
         use antiq::progress::Operation;
         for (operation, word, count) in [
             (Operation::Extracting, "extracting", "1 B/4 B"),

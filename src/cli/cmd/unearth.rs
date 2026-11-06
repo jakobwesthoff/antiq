@@ -25,8 +25,8 @@ use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 
-/// Extracting and verifying count the content bytes of the files, as the
-/// size on the card does. The removing of the staging area counts files,
+/// Extracting and verifying count the content bytes of the files, the unit
+/// of the size on the finished line. The removing of the staging area counts files,
 /// which is what the cards show for an operation without an entry here.
 /// `fork` brings a version back the same way and uses the same list.
 pub(super) const COUNTS: &[(Operation, Count)] = &[

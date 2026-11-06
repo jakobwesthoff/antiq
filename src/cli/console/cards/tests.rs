@@ -333,6 +333,31 @@ fn a_short_name_keeps_its_version_on_the_finished_line() {
 }
 
 #[test]
+fn the_counts_of_a_result_group_their_thousands_with_a_space() {
+    let mut cards = cards(ARCHIVE);
+    cards.config.result_width = 20;
+    cards.apply(finished("a", 5, Outcome::Files(12_345)), secs(1));
+    cards.apply(
+        finished(
+            "b",
+            5,
+            Outcome::Changes {
+                created: 1_203,
+                updated: 0,
+                deleted: 2_931,
+            },
+        ),
+        secs(1),
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("  12 345 files  "), "{lines:?}");
+    assert!(
+        lines[1].contains("1 203 created, 2 931 deleted"),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
     let mut cards = with_style(ARCHIVE, style(true, true));
     run_piece(

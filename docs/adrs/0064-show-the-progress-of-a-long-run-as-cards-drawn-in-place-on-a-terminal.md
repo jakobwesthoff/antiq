@@ -27,7 +27,8 @@ of the running pieces and one line `○ N waiting`.
 
 A `push` is one run of rsync over the whole collection, so it has one card
 instead of one for each piece. The card counts the entries rsync lists
-against the total rsync reports, shows no percentage, and is removed when
+against the total rsync reports, leads the count with the bytes sent so far,
+shows no percentage, and is removed when
 rsync ends. The table of the pieces and the closing line follow it.
 
 One formatter writes the card and the finished line, so the lines on the
@@ -35,13 +36,13 @@ screen during the run and the lines that remain after it look alike.
 
 The bar of an operation follows the work in bytes where bytes are what
 takes time, and counts the content bytes of the piece's files, the unit of
-the size on the card: packing counts the content bytes among those the
+the size on the finished line: packing counts the content bytes among those the
 compressor has consumed, the extracting of an unearth or a fork the content bytes of the regular files as they are written, against those of the listing, and the verifying of an archive the content bytes
 of the members as the archive hands them out plus those of the files of the
 folder as they are read, with the count under the bar halved. The verifying of a
 rebuild counts the content bytes of the members of its single read of the archive; without a
-listing the size is unknown and the count shows the bytes checked so far. A count under the bar shows numbers only in
-units that match the card (its size, files, entries). The compressor works
+listing the total is unknown and the count shows the bytes checked so far. A count under the bar shows numbers only in
+units that match the card (content bytes, files, entries). The compressor works
 behind the writer, so the bytes handed to it reach the total long before it
 has compressed them; the bytes it has consumed are what the bar follows.
 

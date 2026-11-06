@@ -20,7 +20,7 @@ use antiq::progress::Operation;
 use anyhow::Context as _;
 
 /// The packing and the verifying of a piece show the content bytes of its
-/// files, as the size on the card does. The bar of the verifying counts those
+/// files, the unit of the size on the finished line. The bar of the verifying counts those
 /// bytes twice, once as the archive hands them out and once as the folder
 /// delivers them, so the text halves both numbers. The removing of a piece
 /// counts the entries of its listing, and every other operation counts files.

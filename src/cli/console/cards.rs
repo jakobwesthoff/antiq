@@ -59,8 +59,8 @@ pub(crate) fn items(done: u64, total: Option<u64>, noun: &str) -> String {
 }
 
 /// `412 MB/1.2 GB`, and nothing while the total is not known. For an
-/// operation whose numbers are the content bytes of the piece, which the
-/// size on the card counts too.
+/// operation whose numbers are the content bytes of the piece, the unit of
+/// the size on the finished line.
 pub(crate) fn sizes(done: u64, total: Option<u64>) -> String {
     total.map_or_else(String::new, |total| {
         format!("{}/{}", decimal_size(done), decimal_size(total))
@@ -543,7 +543,7 @@ impl Cards {
     fn result_text(outcome: &Outcome) -> String {
         match outcome {
             Outcome::Files(1) => "1 file".to_string(),
-            Outcome::Files(count) => format!("{count} files"),
+            Outcome::Files(count) => format!("{} files", thousands(*count)),
             Outcome::Changes {
                 created,
                 updated,
@@ -556,7 +556,7 @@ impl Cards {
                 ]
                 .into_iter()
                 .filter(|(count, _)| **count > 0)
-                .map(|(count, word)| format!("{count} {word}"))
+                .map(|(count, word)| format!("{} {word}", thousands(*count)))
                 .collect();
                 if parts.is_empty() {
                     "no changes".to_string()
