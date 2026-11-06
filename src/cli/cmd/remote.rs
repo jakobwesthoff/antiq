@@ -4,6 +4,7 @@
 
 //! The `remote add`, `remote show` and `remote remove` commands.
 
+use super::status::sanitize;
 use crate::cli::output::Output;
 use crate::cli::{Context, RemoteAddArgs, RemoteCommand, RemoteRemoveArgs};
 use antiq::clock::SystemClock;
@@ -13,6 +14,7 @@ use antiq::ops::remote::{
     AddReport, AddRequest, RemoteOpError, RemoveReport, ShowReport, add, remove, show,
 };
 use antiq::remote::RemoteState;
+use antiq::report;
 use antiq::run::{self, Started};
 use anyhow::Context as _;
 use std::path::PathBuf;
@@ -49,8 +51,8 @@ fn lock_note(started: &Started) -> Option<String> {
         Started::DryRun {
             holder: Some(holder),
         } => Some(format!(
-            "note: another run holds the lock (pid {}, machine {}, started {})",
-            holder.pid, holder.machine, holder.started
+            "note: {}",
+            sanitize(&report::lock_note(holder).message)
         )),
         _ => None,
     }
