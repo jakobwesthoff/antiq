@@ -88,7 +88,10 @@
 //! `marker_with(id, host, path)` writes one with any values, such as the
 //! name of another machine. `remove` deletes the directory. `copy_back`
 //! runs `rsync -aH` into a new directory and returns it as a collection,
-//! for scenarios that restore from the target.
+//! for scenarios that restore from the target. `real_rsync` finds an rsync
+//! of 3.2.4 or later and `Collection::use_real_rsync` writes it as
+//! `[target] rsync`, so a push does not depend on the machine's `PATH`
+//! order (macOS ships openrsync as `/usr/bin/rsync`).
 //!
 //! # Running commands
 //!
@@ -137,6 +140,8 @@
 //! - file times are not compared, the lock file is left out.
 //!
 //! `State::raw` reads exactly what is there, without any of this.
+//! `State::without(paths)` drops paths and what is below them, to compare a
+//! collection with its mirror.
 //!
 //! # Checks without antiq code
 //!
@@ -145,7 +150,8 @@
 //! it is not installed; `tar_members` lists an archive; `store_files`
 //! returns the files of each version found in a piece's store folder,
 //! found by suffix, and `Collection::versions` the stamps of the versions
-//! whose archive exists. `tar_extract` unpacks an archive with `tar --zstd
+//! whose archive exists. `same_file` tells whether two paths are one file
+//! under two names (hard links). `tar_extract` unpacks an archive with `tar --zstd
 //! -xpf` into a new directory and `listing_check` runs `shasum -a 256 -c`
 //! on the checksum lines of a listing in an unpacked tree; both fail,
 //! naming the tool, when it is not installed.

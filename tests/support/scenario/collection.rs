@@ -454,6 +454,22 @@ impl Collection {
         fs::write(&path, text).expect("the config can be written");
     }
 
+    /// Names the rsync of `real_rsync` as `[target] rsync`, so a push does
+    /// not depend on which rsync the machine finds first in `PATH`.
+    pub fn use_real_rsync(&self) {
+        let path = self.path(".antiq/config.toml");
+        let text = fs::read_to_string(&path).expect("the config exists");
+        let rsync = super::target::real_rsync();
+        let rsync = serde_json::to_string(rsync.to_str().expect("the path is UTF-8"))
+            .expect("a string serialises");
+        assert!(
+            text.contains("[target]\n"),
+            "use_target comes first: the config has no [target] table"
+        );
+        let text = text.replacen("[target]\n", &format!("[target]\nrsync = {rsync}\n"), 1);
+        fs::write(&path, text).expect("the config can be written");
+    }
+
     /// The ID in the config.
     pub fn id(&self) -> String {
         antiq::config::Config::read(&self.path(".antiq/config.toml"))

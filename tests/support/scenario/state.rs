@@ -333,6 +333,21 @@ impl State {
         State { entries }
     }
 
+    /// The state without the given paths and everything below them.
+    pub fn without(&self, paths: &[&str]) -> State {
+        let entries = self
+            .entries
+            .iter()
+            .filter(|(name, _)| {
+                !paths
+                    .iter()
+                    .any(|path| *name == path || name.starts_with(&format!("{path}/")))
+            })
+            .map(|(name, entry)| (name.clone(), entry.clone()))
+            .collect();
+        State { entries }
+    }
+
     pub fn paths(&self) -> Vec<&str> {
         self.entries.keys().map(String::as_str).collect()
     }

@@ -7,6 +7,7 @@
 use super::collection::Collection;
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -185,4 +186,12 @@ impl Collection {
             .map(|version| version.stamp)
             .collect()
     }
+}
+
+/// Whether two paths are one file under two names: the same device and
+/// inode.
+pub fn same_file(first: &Path, second: &Path) -> bool {
+    let first = fs::metadata(first).expect("the first path has metadata");
+    let second = fs::metadata(second).expect("the second path has metadata");
+    first.dev() == second.dev() && first.ino() == second.ino()
 }

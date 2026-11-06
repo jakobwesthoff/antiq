@@ -84,3 +84,39 @@ impl Target {
         Collection::around(tree, *clock)
     }
 }
+
+/// The first rsync of 3.2.4 or later in `PATH`, `/opt/homebrew/bin` or
+/// `/usr/local/bin`: the places antiq itself searches. Fails naming the
+/// tool when there is none, as the push needs one that knows `--fsync`.
+pub fn real_rsync() -> PathBuf {
+    let mut dirs: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    dirs.push("/opt/homebrew/bin".into());
+    dirs.push("/usr/local/bin".into());
+    for dir in dirs {
+        let candidate = dir.join("rsync");
+        let Ok(output) = Command::new(&candidate).arg("--version").output() else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        // The first line reads "rsync  version 3.5.1  protocol version 33";
+        // openrsync names itself differently and is skipped.
+        let mut words = text.split_whitespace();
+        if words.next() != Some("rsync") {
+            continue;
+        }
+        let version = words.nth(1).unwrap_or("");
+        let mut numbers = version.split('.').map(|part| part.parse::<u32>().ok());
+        let found = (
+            numbers.next().flatten().unwrap_or(0),
+            numbers.next().flatten().unwrap_or(0),
+            numbers.next().flatten().unwrap_or(0),
+        );
+        if found >= (3, 2, 4) {
+            return fs::canonicalize(&candidate).unwrap_or(candidate);
+        }
+    }
+    panic!(
+        "these scenarios need rsync 3.2.4 or newer in PATH, /opt/homebrew/bin or /usr/local/bin"
+    );
+}

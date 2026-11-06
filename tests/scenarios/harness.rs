@@ -331,6 +331,85 @@ fn a_failing_rsync_is_named() {
     Target::new().copy_back_using("false", &clock);
 }
 
+#[test]
+fn the_located_rsync_is_a_current_rsync() {
+    let rsync = crate::support::scenario::target::real_rsync();
+    let output = std::process::Command::new(&rsync)
+        .arg("--version")
+        .output()
+        .expect("the located rsync runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.starts_with("rsync "), "{text}");
+    assert!(rsync.is_absolute(), "{rsync:?}");
+}
+
+#[test]
+fn a_collection_can_name_the_located_rsync_in_its_target_table() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    let target = Target::new();
+    collection.use_target(&target.path());
+    collection.use_real_rsync();
+    let found = Library::find(&collection.root()).expect("the collection is found");
+    assert_eq!(
+        found.config().target.rsync,
+        Some(crate::support::scenario::target::real_rsync())
+    );
+    assert_eq!(
+        found.config().target.url.as_deref(),
+        Some(target.path().to_str().expect("UTF-8"))
+    );
+}
+
+#[test]
+fn a_target_without_the_rsync_call_keeps_searching_path() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    collection.use_target(&Target::new().path());
+    let found = Library::find(&collection.root()).expect("the collection is found");
+    assert_eq!(found.config().target.rsync, None);
+}
+
+#[test]
+fn two_names_of_one_file_are_the_same_file() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("a/b", |piece| {
+            piece
+                .file("one", "same")
+                .hard_link("one", "two")
+                .file("three", "same");
+        })
+        .finish();
+    let same = crate::support::scenario::outsider::same_file;
+    assert!(same(
+        &collection.path("a/b/one"),
+        &collection.path("a/b/two")
+    ));
+    assert!(!same(
+        &collection.path("a/b/one"),
+        &collection.path("a/b/three")
+    ));
+}
+
+#[test]
+fn a_state_without_paths_drops_them_and_what_is_below() {
+    use crate::support::scenario::state::State;
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("a/b", |piece| {
+            piece.file("one", "1").file("sub/two", "2");
+        })
+        .finish();
+    let state = State::raw(&collection.root()).without(&["a/b/sub", ".antiq/config.toml"]);
+    let paths = state.paths();
+    assert!(paths.contains(&"a/b/one"));
+    assert!(!paths.contains(&"a/b/sub"));
+    assert!(!paths.contains(&"a/b/sub/two"));
+    assert!(!paths.contains(&".antiq/config.toml"));
+    assert!(paths.contains(&".antiq"));
+}
+
 // =========================================================
 // The JSON envelope
 // =========================================================
