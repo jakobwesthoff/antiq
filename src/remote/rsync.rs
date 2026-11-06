@@ -172,6 +172,7 @@ impl Rsync {
             "--stats",
             "--no-human-readable",
             "--no-whole-file",
+            "--ignore-times",
             &format!("--timeout={}", settings.timeout_seconds),
             "-e",
         ]
@@ -854,6 +855,7 @@ mod tests {
                 "--stats",
                 "--no-human-readable",
                 "--no-whole-file",
+                "--ignore-times",
                 "--timeout=13",
                 "-e",
                 "'ssh' '-o' 'BatchMode=yes'",
@@ -882,8 +884,8 @@ mod tests {
         with.remote_rsync = Some("/opt/homebrew/bin/rsync".to_string());
         let with = argv(&prepared(&with));
         assert_eq!(with[0], "--stats");
-        assert_eq!(with[5], "'ssh'");
-        assert_eq!(with[6], "--rsync-path=/opt/homebrew/bin/rsync");
+        assert_eq!(with[6], "'ssh'");
+        assert_eq!(with[7], "--rsync-path=/opt/homebrew/bin/rsync");
         let without = argv(&prepared(&settings(&["ssh"])));
         assert_eq!(without[0], "--stats");
         assert!(
@@ -898,7 +900,7 @@ mod tests {
         resumable.resumable = true;
         let resumable = argv(&prepared(&resumable));
         assert_eq!(resumable[0], "--stats");
-        assert_eq!(resumable[6], "--partial-dir=.antiq-partial");
+        assert_eq!(resumable[7], "--partial-dir=.antiq-partial");
         let plain = argv(&prepared(&settings(&["ssh"])));
         assert_eq!(plain[0], "--stats");
         assert!(
@@ -914,7 +916,7 @@ mod tests {
         both.remote_rsync = Some("rsync".to_string());
         let both = argv(&prepared(&both));
         assert_eq!(
-            both[6..],
+            both[7..],
             [
                 "--rsync-path=rsync",
                 "--partial-dir=.antiq-partial",
@@ -1175,6 +1177,7 @@ total size is 2568  speedup is 0.96\n";
                 "--stats",
                 "--no-human-readable",
                 "--no-whole-file",
+                "--ignore-times",
                 "--timeout=13",
                 "-e",
                 "'ssh' '-p' '2222'",
@@ -1335,5 +1338,36 @@ total size is 2568  speedup is 0.96\n";
             ),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_source_with_the_size_and_time_of_the_destination_still_replaces_it() {
+        let rsync = Rsync::resolve(None, &std::env::var_os("PATH").expect("PATH"))
+            .expect("these tests need an rsync 3.1 or later");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        fs::write(&source, "new bytes").expect("source");
+        fs::write(&destination, "old bytes").expect("destination");
+        let same_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&source, &destination] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_modified(same_time)
+                .expect("mtime");
+        }
+        let settings = TransferSettings {
+            ssh_command: vec!["ssh".into()],
+            timeout_seconds: 30,
+            remote_rsync: None,
+            resumable: false,
+        };
+        rsync
+            .transfer(&settings, source.as_os_str(), destination.as_os_str())
+            .run()
+            .expect("rsync runs");
+        assert_eq!(fs::read(&destination).expect("destination"), b"new bytes");
     }
 }
