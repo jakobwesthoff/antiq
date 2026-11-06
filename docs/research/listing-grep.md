@@ -214,3 +214,20 @@ listings take 2.99 GB plain and 0.92 GB as zstd.
 | `grep-reader` `lit` | 375 ms | 71 ms | 1.97 s | 221 ms |
 | `grep-reader` `ci` | 681 ms | 102 ms | 2.24 s | 251 ms |
 | `grep-reader` `re` | 920 ms | 368 ms | 2.49 s | 405 ms |
+
+## Cold page cache with the prefiltered search
+
+A third set `D` (298 471 180 bytes plain, 92 150 306 bytes zstd, written
+with `F_NOCACHE` like the others) searched with `regex`, hash lines,
+literal `scanner` (91 226 hits), runs 1 to 3 in order without warm-up,
+milliseconds. Run 1 is cold. Two combinations only, so that each file set
+is read cold once.
+
+| Files | Threads | Run 1 (cold) | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: | ---: |
+| zstd | 14 | 56.9 | 28.2 | 22.2 |
+| plain | 1 | 65.2 | 29.0 | 29.1 |
+
+The cold run took 34.7 ms (zstd, 14 threads) and 36.2 ms (plain, one
+thread) more than the best warm run. Times 10 (not measured at that size)
+the cold runs are 569 ms (zstd, 14 threads) and 652 ms (plain, 1 thread).
