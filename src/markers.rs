@@ -235,8 +235,8 @@ pub(crate) fn ensure_same_device(
 /// Writes the marker `name` with `content` at `top`.
 ///
 /// The content is written and flushed in `.antiq/tmp/`, then renamed over
-/// the marker's place, then the top is flushed. A failure on the way
-/// leaves the temp file in `tmp/`. A top on another device than `tmp/`
+/// the marker's place, then the top is flushed. A failure up to and including
+/// the rename removes the temp file. A top on another device than `tmp/`
 /// is refused before anything is written, and so is an entry at the
 /// marker's place that is no file.
 pub(crate) fn put(
@@ -253,24 +253,32 @@ pub(crate) fn put(
 
     let tmp = RelPath::parse(TMP).expect("the temporary folder is a valid path");
     let (temp, mut file) = create_temp(root, &tmp, name)?;
-    file.write_all(content)
-        .map_err(failure("write", root, &temp))?;
-    site.durable().file(&file, &named(root, &temp))?;
-    drop(file);
-    site.before_rename()
-        .map_err(failure("rename", root, &marker))?;
+    let placed = (|| {
+        file.write_all(content)
+            .map_err(failure("write", root, &temp))?;
+        site.durable().file(&file, &named(root, &temp))?;
+        drop(file);
+        site.before_rename()
+            .map_err(failure("rename", root, &marker))?;
 
-    with_owner_write(root, top, site, || {
-        site.rename(root, &temp, &marker).map_err(|error| {
-            if error.raw_os_error() == Some(Errno::XDEV.raw_os_error()) {
-                MarkerError::MountPoint {
-                    path: root.prefix().concat(top),
+        with_owner_write(root, top, site, || {
+            site.rename(root, &temp, &marker).map_err(|error| {
+                if error.raw_os_error() == Some(Errno::XDEV.raw_os_error()) {
+                    MarkerError::MountPoint {
+                        path: root.prefix().concat(top),
+                    }
+                } else {
+                    failure("rename", root, &marker)(error).into()
                 }
-            } else {
-                failure("rename", root, &marker)(error).into()
-            }
+            })
         })
-    })?;
+    })();
+    if let Err(error) = placed {
+        // The failure being reported matters more than a temp file that
+        // cannot be removed either; the next run empties `tmp/`.
+        let _ = root.remove_file(&temp);
+        return Err(error);
+    }
     Ok(flush_dir_of(site.durable(), root, top)?)
 }
 
@@ -515,6 +523,7 @@ mod tests {
         recording: Recording,
         other_device: bool,
         crash_before_rename: bool,
+        fail_before_rename: bool,
         rename_errno: Cell<Option<i32>>,
         unlink_fails: bool,
         /// Which calls of `set_mode` fail, counted from 0.
@@ -539,7 +548,10 @@ mod tests {
 
         fn before_rename(&self) -> io::Result<()> {
             if self.crash_before_rename {
-                return Err(io::Error::other("the process died"));
+                panic!("the process died");
+            }
+            if self.fail_before_rename {
+                return Err(io::Error::other("the volume is full"));
             }
             Ok(())
         }
@@ -715,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_rename_still_puts_the_mode_back_and_leaves_the_temp() {
+    fn a_failed_rename_still_puts_the_mode_back_and_removes_the_temp() {
         let tree = collection();
         let _restore = read_only_top(&tree);
         let probe = Probe::default();
@@ -730,7 +742,7 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o7777, 0o555);
-        assert_eq!(temp_leftovers(&tree).len(), 1);
+        assert!(temp_leftovers(&tree).is_empty());
         assert!(!tree.path("p/.antiq-restored").exists());
         assert_eq!(
             probe.recording.flushes().len(),
@@ -794,10 +806,28 @@ mod tests {
             ..Probe::default()
         };
 
-        put(&open(&tree), &path("p"), ".antiq-restored", b"x\n", &probe)
-            .expect_err("the process dies");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            put(&open(&tree), &path("p"), ".antiq-restored", b"x\n", &probe)
+        }));
 
+        assert!(outcome.is_err(), "the process dies");
         assert_eq!(temp_leftovers(&tree).len(), 1);
+        assert!(top_entries(&tree).is_empty());
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_removes_the_temp_and_leaves_the_top_alone() {
+        let tree = collection();
+        let probe = Probe {
+            fail_before_rename: true,
+            ..Probe::default()
+        };
+
+        let error = put(&open(&tree), &path("p"), ".antiq-restored", b"x\n", &probe)
+            .expect_err("the volume is full");
+
+        assert!(error.to_string().contains("rename"), "{error}");
+        assert!(temp_leftovers(&tree).is_empty());
         assert!(top_entries(&tree).is_empty());
     }
 
@@ -846,7 +876,7 @@ mod tests {
             .expect_err("the rename crosses devices");
 
         assert!(matches!(error, MarkerError::MountPoint { .. }), "{error}");
-        assert_eq!(temp_leftovers(&tree).len(), 1);
+        assert!(temp_leftovers(&tree).is_empty());
     }
 
     #[test]

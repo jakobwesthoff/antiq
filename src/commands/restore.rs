@@ -8,14 +8,22 @@
 
 use crate::archive::TargetRules;
 use crate::archive::extract::ExtractionFlush;
+use crate::archive::extract::unpack_flushed;
 use crate::archive::names::{MemberName, check_members};
+use crate::archive::verify::compare_with_listing;
+use crate::archive::{PackError, WalkRules};
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
+use crate::filesystem::atomic::{create_dir_chain, flush_dir_of, named};
+use crate::filesystem::moves::{self, Moved};
+use crate::filesystem::remove::remove_tree;
+use crate::filesystem::space;
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::{self, Listing, ListingEntry, ListingError, ListingType};
-use crate::markers::RESTORED_FILE;
+use crate::markers::{self, Restored};
+use crate::markers::{MarkerError, RESTORED_FILE, RealSite, Site};
 use crate::pin::PIN_FILE;
 use crate::reference::{self, CandidateSet, ReferenceError};
 use crate::relpath::{Name, RelPath};
@@ -26,11 +34,13 @@ use crate::versions::damage::{self, Check, Condition, Places};
 use crate::versions::naming::{self, Candidate, Lookup};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use rustix::io::Errno;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -88,11 +98,19 @@ pub enum RestoreError {
         problem: TargetProblem,
     },
     #[error("cannot {action} `{path}`: {source}")]
-    Look {
+    Io {
         action: &'static str,
         path: String,
         source: io::Error,
     },
+    #[error("{0}")]
+    Filesystem(#[from] FilesystemError),
+    #[error("{0}")]
+    Marker(#[from] MarkerError),
+    #[error("cannot extract the archive: {0}")]
+    Pack(#[from] PackError),
+    #[error("the extracted tree differs from the listing: {}", differences.join("; "))]
+    Differs { differences: Vec<String> },
 }
 
 impl HasKind for RestoreError {
@@ -312,6 +330,7 @@ pub enum TargetProblem {
     SpelledDifferently { at: RelPath },
     Taken,
     Unholdable { reason: String },
+    MountPoint,
 }
 
 impl std::fmt::Display for TargetProblem {
@@ -330,6 +349,9 @@ impl std::fmt::Display for TargetProblem {
             }
             TargetProblem::Taken => f.write_str("it is taken"),
             TargetProblem::Unholdable { reason } => f.write_str(reason),
+            TargetProblem::MountPoint => {
+                f.write_str("it is on another volume than `.antiq/tmp/`: mount point")
+            }
         }
     }
 }
@@ -426,7 +448,7 @@ fn look_at(root: &TreeRoot, path: &RelPath) -> Result<Option<TreeEntry>, Restore
         {
             Ok(None)
         }
-        Err(source) => Err(RestoreError::Look {
+        Err(source) => Err(RestoreError::Io {
             action: "look at",
             path: path.to_string(),
             source,
@@ -701,6 +723,362 @@ impl ExtractionFlush for TreeFlush {
             Method::Barrier => self.cheap(directory),
         }
     }
+}
+
+// =========================================================
+// Bringing a version back
+// =========================================================
+
+/// The points of `bring_back` at which a test looks at the disk or makes
+/// the run stop, as a crash would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    SpaceChecked,
+    StagingMade,
+    Extracted,
+    Verified,
+    MarkerWritten,
+    Flushed,
+    Renamed,
+    ParentFlushed,
+}
+
+/// Everything `bring_back` takes from the system. The real one is
+/// [`RealHooks`]; tests override single parts.
+pub(crate) trait Hooks {
+    /// Called after each step. An error ends the run there.
+    fn reached(&self, _step: Step) -> Result<(), RestoreError> {
+        Ok(())
+    }
+    fn available_space(&self, path: &Path) -> Result<u64, FilesystemError> {
+        space::available_space(path)
+    }
+    fn platform(&self) -> Platform {
+        Platform::real()
+    }
+    fn durable(&self) -> &dyn Durable {
+        &RealDurable
+    }
+    fn site(&self) -> &dyn Site {
+        &RealSite
+    }
+    fn device(&self, root: &TreeRoot, path: &RelPath) -> io::Result<u64> {
+        Ok(root.lstat(path)?.device)
+    }
+    fn move_dir(
+        &self,
+        root: &TreeRoot,
+        from: &RelPath,
+        to: &RelPath,
+    ) -> Result<Moved, FilesystemError> {
+        moves::move_dir(root, from, root, to)
+    }
+    /// What the volume of `staged` can hold.
+    fn target_rules(&self, staged: &TreeRoot) -> io::Result<TargetRules> {
+        TargetRules::probe(staged)
+    }
+}
+
+pub(crate) struct RealHooks;
+
+impl Hooks for RealHooks {}
+
+/// Why a version was not brought back although nothing is wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Skipped {
+    NoSpace { needed: u64, available: u64 },
+}
+
+/// What `bring_back` did.
+#[derive(Debug)]
+pub(crate) enum Brought {
+    /// The folder is in place. `time` is what `.antiq-restored` holds.
+    Done {
+        time: Timestamp,
+        warnings: Vec<String>,
+    },
+    Skipped {
+        reason: Skipped,
+        warnings: Vec<String>,
+    },
+}
+
+/// What a failed attempt to place the version leaves for the cleanup to
+/// remove.
+#[derive(Default)]
+struct Placed {
+    /// The staging folder, once it is made.
+    staged: Option<RelPath>,
+    /// The folders above the destination that this run creates.
+    created: Vec<RelPath>,
+    /// Set when the staged tree has been renamed to the destination: from
+    /// then on the folder is in place and nothing is taken back.
+    renamed: bool,
+    warnings: Vec<String>,
+}
+
+fn io_at(action: &'static str, path: impl ToString) -> impl FnOnce(io::Error) -> RestoreError {
+    let path = path.to_string();
+    move |source| RestoreError::Io {
+        action,
+        path,
+        source,
+    }
+}
+
+/// The most differences an error message lists.
+const DIFFERENCES_SHOWN: usize = 20;
+
+/// The differences as the error lists them: the first ones, and how many
+/// more there are.
+fn summarize(mut differences: Vec<String>) -> Vec<String> {
+    if differences.len() > DIFFERENCES_SHOWN {
+        let more = differences.len() - DIFFERENCES_SHOWN;
+        differences.truncate(DIFFERENCES_SHOWN);
+        differences.push(format!("and {more} more"));
+    }
+    differences
+}
+
+/// Brings the chosen version back as a folder at the piece's own path:
+/// extracts it into staging below `.antiq/tmp/extract/`, compares the tree
+/// with the listing, writes `.antiq-restored`, makes the tree durable,
+/// renames it into place and flushes what the rename changed. The version
+/// is not touched. Whatever fails before the rename removes the staging
+/// and the folders above the destination that this run made.
+///
+/// A full volume anywhere before the rename ends in [`Brought::Skipped`]
+/// with nothing left behind. After the rename the folder is in place and a
+/// failure is an error.
+pub(crate) fn bring_back(
+    collection: &Collection,
+    places: &Places,
+    rules: &Rules,
+    chosen: &Chosen,
+    marker_version: Option<Stamp>,
+    now: Timestamp,
+    hooks: &dyn Hooks,
+) -> Result<Brought, RestoreError> {
+    let root =
+        TreeRoot::open(collection.root()).map_err(io_at("open", collection.root().display()))?;
+    let needed = chosen.listing.bytes;
+    let tmp = collection.tmp_dir();
+    let available = hooks.available_space(&tmp)?;
+    if available < needed {
+        return Ok(Brought::Skipped {
+            reason: Skipped::NoSpace { needed, available },
+            warnings: Vec::new(),
+        });
+    }
+    hooks.reached(Step::SpaceChecked)?;
+
+    let mut placed = Placed::default();
+    let result = place(
+        collection,
+        places,
+        rules,
+        chosen,
+        marker_version,
+        now,
+        hooks,
+        &root,
+        &mut placed,
+    );
+    match result {
+        Ok(time) => Ok(Brought::Done {
+            time,
+            warnings: placed.warnings,
+        }),
+        Err(error) if placed.renamed => Err(error),
+        Err(error) => {
+            take_back(&root, &mut placed);
+            if space::is_out_of_space(&error) {
+                Ok(Brought::Skipped {
+                    reason: Skipped::NoSpace {
+                        needed,
+                        available: hooks.available_space(&tmp).unwrap_or(0),
+                    },
+                    warnings: placed.warnings,
+                })
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Removes the staging and the folders this run made above the
+/// destination, deepest first. A folder that cannot be removed stays; the
+/// staging is a warning as the next run empties `.antiq/tmp/`.
+fn take_back(root: &TreeRoot, placed: &mut Placed) {
+    if let Some(staged) = &placed.staged
+        && let Err(error) = remove_tree(root, staged)
+    {
+        placed.warnings.push(format!(
+            "cannot remove the staging folder `{staged}`: {error}; the next run empties it"
+        ));
+    }
+    for parent in placed.created.iter().rev() {
+        let _ = root.remove_dir(parent);
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is one input of the run"
+)]
+fn place(
+    collection: &Collection,
+    places: &Places,
+    rules: &Rules,
+    chosen: &Chosen,
+    marker_version: Option<Stamp>,
+    now: Timestamp,
+    hooks: &dyn Hooks,
+    root: &TreeRoot,
+    placed: &mut Placed,
+) -> Result<Timestamp, RestoreError> {
+    let target = &chosen.piece;
+    let extract = RelPath::parse(".antiq/tmp/extract").expect("a valid path");
+    create_dir_chain(hooks.durable(), root, &extract)?;
+    let staged = make_staging(root, &extract)?;
+    placed.staged = Some(staged.clone());
+    hooks.reached(Step::StagingMade)?;
+
+    // The rules of the volume the tree is extracted to, and with them the
+    // checks on the destination, come before the first byte is written.
+    let staging = root.sub(&staged).map_err(io_at("open", &staged))?;
+    let volume = hooks
+        .target_rules(&staging)
+        .map_err(io_at("probe the volume of", &staged))?;
+    let missing = check_destination(root, rules, target)?;
+    check_destination_names(target, &missing, &volume)?;
+    check_same_volume(root, hooks, &extract, target, &missing)?;
+
+    let archive_name = chosen
+        .version
+        .archives
+        .first()
+        .expect("a sound version has an archive");
+    let archive = places
+        .pieces_dir
+        .join(OsStr::from_bytes(target.as_bytes()))
+        .join(archive_name);
+    let flush = TreeFlush::begin_with(&collection.tmp_dir().join("extract"), hooks.platform())
+        .map_err(io_at("start the flush in", &extract))?;
+    let unpacked = unpack_flushed(&archive, &staging, &volume, &flush)?;
+    hooks.reached(Step::Extracted)?;
+
+    let compared = compare_with_listing(
+        &chosen.listing.entries,
+        &staging,
+        &WalkRules {
+            staged: true,
+            ..WalkRules::default()
+        },
+    )?;
+    if !compared.differences().is_empty() {
+        return Err(RestoreError::Differs {
+            differences: summarize(
+                compared
+                    .differences()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            ),
+        });
+    }
+    hooks.reached(Step::Verified)?;
+
+    let time = Timestamp::from_second(now.as_second()).expect("a whole second of a time is valid");
+    let marker = Restored {
+        time,
+        version: marker_version,
+    };
+    markers::put(
+        root,
+        &staged,
+        RESTORED_FILE,
+        marker.render().as_bytes(),
+        hooks.site(),
+    )?;
+    hooks.reached(Step::MarkerWritten)?;
+
+    // The top gets its archived mode last and is flushed through a handle
+    // opened before, which stays valid when the mode keeps the owner out
+    // and after the rename.
+    let top = root
+        .open_dir_file(&staged)
+        .map_err(io_at("open", &staged))?;
+    root.set_mode(&staged, unpacked.top_mode & 0o7777)
+        .map_err(io_at("set the mode of", &staged))?;
+    hooks.durable().dir(&top, &named(root, &staged))?;
+    flush
+        .finish()
+        .map_err(io_at("flush the volume of", &extract))?;
+    hooks.reached(Step::Flushed)?;
+
+    // The world may have changed since the first check.
+    let missing = check_destination(root, rules, target)?;
+    check_destination_names(target, &missing, &volume)?;
+    let parent = parent_of(target);
+    placed.created = missing;
+    if !placed.created.is_empty() {
+        create_dir_chain(hooks.durable(), root, &parent)?;
+    }
+    let moved = hooks.move_dir(root, &staged, target)?;
+    placed.renamed = true;
+    if let Some(error) = moved.mode_restore_error {
+        placed.warnings.push(error.to_string());
+    }
+    hooks.reached(Step::Renamed)?;
+
+    hooks.durable().dir(&top, &named(root, target))?;
+    flush_dir_of(hooks.durable(), root, &parent)?;
+    hooks.reached(Step::ParentFlushed)?;
+    Ok(time)
+}
+
+/// Makes the first unused numbered folder below `extract`.
+fn make_staging(root: &TreeRoot, extract: &RelPath) -> Result<RelPath, RestoreError> {
+    for number in 1_u64.. {
+        let name = Name::from_bytes(number.to_string().into_bytes()).expect("digits are a name");
+        let staged = extract.join(&name);
+        match root.create_dir(&staged, 0o700) {
+            Ok(()) => return Ok(staged),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io_at("create", &staged)(error)),
+        }
+    }
+    unreachable!("a u64 counter does not run out")
+}
+
+/// The folder that holds `path`.
+fn parent_of(path: &RelPath) -> RelPath {
+    ancestors(path).pop().unwrap_or_else(RelPath::root)
+}
+
+/// Refuses a destination whose nearest existing folder is on another
+/// volume than the staging, as the rename could not cross it.
+fn check_same_volume(
+    root: &TreeRoot,
+    hooks: &dyn Hooks,
+    extract: &RelPath,
+    target: &RelPath,
+    missing: &[RelPath],
+) -> Result<(), RestoreError> {
+    let nearest = ancestors(target)
+        .into_iter()
+        .rfind(|ancestor| !missing.contains(ancestor))
+        .unwrap_or_else(RelPath::root);
+    let device = |path: &RelPath| hooks.device(root, path).map_err(io_at("look at", path));
+    if device(&nearest)? != device(extract)? {
+        return Err(RestoreError::Target {
+            path: target.clone(),
+            problem: TargetProblem::MountPoint,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1540,7 +1918,7 @@ mod destination_tests {
             .check(&rules(&["projects/*/*"], &[]), "projects/a/b")
             .expect_err("unreadable")
         {
-            RestoreError::Look { path, .. } => assert_eq!(path, "projects/a"),
+            RestoreError::Io { path, .. } => assert_eq!(path, "projects/a"),
             other => panic!("expected a look error, got {other:?}"),
         }
     }
@@ -1567,7 +1945,7 @@ mod destination_tests {
         .expect("mode");
         assert!(matches!(
             result.expect_err("unreadable"),
-            RestoreError::Look { .. }
+            RestoreError::Io { .. }
         ));
     }
 
@@ -1654,5 +2032,891 @@ mod destination_tests {
     fn plain_names_pass_on_a_decomposing_volume() {
         check_destination_names(&rel("projects/a"), &[rel("projects")], &volume(true, 255))
             .expect("accepted");
+    }
+}
+
+#[cfg(test)]
+mod bring_tests {
+    use super::*;
+    use crate::archive::names::{LengthUnit, NameLimit};
+    use crate::testing::tree::{TempCollection, Tree, snapshot};
+    use crate::testing::versions::Store;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    const STAMP: &str = "2026-11-04T090211";
+    const MTIME: i64 = 1_700_000_000;
+
+    type Log = Arc<Mutex<Vec<String>>>;
+    type Fault = Arc<dyn Fn(&str, &Path) -> Option<io::Error> + Send + Sync>;
+    type Callback = Box<dyn Fn() -> Result<(), RestoreError>>;
+
+    fn rel(text: &str) -> RelPath {
+        RelPath::parse(text).expect("a valid test path")
+    }
+
+    fn enospc() -> io::Error {
+        io::Error::from_raw_os_error(Errno::NOSPC.raw_os_error())
+    }
+
+    fn at_error(action: &'static str) -> RestoreError {
+        RestoreError::Io {
+            action,
+            path: String::new(),
+            source: enospc(),
+        }
+    }
+
+    /// A durable that logs what it is asked to flush and fails where the
+    /// test says so.
+    #[derive(Clone)]
+    struct Flaky {
+        log: Option<Log>,
+        fault: Fault,
+    }
+
+    impl Durable for Flaky {
+        fn file(&self, _file: &File, path: &Path) -> Result<(), FilesystemError> {
+            self.flush("file", path)
+        }
+        fn dir(&self, _dir: &File, path: &Path) -> Result<(), FilesystemError> {
+            self.flush("dir", path)
+        }
+    }
+
+    impl Flaky {
+        fn flush(&self, kind: &str, path: &Path) -> Result<(), FilesystemError> {
+            if let Some(log) = &self.log {
+                log.lock()
+                    .expect("log")
+                    .push(format!("{kind} {}", path.display()));
+            }
+            match (self.fault)(kind, path) {
+                Some(source) => Err(FilesystemError::Io {
+                    action: "flush",
+                    path: path.display().to_string(),
+                    source,
+                }),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// How the tree is flushed: with one barrier, or item by item.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Barrier,
+        PerItem,
+    }
+
+    struct Spy {
+        root: PathBuf,
+        log: Log,
+        callbacks: Vec<(Step, Callback)>,
+        mode: Mode,
+        space: Option<u64>,
+        durable: Flaky,
+        barrier_fault: Option<io::Error>,
+        move_fault: Option<fn() -> FilesystemError>,
+        volume: Option<TargetRules>,
+        device: Option<fn(&RelPath) -> u64>,
+        before_rename_fault: bool,
+    }
+
+    impl Spy {
+        fn new(root: &Path) -> Spy {
+            let log: Log = Arc::default();
+            Spy {
+                root: root.to_path_buf(),
+                log: log.clone(),
+                callbacks: Vec::new(),
+                mode: Mode::Barrier,
+                space: None,
+                durable: Flaky {
+                    log: None,
+                    fault: Arc::new(|_, _| None),
+                },
+                barrier_fault: None,
+                move_fault: None,
+                volume: None,
+                device: None,
+                before_rename_fault: false,
+            }
+        }
+
+        fn on(mut self, step: Step, run: impl Fn() -> Result<(), RestoreError> + 'static) -> Spy {
+            self.callbacks.push((step, Box::new(run)));
+            self
+        }
+
+        fn fault(
+            mut self,
+            fault: impl Fn(&str, &Path) -> Option<io::Error> + Send + Sync + 'static,
+        ) -> Spy {
+            self.durable.fault = Arc::new(fault);
+            self
+        }
+
+        fn logging_flushes(mut self) -> Spy {
+            self.durable.log = Some(self.log.clone());
+            self
+        }
+
+        fn entries(&self) -> Vec<String> {
+            self.log.lock().expect("log").clone()
+        }
+    }
+
+    struct SpySite<'a>(&'a Spy);
+
+    impl Site for SpySite<'_> {
+        fn durable(&self) -> &dyn Durable {
+            &self.0.durable
+        }
+        fn before_rename(&self) -> io::Result<()> {
+            if self.0.before_rename_fault {
+                Err(enospc())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Hooks for Spy {
+        fn reached(&self, step: Step) -> Result<(), RestoreError> {
+            self.log.lock().expect("log").push(format!("{step:?}"));
+            for (at, run) in &self.callbacks {
+                if *at == step {
+                    run()?;
+                }
+            }
+            Ok(())
+        }
+
+        fn available_space(&self, path: &Path) -> Result<u64, FilesystemError> {
+            match self.space {
+                Some(space) => Ok(space),
+                None => space::available_space(path),
+            }
+        }
+
+        fn platform(&self) -> Platform {
+            let log = self.log.clone();
+            let barrier_fault = self.barrier_fault.as_ref().map(|e| e.raw_os_error());
+            let calls = Arc::new(Mutex::new(0));
+            let extract = self.root.join(".antiq/tmp/extract");
+            let barrier: Barrier = Box::new(move |file: &File| {
+                let mut calls = calls.lock().expect("calls");
+                *calls += 1;
+                let device = file.metadata().expect("probe metadata").dev();
+                let expected = fs::metadata(&extract).expect("extract dir").dev();
+                log.lock().expect("log").push(if device == expected {
+                    "barrier".to_string()
+                } else {
+                    "barrier on another volume".to_string()
+                });
+                // The first call is the try of `begin`.
+                match barrier_fault {
+                    Some(code) if *calls > 1 => {
+                        Err(io::Error::from_raw_os_error(code.expect("an errno")))
+                    }
+                    _ => Ok(()),
+                }
+            });
+            match self.mode {
+                Mode::Barrier => Platform {
+                    os: System::Linux,
+                    kernel: Some((6, 1)),
+                    barrier,
+                    durable: Box::new(self.durable.clone()),
+                },
+                Mode::PerItem => Platform {
+                    os: System::Other,
+                    kernel: None,
+                    barrier,
+                    durable: Box::new(self.durable.clone()),
+                },
+            }
+        }
+
+        fn durable(&self) -> &dyn Durable {
+            &self.durable
+        }
+
+        fn site(&self) -> &dyn Site {
+            // Leaked once per call; the value is two words and tests are short.
+            Box::leak(Box::new(SpySite(self)))
+        }
+
+        fn device(&self, root: &TreeRoot, path: &RelPath) -> io::Result<u64> {
+            match self.device {
+                Some(device) => Ok(device(path)),
+                None => Ok(root.lstat(path)?.device),
+            }
+        }
+
+        fn target_rules(&self, staged: &TreeRoot) -> io::Result<TargetRules> {
+            match &self.volume {
+                Some(rules) => Ok(rules.clone()),
+                None => TargetRules::probe(staged),
+            }
+        }
+
+        fn move_dir(
+            &self,
+            root: &TreeRoot,
+            from: &RelPath,
+            to: &RelPath,
+        ) -> Result<Moved, FilesystemError> {
+            match self.move_fault {
+                Some(fault) => Err(fault()),
+                None => moves::move_dir(root, from, root, to),
+            }
+        }
+    }
+
+    fn piece_source() -> Tree {
+        let mut tree = Tree::new();
+        tree.file_with("projects/scanner/main.rs", "fn main() {}", 0o644, MTIME);
+        tree.file_with(
+            "projects/scanner/src/lib.rs",
+            "pub fn f() {}",
+            0o755,
+            MTIME + 60,
+        );
+        tree.symlink("projects/scanner/link", "main.rs");
+        tree.hard_link("projects/scanner/main.rs", "projects/scanner/copy.rs");
+        tree.dir("projects/scanner/empty");
+        tree
+    }
+
+    struct World {
+        collection: TempCollection,
+        store: Store,
+        source: Tree,
+        rules: Rules,
+        now: Timestamp,
+    }
+
+    impl World {
+        fn new() -> World {
+            let source = piece_source();
+            let mut store = Store::new();
+            store.add_version(&source, "projects/scanner", STAMP);
+            World {
+                collection: TempCollection::minimal(),
+                store,
+                source,
+                rules: Rules::new(&["projects/*".to_string()], &[]).expect("rules"),
+                now: "2026-11-05T10:00:00.7Z".parse().expect("a time"),
+            }
+        }
+
+        fn root(&self) -> &Path {
+            self.collection.root()
+        }
+
+        fn destination(&self) -> PathBuf {
+            self.root().join("projects/scanner")
+        }
+
+        fn extract_dir(&self) -> PathBuf {
+            self.root().join(".antiq/tmp/extract")
+        }
+
+        fn spy(&self) -> Spy {
+            Spy::new(self.root())
+        }
+
+        fn run(&self, hooks: &dyn Hooks) -> Result<Brought, RestoreError> {
+            let collection = Collection::find(self.root()).expect("collection");
+            let places = self.store.places();
+            let chosen = choose_version(
+                &collection,
+                &places,
+                self.root(),
+                OsStr::new("projects/scanner"),
+                None,
+                &TimeZone::UTC,
+            )
+            .expect("the version is chosen");
+            let rules = self
+                .rules
+                .clone()
+                .bind(&TreeRoot::open(self.root()).expect("root"))
+                .expect("bound");
+            bring_back(
+                &collection,
+                &places,
+                &rules,
+                &chosen,
+                Some(chosen.stamp),
+                self.now,
+                hooks,
+            )
+        }
+
+        fn left_in_extract(&self) -> Vec<String> {
+            match fs::read_dir(self.extract_dir()) {
+                Ok(items) => items
+                    .map(|item| {
+                        item.expect("item")
+                            .file_name()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+    }
+
+    fn done(result: Result<Brought, RestoreError>) -> (Timestamp, Vec<String>) {
+        match result.expect("the version comes back") {
+            Brought::Done { time, warnings } => (time, warnings),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    fn skipped(result: Result<Brought, RestoreError>) -> Skipped {
+        match result.expect("the run ends without an error") {
+            Brought::Skipped { reason, .. } => reason,
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_tree_comes_back_with_content_modes_times_links_and_parents() {
+        let world = World::new();
+        done(world.run(&world.spy()));
+        let mut expected = snapshot(&world.source.path("projects/scanner"));
+        let mut found = snapshot(&world.destination());
+        assert!(found.remove(".antiq-restored").is_some());
+        expected.remove(".antiq-restored");
+        assert_eq!(found, expected);
+        let main = fs::metadata(world.destination().join("main.rs")).expect("main.rs");
+        assert_eq!(main.mtime(), MTIME);
+        assert_eq!(main.nlink(), 2, "the hard link is a hard link again");
+        assert_eq!(
+            fs::read_link(world.destination().join("link")).expect("link"),
+            Path::new("main.rs")
+        );
+        assert!(world.destination().join("empty").is_dir());
+    }
+
+    #[test]
+    fn the_marker_holds_the_time_and_the_version_and_staging_is_empty() {
+        let world = World::new();
+        let (time, warnings) = done(world.run(&world.spy()));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(time.to_string(), "2026-11-05T10:00:00Z");
+        assert_eq!(
+            fs::read_to_string(world.destination().join(".antiq-restored")).expect("marker"),
+            format!("restored 2026-11-05T10:00:00Z version {STAMP}\n")
+        );
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_steps_come_in_order_and_the_barrier_runs_before_the_rename() {
+        let world = World::new();
+        let root = world.root().to_path_buf();
+        let destination = world.destination();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (at_flushed, at_renamed) = (seen.clone(), seen.clone());
+        let (d1, d2) = (destination.clone(), destination.clone());
+        let spy = world
+            .spy()
+            .logging_flushes()
+            .on(Step::Flushed, move || {
+                at_flushed
+                    .lock()
+                    .expect("seen")
+                    .push(format!("destination at Flushed: {}", d1.exists()));
+                Ok(())
+            })
+            .on(Step::Renamed, move || {
+                at_renamed.lock().expect("seen").push(format!(
+                    "destination at Renamed: {}, staged left: {}",
+                    d2.exists(),
+                    root.join(".antiq/tmp/extract/1").exists()
+                ));
+                Ok(())
+            });
+        done(world.run(&spy));
+        let log = spy.entries();
+        let steps: Vec<&str> = log
+            .iter()
+            .map(String::as_str)
+            .filter(|entry| !entry.starts_with("dir ") && !entry.starts_with("file "))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "SpaceChecked",
+                "StagingMade",
+                "barrier",
+                "Extracted",
+                "Verified",
+                "MarkerWritten",
+                "barrier",
+                "Flushed",
+                "Renamed",
+                "ParentFlushed"
+            ]
+        );
+        let renamed = log.iter().position(|e| e == "Renamed").expect("Renamed");
+        assert_eq!(
+            &log[renamed..],
+            [
+                "Renamed",
+                "dir projects/scanner",
+                "dir projects",
+                "ParentFlushed"
+            ]
+        );
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            [
+                "destination at Flushed: false",
+                "destination at Renamed: true, staged left: false"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_per_item_method_flushes_every_file_and_directory_and_no_barrier() {
+        let world = World::new();
+        let mut spy = world.spy().logging_flushes();
+        spy.mode = Mode::PerItem;
+        done(world.run(&spy));
+        let log = spy.entries();
+        assert!(log.iter().any(|e| e == "file src/lib.rs"), "{log:?}");
+        assert!(log.iter().any(|e| e == "dir src"), "{log:?}");
+        assert_eq!(
+            log.iter().filter(|e| e.starts_with("barrier")).count(),
+            1,
+            "only the try"
+        );
+    }
+
+    #[test]
+    fn a_file_changed_after_the_extraction_refuses_and_nothing_moves() {
+        let world = World::new();
+        let staged = world.extract_dir().join("1/main.rs");
+        let spy = world.spy().on(Step::Extracted, move || {
+            fs::write(&staged, "fn xxxx() {}").expect("changes the file");
+            Ok(())
+        });
+        let error = world.run(&spy).expect_err("the tree differs");
+        assert!(matches!(error, RestoreError::Differs { .. }), "{error:?}");
+        assert!(!world.root().join("projects").exists());
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_destination_taken_after_the_check_is_refused_and_staging_goes() {
+        let world = World::new();
+        let destination = world.destination();
+        let spy = world.spy().on(Step::Flushed, move || {
+            fs::create_dir_all(&destination).expect("takes the place");
+            Ok(())
+        });
+        match world.run(&spy).expect_err("taken") {
+            RestoreError::Target { problem, .. } => assert_eq!(problem, TargetProblem::Taken),
+            other => panic!("expected taken, got {other:?}"),
+        }
+        assert_eq!(fs::read_dir(world.destination()).expect("lists").count(), 0);
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_symlink_above_the_destination_after_the_verify_is_refused() {
+        let world = World::new();
+        let elsewhere = Tree::new();
+        let (link, target) = (
+            world.root().join("projects"),
+            elsewhere.root().to_path_buf(),
+        );
+        let spy = world.spy().on(Step::Verified, move || {
+            std::os::unix::fs::symlink(&target, &link).expect("link");
+            Ok(())
+        });
+        match world.run(&spy).expect_err("refused") {
+            RestoreError::Target { problem, .. } => {
+                assert_eq!(
+                    problem,
+                    TargetProblem::NotAFolder {
+                        at: rel("projects")
+                    }
+                );
+            }
+            other => panic!("expected a target problem, got {other:?}"),
+        }
+        assert_eq!(fs::read_dir(elsewhere.root()).expect("lists").count(), 0);
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failing_rename_removes_the_parents_this_run_made() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.move_fault = Some(|| FilesystemError::Locked { path: "x".into() });
+        let error = world.run(&spy).expect_err("the rename fails");
+        assert!(matches!(error, RestoreError::Filesystem(_)), "{error:?}");
+        assert!(!world.root().join("projects").exists());
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failing_rename_leaves_parents_that_existed() {
+        let mut world = World::new();
+        world.collection.tree().dir("projects");
+        let mut spy = world.spy();
+        spy.move_fault = Some(|| FilesystemError::Locked { path: "x".into() });
+        world.run(&spy).expect_err("the rename fails");
+        assert!(world.root().join("projects").is_dir());
+    }
+
+    #[test]
+    fn parents_that_cannot_be_made_durable_are_removed_again() {
+        let mut world = World::new();
+        world.rules = Rules::new(&["projects/*/*".to_string()], &[]).expect("rules");
+        let source = {
+            let mut tree = piece_source();
+            tree.file("projects/team/scanner/x", "x");
+            tree
+        };
+        let mut store = Store::new();
+        store.add_version(&source, "projects/team/scanner", STAMP);
+        world.store = store;
+        let spy = world.spy().fault(|kind, path| {
+            (kind == "dir" && path == Path::new("projects/team"))
+                .then(|| io::Error::from_raw_os_error(Errno::IO.raw_os_error()))
+        });
+        let collection = Collection::find(world.root()).expect("collection");
+        let chosen = choose_version(
+            &collection,
+            &world.store.places(),
+            world.root(),
+            OsStr::new("projects/team/scanner"),
+            None,
+            &TimeZone::UTC,
+        )
+        .expect("chosen");
+        let rules = world
+            .rules
+            .clone()
+            .bind(&TreeRoot::open(world.root()).expect("root"))
+            .expect("bound");
+        let error = bring_back(
+            &collection,
+            &world.store.places(),
+            &rules,
+            &chosen,
+            None,
+            world.now,
+            &spy,
+        )
+        .expect_err("the parents cannot be flushed");
+        assert!(matches!(error, RestoreError::Filesystem(_)), "{error:?}");
+        assert!(!world.root().join("projects").exists());
+    }
+
+    #[test]
+    fn a_top_without_owner_write_arrives_with_its_mode() {
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        struct Unlock(PathBuf);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let mut world = World::new();
+        fs::set_permissions(
+            world.source.path("projects/scanner"),
+            fs::Permissions::from_mode(0o500),
+        )
+        .expect("mode");
+        let mut store = Store::new();
+        store.add_version(&world.source, "projects/scanner", STAMP);
+        world.store = store;
+        fs::set_permissions(
+            world.source.path("projects/scanner"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("mode");
+        let _unlock = Unlock(world.destination());
+        done(world.run(&world.spy()));
+        let mode = fs::metadata(world.destination())
+            .expect("destination")
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o500);
+    }
+
+    #[test]
+    fn no_room_skips_before_anything_is_staged() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.space = Some(5);
+        match skipped(world.run(&spy)) {
+            Skipped::NoSpace { needed, available } => {
+                assert!(needed > 5);
+                assert_eq!(available, 5);
+            }
+        }
+        assert!(!spy.entries().contains(&"StagingMade".to_string()));
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.root().join("projects").exists());
+    }
+
+    fn assert_no_space_and_clean(world: &World, spy: &Spy) {
+        let reason = skipped(world.run(spy));
+        assert!(matches!(reason, Skipped::NoSpace { .. }));
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+        assert!(!world.root().join("projects").exists());
+    }
+
+    #[test]
+    fn a_full_volume_during_the_extraction_skips_and_removes_staging() {
+        let world = World::new();
+        let mut spy = world.spy().fault(|kind, _| (kind == "file").then(enospc));
+        spy.mode = Mode::PerItem;
+        assert_no_space_and_clean(&world, &spy);
+    }
+
+    #[test]
+    fn a_full_volume_at_the_barrier_skips_and_removes_staging() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.barrier_fault = Some(enospc());
+        assert_no_space_and_clean(&world, &spy);
+    }
+
+    #[test]
+    fn a_full_volume_at_the_marker_skips_and_removes_staging() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.before_rename_fault = true;
+        assert_no_space_and_clean(&world, &spy);
+    }
+
+    #[test]
+    fn a_failed_marker_write_leaves_no_temp_file_in_tmp() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.before_rename_fault = true;
+        assert_no_space_and_clean(&world, &spy);
+        let left: Vec<String> = fs::read_dir(world.root().join(".antiq/tmp"))
+            .expect("lists tmp")
+            .map(|item| {
+                item.expect("item")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".antiq-restored"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn a_full_volume_while_creating_the_parents_skips_and_removes_them() {
+        let world = World::new();
+        let spy = world
+            .spy()
+            .fault(|kind, path| (kind == "dir" && path == Path::new("projects")).then(enospc));
+        assert_no_space_and_clean(&world, &spy);
+    }
+
+    #[test]
+    fn a_full_volume_at_the_rename_skips_and_removes_the_parents() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.move_fault = Some(|| FilesystemError::Io {
+            action: "move",
+            path: "x".into(),
+            source: enospc(),
+        });
+        assert_no_space_and_clean(&world, &spy);
+    }
+
+    #[test]
+    fn a_full_volume_after_the_rename_is_an_error_and_the_folder_stays() {
+        let world = World::new();
+        // The chain flushes "projects" before the rename too, so only the
+        // second flush of it, the parent flush after the rename, fails.
+        let flushed_before = Arc::new(Mutex::new(false));
+        let spy = world.spy().fault(move |kind, path| {
+            if kind == "dir" && path == Path::new("projects") {
+                let mut seen = flushed_before.lock().expect("gate");
+                let fail = std::mem::replace(&mut *seen, true);
+                return fail.then(enospc);
+            }
+            None
+        });
+        let error = world.run(&spy).expect_err("an error after the rename");
+        assert!(space::is_out_of_space(&error), "{error:?}");
+        assert!(world.destination().join("main.rs").exists());
+    }
+
+    #[test]
+    fn another_failure_during_the_extraction_is_an_error_and_staging_goes() {
+        let world = World::new();
+        let mut spy = world.spy().fault(|kind, _| {
+            (kind == "file").then(|| io::Error::from_raw_os_error(Errno::IO.raw_os_error()))
+        });
+        spy.mode = Mode::PerItem;
+        let error = world.run(&spy).expect_err("fails");
+        assert!(matches!(error, RestoreError::Pack(_)), "{error:?}");
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_member_name_the_volume_cannot_hold_is_refused_before_anything_is_written() {
+        let mut world = World::new();
+        world
+            .source
+            .file("projects/scanner/a-long-member-name", "x");
+        world
+            .store
+            .add_version(&world.source, "projects/scanner", STAMP);
+        let mut spy = world.spy();
+        spy.volume = Some(TargetRules {
+            name_limit: NameLimit {
+                max: 9,
+                unit: LengthUnit::Bytes,
+            },
+            ..TargetRules::linux()
+        });
+        let error = world.run(&spy).expect_err("refused");
+        assert!(
+            matches!(error, RestoreError::Pack(PackError::UnholdableNames(_))),
+            "{error:?}"
+        );
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_destination_on_another_volume_than_tmp_is_refused_as_a_mount_point() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.device = Some(|path| {
+            if path.to_string().starts_with(".antiq") {
+                1
+            } else {
+                2
+            }
+        });
+        match world.run(&spy).expect_err("refused") {
+            RestoreError::Target { problem, .. } => assert_eq!(problem, TargetProblem::MountPoint),
+            other => panic!("expected a target problem, got {other:?}"),
+        }
+        assert!(!spy.entries().contains(&"Extracted".to_string()));
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_destination_that_the_names_of_the_volume_cannot_hold_is_refused_before_extraction() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.volume = Some(TargetRules {
+            name_limit: NameLimit {
+                max: 5,
+                unit: LengthUnit::Bytes,
+            },
+            ..TargetRules::linux()
+        });
+        match world.run(&spy).expect_err("refused") {
+            RestoreError::Target { problem, .. } => {
+                assert!(matches!(problem, TargetProblem::Unholdable { .. }));
+            }
+            other => panic!("expected a target problem, got {other:?}"),
+        }
+        assert!(!spy.entries().contains(&"Extracted".to_string()));
+    }
+
+    #[test]
+    fn the_real_hooks_bring_a_version_back_on_this_volume() {
+        let world = World::new();
+        done(world.run(&RealHooks));
+        assert!(world.destination().join("main.rs").exists());
+        assert_eq!(world.left_in_extract(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_crash_at_every_step_leaves_the_version_and_no_folder_before_the_rename() {
+        for step in [
+            Step::SpaceChecked,
+            Step::StagingMade,
+            Step::Extracted,
+            Step::Verified,
+            Step::MarkerWritten,
+            Step::Flushed,
+        ] {
+            let world = World::new();
+            let spy = world.spy().on(step, || {
+                Err(RestoreError::Io {
+                    action: "stop",
+                    path: String::new(),
+                    source: io::Error::from_raw_os_error(Errno::IO.raw_os_error()),
+                })
+            });
+            world.run(&spy).expect_err("the run stops");
+            assert!(!world.root().join("projects").exists(), "{step:?}");
+            assert_eq!(world.left_in_extract(), Vec::<String>::new(), "{step:?}");
+        }
+    }
+
+    #[test]
+    fn many_differences_are_listed_up_to_a_limit_and_counted() {
+        let all: Vec<String> = (0..25).map(|n| format!("difference {n}")).collect();
+        let shown = summarize(all.clone());
+        assert_eq!(shown.len(), 21);
+        assert_eq!(shown[19], "difference 19");
+        assert_eq!(shown[20], "and 5 more");
+        assert_eq!(summarize(all[..3].to_vec()), all[..3].to_vec());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staging_that_cannot_be_removed_is_a_warning_of_the_skipped_run() {
+        struct Unlock(PathBuf);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("chflags")
+                    .arg("nouchg")
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+        let world = World::new();
+        let locked = world.extract_dir().join("1/main.rs");
+        let _unlock = Unlock(locked.clone());
+        let spy = world.spy().on(Step::Extracted, move || {
+            let status = std::process::Command::new("chflags")
+                .arg("uchg")
+                .arg(&locked)
+                .status()
+                .expect("chflags runs");
+            assert!(status.success());
+            Err(at_error("fill"))
+        });
+        match world.run(&spy).expect("skipped") {
+            Brought::Skipped { warnings, .. } => {
+                assert_eq!(warnings.len(), 1, "{warnings:?}");
+                assert!(
+                    warnings[0].starts_with("cannot remove the staging folder"),
+                    "{warnings:?}"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
     }
 }
