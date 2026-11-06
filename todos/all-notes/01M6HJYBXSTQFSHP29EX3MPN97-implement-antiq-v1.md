@@ -2510,6 +2510,8 @@ the same commit; the lead checks that at acceptance.
   committed version; `promote_pending` refuses a number not above the
   highest local committed one. I08 writes these into spec "Metadata",
   "Storage", "Metadata changes" and ADR 0058.
+- 2026-11-04: an object none of whose metadata versions reads and that
+  has no `meta.pending` is an error naming the versions (I08, spec).
 
 ### I09
 
