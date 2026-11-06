@@ -347,6 +347,12 @@ impl Error {
                 Value::from(whole_seconds(started).to_string()),
             );
         }
+        if let Some((lines, more)) = find_rsync_said(self.wrapped()) {
+            details.insert(
+                "rsync_said".into(),
+                serde_json::json!({ "lines": lines, "more": more }),
+            );
+        }
         details
     }
 }
@@ -409,6 +415,21 @@ fn find_candidates<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&
     while let Some(current) = link {
         if let Some(ReferenceError::Ambiguous { candidates, .. }) = current.downcast_ref() {
             return Some(candidates);
+        }
+        link = current.source();
+    }
+    None
+}
+
+/// The lines rsync said, and how many more it said, in the push error that
+/// `error` or one of its sources is.
+fn find_rsync_said<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<(&'a [String], usize)> {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if let Some(PushError::TargetRefusesModes { shown, more }) = current.downcast_ref() {
+            return Some((shown, *more));
         }
         link = current.source();
     }

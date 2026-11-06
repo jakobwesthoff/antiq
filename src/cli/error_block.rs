@@ -55,6 +55,21 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
             block = block.candidate(stamp);
         }
     }
+    if let Some(PushError::TargetRefusesModes { shown, more }) =
+        description.library_error.and_then(find::<PushError>)
+    {
+        for line in shown {
+            block = block.rsync_said(Rich::new().text(line));
+        }
+        let rest = match more {
+            0 => None,
+            1 => Some("and 1 more line".to_string()),
+            more => Some(format!("and {more} more lines")),
+        };
+        if let Some(rest) = rest {
+            block = block.rsync_said(Rich::new().text(&rest));
+        }
+    }
     for step in &description.contexts {
         block = block.doing(step);
     }
@@ -377,19 +392,42 @@ mod tests {
                 "▌ The mirror failed: the target does not let rsync set file modes (rsync exit 23)",
                 "▌",
                 "▌ How to fix it",
-                "▌   The target does not let rsync set file modes. Add this to .antiq/config.toml:",
+                "▌   Add this to .antiq/config.toml:",
                 "▌",
                 "▌     [target]",
                 "▌     rsync_args = [\"--no-perms\"]",
                 "▌",
-                "▌   rsync said:",
-                "▌",
-                "▌     rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
-                "▌     rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
-                "▌     and 37 more lines",
+                "▌ What rsync said",
+                "▌   rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
+                "▌   rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
+                "▌   and 37 more lines",
                 "▌",
                 "▌ What antiq was doing",
                 "▌   Attempting to push the antiq collection.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pipe_gets_what_rsync_said_after_the_fix() {
+        let error = PushError::TargetRefusesModes {
+            shown: vec![
+                "rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)".into(),
+                "rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)".into(),
+            ],
+            more: 37,
+        };
+        assert_eq!(
+            plain(error, &["push the antiq collection"]),
+            [
+                "error: the mirror failed: the target does not let rsync set file modes (rsync exit 23)",
+                "  fix: Add this to .antiq/config.toml:",
+                "         [target]",
+                "         rsync_args = [\"--no-perms\"]",
+                "  rsync said: rsync: [receiver] mkstemp \"/t/a\" failed: Operation not permitted (1)",
+                "              rsync: [receiver] mkstemp \"/t/b\" failed: Operation not permitted (1)",
+                "              and 37 more lines",
+                "  while attempting to push the antiq collection",
             ]
         );
     }
@@ -419,7 +457,7 @@ mod tests {
         };
         let lines = rich(error, &[]);
         assert!(
-            lines.iter().any(|line| line == "▌     and 1 more line"),
+            lines.iter().any(|line| line == "▌   and 1 more line"),
             "{lines:?}"
         );
     }

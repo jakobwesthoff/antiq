@@ -1750,10 +1750,16 @@ fn a_target_that_refuses_file_modes_gets_the_option_that_fixes_it() {
         );
         let fix = run.error_fix();
         assert!(fix.contains("rsync_args = [\"--no-perms\"]"), "{fix}");
-        assert!(fix.contains("does not let rsync set file modes"), "{fix}");
-        assert!(fix.contains("note3.md"), "{fix}");
-        assert!(!fix.contains("note4.md"), "{fix}");
-        assert!(fix.contains("and 38 more lines"), "{fix}");
+        assert!(!fix.contains("does not let rsync set file modes"), "{fix}");
+        assert!(!fix.contains("[receiver]"), "{fix}");
+        let said = &json["error"]["rsync_said"];
+        let lines = said["lines"].as_array().expect("the lines are a list");
+        assert_eq!(lines.len(), 3, "{said}");
+        assert!(
+            lines[2].as_str().expect("a line").contains("note3.md"),
+            "{said}"
+        );
+        assert_eq!(said["more"], 38, "{said}");
     }
 }
 

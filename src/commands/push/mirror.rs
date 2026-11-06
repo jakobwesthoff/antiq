@@ -78,12 +78,15 @@ const IO_ERROR_LINE: &str = "IO error encountered -- skipping file deletion";
 const REFUSED_LINES_SHOWN: usize = 3;
 
 /// Whether the error text of an exit 23 holds a refusal of the receiver to
-/// create a temporary file (`mkstemp`) or to change a mode (`chmod`).
+/// create a temporary file (`mkstemp`) or to change a mode (`chmod`, which
+/// rsync 3.x words as `failed to set permissions`).
 fn refuses_modes(stderr: &str) -> bool {
     stderr.lines().any(|line| {
         line.contains("[receiver]")
             && line.contains("Operation not permitted")
-            && (line.contains("mkstemp") || line.contains("chmod"))
+            && (line.contains("mkstemp")
+                || line.contains("chmod")
+                || line.contains("failed to set permissions"))
     })
 }
 
@@ -515,6 +518,14 @@ mod tests {
     fn a_receiver_chmod_refusal_is_the_same_case() {
         let stderr =
             "rsync: [receiver] chmod \"/mnt/shadow/beta\" failed: Operation not permitted (1)\n";
+        let (shown, more) = refused_error(outcome_of(Some(23), "", stderr));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(more, 0);
+    }
+
+    #[test]
+    fn a_receiver_that_fails_to_set_permissions_is_the_same_case() {
+        let stderr = "rsync: [receiver] failed to set permissions on \"/mnt/shadow/beta\": Operation not permitted (1)\n";
         let (shown, more) = refused_error(outcome_of(Some(23), "", stderr));
         assert_eq!(shown.len(), 1);
         assert_eq!(more, 0);

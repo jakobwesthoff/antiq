@@ -44,6 +44,7 @@ pub struct Block {
     pub(super) text: Vec<Para>,
     pub(super) fix: Option<Rich>,
     pub(super) how: Vec<Para>,
+    pub(super) said: Vec<Para>,
     pub(super) doing: Vec<String>,
     pub(super) candidates: Vec<String>,
     pub(super) pipe: Option<String>,
@@ -58,6 +59,7 @@ impl Block {
             text: Vec::new(),
             fix: None,
             how: Vec::new(),
+            said: Vec::new(),
             doing: Vec::new(),
             candidates: Vec::new(),
             pipe: None,
@@ -111,6 +113,13 @@ impl Block {
     /// A paragraph of the "How to fix it" section of an error.
     pub fn how(mut self, paragraph: impl Into<Para>) -> Block {
         self.how.push(paragraph.into());
+        self
+    }
+
+    /// A paragraph of the "What rsync said" section of an error, which
+    /// follows "How to fix it".
+    pub fn rsync_said(mut self, paragraph: impl Into<Para>) -> Block {
+        self.said.push(paragraph.into());
         self
     }
 

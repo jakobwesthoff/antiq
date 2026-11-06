@@ -219,6 +219,7 @@ impl Block {
                     lines.push(bar.line(&line));
                 }
                 self.section(env, &bar, "How to fix it", &self.how, &mut lines);
+                self.section(env, &bar, "What rsync said", &self.said, &mut lines);
                 let steps: Vec<Para> = self
                     .doing
                     .iter()
@@ -326,6 +327,7 @@ impl Block {
             Kind::Error => {
                 lines.push(format!("error: {}", self.plain_title()));
                 labelled(&mut lines, "fix", &self.how);
+                labelled(&mut lines, "rsync said", &self.said);
                 for candidate in &self.candidates {
                     lines.push(format!("    candidate: {candidate}"));
                 }
