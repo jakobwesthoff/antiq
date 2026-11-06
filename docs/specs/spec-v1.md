@@ -1178,9 +1178,14 @@ of the conditions `status` shows, such as `pinned`, `stale_backup`,
 `find` adds `query` and `matches`, a list of objects with `id`, `path`,
 `abs_path`, `name`, `state`, `created` and `size`.
 
-`init` has no payload defined yet. Without a terminal, or with `--json`,
-it creates nothing and prints the plan unless `--yes` is given, and
-exits 3.
+`init` adds `created`, `id` (only when created), `path` (the
+collection's root), `machine`, `patterns`, `exclude` (what `--yes` writes:
+the proposed exclude or nothing), `pieces` (what the patterns select, with
+the exclude applied), `actions` (one `create_collection` action with the
+path) and `warnings` (one `message` per note). `dry_run` is present, and
+true, under `--dry-run`. Without a terminal, or with `--json`, it creates
+nothing and prints the plan, the same keys without `id`, unless `--yes` is
+given, and exits 3. Under `--json` nothing goes to stderr.
 
 `archive` has no payload defined yet.
 

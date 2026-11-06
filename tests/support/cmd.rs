@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use tempfile::TempDir;
 
@@ -66,6 +67,11 @@ impl Antiq {
         S: AsRef<OsStr>,
     {
         self.command.args(args);
+        self
+    }
+
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Antiq {
+        self.command.current_dir(dir);
         self
     }
 

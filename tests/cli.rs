@@ -134,19 +134,6 @@ macro_rules! accepts {
     };
 }
 
-accepts!(
-    init_takes_patterns_yes_and_dry_run,
-    "init",
-    [
-        "init",
-        "--pattern",
-        "a*",
-        "--pattern",
-        "b*",
-        "--yes",
-        "--dry-run"
-    ]
-);
 accepts!(status_takes_nothing, "status", ["status"]);
 accepts!(archive_takes_dry_run, "archive", ["archive", "--dry-run"]);
 accepts!(
