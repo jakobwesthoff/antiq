@@ -762,10 +762,14 @@ fn a_run_that_cannot_take_the_lock_prints_no_cards_and_fails_as_before() {
     let archive = archive_world(1);
     let push = push_world();
     let unearth = unearth_world();
+    let rebuild = unearth_world();
+    remove_sidecars(&rebuild, &[CHECKSUM]);
     for (world, args) in [
         (&archive, vec!["archive"]),
         (&push, vec!["push"]),
         (&unearth, vec!["unearth", "projects/scanner"]),
+        (&unearth, vec!["fork", "projects/scanner"]),
+        (&rebuild, vec!["rebuild", "projects/scanner", NEW]),
     ] {
         let _lock = hold_lock(&world.collection().root());
         let run = world.run_tty_sized(&args, 100, 24, &[]);
@@ -880,7 +884,7 @@ fn a_rebuild_dry_run_on_a_terminal_shows_no_cards() {
 }
 
 #[test]
-fn rebuild_on_a_dumb_terminal_prints_the_line_it_always_did() {
+fn rebuild_on_a_dumb_terminal_prints_the_line_once() {
     let world = unearth_world();
     remove_sidecars(&world, &[CHECKSUM]);
     let run = world.run_tty_sized(
@@ -891,7 +895,17 @@ fn rebuild_on_a_dumb_terminal_prints_the_line_it_always_did() {
     );
     run.expect_code(0);
     assert!(!run.stdout.contains('\x1b'));
-    assert_eq!(run.stdout.lines().count(), 3, "{:?}", run.stdout);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{:?}", run.stdout);
+    assert!(
+        lines[0].contains("checksum rebuilt") && lines[0].contains("version "),
+        "{lines:?}"
+    );
+    assert!(
+        is_summary(lines[2], "✔ Rebuilt the checksum file"),
+        "{lines:?}"
+    );
+    assert!(!run.stdout.contains("Rebuilt version"), "{:?}", run.stdout);
 }
 
 #[test]

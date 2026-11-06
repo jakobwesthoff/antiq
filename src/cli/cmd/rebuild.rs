@@ -32,6 +32,7 @@ const COUNTS: &[(Operation, Count)] = &[(
     Count {
         text: |done, total| match total {
             Some(_) => sizes(done, total),
+            None if done == 0 => String::new(),
             None => decimal_size(done),
         },
         percent: true,
@@ -95,7 +96,7 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
         out.json(Some("rebuild"), &report)
             .context("print the result")?;
     } else {
-        let lines = render(&report, style.terminal, &zone);
+        let lines = render(&report);
         if let Some(shown) = &shown {
             shown.print_summary(out, &summary(&report, shown.took()))?;
         } else {
@@ -141,14 +142,11 @@ fn statement(basis: Basis) -> &'static str {
     }
 }
 
-/// The version is named by its local time on a terminal and by its stamp in
-/// a pipe, which a script can hand to the next command.
-fn render(report: &RebuildReport, terminal: bool, zone: &TimeZone) -> Lines {
-    let name = if terminal {
-        local_labels(&[report.stamp], zone).remove(0)
-    } else {
-        report.stamp.to_string()
-    };
+/// The line of a pipe, which names the version by its stamp so that a
+/// script can hand it to the next command, and the notes that follow the
+/// result on any output.
+fn render(report: &RebuildReport) -> Lines {
+    let name = report.stamp.to_string();
     let files: Vec<String> = report.written.iter().map(|file| sanitize(file)).collect();
     let stdout = vec![format!(
         "Rebuilt version {name} of {}: wrote {}",
@@ -346,5 +344,12 @@ mod tests {
         assert!(second.ends_with("412 MB"), "{second:?}");
         assert!(!second.contains('%'), "{second:?}");
         assert!(!second.contains('/'), "{second:?}");
+    }
+
+    #[test]
+    fn before_any_byte_is_checked_the_card_shows_no_count() {
+        let [_, second] = progress::card_of(COUNTS, Operation::Verifying, 0, 0);
+        assert!(!second.contains(" B"), "{second:?}");
+        assert!(second.trim_end().ends_with('─'), "{second:?}");
     }
 }
