@@ -157,7 +157,8 @@ live folder whose path the collection's volume treats as the same name
 (case, Unicode normalization, as probed per ADR 0054) is the same piece
 and is archived into that folder. `unearth` and `fork` extract to the
 stored spelling, `list` shows it, and `status` warns when a live spelling
-differs from the stored one.
+differs from the stored one. A new store folder below an existing parent
+folder is created inside the parent's stored spelling.
 
 ## Walks
 
@@ -1323,9 +1324,12 @@ collection root itself is recognised by device and inode, so another
 spelling of it, such as `/var` and `/private/var` on macOS, still counts
 as the root; symlinks below the root are never followed.
 
-An input that names a candidate piece as a path is that piece. Any other
+An input that names a candidate piece as a path is that piece. On a volume
+that treats other spellings of a name as the same (see "Spelling"), a path
+in another spelling names the candidate whose folder it leads to. Any other
 input is a search word, matched with the same fuzzy pattern `list` uses
-(smart case, smart normalization), and must match exactly one candidate.
+(smart case, smart normalization) against the candidates' paths in their
+escaped form, and must match exactly one candidate.
 No match is the error kind `unknown_reference`; several matches are
 `ambiguous_reference`, listing the candidates. Both exit 1. The
 candidates are the live pieces for `archive`, `pin` and `unpin`; the
