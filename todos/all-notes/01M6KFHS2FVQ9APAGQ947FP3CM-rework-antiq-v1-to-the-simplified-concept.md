@@ -572,7 +572,7 @@ the same commit. A held lock in a real run is `lock_held` with `pid` and
   itself is in the output of the run that failed and in later repair 3
   warnings (O2, decided). Lookups read only `NotFound` and
   `NotADirectory` as "missing" (the lesson of todo
-  01M6JNH5VD0MD4MVP0M9A97MA7). `soon` comes from `soon_days`. No lock;
+  the status lookup todo, closed in C1). `soon` comes from `soon_days`. No lock;
   a held lock is a note.
 - **init (C2)**: no question, no `archive.sh` detection
   (`has_archive_sh_layout`, `src/commands/init.rs:215-232`, goes), refusals
@@ -690,7 +690,7 @@ Concept "push", "Configuration".
   `src/cli/output.rs:60-81` unchanged.
 - Lookups that decide "not there" read only `NotFound` and
   `NotADirectory` as missing; any other error is reported (todo
-  01M6JNH5VD0MD4MVP0M9A97MA7).
+  the status lookup todo, closed in C1).
 - Directories antiq creates are flushed with their parent before a later
   step relies on them (F2 helper).
 
@@ -926,7 +926,7 @@ Further closings, decided by the lead (O20, 8.4):
   decided in the concept; D0 closes it.
 - 01M6JV59PAVVWYAMB9PTRV9KG0 (forget command): the concept's `forget`
   replaces it; C8 closes it.
-- 01M6JNH5VD0MD4MVP0M9A97MA7 (status lookup bug): the code it names
+- The status lookup todo (closed in C1): the code it names
   goes in R1; the rule moves into section 4.10; C1 closes it.
 
 Rewritten by D0 (they stay but name removed parts or point at the old
@@ -1346,7 +1346,7 @@ neighbouring-hunk conflicts.
   spelling difference, an unparsable file in `pieces/`; a held lock is a
   note; status writes nothing below `.antiq/` (port
   `status_changes_nothing...`, `tests/status.rs:428` at beb748f).
-- Todos: closes 01M6JNH5VD0MD4MVP0M9A97MA7 (O20).
+- Todos: closes the status lookup todo (O20).
 - Risk: low-medium. Opus review: no.
 
 #### C2 init
@@ -1636,7 +1636,7 @@ the record of what was open and why.
   beyond main e2491c5 (`git log e2491c5..f0fc5ec`): 6a90f18 (remove
   `not_implemented`) and f0fc5ec (a changed directory mode is no loss
   when an unearthed piece is archived again). The folder lookup fix
-  (todo 01M6JNH5VD0MD4MVP0M9A97MA7) is in neither. Plan: 6a90f18 is
+  (the status lookup todo, closed in C1) is in neither. Plan: 6a90f18 is
   cherry-picked in Z, not at the start, because the rework's stubs raise
   `not_implemented` until the last command lands; it touches only
   `src/error.rs` (`git show --stat 6a90f18`) and will conflict with S1's
