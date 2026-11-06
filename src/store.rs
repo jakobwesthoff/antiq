@@ -411,7 +411,11 @@ impl<'c> Store<'c> {
     /// Removes the recorded change because a committed version above every
     /// version stored here holds its history, which makes the change a part
     /// of that version. The file is removed only while it still has the
-    /// bytes that were committed.
+    /// bytes that were committed, and durably: the directory is flushed.
+    ///
+    /// Only a settle that history proves may call this. The recorded change
+    /// is the only local copy of those bytes, so a caller has to know that
+    /// a committed version holds them.
     pub fn discard_pending(
         &self,
         _lock: &RunLock,
