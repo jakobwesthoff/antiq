@@ -123,10 +123,10 @@ fn lock_outcome(result: Result<(), TryLockError>, lock_file: &Path) -> Result<bo
 /// The error for a lock that is held: with the holder's pid and start
 /// when its file has them.
 fn describe_holder(file: &mut File, lock_file: &Path) -> Result<LockError, LockError> {
-    let mut text = String::new();
-    file.read_to_string(&mut text)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
         .map_err(io_error("read", lock_file))?;
-    Ok(match serde_json::from_str::<Holder>(&text) {
+    Ok(match serde_json::from_slice::<Holder>(&bytes) {
         Ok(holder) => LockError::Held {
             pid: holder.pid,
             started: holder.started,
@@ -144,13 +144,13 @@ fn describe_holder(file: &mut File, lock_file: &Path) -> Result<LockError, LockE
 /// releasing, whose pid another process has taken since, shows as a live
 /// holder.
 pub fn holder(lock_file: &Path) -> Result<Option<Holder>, LockError> {
-    let text = match std::fs::read_to_string(lock_file) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(lock_file) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error("read", lock_file)(error)),
     };
     let alive = |holder: &Holder| process_exists(holder.pid);
-    Ok(serde_json::from_str::<Holder>(&text).ok().filter(alive))
+    Ok(serde_json::from_slice::<Holder>(&bytes).ok().filter(alive))
 }
 
 /// Whether a process with this pid exists. A process of another user
@@ -360,6 +360,35 @@ mod tests {
         };
         let path = tree.file("lock", serde_json::to_string(&content).expect("json"));
         assert_eq!(holder(&path).expect("reads"), None);
+    }
+
+    #[test]
+    fn a_held_lock_file_that_is_not_utf8_is_held_without_details() {
+        let mut tree = Tree::new();
+        let path = tree.file("lock", b"\xff\xfe not text");
+        let taken = File::open(&path).expect("opens");
+        taken.try_lock().expect("free");
+        let error = acquire(&path, "m", &clock()).expect_err("held");
+        assert!(matches!(error, LockError::HeldUnknown), "{error}");
+    }
+
+    #[test]
+    fn a_lock_file_that_is_not_utf8_shows_no_holder() {
+        let mut tree = Tree::new();
+        let path = tree.file("lock", b"\xff\xfe not text");
+        assert_eq!(holder(&path).expect("reads"), None);
+    }
+
+    #[test]
+    fn a_process_of_another_user_still_counts_as_existing() {
+        assert!(
+            !rustix::process::getuid().is_root(),
+            "the test needs a non-root user, who is refused a signal to pid 1"
+        );
+        let refused = test_kill_process(Pid::from_raw(1).expect("1 is a pid"))
+            .expect_err("the test needs pid 1 to belong to another user");
+        assert_eq!(refused, Errno::PERM);
+        assert!(process_exists(1));
     }
 
     #[test]
