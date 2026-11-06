@@ -2584,6 +2584,15 @@ the same commit; the lead checks that at acceptance.
   omitted when empty), not through the `encoder` record. I14's packer
   returns the list; I32 adds the key to `Payload` and to spec
   "Metadata" when it writes live payloads; I34 warns on it.
+- 2026-11-04 (merged): for I32, `pack_live(source, first_tree,
+  settings, out_path)` returns `Packed`, `NoPackage`, `Stale` or
+  `Blocked`; `live::manifest_of(walk, exclude)` is the one filter for
+  both sides of the change detection; `live::lease_for` gives the pool
+  lease. I32 wraps `LiveError` and `ManifestError` into `error::Error`,
+  writes the stale marker, and treats a manifest that cannot be read as
+  a changed tree. A walk problem inside a `live_exclude` directory still
+  blocks the piece. The live stream check in `live.rs` is separate from
+  I12's in `read.rs`.
 
 ### I12
 
