@@ -394,17 +394,12 @@ The tests need rsync 3.2.4 or newer, found in `PATH`,
 `sha256sum` (named `gsha256sum` by brew's coreutils on macOS). They fail
 with a message naming the missing tool.
 
-`scripts/check.sh` runs `cargo fmt --check`, `cargo clippy --all-targets
--- -D warnings` and `cargo test`; every commit has to pass it.
+The tasks live in the `Justfile` (`just --list` shows them). `just check`
+runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+`cargo test`; every commit has to pass it.
 
-Coverage needs `cargo-llvm-cov`. After a change, list the changed lines
-that no test runs:
-
-```bash
-mkdir -p target/llvm-cov
-cargo llvm-cov --all-targets --lcov --output-path target/llvm-cov/lcov.info
-scripts/uncovered-lines.sh <base-commit>
-```
+Coverage needs `cargo-llvm-cov`. After a change, `just coverage
+<base-commit>` lists the changed lines under `src/` that no test runs.
 
 `docs/specs/spec-v1.md` specifies version 1, `docs/adrs/` records the
 decisions behind it and `docs/research/` the research. Deferred work is

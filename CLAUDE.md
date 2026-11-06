@@ -2,9 +2,28 @@
 
 Archive what you no longer touch, find it when you need it. One Rust
 crate with a library (`src/lib.rs`) and a command-line binary
-(`src/main.rs`), in early design. Architecture decisions live in
-`docs/adrs/`; deferred work and open design questions live in the todo
-vault at `todos/`.
+(`src/main.rs`). Version 1 is implemented and not yet released; the
+specification is `docs/specs/spec-v1.md`. Architecture decisions live
+in `docs/adrs/`; deferred work and open design questions live in the
+todo vault at `todos/`.
+
+## Working on the code
+
+- The development tasks are the recipes of the `Justfile`; use them
+  (`just --list`). Every commit passes `just check` (formatting, clippy
+  with warnings as errors, the tests).
+- Tests: unit tests sit in their module; each command has a
+  `tests/<command>.rs` that runs the binary; whole user tasks are
+  scenarios in `tests/scenarios/`, run in text and in JSON mode (how to
+  write one: `tests/support/scenario/mod.rs`).
+- Tests start the antiq binary only through `tests/support/cmd.rs`. It
+  holds a lock around every spawn, because a `pre_exec` child forked
+  while another test thread initialises a macOS system library aborts
+  before `exec` and shows up as a SIGKILL.
+- A command error that wraps a lock, run or reference error uses
+  `#[from]` or `#[source]`, never `#[error(transparent)]`: the JSON
+  output finds `lock_held` and `candidates` by walking `source()`, and a
+  transparent wrapper hides them.
 
 ## Licensing
 
