@@ -11,12 +11,10 @@ use antiq::commands::init::{InitError, InitReport, InitRequest, init};
 use antiq::id::RandomIds;
 use antiq::select::SelectError;
 use anyhow::Context as _;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let directory = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
     let request = InitRequest {
-        directory: &directory,
+        directory: &ctx.start,
         patterns: &args.patterns,
         dry_run: args.dry_run,
     };

@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::fs;
 use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
@@ -428,7 +429,12 @@ fn a_json_run_prints_one_error_envelope() {
     assert_eq!(json["error"]["kind"], "not_a_collection");
     assert_eq!(
         json["error"]["message"],
-        format!("{} is not inside a collection", dir.path().display())
+        format!(
+            "{} is not inside a collection",
+            fs::canonicalize(dir.path())
+                .expect("the dir exists")
+                .display()
+        )
     );
 }
 
@@ -442,7 +448,9 @@ fn a_plain_run_prints_its_error_to_stderr() {
         run.stderr,
         format!(
             "error: {} is not inside a collection\n  while attempting to find the collection\n",
-            dir.path().display()
+            fs::canonicalize(dir.path())
+                .expect("the dir exists")
+                .display()
         )
     );
 }

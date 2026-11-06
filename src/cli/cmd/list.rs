@@ -12,11 +12,9 @@ use antiq::commands::list::{ListReport, Row, State, list};
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let query = args.query.as_deref();

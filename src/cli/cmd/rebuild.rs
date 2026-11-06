@@ -15,21 +15,14 @@ use antiq::commands::rebuild::{
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
-    // A piece given as a relative path starts where the collection was
-    // looked for from.
-    let cwd = start
-        .canonicalize()
-        .context("resolve the current directory")?;
     let request = RebuildRequest {
         collection: &collection,
-        cwd: &cwd,
+        cwd: &ctx.start,
         piece: &args.piece,
         version: &args.version,
     };

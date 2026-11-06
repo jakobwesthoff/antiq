@@ -10,11 +10,9 @@ use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::push::{PushOutcome, PushRequest, push};
 use anyhow::Context as _;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let request = PushRequest {

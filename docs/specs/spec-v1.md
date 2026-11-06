@@ -1753,9 +1753,11 @@ take is a usage error. No command asks a question. (ADR 0020)
 
 ### Piece references
 
-A piece reference is a path or a search word. A path is resolved against
-the current directory, normalised, and taken relative to the collection
-root; a path outside the collection is refused with the error kind
+A piece reference is a path or a search word. A relative path is resolved
+against the directory `-C` names, or against the current directory without
+`-C`; a relative `-C` is itself taken against the current directory. The
+path is normalised and taken relative to the collection root; a path
+outside the collection is refused with the error kind
 `outside_collection`, exit 1. `.` and `..` in a path are resolved from its
 text, and a `..` that would go above the root of the filesystem is
 refused; `--as` and `--name` are normalised the same way. Only the

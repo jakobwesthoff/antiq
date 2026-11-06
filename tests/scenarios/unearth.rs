@@ -769,3 +769,19 @@ fn an_unearthed_folder_that_is_archived_again_becomes_a_new_version() {
         no_staging_left(world);
     });
 }
+
+#[test]
+fn unearth_without_c_resolves_a_path_from_the_current_directory() {
+    both_modes(scanner_world, |world| {
+        let root = world.collection().root();
+        let projects = world.collection().path("projects");
+
+        let from_root = world.run_in(&root, &["unearth", "-n", "tools/scan-old"]);
+        from_root.expect_code(0);
+        from_root.json_only(|json| assert_eq!(json["actions"][0]["piece"], "tools/scan-old"));
+
+        let from_below = world.run_in(&projects, &["unearth", "-n", "../tools/scan-old"]);
+        from_below.expect_code(0);
+        from_below.json_only(|json| assert_eq!(json["actions"][0]["piece"], "tools/scan-old"));
+    });
+}

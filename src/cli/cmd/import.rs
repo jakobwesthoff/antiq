@@ -12,21 +12,16 @@ use antiq::commands::import::{ImportReport, Outcome, Request, import};
 use antiq::plan::PlanAction;
 use antiq::report::Warning;
 use anyhow::Context as _;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
-    // A relative folder and a relative `--as` start where the collection
-    // was looked for.
-    let cwd = std::fs::canonicalize(&start).context("find the directory to start from")?;
     let request = Request {
         folder: args.folder.clone(),
         as_path: args.as_path.clone(),
         time: args.time.clone(),
-        cwd,
+        cwd: ctx.start.clone(),
         dry_run: args.dry_run,
     };
     let outcome = import(&collection, &SystemClock, &request)

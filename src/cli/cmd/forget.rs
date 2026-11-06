@@ -16,24 +16,17 @@ use antiq::report::CommandReport;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
-use std::path::PathBuf;
 
 /// The exit code of a run in which a version could not be deleted.
 const PARTIAL: u8 = 3;
 
 pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
-    // A piece given as a relative path starts where the collection was
-    // looked for from.
-    let cwd = start
-        .canonicalize()
-        .context("resolve the current directory")?;
     let request = ForgetRequest {
         collection: &collection,
-        cwd: &cwd,
+        cwd: &ctx.start,
         piece: &args.piece,
         which: match &args.version {
             Some(version) => Which::One(version),

@@ -18,15 +18,13 @@ use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let request = UnearthRequest {
-        cwd: start,
+        cwd: ctx.start.clone(),
         piece: args.piece.clone(),
         version: args.version.clone(),
         dry_run: args.dry_run,

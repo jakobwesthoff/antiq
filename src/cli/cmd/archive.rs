@@ -12,23 +12,17 @@ use antiq::commands::archive::{ArchiveReport, Outcome, Request, Target, archive}
 use antiq::plan::PlanAction;
 use antiq::report::Warning;
 use anyhow::Context as _;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let target = match &args.piece {
         None => Target::Due,
-        Some(reference) => {
-            // A relative path starts where `Collection::find` started.
-            let cwd = std::fs::canonicalize(&start).context("find the directory to start from")?;
-            Target::Piece {
-                reference: reference.clone(),
-                cwd,
-            }
-        }
+        Some(reference) => Target::Piece {
+            reference: reference.clone(),
+            cwd: ctx.start.clone(),
+        },
     };
     let request = Request {
         target,

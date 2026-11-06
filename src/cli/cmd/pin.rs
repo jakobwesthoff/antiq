@@ -14,7 +14,6 @@ use antiq::commands::pin::{
 };
 use antiq::report::CommandReport;
 use anyhow::Context as _;
-use std::path::PathBuf;
 
 pub fn pin(ctx: &Context, args: &PieceArgs, out: &mut Output) -> anyhow::Result<u8> {
     run(ctx, args, out, Direction::Pin)
@@ -34,18 +33,12 @@ fn run(
         Direction::Pin => "pin",
         Direction::Unpin => "unpin",
     };
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
-    // A piece given as a relative path starts where the collection was
-    // looked for from.
-    let cwd = start
-        .canonicalize()
-        .context("resolve the current directory")?;
     let request = PinRequest {
         collection: &collection,
-        cwd: &cwd,
+        cwd: &ctx.start,
         piece: &args.piece,
         direction,
     };

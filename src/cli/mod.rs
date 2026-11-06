@@ -11,10 +11,11 @@ pub mod table;
 
 use self::output::Output;
 use antiq::error::ErrorKind;
+use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::Map;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Archive what you no longer touch, find it when you need it.
 #[derive(Debug, Parser)]
@@ -218,7 +219,10 @@ pub struct PushArgs {
 #[allow(dead_code, reason = "each command reads the fields it needs")]
 pub struct Context {
     pub json: bool,
-    pub directory: Option<PathBuf>,
+    /// The directory the command runs in: the one `-C` names, else the
+    /// current directory. It is absolute and free of links and `..`, which
+    /// is the form the piece references expect.
+    pub start: PathBuf,
 }
 
 /// Runs the command line `args` (starting with the program name), writes
@@ -234,9 +238,12 @@ pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
 }
 
 fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
+    let given = cli.directory.as_deref().unwrap_or(Path::new("."));
+    let start = std::fs::canonicalize(given)
+        .with_context(|| format!("resolve the directory {} to start from", given.display()))?;
     let ctx = Context {
         json: cli.json,
-        directory: cli.directory.clone(),
+        start,
     };
     match &cli.command {
         Command::Init(args) => cmd::init::run(&ctx, args, out),
@@ -389,7 +396,6 @@ mod tests {
     use super::output::testing::{Capture, FailsOnFlush};
     use super::*;
     use antiq::lock::LockError;
-    use anyhow::Context as _;
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -420,6 +426,7 @@ mod tests {
     #[test]
     fn a_plain_run_reports_on_stderr() {
         let root = tempfile::tempdir().expect("a temp dir");
+        let canonical = std::fs::canonicalize(root.path()).expect("the temp dir exists");
         let (code, stdout, stderr) =
             run_captured(&["-C", root.path().to_str().expect("UTF-8"), "status"]);
         assert_eq!(code, 1);
@@ -428,7 +435,7 @@ mod tests {
             stderr,
             format!(
                 "error: {} is not inside a collection\n  while attempting to find the collection\n",
-                root.path().display()
+                canonical.display()
             )
         );
     }

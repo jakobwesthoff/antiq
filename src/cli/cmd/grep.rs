@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
 pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -29,8 +28,7 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
     let pattern = compile(&args.pattern)
         .map_err(antiq::Error::from)
         .context("compile the pattern")?;
-    let start = ctx.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    let collection = Collection::find(&start)
+    let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let found = grep_collection(&collection, &pattern)
