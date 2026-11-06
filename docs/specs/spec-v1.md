@@ -830,9 +830,15 @@ The stream checksum is verified before upload.
 
 ### Change detection
 
-Each live package has a local manifest of path, type, size,
-modification time in nanoseconds, inode, ctime and directories. A live
-piece is packed again when its tree differs from the manifest. When the
+Each live package has a local manifest, a JSON file with a `format` of
+1 and one entry per file, directory and symlink the package holds, the
+piece's top directory included: path (escaped form), type, size,
+modification time and ctime in nanoseconds, and inode. The entries are
+sorted by path bytes. Fifos, sockets and devices are not packed and are
+not in the manifest. A live piece is packed again when its tree differs
+from the manifest: a path was added or removed, or the type, size,
+modification time, ctime or inode of a path changed. A manifest that
+cannot be read counts as a tree that differs. When the
 new package has the same SHA-256 as the current one, only the manifest
 is replaced: no new version, no transfer, no history entry. The first
 sync after unearthing packs once.
