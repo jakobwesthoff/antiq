@@ -17,6 +17,7 @@ pub mod collection;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod external;
 pub mod filesystem;
 pub mod id;
 pub mod idle;
