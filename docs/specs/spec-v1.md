@@ -1192,6 +1192,14 @@ Every state-changing run, right after taking the lock, in this order:
   whose metadata says live: `live` when a folder is at the metadata's
   path and no other entry holds it, `gone` without local payloads when
   there is no folder;
+- writes the missing entry of an import that stopped between its metadata
+  and its entry: an object of this collection whose metadata is still a
+  recorded change with the single history entry `import` and the single
+  archive payload of version 1, and whose archive file lies in the object
+  directory with the recorded size and SHA-256, gets an entry `gone` that
+  names that archive as its local payload, with the version taken out
+  `pending`. A file with the recorded size and other bytes is reported and
+  leaves the object without an entry;
 - removes a live manifest whose ID has no tracking entry file, and keeps
   one whose entry file exists but cannot be read, which the run reports
   with a warning.

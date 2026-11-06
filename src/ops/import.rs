@@ -1778,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_between_the_metadata_and_the_entry_is_completed_by_a_rerun() {
+    fn a_crash_between_the_metadata_and_the_entry_is_completed_when_the_next_run_starts() {
         let world = World::new();
         let file = world.simple("proj.tar.zst");
         world
@@ -1795,12 +1795,21 @@ mod tests {
                 .is_none()
         );
 
+        // The repairs at the start of the rerun write the entry; the file
+        // is then a plain duplicate.
         let report = world.run(&[file]);
         assert!(report.imported.is_empty());
         assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].reason, SkipReason::EntryCompleted);
+        assert_eq!(report.skipped[0].reason, SkipReason::AlreadyImported);
         assert_eq!(report.skipped[0].id, Some(id));
         assert!(!report.partial());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("stopped before its tracking entry")),
+            "{report:?}"
+        );
         let entry = tracking::read(&world.collection, id)
             .expect("reads")
             .expect("the entry exists now");

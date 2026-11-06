@@ -15,6 +15,7 @@ use crate::lock::RunLock;
 use crate::machine::MachineError;
 use crate::meta::{HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::pack::WalkRules;
+use crate::pack::hashing::HashingReader;
 use crate::pack::verify::{Compared, Difference, Field, compare_with_listing};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
@@ -243,6 +244,7 @@ pub(crate) fn run(
     repairs.settle_unearthing()?;
     repairs.catch_up_with_archives()?;
     repairs.restore_missing_entries()?;
+    repairs.complete_imports()?;
     repairs.remove_orphan_manifests();
     Ok(repairs.warnings)
 }
@@ -989,6 +991,82 @@ impl Repairs<'_> {
     }
 
     // =========================================================
+    // Imports that stopped before their entry
+    // =========================================================
+
+    /// Writes the entry of an import that stopped between its metadata and
+    /// its entry.
+    ///
+    /// Only an import that is still a recorded change qualifies: one
+    /// history entry, `import`, and one archive payload of version 1, in
+    /// this collection's name and with its file in the object directory at
+    /// the recorded size and SHA-256. Once a version is committed, the
+    /// remote holds the archive, and a missing entry is a different state.
+    fn complete_imports(&mut self) -> Result<(), RepairError> {
+        let store = Store::new(self.collection);
+        for id in store.objects()? {
+            if self.entries.iter().any(|entry| entry.id == id) || self.unreadable.contains(&id) {
+                continue;
+            }
+            let current = match store.current(id) {
+                Ok(Some(current)) => current,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.warn(format!("cannot read the metadata of {id}: {error}"));
+                    continue;
+                }
+            };
+            if current.source != Source::Pending {
+                continue;
+            }
+            let metadata = &current.metadata;
+            let ([payload], [only]) = (metadata.payloads.as_slice(), metadata.history.as_slice())
+            else {
+                continue;
+            };
+            let is_import = only.action == HistoryAction::Import.as_str()
+                && metadata.collection == self.collection.id()
+                && payload.kind == PayloadKind::Archive
+                && payload.version == 1;
+            let stored = store.file_path(id, &payload.file);
+            let same_size = fs::metadata(&stored).is_ok_and(|found| found.len() == payload.size);
+            if !is_import || !same_size {
+                continue;
+            }
+            let digest = File::open(&stored).and_then(|mut file| {
+                let mut reader = HashingReader::new(&mut file);
+                io::copy(&mut reader, &mut io::sink())?;
+                Ok(reader.sha256())
+            });
+            if digest.ok().as_deref() != Some(payload.checksum.value.as_str()) {
+                self.warn(format!(
+                    "the archive file of the import of {} ({id}) does not match its metadata; no tracking entry is written",
+                    metadata.path
+                ));
+                continue;
+            }
+            let mut entry = TrackingEntry::new(
+                id,
+                metadata.path.clone(),
+                EntryState::Gone,
+                VersionTakenOut::Pending,
+                self.now(),
+            );
+            entry.local_payloads.push(LocalPayload {
+                kind: PayloadKind::Archive,
+                version: payload.version,
+                file: payload.file.clone(),
+            });
+            self.write(entry)?;
+            self.warn(format!(
+                "the import of {} ({id}) stopped before its tracking entry; the entry is written",
+                metadata.path
+            ));
+        }
+        Ok(())
+    }
+
+    // =========================================================
     // Emptying the run directories
     // =========================================================
 
@@ -1362,6 +1440,15 @@ mod tests {
         /// Changes the committed metadata document of `object`.
         fn edit_meta(&self, object: &str, edit: impl FnOnce(&mut serde_json::Value)) {
             let path = self.collection.object_dir(id(object)).join("meta.1");
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
+            edit(&mut document);
+            fs::write(&path, serde_json::to_vec(&document).expect("json")).expect("written");
+        }
+
+        /// Changes the recorded change (`meta.pending`) of `object`.
+        fn edit_pending(&self, object: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+            let path = self.collection.object_dir(id(object)).join("meta.pending");
             let mut document: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
             edit(&mut document);
@@ -3638,6 +3725,259 @@ mod tests {
                 world
                     .tree()
                     .file(&format!(".antiq/tracking/{OTHER_ID}.manifest.json"), "{}");
+                world
+            },
+            &[],
+        );
+    }
+
+    // =====================================================================
+    // Imports that stopped before their entry
+    // =====================================================================
+
+    /// What `import` leaves when it stops after the metadata: the payload
+    /// and the listing, a recorded change that is an import, and no entry.
+    fn interrupted_import(world: &mut World, object: &str, piece: &str) -> Archived {
+        let archive = world.archived(object, piece, FILES);
+        // Packing the same folder again gives the same bytes, which are
+        // the payload `archived` only describes.
+        let packaged = pack_piece(world.tree(), piece);
+        let dir = world.collection.object_dir(id(object));
+        fs::write(dir.join(archive.payload.as_str()), &packaged.bytes).expect("the payload");
+        world.edit_meta(object, |document| {
+            document["history"] = serde_json::json!([
+                {"time": ARCHIVED_AT, "machine": "imperius", "action": "import"}
+            ]);
+        });
+        let dir = world.collection.object_dir(id(object));
+        fs::rename(dir.join("meta.1"), dir.join("meta.pending")).expect("pending");
+        archive
+    }
+
+    #[test]
+    fn an_interrupted_import_gets_its_gone_entry_with_the_local_archive() {
+        let mut world = World::new();
+        let archive = interrupted_import(&mut world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.path, path("projects/a"));
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Pending);
+        assert_eq!(
+            entry.local_payloads,
+            [LocalPayload {
+                kind: PayloadKind::Archive,
+                version: 1,
+                file: archive.payload,
+            }]
+        );
+        assert!(mentions(&warnings, "import"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_committed_import_without_an_entry_is_left_alone() {
+        let mut world = World::new();
+        interrupted_import(&mut world, ID, "projects/a");
+        let dir = world.collection.object_dir(id(ID));
+        fs::rename(dir.join("meta.pending"), dir.join("meta.1")).expect("committed");
+
+        world.run();
+
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_archive_that_is_not_an_import_gets_no_entry_from_this_step() {
+        let mut world = World::new();
+        interrupted_import(&mut world, ID, "projects/a");
+        world.edit_pending(ID, |document| {
+            document["history"][0]["action"] = serde_json::json!("archive");
+        });
+
+        world.run();
+
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_import_with_a_second_payload_or_history_entry_gets_no_entry() {
+        for edit in [
+            (|document: &mut serde_json::Value| {
+                let payload = document["payloads"][0].clone();
+                document["payloads"]
+                    .as_array_mut()
+                    .expect("a list")
+                    .push(payload);
+            }) as fn(&mut serde_json::Value),
+            |document| {
+                let entry = document["history"][0].clone();
+                document["history"]
+                    .as_array_mut()
+                    .expect("a list")
+                    .push(entry);
+            },
+        ] {
+            let mut world = World::new();
+            interrupted_import(&mut world, ID, "projects/a");
+            world.edit_pending(ID, edit);
+
+            world.run();
+
+            assert!(
+                tracking::read(&world.collection, id(ID))
+                    .expect("reads")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_of_another_collection_gets_no_entry() {
+        let mut world = World::new();
+        interrupted_import(&mut world, ID, "projects/a");
+        world.edit_pending(ID, |document| {
+            document["collection"] = serde_json::json!(OTHER_ID);
+        });
+
+        world.run();
+
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_import_that_is_not_an_archive_payload_of_version_1_gets_no_entry() {
+        for edit in [
+            (|document: &mut serde_json::Value| {
+                document["payloads"][0]["kind"] = serde_json::json!("live");
+            }) as fn(&mut serde_json::Value),
+            |document| document["payloads"][0]["version"] = serde_json::json!(2),
+        ] {
+            let mut world = World::new();
+            interrupted_import(&mut world, ID, "projects/a");
+            world.edit_pending(ID, edit);
+
+            world.run();
+
+            assert!(
+                tracking::read(&world.collection, id(ID))
+                    .expect("reads")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_whose_payload_file_is_missing_or_has_another_size_gets_no_entry() {
+        let mut world = World::new();
+        let archive = interrupted_import(&mut world, ID, "projects/a");
+        let payload = world
+            .collection
+            .object_dir(id(ID))
+            .join(archive.payload.as_str());
+        fs::write(&payload, b"short").expect("another size");
+        let warnings = world.run();
+        assert!(
+            warnings.is_empty(),
+            "the size settles it before the file is read: {warnings:?}"
+        );
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+
+        fs::remove_file(&payload).expect("removed");
+        world.run();
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_import_whose_payload_has_the_size_but_other_bytes_gets_no_entry_and_a_warning() {
+        let mut world = World::new();
+        let archive = interrupted_import(&mut world, ID, "projects/a");
+        let payload = world
+            .collection
+            .object_dir(id(ID))
+            .join(archive.payload.as_str());
+        let mut bytes = fs::read(&payload).expect("reads");
+        bytes[0] ^= 0xFF;
+        fs::write(&payload, bytes).expect("same size, other bytes");
+
+        let warnings = world.run();
+
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+        assert!(mentions(&warnings, "does not match"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_import_that_has_its_entry_keeps_it() {
+        let mut world = World::new();
+        let archive = interrupted_import(&mut world, ID, "projects/a");
+        let mut entry = TrackingEntry::new(
+            id(ID),
+            path("projects/a"),
+            EntryState::Gone,
+            VersionTakenOut::Pending,
+            time(WRITTEN),
+        );
+        entry.local_payloads = vec![LocalPayload {
+            kind: PayloadKind::Archive,
+            version: 1,
+            file: archive.payload,
+        }];
+        world.store_entry(&entry);
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(world.entry(ID).written, time(WRITTEN));
+    }
+
+    #[test]
+    fn a_recorded_change_that_cannot_be_read_gives_a_warning_and_no_entry() {
+        let mut world = World::new();
+        interrupted_import(&mut world, ID, "projects/a");
+        let dir = world.collection.object_dir(id(ID));
+        fs::write(dir.join("meta.pending"), b"{ not json").expect("garbage");
+
+        let warnings = world.run();
+
+        assert!(
+            tracking::read(&world.collection, id(ID))
+                .expect("reads")
+                .is_none()
+        );
+        assert!(mentions(&warnings, ID), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_crash_anywhere_in_completing_an_import_ends_in_the_same_state() {
+        survives_every_crash(
+            || {
+                let mut world = World::new();
+                interrupted_import(&mut world, ID, "projects/a");
                 world
             },
             &[],
