@@ -1923,4 +1923,18 @@ lists one action `{"action": "unearth", "piece", "stamp", "version",
 `destination`, `free_space`, `member_names`, `extracted_tree`. Without room
 for the version the action has `skipped` as above and the exit status is 3.
 
+`fork` has `forked` (false when the version did not fit), `piece`, `stamp`,
+`version` (the time of the stamp in UTC, RFC 3339), `path` (the destination),
+`bytes` (the unpacked size; null without a usable listing), `repairs`,
+`warnings`, and, only when no room was found, `skipped` as `{"reason":
+"no_space", "needed", "available"}` in bytes, with `needed` null when the
+volume ran full during the extraction of a version without a usable listing.
+A dry run has `dry_run`, `actions` and `warnings`; after the repairs it
+lists one action `{"action": "fork", "piece", "stamp", "version", "path",
+"bytes", "checks"}` with `checks` in the order `version`, `destination`,
+`free_space`, `member_names`, `extracted_tree`, each left out where the
+section "fork" says so, and `damage` (a list of texts) for a damaged
+version. Without room for the version the action has `skipped` as above and
+the exit status is 3.
+
 The keys that the other commands add are not yet established.

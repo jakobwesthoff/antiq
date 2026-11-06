@@ -173,11 +173,6 @@ mod archive {
 }
 
 command_line!(
-    fork,
-    "fork",
-    ["fork", "piece", "--version", "v", "--name", "copy", "-n"]
-);
-command_line!(
     import,
     "import",
     [
@@ -236,6 +231,30 @@ fn rebuild_needs_a_collection() {
         );
         assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
         assert_eq!(run.json()["command"], "rebuild");
+    }
+}
+
+#[test]
+fn fork_needs_a_collection() {
+    for args in [
+        &["fork", "piece", "--version", "v", "--name", "copy"][..],
+        &["fork", "piece", "-n"],
+    ] {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args(args)
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
+        assert_eq!(run.json()["command"], "fork");
     }
 }
 

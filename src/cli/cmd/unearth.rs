@@ -84,7 +84,7 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
 
 /// How the console names a version: its local time on a terminal, with
 /// the offset where a sibling renders alike, and the stamp in a pipe.
-fn label(stamp: &str, siblings: &[Stamp], style: Style, zone: &TimeZone) -> String {
+pub(super) fn label(stamp: &str, siblings: &[Stamp], style: Style, zone: &TimeZone) -> String {
     let Ok(stamp) = stamp.parse::<Stamp>() else {
         return stamp.to_string();
     };
