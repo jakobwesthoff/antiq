@@ -7,6 +7,7 @@
 use super::Description;
 use super::console::block::{Block, Para};
 use super::console::rich::Rich;
+use antiq::commands::push::PushError;
 use antiq::error::explanation;
 use antiq::versions::naming::VersionLookupError;
 use miette::Diagnostic;
@@ -20,7 +21,12 @@ pub fn block_for(description: &Description) -> Block {
     let explained = description
         .library_error
         .and_then(|error| explanation(error));
+    let free_text = description
+        .library_error
+        .and_then(find::<PushError>)
+        .is_some_and(|error| matches!(error, PushError::Unreachable { .. }));
     let mut block = match explained {
+        Some(explained) if free_text => plain_block(explained),
         Some(explained) => explained_block(explained),
         None => Block::error(Rich::new().text(&description.root)),
     };
@@ -48,10 +54,20 @@ pub fn block_for(description: &Description) -> Block {
 }
 
 /// The error block for a diagnostic: its message as the title and its
-/// help as the fix.
+/// help as the fix. The message is read for code spans.
 pub(super) fn explained_block(explained: &dyn Diagnostic) -> Block {
-    let message = explained.to_string();
-    let mut block = Block::error(Rich::parse(&message)).message(&message);
+    titled_block(explained, Rich::parse(&explained.to_string()))
+}
+
+/// [`explained_block`] with the message as plain text. The reason of an
+/// unreachable target comes from the system, such as the output of ssh,
+/// and can hold backticks that are no code spans.
+fn plain_block(explained: &dyn Diagnostic) -> Block {
+    titled_block(explained, Rich::new().text(&explained.to_string()))
+}
+
+fn titled_block(explained: &dyn Diagnostic, title: Rich) -> Block {
+    let mut block = Block::error(title).message(&explained.to_string());
     if let Some(help) = explained.help() {
         for paragraph in help_paragraphs(&help.to_string()) {
             block = block.how(paragraph);
@@ -100,10 +116,13 @@ mod tests {
     use super::block_for;
     use antiq::collection::CollectionError;
     use antiq::commands::push::PushError;
+    use antiq::commands::rebuild::RebuildError;
+    use antiq::commands::restore::RestoreError;
     use antiq::listing::ListingError;
     use antiq::lock::LockError;
     use antiq::reference::ReferenceError;
     use antiq::run::RunError;
+    use antiq::versions::naming::VersionLookupError;
 
     /// The rich lines of the block for `error`, run through the steps
     /// `doing` (innermost first), on a terminal 100 columns wide.
@@ -346,6 +365,64 @@ mod tests {
                 &[]
             )[1],
             "▌ /a`b is outside the antiq collection at /root"
+        );
+    }
+
+    #[test]
+    fn the_reason_of_an_unreachable_target_stays_plain_text_in_the_title() {
+        let error = PushError::Unreachable {
+            reason: "ssh said `no route` to `host`".into(),
+        };
+        assert_eq!(rich(error, &[])[1], "▌ Ssh said `no route` to `host`");
+    }
+
+    /// A piece whose name holds two backticks, which a plain pair of
+    /// backticks around it would pair up with the ones around the input.
+    const TICKED_PIECE: &str = "projects/a`b`c";
+
+    #[test]
+    fn a_version_lookup_keeps_a_piece_with_backticks_whole_in_console_and_pipe() {
+        let error = || VersionLookupError::NoSuch {
+            piece: TICKED_PIECE.into(),
+            input: "2020".into(),
+            stamps: vec!["2026-11-04T090211".into()],
+        };
+        assert_eq!(
+            rich(RestoreError::Version(error()), &[])[1],
+            "▌ 2020 matches no version of projects/a`b`c; there are 2026-11-04T090211"
+        );
+        assert_eq!(
+            plain(RestoreError::Version(error()), &[])[0],
+            "error: `2020` matches no version of ``projects/a`b`c``; there are 2026-11-04T090211"
+        );
+        let ambiguous = VersionLookupError::Ambiguous {
+            piece: TICKED_PIECE.into(),
+            input: "2026-11-04".into(),
+            stamps: vec!["2026-11-04T100000".into(), "2026-11-04T090211".into()],
+        };
+        assert!(
+            rich(RestoreError::Version(ambiguous), &[])[1]
+                .starts_with("▌ 2026-11-04 names no single version of projects/a`b`c, as 2"),
+        );
+    }
+
+    #[test]
+    fn a_newer_format_keeps_a_piece_with_backticks_whole_in_console_and_pipe() {
+        let restore = || RestoreError::FormatTooNew {
+            piece: TICKED_PIECE.into(),
+            stamp: "2026-11-04T090211".into(),
+        };
+        assert_eq!(
+            rich(restore(), &[])[1],
+            "▌ Version 2026-11-04T090211 of projects/a`b`c has a listing of a newer format than this antiq reads"
+        );
+        let rebuild = RebuildError::FormatTooNew {
+            piece: TICKED_PIECE.into(),
+            stamp: "2026-11-04T090211".into(),
+        };
+        assert_eq!(
+            rich(rebuild, &[])[1],
+            "▌ The listing of version 2026-11-04T090211 of projects/a`b`c is of a newer format than antiq reads"
         );
     }
 

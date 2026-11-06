@@ -40,7 +40,12 @@ pub enum VersionLookupError {
         code(antiq::version::no_such),
         help("Name one of these versions by its stamp, or by the start of it.")
     )]
-    #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
+    #[error(
+        "{} matches no version of {}; there are {}",
+        CodeSpan(.input),
+        CodeSpan(.piece),
+        stamps.join(", ")
+    )]
     NoSuch {
         piece: String,
         input: String,
@@ -54,8 +59,9 @@ pub enum VersionLookupError {
         )
     )]
     #[error(
-        "{} names no single version of {piece}, as {} versions match it: {}",
+        "{} names no single version of {}, as {} versions match it: {}",
         CodeSpan(.input),
+        CodeSpan(.piece),
         stamps.len(),
         stamps.join(", ")
     )]
@@ -528,7 +534,7 @@ mod tests {
         assert!(matches!(error, VersionLookupError::NoSuch { .. }));
         assert_eq!(
             error.to_string(),
-            "`2020` matches no version of tools/scan; there are 2026-11-04T090211, 2026-11-03T100000"
+            "`2020` matches no version of `tools/scan`; there are 2026-11-04T090211, 2026-11-03T100000"
         );
     }
 
@@ -540,7 +546,7 @@ mod tests {
         assert!(matches!(error, VersionLookupError::Ambiguous { .. }));
         assert_eq!(
             error.to_string(),
-            "`2026-11-04` names no single version of tools/scan, as 2 versions match it: 2026-11-04T090212, 2026-11-04T090211"
+            "`2026-11-04` names no single version of `tools/scan`, as 2 versions match it: 2026-11-04T090212, 2026-11-04T090211"
         );
     }
 

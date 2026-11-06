@@ -9,7 +9,10 @@ use std::fmt::{self, Display};
 
 /// A value shown as a CommonMark code span: in backticks, with one more
 /// backtick on each side than the longest run inside the value, and a
-/// space inside the fence when the value starts or ends with a backtick.
+/// space inside the fence when the value starts or ends with a backtick,
+/// or starts and ends with a space and is not all spaces. A reader drops
+/// one space at each edge of such a span, so the padding keeps the value's
+/// own.
 ///
 /// The messages of the library carry paths and names from the user's
 /// files, which can hold backticks. A plain pair of backticks around them
@@ -25,7 +28,8 @@ impl<T: Display> Display for CodeSpan<T> {
             .max()
             .unwrap_or(0);
         let fence = "`".repeat(longest + 1);
-        let pad = if value.starts_with('`') || value.ends_with('`') {
+        let spaced = value.starts_with(' ') && value.ends_with(' ') && !value.trim().is_empty();
+        let pad = if value.starts_with('`') || value.ends_with('`') || spaced {
             " "
         } else {
             ""
@@ -56,6 +60,19 @@ mod tests {
     fn a_value_at_the_edge_of_the_fence_is_padded() {
         assert_eq!(CodeSpan("`a").to_string(), "`` `a ``");
         assert_eq!(CodeSpan("a`").to_string(), "`` a` ``");
+    }
+
+    #[test]
+    fn a_value_with_a_space_at_both_edges_is_padded() {
+        assert_eq!(CodeSpan(" a ").to_string(), "`  a  `");
+        assert_eq!(CodeSpan(" `a` ").to_string(), "``  `a`  ``");
+    }
+
+    #[test]
+    fn a_value_of_spaces_only_or_with_one_spaced_edge_is_not_padded() {
+        assert_eq!(CodeSpan("   ").to_string(), "`   `");
+        assert_eq!(CodeSpan(" a").to_string(), "` a`");
+        assert_eq!(CodeSpan("a ").to_string(), "`a `");
     }
 
     #[test]

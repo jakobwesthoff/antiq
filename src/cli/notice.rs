@@ -7,7 +7,7 @@
 
 use super::console::block::Block;
 use super::console::rich::Rich;
-use antiq::report::Warning;
+use antiq::report::{Warning, WarningKind};
 use miette::{Diagnostic, Severity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +44,15 @@ fn warning_block(warning: &Warning) -> Block {
         .kind
         .as_ref()
         .is_some_and(|kind| kind.severity() == Some(Severity::Advice));
+    // The reasons of these two kinds come from the system and can hold
+    // backticks that are no code spans.
+    let free_text = matches!(
+        warning.kind,
+        Some(WarningKind::FilesystemUnknown { .. } | WarningKind::LockUnreadable { .. })
+    );
     let block = if advice {
         Block::info(Rich::parse(message)).pipe(&format!("note: {message}"))
-    } else if warning.kind.is_some() {
+    } else if warning.kind.is_some() && !free_text {
         Block::warning(Rich::parse(message)).pipe(&format!("warning: {message}"))
     } else {
         Block::warning(Rich::new().text(message)).pipe(&format!("warning: {message}"))
@@ -156,6 +162,27 @@ mod tests {
         assert_eq!(
             rich(lock),
             [" ⚠ WARNING  Cannot read the lock file: denied"]
+        );
+    }
+
+    #[test]
+    fn a_reason_with_backticks_stays_plain_text_in_the_title() {
+        let filesystem = Notice::Warning(Warning::of(WarningKind::FilesystemUnknown {
+            reason: "cannot stat /work/`a`/`b`: denied".into(),
+        }));
+        assert_eq!(
+            rich(filesystem),
+            [
+                " ⚠ WARNING  Cannot tell what kind of filesystem the antiq collection is on: cannot stat",
+                "            /work/`a`/`b`: denied",
+            ]
+        );
+        let lock = Notice::Warning(Warning::of(WarningKind::LockUnreadable {
+            reason: "`a` and `b`".into(),
+        }));
+        assert_eq!(
+            rich(lock),
+            [" ⚠ WARNING  Cannot read the lock file: `a` and `b`"]
         );
     }
 

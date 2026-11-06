@@ -13,6 +13,7 @@ use crate::archive::check::{
 };
 use crate::archive::read;
 use crate::clock::{Clock, whole_seconds};
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::tree::TreeRoot;
@@ -85,7 +86,11 @@ pub enum RebuildError {
         code(antiq::rebuild::format_too_new),
         help("Use a version of antiq that reads the newer format.")
     )]
-    #[error("the listing of version {stamp} of {piece} is of a newer format than antiq reads")]
+    #[error(
+        "the listing of version {} of {} is of a newer format than antiq reads",
+        CodeSpan(.stamp),
+        CodeSpan(.piece)
+    )]
     FormatTooNew { piece: String, stamp: String },
     /// The version cannot be repaired, or its files show that it must not
     /// be. `reason` says why.

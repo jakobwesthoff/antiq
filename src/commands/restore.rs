@@ -10,6 +10,7 @@ use crate::archive::extract::unpack_flushed;
 use crate::archive::names::{MemberName, check_members};
 use crate::archive::verify::compare_with_listing;
 use crate::archive::{PackError, WalkRules};
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::FilesystemError;
@@ -97,7 +98,11 @@ pub enum RestoreError {
         code(antiq::restore::format_too_new),
         help("Use a version of antiq that reads the newer format.")
     )]
-    #[error("version {stamp} of {piece} has a listing of a newer format than this antiq reads")]
+    #[error(
+        "version {} of {} has a listing of a newer format than this antiq reads",
+        CodeSpan(.stamp),
+        CodeSpan(.piece)
+    )]
     FormatTooNew { piece: String, stamp: String },
     #[error("version {stamp} of {piece} holds `{name}` at its top, and it is not a file")]
     MarkerNotAFile {

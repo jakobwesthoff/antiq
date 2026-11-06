@@ -150,7 +150,7 @@ fn an_ambiguous_version_lists_one_candidate_line_per_stamp_on_a_pipe() {
     run.expect_code(1);
     assert_eq!(
         run.stderr,
-        "error: `2026-11-04` names no single version of projects/scanner, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\n  \
+        "error: `2026-11-04` names no single version of `projects/scanner`, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\n  \
          fix: Name one version by more of its stamp, for example 2026-11-04T100000.\n    \
          candidate: 2026-11-04T100000\n    \
          candidate: 2026-11-04T090211\n  \
@@ -176,7 +176,35 @@ fn the_json_of_an_ambiguous_version_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"code\":\"antiq::version::ambiguous\",\"message\":\"`2026-11-04` names no single version of projects/scanner, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\",\"fix\":\"Name one version by more of its stamp, for example `2026-11-04T100000`.\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"code\":\"antiq::version::ambiguous\",\"message\":\"`2026-11-04` names no single version of `projects/scanner`, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\",\"fix\":\"Name one version by more of its stamp, for example `2026-11-04T100000`.\"}}\n"
+    );
+}
+
+/// A stored piece whose name holds two backticks.
+fn ticked_piece(builder: &mut CollectionBuilder) {
+    builder.version("projects/a`b`c", STAMP, &[("main.rs", "fn main() {}\n")]);
+}
+
+#[test]
+fn a_piece_with_backticks_is_fenced_in_the_pipe_text_of_a_version_lookup() {
+    let world = world(Mode::Text, ticked_piece);
+    let run = world.run(&["unearth", "projects/a`b`c", "--version", "2020"]);
+    run.expect_code(1);
+    assert_eq!(
+        run.stderr.lines().next().expect("a title"),
+        "error: `2020` matches no version of ``projects/a`b`c``; there are 2026-11-04T090211"
+    );
+}
+
+#[test]
+fn a_piece_with_backticks_is_fenced_in_the_json_message_of_a_version_lookup() {
+    let world = world(Mode::Json, ticked_piece);
+    let run = world.run(&["unearth", "projects/a`b`c", "--version", "2020"]);
+    run.expect_code(1);
+    let json: Value = serde_json::from_str(&run.stdout).expect("a JSON envelope");
+    assert_eq!(
+        json["error"]["message"],
+        "`2020` matches no version of ``projects/a`b`c``; there are 2026-11-04T090211"
     );
 }
 

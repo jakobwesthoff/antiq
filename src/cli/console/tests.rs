@@ -444,6 +444,20 @@ fn a_span_with_a_longer_fence_holds_backticks() {
 }
 
 #[test]
+fn a_code_span_of_any_value_parses_back_to_that_value() {
+    for value in [
+        "plain", "a`b", "`a", "a`", " a ", "  a  ", " `a` ", " a", "a ", " ", "   ",
+    ] {
+        let fenced = antiq::code_span::CodeSpan(value).to_string();
+        assert_eq!(
+            Rich::parse(&fenced),
+            Rich::new().cmd(value),
+            "{value:?} fenced as {fenced:?}"
+        );
+    }
+}
+
+#[test]
 fn a_run_of_backticks_without_a_closing_run_is_plain_text() {
     assert_eq!(Rich::parse("a ``b` c").to_plain(), "a ``b` c");
 }

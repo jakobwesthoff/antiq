@@ -740,9 +740,9 @@ never mixed:
 
 An exact match wins over prefix matches. Several matches are an error of
 the kind `other` that reads `` `<input>` names no single version of
-<piece>, as <n> versions match it: <stamps> ``, the stamps newest first. An input that matches no
+`<piece>`, as <n> versions match it: <stamps> ``, the stamps newest first. An input that matches no
 version is an error of the kind `other` that reads `` `<input>` matches no
-version of <piece>; there are <stamps> ``, listing the stamps of all the
+version of `<piece>`; there are <stamps> ``, listing the stamps of all the
 versions of the piece, incomplete ones included, newest first for every
 command. When two versions of one piece render alike
 in local time at different UTC offsets (the repeated hour when daylight
@@ -2092,6 +2092,9 @@ error is the chain text of the whole error, and its `fix` is the help of
 the explanation. The steps the run was in are listed innermost first under "What
 antiq was doing". A reference that matches several pieces or versions, or
 no piece, adds a table and an info after the block (see "Piece references").
+The title of the error for an unreachable target, and the title of the
+warnings about a filesystem that cannot be told and a lock file that cannot
+be read, hold system text; they show it as written, backticks included.
 A usage error of the command line parser is a block too. Its title is the
 parser's first line, with the first letter in upper case. "How to fix it"
 lists what the parser carries for the error, in its order: "Did you mean
@@ -2107,7 +2110,11 @@ terminal are plain text, whatever `CLICOLOR_FORCE` says.
 
 On a pipe the error is plain lines. An error line gives the title,
 prefixed `error:`, with the message as written, in lower case and with its
-backticks; it is followed by a `  fix:` line where the error has a help, one `    candidate: <path>` line per
+backticks. A value from the user's files or command line, such as a piece,
+a version input or a stamp, stands in a code span; a value that holds
+backticks gets a fence one backtick longer than the longest run inside it,
+and a space inside each edge of the fence when the value starts or ends
+with a backtick, or starts and ends with a space. The line is followed by a `  fix:` line where the error has a help, one `    candidate: <path>` line per
 candidate of an ambiguous reference (for an ambiguous version, one per
 matching stamp) and one
 `  while attempting to <action>` line per context, the innermost first. The
