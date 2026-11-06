@@ -134,8 +134,8 @@ composed Unicode form does not match a name in decomposed form.
 
 A directory that selection has to look into and cannot read is skipped
 and reported: `status` lists it as a note below the table
-("unreadable: <dir>") and `archive` names it in its output. The exit
-code stays 0.
+("unreadable: <dir>") and `archive` names it in a warning of the same
+text, also in a dry run. The exit code stays 0.
 When the collection root itself cannot be listed, the run
 fails. Running out of file descriptors fails the run as it does in a walk.
 An entry deleted while selection runs is skipped. Selection looks no more

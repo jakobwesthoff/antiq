@@ -147,6 +147,7 @@ pub(crate) fn plan(
         }
     }
     let mut notes = setting_notes(collection);
+    notes.extend(setup.unreadable_notes());
     notes.extend(warnings);
     Ok(ArchivePlan::new(actions, refused, notes, setup.named))
 }
@@ -179,6 +180,7 @@ pub(crate) fn execute(
         warnings: setting_notes(collection),
         named: setup.named,
     };
+    report.warnings.extend(setup.unreadable_notes());
     report.warnings.extend(guard.warnings().iter().cloned());
     let mut exhausted = None;
     for item in done {
@@ -212,6 +214,8 @@ struct Setup {
     pieces: Vec<RelPath>,
     /// Whether the command line names the piece.
     named: bool,
+    /// The directories selection had to look into and could not read.
+    unreadable: Vec<RelPath>,
 }
 
 /// What `archive` makes of a piece.
@@ -248,7 +252,16 @@ impl Setup {
             settings: idle::Settings::new(config.idle_days, config.soon_days),
             pieces,
             named,
+            unreadable: selection.unreadable().to_vec(),
         })
+    }
+
+    /// The warnings that name the directories selection could not read.
+    fn unreadable_notes(&self) -> Vec<Warning> {
+        self.unreadable
+            .iter()
+            .map(|directory| Warning::new(format!("unreadable: {directory}")))
+            .collect()
     }
 
     fn walk(&self, piece: &RelPath, hooks: &dyn Hooks) -> Result<PieceTree, ArchiveError> {
@@ -1318,6 +1331,45 @@ mod tests {
             .count();
         assert_eq!(warnings, 1, "{:?}", report.warnings);
         assert_eq!(report.exit_code(), 3);
+    }
+
+    /// A directory that selection has to look into and cannot read.
+    fn world_with_unreadable_directory() -> TempCollection {
+        let mut world = world("patterns = [\"*/*\"]");
+        add(&mut world, "b/c", 40);
+        let locked = world.tree().unreadable_dir("a");
+        assert!(
+            fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+        world
+    }
+
+    #[test]
+    fn an_unreadable_directory_of_the_selection_is_named_in_a_warning() {
+        let world = world_with_unreadable_directory();
+
+        let report = run_all(&world);
+
+        let archived: Vec<&str> = report
+            .archived
+            .iter()
+            .map(|item| item.piece.as_str())
+            .collect();
+        assert_eq!(archived, ["b/c"]);
+        let texts: Vec<&str> = report.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(texts, ["unreadable: a"], "the run goes on and exits 0");
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn a_dry_run_names_the_unreadable_directory_too() {
+        let world = world_with_unreadable_directory();
+
+        let plan = plan_of(&world, &Target::Due);
+
+        let texts: Vec<&str> = plan.warnings.iter().map(|w| w.message.as_str()).collect();
+        assert_eq!(texts, ["unreadable: a"]);
     }
 
     // =========================================================
