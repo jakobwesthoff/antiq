@@ -422,7 +422,8 @@ them is deleted or rewritten automatically. (ADR 0062)
   entries) or lacks a parsable `piece`, `archived` or `archive-bytes`
   line; or whose checksum file is not
   exactly one checksum line for the archive's name. `status` reports it;
-  `list` marks what it sees in the listing's head; `rebuild` repairs a
+  `list` marks what it sees in the listing's head, the sidecars and the
+  size of the archive; `rebuild` repairs a
   missing sidecar; `fork` can still extract it, with a warning and
   without the comparison against the listing; `unearth` refuses it.
 - **Doubled slot:** two or more files in one slot of a version, that is,
