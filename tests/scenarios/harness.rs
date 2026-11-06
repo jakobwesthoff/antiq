@@ -1262,3 +1262,114 @@ fn a_source_is_a_folder_outside_the_collection_with_aged_files() {
     assert_eq!(fs::read_to_string(&file).expect("it exists"), "x");
     assert_eq!(mtime(&file), clock.days_ago(40));
 }
+
+// =========================================================
+// Checks without antiq
+// =========================================================
+
+use crate::support::scenario::outsider::{
+    StoredVersion, shasum_check, shasum_check_with, store_files, tar_members,
+};
+
+#[test]
+fn shasum_check_accepts_a_matching_checksum_file() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    shasum_check(
+        &collection.path(".antiq/pieces/old/client-site"),
+        &files.checksum,
+    );
+}
+
+#[test]
+#[should_panic(expected = "shasum -c failed")]
+fn shasum_check_rejects_a_changed_archive() {
+    let collection = collection_with_version();
+    collection.damage_truncate_archive("old/client-site", STAMP);
+    let files = collection.version_files("old/client-site", STAMP);
+    shasum_check(
+        &collection.path(".antiq/pieces/old/client-site"),
+        &files.checksum,
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot run no-such-shasum")]
+fn a_missing_shasum_is_named() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    shasum_check_with(
+        "no-such-shasum",
+        &collection.path(".antiq/pieces/old/client-site"),
+        &files.checksum,
+    );
+}
+
+#[test]
+fn tar_members_lists_the_archive_sorted() {
+    let collection = collection_with_version();
+    let files = collection.version_files("old/client-site", STAMP);
+    assert_eq!(
+        tar_members(&files.archive),
+        [
+            "client-site",
+            "client-site/README",
+            "client-site/src",
+            "client-site/src/main.rs"
+        ]
+    );
+}
+
+fn stored(stamp: &str, folder: &std::path::Path, stem: &str, parts: [bool; 3]) -> StoredVersion {
+    let file = |present: bool, suffix: &str| {
+        present.then(|| folder.join(format!("{stem}--{stamp}{suffix}")))
+    };
+    StoredVersion {
+        stamp: stamp.to_string(),
+        archive: file(parts[0], ".tar.zst"),
+        checksum: file(parts[1], ".tar.zst.sha256"),
+        listing: file(parts[2], ".sha256.zst"),
+    }
+}
+
+#[test]
+fn store_files_finds_each_version_by_suffix_in_stamp_order() {
+    let collection = Collection::build(&Clock::now())
+        .version("p/q", "2026-09-03T101500-10", &[("a", "x")])
+        .version("p/q", "2026-09-03T101500", &[("a", "x")])
+        .version("p/q", "2026-09-03T101500-2", &[("a", "x")])
+        .version("p/q", "2026-08-01T000000", &[("a", "x")])
+        .finish();
+    collection.damage_remove_archive("p/q", "2026-08-01T000000");
+    let folder = collection.path(".antiq/pieces/p/q");
+    assert_eq!(
+        store_files(&collection, "p/q"),
+        [
+            stored("2026-08-01T000000", &folder, "p-q", [false, true, true]),
+            stored("2026-09-03T101500", &folder, "p-q", [true, true, true]),
+            stored("2026-09-03T101500-2", &folder, "p-q", [true, true, true]),
+            stored("2026-09-03T101500-10", &folder, "p-q", [true, true, true]),
+        ]
+    );
+}
+
+#[test]
+fn a_version_exists_when_its_archive_does() {
+    let collection = Collection::build(&Clock::now())
+        .version("p", "2026-09-03T101500-2", &[("a", "x")])
+        .version("p", "2026-09-03T101500", &[("a", "x")])
+        .version("p", "2026-08-01T000000", &[("a", "x")])
+        .finish();
+    collection.damage_remove_archive("p", "2026-08-01T000000");
+    assert_eq!(
+        collection.versions("p"),
+        ["2026-09-03T101500", "2026-09-03T101500-2"]
+    );
+}
+
+#[test]
+fn a_piece_without_a_store_folder_has_no_versions() {
+    let collection = Collection::build(&Clock::now()).finish();
+    assert!(store_files(&collection, "nothing").is_empty());
+    assert!(collection.versions("nothing").is_empty());
+}

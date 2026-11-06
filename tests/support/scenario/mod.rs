@@ -6,6 +6,7 @@
 
 pub mod collection;
 pub mod envelope;
+pub mod outsider;
 pub mod state;
 pub mod target;
 pub mod versions;
