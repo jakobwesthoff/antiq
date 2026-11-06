@@ -355,7 +355,8 @@ flushed. The pin is checked before the idle and empty tests. (ADR 0024)
   packing starts. A new stamp for a piece is that second without a counter
   when no file in the piece's store folder and no directory
   `tmp/pack/<stamp>/<piece path>` uses it; otherwise the same second with
-  counter 2, then 3, and so on, the first one unused.
+  counter 2, then 3, and so on, the first one unused, up to the counter
+  9999.
 - The checksum file holds one line, `<hash>  <archive file name>`, with
   the hash in lower-case hex, two spaces, the bare file name and a final
   newline, and nothing else, so `shasum -a 256 -c <checksum file>` run in the
@@ -368,6 +369,14 @@ flushed. The pin is checked before the idle and empty tests. (ADR 0024)
   deletes a version.
 - **A version exists if and only if its `.tar.zst` exists.** The
   `.tar.zst` is moved in last and deleted first. (ADR 0030)
+- A version moves into its store folder as listing, checksum file,
+  `.tar.zst`. Each file is flushed where it lies, renamed without
+  replacing anything, and its folder flushed. A failure before the
+  `.tar.zst` has moved puts the files that moved back; when that fails
+  too, they and the staging stay where they are for repair 1, whatever the
+  cause was, a full disk included. A failure to flush the folder after the
+  `.tar.zst` has moved leaves the version in the store; the piece then
+  goes no further and its folder stays live.
 - When the last version of a piece goes, its folder under `pieces/` and
   every parent that became empty go with it.
 - There is no state file: everything antiq needs follows from the
@@ -646,7 +655,9 @@ is stored or removed. `unearth` and `fork` need room for the listing's
 `bytes`; `fork` of a version without a usable listing skips the check
 with a warning. A piece without room is skipped before staging, and
 `ENOSPC` during a step removes that step's staging and skips the piece
-(exit 3).
+(exit 3). The exception is the move into the store (`archive` step 4)
+after a file has moved and the undo failed: the files and the staging
+stay for repair 1.
 
 Moving a piece's top directory to another parent (into `trash/`, into
 place) adds owner write to it first and restores the recorded mode right

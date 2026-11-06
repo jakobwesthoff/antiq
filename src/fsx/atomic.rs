@@ -66,10 +66,6 @@ fn flush_dir_with(dir: &Path, sync: Flush<'_>, fsync: Flush<'_>) -> Result<(), F
 /// Both methods take the open handle, so a path deeper than the system
 /// limit is flushed like any other. `path` only names the target in the
 /// error and in the record.
-#[allow(
-    dead_code,
-    reason = "used by the versions store (move_in and the other operations)"
-)]
 pub(crate) trait Durable: Send + Sync {
     /// Makes the data of an open file durable.
     fn file(&self, file: &File, path: &Path) -> Result<(), FsxError>;
@@ -78,10 +74,6 @@ pub(crate) trait Durable: Send + Sync {
 }
 
 /// The flushing of the platform ([`flush_file`]).
-#[allow(
-    dead_code,
-    reason = "used by the versions store (move_in and the other operations)"
-)]
 pub(crate) struct RealDurable;
 
 impl Durable for RealDurable {
@@ -96,10 +88,6 @@ impl Durable for RealDurable {
 
 /// How an error or a record names `path` below `root`: the path itself,
 /// or `.` for the root.
-#[allow(
-    dead_code,
-    reason = "used by the versions store (move_in and the other operations)"
-)]
 pub(crate) fn named(root: &TreeRoot, path: &RelPath) -> std::path::PathBuf {
     let shown = root.prefix().concat(path);
     if shown.is_root() {
@@ -109,10 +97,6 @@ pub(crate) fn named(root: &TreeRoot, path: &RelPath) -> std::path::PathBuf {
 }
 
 /// Makes the directory `dir` of `root` durable.
-#[allow(
-    dead_code,
-    reason = "used by the versions store (move_in and the other operations)"
-)]
 pub(crate) fn flush_dir_of(
     durable: &dyn Durable,
     root: &TreeRoot,
@@ -132,10 +116,6 @@ pub(crate) fn flush_dir_of(
 ///
 /// A component that exists as anything but a directory, a symlink to a
 /// directory included, is an error.
-#[allow(
-    dead_code,
-    reason = "used by the versions store (move_in and the other operations)"
-)]
 pub(crate) fn create_dir_chain(
     durable: &dyn Durable,
     base: &TreeRoot,
@@ -276,10 +256,10 @@ pub(crate) mod recording {
     pub(crate) struct Recording {
         flushes: Mutex<Vec<Flush>>,
         observer: Mutex<Option<Observer>>,
-        /// File flushes from this one on (counted from 0) fail.
-        fail_files_from: Mutex<Option<usize>>,
-        /// Directory flushes from this one on (counted from 0) fail.
-        fail_dirs_from: Mutex<Option<usize>>,
+        /// The file flushes (counted from 0) that fail.
+        fail_files: Mutex<Option<std::ops::Range<usize>>>,
+        /// The directory flushes (counted from 0) that fail.
+        fail_dirs: Mutex<Option<std::ops::Range<usize>>>,
     }
 
     impl Recording {
@@ -296,20 +276,25 @@ pub(crate) mod recording {
         /// Makes the file flushes fail from the `n`th one on, counted from
         /// 0 over the file flushes only.
         pub(crate) fn fail_files_from(&self, n: usize) {
-            *self
-                .fail_files_from
-                .lock()
-                .expect("no test panics holding it") = Some(n);
+            *self.fail_files.lock().expect("no test panics holding it") = Some(n..usize::MAX);
+        }
+
+        /// Makes only the `n`th file flush fail, so that a step that
+        /// undoes another can be seen to work.
+        pub(crate) fn fail_files_at(&self, n: usize) {
+            *self.fail_files.lock().expect("no test panics holding it") = Some(n..n + 1);
         }
 
         /// Makes the directory flushes fail from the `n`th one on, counted
         /// from 0 over the directory flushes only, so a test can let the
         /// flushes of its setup pass and fail the one it is about.
         pub(crate) fn fail_dirs_from(&self, n: usize) {
-            *self
-                .fail_dirs_from
-                .lock()
-                .expect("no test panics holding it") = Some(n);
+            *self.fail_dirs.lock().expect("no test panics holding it") = Some(n..usize::MAX);
+        }
+
+        /// Makes only the `n`th directory flush fail.
+        pub(crate) fn fail_dirs_at(&self, n: usize) {
+            *self.fail_dirs.lock().expect("no test panics holding it") = Some(n..n + 1);
         }
 
         pub(crate) fn flushes(&self) -> Vec<Flush> {
@@ -323,7 +308,7 @@ pub(crate) mod recording {
             &self,
             flush: Flush,
             handle: &File,
-            fail_from: &Mutex<Option<usize>>,
+            fail: &Mutex<Option<std::ops::Range<usize>>>,
             same_kind: fn(&Flush) -> bool,
         ) -> Result<(), FsxError> {
             if let Some(observer) = &*self.observer.lock().expect("no test panics holding it") {
@@ -335,8 +320,8 @@ pub(crate) mod recording {
                 Flush::File(path) | Flush::Dir(path) => path.clone(),
             };
             flushes.push(flush);
-            let from = *fail_from.lock().expect("no test panics holding it");
-            if from.is_some_and(|from| earlier >= from) {
+            let failing = fail.lock().expect("no test panics holding it").clone();
+            if failing.is_some_and(|failing| failing.contains(&earlier)) {
                 return Err(FsxError::Io {
                     action: "flush",
                     path: path.display().to_string(),
@@ -352,7 +337,7 @@ pub(crate) mod recording {
             self.record(
                 Flush::File(path.to_path_buf()),
                 file,
-                &self.fail_files_from,
+                &self.fail_files,
                 |flush| matches!(flush, Flush::File(_)),
             )
         }
@@ -361,7 +346,7 @@ pub(crate) mod recording {
             self.record(
                 Flush::Dir(path.to_path_buf()),
                 dir,
-                &self.fail_dirs_from,
+                &self.fail_dirs,
                 |flush| matches!(flush, Flush::Dir(_)),
             )
         }
@@ -884,6 +869,31 @@ mod tests {
                 (Flush::File("f".into()), true)
             ]
         );
+    }
+
+    #[test]
+    fn the_recording_fails_only_the_chosen_flush_with_the_at_variants() {
+        let mut tree = Tree::new();
+        let target = tree.file("f", b"x");
+        let file = File::open(&target).expect("opens");
+        let recording = Recording::new();
+        recording.fail_files_at(1);
+        recording.fail_dirs_at(0);
+        recording
+            .file(&file, Path::new("f"))
+            .expect("the first passes");
+        recording
+            .file(&file, Path::new("f"))
+            .expect_err("the second fails");
+        recording
+            .file(&file, Path::new("f"))
+            .expect("the third passes");
+        recording
+            .dir(&file, Path::new("d"))
+            .expect_err("the first directory fails");
+        recording
+            .dir(&file, Path::new("d"))
+            .expect("the second passes");
     }
 
     #[test]

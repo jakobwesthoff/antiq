@@ -90,6 +90,10 @@ impl SpaceLedger {
 /// Whether the error or one of its causes says the volume is full: the
 /// raw `ENOSPC` of the operating system, or the `StorageFull` kind that a
 /// failure built without an errno carries.
+///
+/// The answer says nothing about what to remove: a
+/// `versions::VersionsError::PartlyMoved` has the cause in its chain, and
+/// its staging is kept even when the cause is a full disk.
 pub(crate) fn is_out_of_space(error: &(dyn Error + 'static)) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {

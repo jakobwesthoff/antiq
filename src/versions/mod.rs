@@ -18,7 +18,33 @@ pub mod store;
 pub enum VersionsError {
     #[error("`{0}` is not a version stamp")]
     InvalidStamp(String),
-    #[error("cannot {action} {path} in the store: {source}")]
+    #[error("a stamp for {piece} is not free up to the counter {limit}")]
+    CounterTooHigh { piece: String, limit: u32 },
+    #[error("{path} exists already")]
+    Taken { path: String },
+    /// A move of the files of a version failed after some of them had
+    /// moved and could not be undone. The files that moved stay where they
+    /// are and the staging stays too, whatever the cause was, a full disk
+    /// included: repair 1 needs the staging to finish the move.
+    #[error("the files of {piece} {stamp} are partly moved: {source}")]
+    PartlyMoved {
+        piece: String,
+        stamp: String,
+        source: Box<VersionsError>,
+    },
+    /// The `.tar.zst` is in the store, but making the store folder durable
+    /// failed. The version exists, and it may not survive a crash. The
+    /// piece stops there: its live folder stays where it is and is not
+    /// checked or removed.
+    #[error("{piece} {stamp} is in the store, but it may not be durable: {source}")]
+    StoredNotDurable {
+        piece: String,
+        stamp: String,
+        source: crate::fsx::FsxError,
+    },
+    #[error(transparent)]
+    Fsx(#[from] crate::fsx::FsxError),
+    #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
         path: String,
