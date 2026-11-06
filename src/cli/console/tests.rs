@@ -284,3 +284,58 @@ fn blocks_are_separated_by_an_empty_line_when_rich_and_not_in_a_pipe() {
         ["warning: One", "warning: Two"]
     );
 }
+
+#[test]
+fn a_plain_error_lists_candidates_before_every_step_innermost_first() {
+    let block = Block::error(rich("`scan` matches 2 pieces"))
+        .candidate("projects/scanner")
+        .candidate("tools/scan-old")
+        .doing("find the piece")
+        .doing("start the run");
+    assert_eq!(
+        block.render_plain(),
+        [
+            "error: scan matches 2 pieces",
+            "    candidate: projects/scanner",
+            "    candidate: tools/scan-old",
+            "  while attempting to find the piece",
+            "  while attempting to start the run",
+        ]
+    );
+}
+
+#[test]
+fn a_rich_error_lists_every_step_under_the_heading() {
+    let block = Block::error(rich("Broken"))
+        .doing("find the piece")
+        .doing("start the run");
+    assert_eq!(
+        block.render(&bare(80)),
+        [
+            " ✖ ERROR",
+            "▌ Broken",
+            "▌",
+            "▌ What antiq was doing",
+            "▌   Attempting to find the piece.",
+            "▌   Attempting to start the run.",
+        ]
+    );
+}
+
+#[test]
+fn a_rich_error_lists_its_candidates_under_a_heading() {
+    let block = Block::error(rich("Ambiguous"))
+        .candidate("projects/scanner")
+        .candidate("tools/scan-old");
+    assert_eq!(
+        block.render(&bare(80)),
+        [
+            " ✖ ERROR",
+            "▌ Ambiguous",
+            "▌",
+            "▌ Matches",
+            "▌   projects/scanner",
+            "▌   tools/scan-old",
+        ]
+    );
+}

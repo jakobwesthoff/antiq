@@ -1197,7 +1197,10 @@ also takes the stamp of an incomplete version and removes its sidecars,
 saying that the version was incomplete. The store folders that the deletion
 leaves empty are removed with it. Deleting every version of a piece
 takes `--all-versions --force`, which also removes the piece's incomplete
-versions and says so for each. A crash inside `forget` can leave an
+versions and says so for each. `--all-versions` without `--force` is a
+usage error (exit 2) that names the piece and the command that confirms;
+nothing is deleted, and under `--json` its message is `the following
+required arguments were not provided: --force`. A crash inside `forget` can leave an
 incomplete version; running the same `forget` again removes it. The next
 `push` mirrors the deletion to the target.
 
@@ -1963,7 +1966,14 @@ to a command's result and the dry-run footer go to stdout and are dropped
 when stdout is not rich. One that belongs to a failure or a warning goes to
 stderr and is dropped when stderr is not rich.
 
-Data goes to stdout, messages to stderr. An error line gives the error and
+An error on a rich stderr is an error block. Its title is the error and its
+causes joined with `: `; the steps the run was in are listed innermost
+first under "What antiq was doing", and the candidates of an ambiguous
+reference under "Matches". A usage error of the command line parser is a
+block whose title is the parser's first paragraph, with the parser's tip
+and usage line under "How to fix it".
+
+On a pipe the error is plain lines. An error line gives the error and
 its causes joined with `: `, prefixed `error:`; it is followed by one
 `    candidate: <path>` line per candidate of an ambiguous reference and one
 `  while attempting to <action>` line per context, the innermost first. The

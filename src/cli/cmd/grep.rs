@@ -777,7 +777,7 @@ mod tests {
         let capture = Capture::default();
         let found = scanner_and_scan_old();
         let regex = compile(r"main\.rs").expect("compiles");
-        let mut out = capture.output(false).with_stdout_style(style);
+        let mut out = capture.output().with_stdout_style(style);
         print_report(
             &mut out,
             json,

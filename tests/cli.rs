@@ -548,3 +548,52 @@ fn a_child_keeps_the_environment_of_the_test_run() {
     }
     assert!(run.stdout.contains("CARGO_MANIFEST_DIR="));
 }
+
+#[test]
+fn a_test_run_does_not_inherit_colour_and_locale_settings_of_the_developer() {
+    let mut command = std::process::Command::new("antiq");
+    support::cmd::make_hermetic(&mut command);
+    let envs: std::collections::HashMap<_, _> = command
+        .get_envs()
+        .map(|(key, value)| (key.to_string_lossy().into_owned(), value.is_some()))
+        .collect();
+    for gone in [
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "CI",
+        "LC_CTYPE",
+        "LANG",
+    ] {
+        assert_eq!(envs.get(gone), Some(&false), "{gone} is removed");
+    }
+    assert_eq!(envs.get("LC_ALL"), Some(&true), "LC_ALL is set");
+    assert_eq!(envs.get("TERM"), Some(&true), "TERM is set");
+}
+
+#[test]
+fn forget_all_versions_without_force_keeps_its_json_message_byte_for_byte() {
+    let run = json_run(&["forget", "piece", "--all-versions"]);
+    assert_eq!(run.code(), 2);
+    assert_eq!(
+        run.stdout,
+        "{\"format\":1,\"command\":\"forget\",\"error\":{\"kind\":\"usage\",\
+         \"message\":\"the following required arguments were not provided: --force\"}}\n"
+    );
+    assert_eq!(run.stderr, "");
+}
+
+#[test]
+fn forget_all_versions_without_force_gets_its_own_error_on_a_pipe() {
+    let run = Antiq::new()
+        .args(["forget", "tools/backup-script", "--all-versions"])
+        .run();
+    assert_eq!(run.code(), 2);
+    assert_eq!(run.stdout, "");
+    assert_eq!(
+        run.stderr,
+        "error: tools/backup-script: --all-versions needs --force\n  \
+         why: --all-versions deletes every stored version of the piece, damaged and incomplete ones included, and that cannot be undone.\n  \
+         fix: Add --force to confirm: antiq forget tools/backup-script --all-versions --force. Check the effect first with -n.\n"
+    );
+}

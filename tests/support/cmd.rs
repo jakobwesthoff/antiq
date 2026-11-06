@@ -84,6 +84,25 @@ fn path_without_real_ssh(home: &Path) -> std::ffi::OsString {
     std::env::join_paths(dirs).expect("no directory name holds a colon")
 }
 
+/// Removes the colour and locale settings of the developer from
+/// `command` and sets the ones the tests expect. A test that wants another
+/// setting sets it afterwards.
+pub fn make_hermetic(command: &mut Command) {
+    for name in [
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "CI",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LANG",
+    ] {
+        command.env_remove(name);
+    }
+    command.env("TERM", "xterm-256color");
+    command.env("LC_ALL", "en_US.UTF-8");
+}
+
 /// The antiq binary under test, with a home directory of its own.
 pub struct Antiq {
     command: Command,
@@ -105,21 +124,7 @@ impl Antiq {
         let mut command = detached(program);
         command.env("HOME", home.path());
         command.env("PATH", path_without_real_ssh(home.path()));
-        // The developer's colour and locale settings must not decide what
-        // a test sees. A test that wants one sets it itself.
-        for name in [
-            "NO_COLOR",
-            "CLICOLOR",
-            "CLICOLOR_FORCE",
-            "CI",
-            "LC_ALL",
-            "LC_CTYPE",
-            "LANG",
-        ] {
-            command.env_remove(name);
-        }
-        command.env("TERM", "xterm-256color");
-        command.env("LC_ALL", "en_US.UTF-8");
+        make_hermetic(&mut command);
         Antiq {
             command,
             stdout_set: false,

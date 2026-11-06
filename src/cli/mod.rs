@@ -8,9 +8,12 @@
 pub mod cmd;
 #[expect(dead_code, reason = "no command renders a block yet")]
 pub mod console;
+mod error_block;
 pub mod output;
 pub mod table;
 
+use self::console::block::Block;
+use self::console::rich::Rich;
 use self::output::Output;
 use antiq::error::ErrorKind;
 use anyhow::Context as _;
@@ -143,7 +146,7 @@ pub struct ForgetArgs {
     )]
     pub version: Option<String>,
     /// Delete every version of the piece
-    #[arg(long, requires = "force")]
+    #[arg(long)]
     pub all_versions: bool,
     /// Confirm `--all-versions`
     #[arg(long, requires = "all_versions", conflicts_with = "version")]
@@ -231,11 +234,56 @@ pub struct Context {
 pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
+            if let Some(code) = refuse_all_versions_without_force(&cli, out) {
+                return code;
+            }
             let result = dispatch(&cli, out);
             finish(&cli, result, out)
         }
         Err(error) => report_usage_error(&error, &args, out),
     }
+}
+
+/// `forget --all-versions` without `--force` is refused before anything
+/// runs. clap would refuse it too, but in its own words; this error names
+/// the piece and the command that confirms. Under `--json` the message is
+/// the one clap's `requires` produced, which scripts may match on.
+fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> {
+    let Command::Forget(args) = &cli.command else {
+        return None;
+    };
+    if !args.all_versions || args.force {
+        return None;
+    }
+    let piece = args.piece.to_string_lossy();
+    let _ = if cli.json {
+        out.json_error(
+            Some("forget"),
+            ErrorKind::Usage,
+            "the following required arguments were not provided: --force",
+            &Map::new(),
+        )
+    } else {
+        let confirm = format!("antiq forget {piece} --all-versions --force");
+        out.blocks(&[
+            Block::error(Rich::new().path(&piece).text(": --all-versions needs --force"))
+                .why(Rich::parse(
+                    "`--all-versions` deletes every stored version of the piece, damaged and incomplete ones included, and that cannot be undone.",
+                ))
+                .how(
+                    Rich::new()
+                        .text("Add ")
+                        .cmd("--force")
+                        .text(" to confirm: ")
+                        .cmd(&confirm)
+                        .text(". Check the effect first with ")
+                        .cmd("-n")
+                        .text("."),
+                ),
+            Block::info(Rich::new().text("Nothing was deleted.")),
+        ])
+    };
+    Some(ErrorKind::Usage.exit_code())
 }
 
 fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
@@ -315,14 +363,7 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     let _ = if cli.json {
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
     } else {
-        let candidates: Vec<&str> = description
-            .library_error
-            .and_then(antiq::Error::candidates)
-            .unwrap_or_default()
-            .iter()
-            .map(|candidate| candidate.path.as_str())
-            .collect();
-        out.plain_error(&description.root, &candidates, &description.contexts)
+        out.blocks(&[error_block::block_for(&description)])
     };
     kind.exit_code()
 }
@@ -332,15 +373,37 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
 /// error, which `--json` turns into an envelope on stdout.
 fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) -> u8 {
     let code = u8::try_from(error.exit_code()).unwrap_or(ErrorKind::Usage.exit_code());
-    if code == 0 || !asks_for_json(args) {
+    if code == 0 {
         // A closed terminal leaves nowhere to print to.
         let _ = error.print();
+        return code;
+    }
+    if !asks_for_json(args) {
+        if out.stderr_env().rich {
+            let _ = out.blocks(&[usage_block(&error.render().to_string())]);
+        } else {
+            let _ = error.print();
+        }
         return code;
     }
     let message = first_paragraph(&error.render().to_string());
     let command = guess_command(args);
     let _ = out.json_error(command.as_deref(), ErrorKind::Usage, &message, &Map::new());
     code
+}
+
+/// The error block of a clap error: its first paragraph is the title, and
+/// the tip and the usage line that follow are the way out.
+fn usage_block(rendered: &str) -> Block {
+    let mut block = Block::error(Rich::new().text(&first_paragraph(rendered)));
+    for paragraph in rendered.split("\n\n").skip(1) {
+        let paragraph = paragraph.trim();
+        if paragraph.starts_with("tip:") || paragraph.starts_with("Usage:") {
+            block = block
+                .how(Rich::new().text(&paragraph.split_whitespace().collect::<Vec<_>>().join(" ")));
+        }
+    }
+    block
 }
 
 /// Whether `--json` is among the arguments. Arguments cannot be trusted
@@ -405,7 +468,7 @@ mod tests {
     /// Runs `antiq <args>` and returns exit code, stdout and stderr.
     fn run_captured(args: &[&str]) -> (u8, String, String) {
         let capture = Capture::default();
-        let mut out = capture.output(false);
+        let mut out = capture.output();
         let mut line = vec!["antiq"];
         line.extend_from_slice(args);
         let code = run(os(&line), &mut out);
@@ -420,7 +483,7 @@ mod tests {
 
     fn finish_captured(cli: &Cli, result: anyhow::Result<u8>) -> (u8, String, String) {
         let capture = Capture::default();
-        let code = finish(cli, result, &mut capture.output(false));
+        let code = finish(cli, result, &mut capture.output());
         (code, capture.stdout(), capture.stderr())
     }
 
@@ -592,7 +655,7 @@ mod tests {
     #[test]
     fn a_closed_stdout_keeps_the_exit_code() {
         let (pipe, flushes) = FailsOnFlush::new(std::io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()));
         let code = run(os(&["antiq", "--json", "status"]), &mut out);
         assert_eq!(code, 1);
         assert_eq!(*flushes.lock().expect("no test panics while counting"), 1);

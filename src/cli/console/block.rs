@@ -45,7 +45,8 @@ pub struct Block {
     pub(super) fix: Option<Rich>,
     pub(super) why: Vec<Para>,
     pub(super) how: Vec<Para>,
-    pub(super) doing: Option<String>,
+    pub(super) doing: Vec<String>,
+    pub(super) candidates: Vec<String>,
 }
 
 impl Block {
@@ -57,7 +58,8 @@ impl Block {
             fix: None,
             why: Vec::new(),
             how: Vec::new(),
-            doing: None,
+            doing: Vec::new(),
+            candidates: Vec::new(),
         }
     }
 
@@ -105,10 +107,18 @@ impl Block {
         self
     }
 
-    /// What the run was doing when an error stopped it, as the rest of
-    /// the sentence "Attempting to ...".
+    /// A step the run was in when an error stopped it, as the rest of the
+    /// sentence "Attempting to ...". Steps are given innermost first.
     pub fn doing(mut self, phrase: &str) -> Block {
-        self.doing = Some(phrase.to_string());
+        self.doing.push(phrase.to_string());
+        self
+    }
+
+    /// A match of an ambiguous reference. A pipe lists these as
+    /// `candidate:` lines; a terminal shows them in a table that the
+    /// caller prints.
+    pub fn candidate(mut self, path: &str) -> Block {
+        self.candidates.push(path.to_string());
         self
     }
 }

@@ -667,6 +667,32 @@ fn the_command_line_refuses_a_missing_or_doubled_target() {
     });
 }
 
+#[test]
+fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run_tty_stderr(
+        &["forget", "projects/scanner", "--all-versions"],
+        &[("NO_COLOR", "1")],
+    );
+    run.expect_code(2);
+    assert_eq!(
+        run.stderr,
+        " ✖ ERROR\n\
+         ▌ projects/scanner: --all-versions needs --force\n\
+         ▌\n\
+         ▌ Why it happened\n\
+         ▌   --all-versions deletes every stored version of the piece, damaged and\n\
+         ▌   incomplete ones included, and that cannot be undone.\n\
+         ▌\n\
+         ▌ How to fix it\n\
+         ▌   Add --force to confirm: antiq forget projects/scanner --all-versions\n\
+         ▌   --force. Check the effect first with -n.\n\
+         \n \
+         ℹ INFO  Nothing was deleted.\n"
+    );
+    assert!(exists(&world, "projects/scanner", SCANNER_NEW));
+}
+
 // =========================================================
 // Dry run
 // =========================================================

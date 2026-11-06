@@ -168,11 +168,15 @@ impl Block {
                 }
                 self.section(env, &bar, "Why it happened", &self.why, &mut lines);
                 self.section(env, &bar, "How to fix it", &self.how, &mut lines);
-                if let Some(phrase) = &self.doing {
-                    let sentence =
-                        Para::Text(Rich::new().text(&format!("Attempting to {phrase}.")));
-                    self.section(env, &bar, "What antiq was doing", &[sentence], &mut lines);
-                }
+                let matches: Vec<Para> =
+                    self.candidates.iter().map(|path| Para::pre(path)).collect();
+                self.section(env, &bar, "Matches", &matches, &mut lines);
+                let steps: Vec<Para> = self
+                    .doing
+                    .iter()
+                    .map(|phrase| Para::Text(Rich::new().text(&format!("Attempting to {phrase}."))))
+                    .collect();
+                self.section(env, &bar, "What antiq was doing", &steps, &mut lines);
             }
             Kind::Hint => {
                 let hang = badge.width() + 1;
@@ -260,7 +264,10 @@ impl Block {
                 lines.push(format!("error: {}", self.title.to_plain()));
                 labelled(&mut lines, "why", &self.why);
                 labelled(&mut lines, "fix", &self.how);
-                if let Some(phrase) = &self.doing {
+                for candidate in &self.candidates {
+                    lines.push(format!("    candidate: {candidate}"));
+                }
+                for phrase in &self.doing {
                     lines.push(format!("  while attempting to {phrase}"));
                 }
             }

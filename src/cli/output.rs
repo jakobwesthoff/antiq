@@ -18,7 +18,7 @@ use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::ffi::OsStr;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 
@@ -145,43 +145,24 @@ pub fn terminal_columns(stream: impl AsFd) -> Option<u16> {
 pub struct Output {
     stdout: Sink,
     stderr: Sink,
-    colored: bool,
     stdout_style: Style,
     stdout_env: Env,
     stderr_env: Env,
-}
-
-/// Whether the label of an error on stderr is coloured: on a terminal, and
-/// not when `NO_COLOR` is set to a non-empty value.
-fn stderr_colored(is_tty: bool, no_color: bool) -> bool {
-    is_tty && !no_color
 }
 
 impl Output {
     /// The process's own stdout and stderr. Colour is used when stderr is
     /// a terminal and `NO_COLOR` is not set.
     pub fn stdio() -> Output {
-        Output::new(
-            Box::new(io::stdout()),
-            Box::new(io::stderr()),
-            stderr_colored(
-                io::stderr().is_terminal(),
-                std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
-            ),
-        )
-        .with_stdout_style(Style::of(io::stdout()))
-        .with_envs(Env::detect(&io::stdout()), Env::detect(&io::stderr()))
+        Output::new(Box::new(io::stdout()), Box::new(io::stderr()))
+            .with_stdout_style(Style::of(io::stdout()))
+            .with_envs(Env::detect(&io::stdout()), Env::detect(&io::stderr()))
     }
 
-    pub fn new(
-        stdout: Box<dyn Write + Send>,
-        stderr: Box<dyn Write + Send>,
-        colored: bool,
-    ) -> Output {
+    pub fn new(stdout: Box<dyn Write + Send>, stderr: Box<dyn Write + Send>) -> Output {
         Output {
             stdout: Sink::new(stdout),
             stderr: Sink::new(stderr),
-            colored,
             stdout_style: Style {
                 width: DEFAULT_WIDTH,
                 color: false,
@@ -209,10 +190,6 @@ impl Output {
     }
 
     /// How blocks and symbols on stderr are rendered.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no command reads the environments yet")
-    )]
     pub fn stderr_env(&self) -> Env {
         self.stderr_env
     }
@@ -302,7 +279,6 @@ impl Output {
     /// Writes blocks of any kind to stderr: the rich form on a terminal,
     /// the `error:` and `warning:` lines on a pipe. Info and hint blocks
     /// exist only on a terminal.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
     pub fn blocks(&mut self, blocks: &[Block]) -> io::Result<()> {
         for line in render_blocks(blocks, &self.stderr_env) {
             self.stderr.write_line(&line)?;
@@ -322,31 +298,6 @@ impl Output {
     pub fn dry_footer(&mut self, nothing_was: &str, rerun: &str) -> io::Result<()> {
         for line in dryrun::footer(&self.stdout_env, nothing_was, rerun) {
             self.stdout.write_line(&line)?;
-        }
-        Ok(())
-    }
-
-    /// Writes what went wrong, the pieces an ambiguous reference could mean
-    /// and what the run was doing, to stderr.
-    pub fn plain_error(
-        &mut self,
-        message: &str,
-        candidates: &[&str],
-        contexts: &[String],
-    ) -> io::Result<()> {
-        let label = if self.colored {
-            "\x1b[1;31merror:\x1b[0m"
-        } else {
-            "error:"
-        };
-        self.stderr.write_line(&format!("{label} {message}"))?;
-        for candidate in candidates {
-            self.stderr
-                .write_line(&format!("    candidate: {candidate}"))?;
-        }
-        for context in contexts {
-            self.stderr
-                .write_line(&format!("  while attempting to {context}"))?;
         }
         Ok(())
     }
@@ -382,17 +333,16 @@ pub mod testing {
     }
 
     impl Capture {
-        pub fn output(&self, colored: bool) -> Output {
+        pub fn output(&self) -> Output {
             Output::new(
                 Box::new(Buffer(self.stdout.clone())),
                 Box::new(Buffer(self.stderr.clone())),
-                colored,
             )
         }
 
         /// Output whose streams have the given environments.
         pub fn output_with(&self, stdout: Env, stderr: Env) -> Output {
-            self.output(false).with_envs(stdout, stderr)
+            self.output().with_envs(stdout, stderr)
         }
 
         pub fn stdout(&self) -> String {
@@ -457,7 +407,7 @@ mod tests {
     #[test]
     fn an_envelope_starts_with_format_and_command_then_the_payload() {
         let capture = Capture::default();
-        let mut out = capture.output(false);
+        let mut out = capture.output();
         out.json(Some("status"), &json!({"pieces": [], "remote": "none"}))
             .expect("memory accepts writes");
         assert_eq!(
@@ -559,7 +509,7 @@ mod tests {
     #[test]
     fn each_stream_has_its_own_environment() {
         let capture = Capture::default();
-        let out = capture.output(false);
+        let out = capture.output();
         assert_eq!(out.stdout_env(), Env::pipe());
         assert_eq!(out.stderr_env(), Env::pipe());
         let terminal = Env::new(true, false, true, 100);
@@ -572,7 +522,7 @@ mod tests {
     fn an_envelope_without_a_command_says_null() {
         let capture = Capture::default();
         capture
-            .output(false)
+            .output()
             .json(None, &json!({}))
             .expect("memory accepts writes");
         assert_eq!(capture.stdout(), "{\"format\":1,\"command\":null}\n");
@@ -584,7 +534,7 @@ mod tests {
         let mut details = Map::new();
         details.insert("pid".into(), json!(4242));
         capture
-            .output(false)
+            .output()
             .json_error(Some("archive"), ErrorKind::LockHeld, "held", &details)
             .expect("memory accepts writes");
         assert_eq!(
@@ -596,64 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_error_lists_what_the_run_was_doing_on_stderr() {
-        let capture = Capture::default();
-        capture
-            .output(false)
-            .plain_error(
-                "permission denied",
-                &[],
-                &["read the config file".into(), "start the run".into()],
-            )
-            .expect("memory accepts writes");
-        assert_eq!(
-            capture.stderr(),
-            "error: permission denied\n  \
-             while attempting to read the config file\n  \
-             while attempting to start the run\n"
-        );
-        assert_eq!(capture.stdout(), "");
-    }
-
-    #[test]
-    fn a_plain_error_lists_the_candidates_between_the_message_and_the_contexts() {
-        let capture = Capture::default();
-        capture
-            .output(false)
-            .plain_error(
-                "`scan` matches 2 pieces",
-                &["projects/scanner", "tools/scan-old"],
-                &["find the piece".into()],
-            )
-            .expect("memory accepts writes");
-        assert_eq!(
-            capture.stderr(),
-            "error: `scan` matches 2 pieces\n    candidate: projects/scanner\n    candidate: tools/scan-old\n  while attempting to find the piece\n"
-        );
-    }
-
-    #[test]
-    fn the_error_label_is_coloured_on_a_terminal_unless_no_color_is_set() {
-        assert!(stderr_colored(true, false));
-        assert!(!stderr_colored(true, true), "NO_COLOR turns it off");
-        assert!(!stderr_colored(false, false), "a pipe is never coloured");
-        assert!(!stderr_colored(false, true));
-    }
-
-    #[test]
-    fn colour_changes_only_the_label() {
-        let capture = Capture::default();
-        capture
-            .output(true)
-            .plain_error("broken", &[], &[])
-            .expect("memory accepts writes");
-        assert_eq!(capture.stderr(), "\x1b[1;31merror:\x1b[0m broken\n");
-    }
-
-    #[test]
     fn a_closed_pipe_drops_the_output_without_an_error() {
         let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()));
         out.json(Some("status"), &json!({}))
             .expect("a closed pipe is no error");
         out.json(Some("status"), &json!({}))
@@ -668,7 +563,7 @@ mod tests {
     #[test]
     fn a_line_goes_to_stdout_and_a_note_to_stderr() {
         let capture = Capture::default();
-        let mut out = capture.output(false);
+        let mut out = capture.output();
         out.line("Created the collection")
             .expect("memory accepts writes");
         out.note("nothing else was done")
@@ -680,7 +575,7 @@ mod tests {
     #[test]
     fn a_line_of_bytes_is_written_as_it_is() {
         let capture = Capture::default();
-        let mut out = capture.output(false);
+        let mut out = capture.output();
         out.line_os(OsStr::from_bytes(b"/work/100% done/a\xff"))
             .expect("memory accepts writes");
         assert_eq!(capture.stdout_bytes(), b"/work/100% done/a\xff\n");
@@ -690,7 +585,7 @@ mod tests {
     #[test]
     fn a_line_of_bytes_to_a_closed_pipe_is_dropped() {
         let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()));
         out.line_os(OsStr::new("one"))
             .expect("a closed pipe is no error");
         out.line_os(OsStr::new("two"))
@@ -705,7 +600,7 @@ mod tests {
     #[test]
     fn another_write_failure_of_a_line_of_bytes_is_an_error() {
         let (disk, _) = FailsOnFlush::new(io::ErrorKind::StorageFull);
-        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()));
         let error = out
             .line_os(OsStr::new("one"))
             .expect_err("a full disk is reported");
@@ -715,7 +610,7 @@ mod tests {
     #[test]
     fn a_line_to_a_closed_pipe_is_dropped() {
         let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()));
         out.line("one").expect("a closed pipe is no error");
         out.line("two").expect("a closed pipe is no error");
         assert_eq!(
@@ -728,7 +623,7 @@ mod tests {
     #[test]
     fn a_note_to_a_closed_pipe_is_dropped() {
         let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(Vec::new()), Box::new(pipe), false);
+        let mut out = Output::new(Box::new(Vec::new()), Box::new(pipe));
         out.note("one").expect("a closed pipe is no error");
         out.note("two").expect("a closed pipe is no error");
         assert_eq!(
@@ -741,7 +636,7 @@ mod tests {
     #[test]
     fn another_write_failure_is_an_error() {
         let (disk, _) = FailsOnFlush::new(io::ErrorKind::StorageFull);
-        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()), false);
+        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()));
         let error = out
             .json(Some("status"), &json!({}))
             .expect_err("a full disk is reported");
@@ -878,8 +773,8 @@ mod tests {
             color: true,
             terminal: true,
         };
-        let out = capture.output(false).with_stdout_style(style);
+        let out = capture.output().with_stdout_style(style);
         assert_eq!(out.stdout_style(), style);
-        assert_eq!(capture.output(false).stdout_style().width, 80);
+        assert_eq!(capture.output().stdout_style().width, 80);
     }
 }

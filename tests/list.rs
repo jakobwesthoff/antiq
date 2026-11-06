@@ -412,19 +412,57 @@ fn control_characters_of_a_piece_are_escaped_in_a_pipe() {
 }
 
 #[test]
-fn the_error_label_is_coloured_on_a_terminal_and_not_with_no_color() {
+fn an_error_on_a_stderr_terminal_is_a_block_coloured_unless_no_color_is_set() {
     let world = world(Mode::Text, three_versions);
 
     let coloured = world.run_tty_stderr(&["pin", "no-such-piece"], &[]);
     coloured.expect_code(1);
     assert!(
-        coloured.stderr.starts_with("\x1b[1;31merror:\x1b[0m "),
+        coloured
+            .stderr
+            .starts_with("\x1b[30m\x1b[41m ✖ ERROR \x1b[0m\n"),
         "{:?}",
         coloured.stderr
     );
 
     let plain = world.run_tty_stderr(&["pin", "no-such-piece"], &[("NO_COLOR", "1")]);
     plain.expect_code(1);
-    assert!(plain.stderr.starts_with("error: "), "{:?}", plain.stderr);
-    assert!(!plain.stderr.contains('\x1b'), "{:?}", plain.stderr);
+    assert_eq!(
+        plain.stderr,
+        " ✖ ERROR\n\
+         ▌ cannot find the piece: `no-such-piece` matches no piece\n\
+         ▌\n\
+         ▌ What antiq was doing\n\
+         ▌   Attempting to pin the piece.\n"
+    );
+}
+
+#[test]
+fn an_error_on_a_stderr_pipe_stays_plain_while_stdout_is_a_terminal() {
+    let world = world(Mode::Text, three_versions);
+
+    let run = world.run_tty(&["pin", "no-such-piece"]);
+    run.expect_code(1);
+    assert_eq!(
+        run.stderr,
+        "error: cannot find the piece: `no-such-piece` matches no piece\n  \
+         while attempting to pin the piece\n"
+    );
+}
+
+#[test]
+fn a_usage_error_on_a_stderr_terminal_is_an_error_block_with_the_usage_as_fix() {
+    let world = world(Mode::Text, three_versions);
+
+    let run = world.run_tty_stderr(&["unearth", "piece", "--to", "out"], &[("NO_COLOR", "1")]);
+    run.expect_code(2);
+    assert_eq!(
+        run.stderr,
+        " ✖ ERROR\n\
+         ▌ unexpected argument '--to' found\n\
+         ▌\n\
+         ▌ How to fix it\n\
+         ▌   tip: to pass '--to' as a value, use '-- --to'\n\
+         ▌   Usage: antiq unearth <PIECE>\n"
+    );
 }
