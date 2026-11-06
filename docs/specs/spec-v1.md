@@ -191,7 +191,8 @@ and has opened it.
 The walk does not enter an excluded directory either: a piece that
 contains an existing exclude entry is never archived, and `status` names
 the entry. So is a piece that contains a directory named `.antiq`, the
-marker of a nested collection: `status` names the directory that holds the
+marker of a nested collection (the name is compared without regard to the
+case of ASCII letters, since a volume may ignore case): `status` names the directory that holds the
 marker, and the walk goes on into it.
 
 A walk enters directories up to 512 levels below the piece's top, since

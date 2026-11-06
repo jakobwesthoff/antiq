@@ -143,6 +143,7 @@ pub(crate) fn walk_piece_with(
         excluded: Vec::new(),
         nested_collections: Vec::new(),
         rule_files: Vec::new(),
+        marker_faults: Vec::new(),
         first_failure: None,
     };
     let root = RelPath::root();
@@ -221,6 +222,15 @@ pub(crate) fn walk_piece_with(
             .into_iter()
             .map(|(path, line)| Problem::RuleFile { path, line }),
     );
+    walker
+        .marker_faults
+        .sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    problems.extend(
+        walker
+            .marker_faults
+            .into_iter()
+            .map(|name| Problem::MarkerNotAFile { name }),
+    );
     Ok(PieceTree::new(top.clone(), walker.entries, problems))
 }
 
@@ -266,6 +276,8 @@ struct Walker<'a> {
     nested_collections: Vec<RelPath>,
     /// The rule files that cannot be used, with the line at fault.
     rule_files: Vec<(RelPath, Option<usize>)>,
+    /// The marker names at the top that are not files.
+    marker_faults: Vec<Name>,
     /// The smallest path, in entry order, that could not be read.
     first_failure: Option<RelPath>,
 }
@@ -400,6 +412,22 @@ impl Walker<'_> {
         Ok(())
     }
 
+    /// A marker name at the top of the piece that is not a file refuses the
+    /// piece: it would be packed or deleted without anyone having read it.
+    /// A symlink is a pin, but not a restored marker.
+    fn check_marker_name(&mut self, name: &Name, kind: EntryKind) {
+        let pin = name.as_bytes() == PIN_FILE.as_bytes();
+        let restored = name.as_bytes() == RESTORED_FILE.as_bytes();
+        let fits = match kind {
+            EntryKind::File => true,
+            EntryKind::Symlink => pin,
+            _ => false,
+        };
+        if (pin || restored) && !fits {
+            self.marker_faults.push(name.clone());
+        }
+    }
+
     /// What the rules and the control files make of the entry `listed` in
     /// the directory `level`.
     fn classify(&mut self, level: &Level, listed: &DirEntry, entry: &TreeEntry) -> Class {
@@ -452,8 +480,16 @@ impl Walker<'_> {
         };
         entry.path = child.clone();
         entry.class = self.classify(level, &listed, &entry);
-        if entry.kind == EntryKind::Directory && listed.name.as_bytes() == b".antiq" {
+        // Compared without regard to case: on a volume that ignores case
+        // `.ANTIQ` is the marker too, and on one that does not the worst
+        // outcome is a refused piece, never a deleted collection.
+        if entry.kind == EntryKind::Directory
+            && listed.name.as_bytes().eq_ignore_ascii_case(b".antiq")
+        {
             self.nested_collections.push(level.at.clone());
+        }
+        if level.at.is_root() {
+            self.check_marker_name(&listed.name, entry.kind);
         }
 
         let foreign = self.hooks.device(&child, entry.device) != self.top_device
@@ -1115,6 +1151,80 @@ mod tests {
         );
     }
 
+    fn marker_problem(text: &str) -> Problem {
+        Problem::MarkerNotAFile { name: name(text) }
+    }
+
+    #[test]
+    fn a_marker_name_at_the_top_that_is_not_a_file_refuses_the_piece() {
+        let mut tree = Tree::new();
+        tree.fifo("piece/.antiq-pin");
+        tree.socket("piece/.antiq-restored");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [
+                marker_problem(".antiq-pin"),
+                marker_problem(".antiq-restored")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_directory_with_a_marker_name_is_refused_and_still_entered() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiq-pin/inside", "x");
+        tree.dir("piece/.antiq-restored");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [
+                marker_problem(".antiq-pin"),
+                marker_problem(".antiq-restored")
+            ]
+        );
+        assert!(paths(&walked).contains(&".antiq-pin/inside".to_string()));
+    }
+
+    #[test]
+    fn a_symlink_is_a_pin_but_not_a_restored_marker() {
+        let mut tree = Tree::new();
+        tree.symlink("piece/.antiq-pin", "elsewhere");
+        let walked = walk(&tree, "piece");
+        assert_eq!(walked.problems(), []);
+        assert_eq!(class_of(&walked, ".antiq-pin"), Class::Control);
+
+        let mut tree = Tree::new();
+        tree.symlink("piece/.antiq-restored", "elsewhere");
+        let walked = walk(&tree, "piece");
+        assert_eq!(walked.problems(), [marker_problem(".antiq-restored")]);
+    }
+
+    #[test]
+    fn marker_names_below_the_top_are_ordinary_entries() {
+        let mut tree = Tree::new();
+        tree.fifo("piece/sub/.antiq-pin");
+        tree.dir("piece/sub/.antiq-restored");
+        let walked = walk(&tree, "piece");
+        assert_eq!(walked.problems(), []);
+        assert_eq!(class_of(&walked, "sub/.antiq-pin"), Class::Counted);
+    }
+
+    #[test]
+    fn a_nested_collection_is_found_whatever_the_case_of_the_marker_directory() {
+        let mut tree = Tree::new();
+        tree.dir("piece/a/.ANTIQ");
+        tree.dir("piece/b/.Antiq");
+        let walked = walk(&tree, "piece");
+        assert_eq!(
+            walked.problems(),
+            [
+                Problem::NestedCollection { root: path("a") },
+                Problem::NestedCollection { root: path("b") },
+            ]
+        );
+    }
+
     #[test]
     fn a_collection_marker_inside_the_piece_is_reported_with_the_directory_holding_it() {
         let mut tree = Tree::new();
@@ -1325,6 +1435,22 @@ mod tests {
                 path: path("sub/.antiqignore"),
                 line: Some(1)
             }]
+        );
+    }
+
+    #[test]
+    fn a_marker_name_that_is_not_a_file_is_refused_although_a_rule_ignores_it() {
+        let mut tree = Tree::new();
+        tree.fifo("piece/.antiq-pin");
+        tree.dir("piece/.antiq-restored");
+        let walked = walk_ruled(&tree, &[".*"], &[]);
+        assert_eq!(class_of(&walked, ".antiq-pin"), Class::Ignored);
+        assert_eq!(
+            walked.problems(),
+            [
+                marker_problem(".antiq-pin"),
+                marker_problem(".antiq-restored")
+            ]
         );
     }
 
