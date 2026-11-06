@@ -245,7 +245,7 @@ mod tests {
         let mut temp = TempCollection::minimal();
         temp.tree().file(".antiq/trash/leftover/f", "x");
         temp.tree().file(".antiq/tmp/upload.part", "x");
-        temp.tree().file(".antiq/staging/tree/f", "x");
+        temp.tree().file(".antiq/doomed/tree/f", "x");
         temp.tree().file(".antiq/recovered/old/f", "x");
         temp.tree().file(".antiq/tmp/leftover", "x");
         temp.tree().file("projects/a/notes.txt", "hello");

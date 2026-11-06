@@ -236,16 +236,14 @@ mod tests {
             fs::read_to_string(antiq.join("config.toml")).expect("the config exists"),
             format!("[collection]\nid = \"{COLLECTION_ID}\"\n")
         );
-        for directory in [
-            "objects",
-            "tracking",
-            "index",
-            "tmp",
-            "staging",
-            "trash",
-            "recovered",
-        ] {
+        for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
             assert!(antiq.join(directory).is_dir(), "{directory} is missing");
+        }
+        for gone in ["objects", "tracking", "index", "staging"] {
+            assert!(
+                !antiq.join(gone).exists(),
+                "{gone} is not part of the layout"
+            );
         }
         let mut collection = collection;
         let extra = collection.tree().file("projects/a/readme", "x");

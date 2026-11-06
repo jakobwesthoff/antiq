@@ -102,20 +102,28 @@ fn yes_with_json_creates_the_collection() {
         config.machine.name,
         Some(antiq::machine::detect().expect("a name"))
     );
-    for directory in [
-        "objects",
-        "tracking",
-        "index",
-        "tmp",
-        "staging",
-        "trash",
-        "recovered",
-    ] {
-        assert!(
-            tree.path(".antiq").join(directory).is_dir(),
-            "{directory} is missing"
-        );
-    }
+    let mut names: Vec<String> = fs::read_dir(tree.path(".antiq"))
+        .expect("the marker can be listed")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "config.toml",
+            "doomed",
+            "pieces",
+            "recovered",
+            "tmp",
+            "trash"
+        ]
+    );
 }
 
 #[test]

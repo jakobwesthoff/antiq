@@ -144,15 +144,7 @@ pub struct TempCollection {
 impl TempCollection {
     pub fn minimal() -> TempCollection {
         let mut tree = Tree::new();
-        for directory in [
-            "objects",
-            "tracking",
-            "index",
-            "tmp",
-            "staging",
-            "trash",
-            "recovered",
-        ] {
+        for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
             tree.dir(&format!(".antiq/{directory}"));
         }
         tree.file(

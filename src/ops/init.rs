@@ -119,17 +119,8 @@ pub struct InitRequest<'a> {
 }
 
 /// The directories of the local storage layout that exist from the start.
-/// `lock` and `remote-state.json` are made by the first run that needs
-/// them.
-const LAYOUT: [&str; 7] = [
-    "objects",
-    "tracking",
-    "index",
-    "tmp",
-    "staging",
-    "trash",
-    "recovered",
-];
+/// `lock` is made by the first run that needs it.
+const LAYOUT: [&str; 5] = ["tmp", "trash", "doomed", "recovered", "pieces"];
 
 /// How many `.antiq-init-<pid>-<n>` names are tried before giving up.
 const STAGING_ATTEMPTS: u32 = 100;
@@ -232,7 +223,7 @@ fn has_archive_sh_layout(tree: &TreeRoot) -> bool {
 }
 
 /// A piece is archived whole, so a piece that is a collection itself
-/// would take that collection's objects, tracking and config with it.
+/// would take that collection's `.antiq/` with it.
 fn refuse_nested_collections(
     tree: &TreeRoot,
     root: &Path,
@@ -730,15 +721,29 @@ mod tests {
     fn apply_creates_the_layout_of_the_local_storage() {
         let tree = Tree::new();
         apply_plan(&plan_of(&tree, &[]));
-        for directory in [
-            "objects",
-            "tracking",
-            "index",
-            "tmp",
-            "staging",
-            "trash",
-            "recovered",
-        ] {
+        let mut names: Vec<String> = fs::read_dir(tree.path(".antiq"))
+            .expect("the marker can be listed")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "config.toml",
+                "doomed",
+                "pieces",
+                "recovered",
+                "tmp",
+                "trash"
+            ]
+        );
+        for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
             assert!(
                 tree.path(".antiq").join(directory).is_dir(),
                 "{directory} is missing"

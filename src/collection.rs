@@ -93,8 +93,12 @@ impl Collection {
         self.antiq_dir().join("tmp")
     }
 
-    pub fn staging_dir(&self) -> PathBuf {
-        self.antiq_dir().join("staging")
+    pub fn doomed_dir(&self) -> PathBuf {
+        self.antiq_dir().join("doomed")
+    }
+
+    pub fn pieces_dir(&self) -> PathBuf {
+        self.antiq_dir().join("pieces")
     }
 
     pub fn trash_dir(&self) -> PathBuf {
@@ -290,9 +294,10 @@ mod tests {
         assert_eq!(collection.config_path(), antiq.join("config.toml"));
         assert_eq!(collection.lock_path(), antiq.join("lock"));
         assert_eq!(collection.tmp_dir(), antiq.join("tmp"));
-        assert_eq!(collection.staging_dir(), antiq.join("staging"));
         assert_eq!(collection.trash_dir(), antiq.join("trash"));
+        assert_eq!(collection.doomed_dir(), antiq.join("doomed"));
         assert_eq!(collection.recovered_dir(), antiq.join("recovered"));
+        assert_eq!(collection.pieces_dir(), antiq.join("pieces"));
     }
 
     #[test]
