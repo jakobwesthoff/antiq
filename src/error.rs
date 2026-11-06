@@ -8,40 +8,24 @@
 //! them all, and [`Error::kind`] names the JSON error kind and the exit
 //! code of whichever one it holds.
 
-use crate::brake::{BrakeError, BrakeHold};
 use crate::clock::whole_seconds;
 use crate::collection::CollectionError;
 use crate::config::ConfigError;
 use crate::fsx::FsxError;
 use crate::id::IdError;
 use crate::idle::IdleError;
-use crate::index::IndexError;
 use crate::listing::ListingError;
 use crate::lock::LockError;
 use crate::machine::MachineError;
-use crate::meta::MetaError;
-use crate::ops::archive::ArchiveError;
-use crate::ops::fork::ForkError;
-use crate::ops::import::ImportError;
 use crate::ops::init::InitError;
-use crate::ops::pin::PinOpError;
-use crate::ops::reconcile::ReconcileError;
-use crate::ops::remote::RemoteOpError;
-use crate::ops::resolve::ResolveError;
-use crate::ops::status::StatusError;
-use crate::ops::sync::SyncError;
-use crate::ops::unearth::UnearthError;
 use crate::pack::PackError;
 use crate::pin::PinError;
 use crate::reference::ReferenceError;
 use crate::relpath::RelPathError;
-use crate::remote::RemoteError;
 use crate::repair::RepairError;
 use crate::run::RunError;
 use crate::select::SelectError;
-use crate::store::StoreError;
 use crate::sysmem::SysmemError;
-use crate::tracking::TrackingError;
 use crate::walk::WalkError;
 use serde_json::{Map, Value};
 
@@ -57,33 +41,22 @@ pub enum ErrorKind {
     UnknownReference,
     /// A path given as a piece, `--to` or `--path` lies outside the collection.
     OutsideCollection,
-    Brake,
     LockHeld,
-    NoRemote,
-    RemoteAway,
-    RemoteBroken,
     FormatTooNew,
-    /// A feature a command refuses to run because it is not there yet.
-    Unsupported,
     /// Every failure without a kind of its own.
     Other,
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 14] = [
+    pub const ALL: [ErrorKind; 9] = [
         ErrorKind::Usage,
         ErrorKind::NotImplemented,
         ErrorKind::NotACollection,
         ErrorKind::AmbiguousReference,
         ErrorKind::UnknownReference,
         ErrorKind::OutsideCollection,
-        ErrorKind::Brake,
         ErrorKind::LockHeld,
-        ErrorKind::NoRemote,
-        ErrorKind::RemoteAway,
-        ErrorKind::RemoteBroken,
         ErrorKind::FormatTooNew,
-        ErrorKind::Unsupported,
         ErrorKind::Other,
     ];
 
@@ -96,13 +69,8 @@ impl ErrorKind {
             ErrorKind::AmbiguousReference => "ambiguous_reference",
             ErrorKind::UnknownReference => "unknown_reference",
             ErrorKind::OutsideCollection => "outside_collection",
-            ErrorKind::Brake => "brake",
             ErrorKind::LockHeld => "lock_held",
-            ErrorKind::NoRemote => "no_remote",
-            ErrorKind::RemoteAway => "remote_away",
-            ErrorKind::RemoteBroken => "remote_broken",
             ErrorKind::FormatTooNew => "format_too_new",
-            ErrorKind::Unsupported => "unsupported",
             ErrorKind::Other => "other",
         }
     }
@@ -112,7 +80,6 @@ impl ErrorKind {
     pub fn exit_code(self) -> u8 {
         match self {
             ErrorKind::Usage => 2,
-            ErrorKind::RemoteAway => 4,
             _ => 1,
         }
     }
@@ -134,25 +101,15 @@ pub enum Error {
     #[error("{command} is not implemented")]
     NotImplemented { command: String },
     #[error(transparent)]
-    Archive(#[from] ArchiveError),
-    #[error(transparent)]
-    Brake(#[from] BrakeError),
-    #[error(transparent)]
     Collection(#[from] CollectionError),
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error(transparent)]
-    Fork(#[from] ForkError),
     #[error(transparent)]
     Fsx(#[from] FsxError),
     #[error(transparent)]
     Id(#[from] IdError),
     #[error(transparent)]
     Idle(#[from] IdleError),
-    #[error(transparent)]
-    Import(#[from] ImportError),
-    #[error(transparent)]
-    Index(#[from] IndexError),
     #[error(transparent)]
     Init(#[from] InitError),
     #[error(transparent)]
@@ -162,57 +119,23 @@ pub enum Error {
     #[error(transparent)]
     Machine(#[from] MachineError),
     #[error(transparent)]
-    Meta(#[from] MetaError),
-    #[error(transparent)]
     Pack(#[from] PackError),
     #[error(transparent)]
     Pin(#[from] PinError),
-    #[error(transparent)]
-    PinOp(#[from] PinOpError),
-    #[error(transparent)]
-    Reconcile(#[from] ReconcileError),
     #[error(transparent)]
     Reference(#[from] ReferenceError),
     #[error(transparent)]
     RelPath(#[from] RelPathError),
     #[error(transparent)]
-    Remote(#[from] RemoteError),
-    /// Boxed, since the refusals of `remote add` carry paths and URLs and
-    /// would make every `Result` of the crate this large.
-    #[error(transparent)]
-    RemoteOp(Box<RemoteOpError>),
-    #[error(transparent)]
     Repair(#[from] RepairError),
-    #[error(transparent)]
-    Resolve(#[from] ResolveError),
     #[error(transparent)]
     Run(#[from] RunError),
     #[error(transparent)]
     Select(#[from] SelectError),
     #[error(transparent)]
-    Status(#[from] StatusError),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error(transparent)]
-    Sync(#[from] SyncError),
-    #[error(transparent)]
     Sysmem(#[from] SysmemError),
     #[error(transparent)]
-    Tracking(#[from] TrackingError),
-    #[error(transparent)]
-    Unearth(#[from] UnearthError),
-    #[error(transparent)]
     Walk(#[from] WalkError),
-}
-
-impl From<RemoteOpError> for Error {
-    fn from(error: RemoteOpError) -> Self {
-        // The brake keeps its numbers in the JSON error only as `Error::Brake`.
-        match error {
-            RemoteOpError::Brake(brake) => Error::Brake(brake),
-            error => Error::RemoteOp(Box::new(error)),
-        }
-    }
 }
 
 impl Error {
@@ -220,39 +143,23 @@ impl Error {
         match self {
             Error::Usage(_) => ErrorKind::Usage,
             Error::NotImplemented { .. } => ErrorKind::NotImplemented,
-            Error::Archive(e) => e.kind(),
-            Error::Brake(e) => e.kind(),
             Error::Collection(e) => e.kind(),
             Error::Config(e) => e.kind(),
-            Error::Fork(e) => e.kind(),
             Error::Fsx(e) => e.kind(),
             Error::Id(e) => e.kind(),
             Error::Idle(e) => e.kind(),
-            Error::Import(e) => e.kind(),
-            Error::Index(e) => e.kind(),
             Error::Init(e) => e.kind(),
             Error::Listing(e) => e.kind(),
             Error::Lock(e) => e.kind(),
             Error::Machine(e) => e.kind(),
-            Error::Meta(e) => e.kind(),
             Error::Pack(e) => e.kind(),
             Error::Pin(e) => e.kind(),
-            Error::PinOp(e) => e.kind(),
-            Error::Reconcile(e) => e.kind(),
             Error::Reference(e) => e.kind(),
             Error::RelPath(e) => e.kind(),
-            Error::Remote(e) => e.kind(),
-            Error::RemoteOp(e) => e.kind(),
             Error::Repair(e) => e.kind(),
-            Error::Resolve(e) => e.kind(),
             Error::Run(e) => e.kind(),
             Error::Select(e) => e.kind(),
-            Error::Status(e) => e.kind(),
-            Error::Store(e) => e.kind(),
-            Error::Sync(e) => e.kind(),
             Error::Sysmem(e) => e.kind(),
-            Error::Tracking(e) => e.kind(),
-            Error::Unearth(e) => e.kind(),
             Error::Walk(e) => e.kind(),
         }
     }
@@ -269,7 +176,6 @@ impl Error {
                         .expect("candidates are plain strings and always serialise"),
                 );
             }
-            Error::Brake(BrakeError::Held(hold)) => insert_brake_hold(&mut details, hold),
             Error::Lock(LockError::Held { pid, started })
             | Error::Run(RunError::Lock(LockError::Held { pid, started })) => {
                 details.insert("pid".into(), Value::from(*pid));
@@ -284,25 +190,13 @@ impl Error {
     }
 }
 
-fn insert_brake_hold(details: &mut Map<String, Value>, hold: &BrakeHold) {
-    details.insert("planned".into(), Value::from(hold.planned));
-    details.insert("set_size".into(), Value::from(hold.set_size));
-    details.insert(
-        "items".into(),
-        serde_json::to_value(hold.items()).expect("candidates are plain strings and serialise"),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brake::{BrakeError, BrakeHold};
     use crate::collection::CollectionError;
+    use crate::listing::ListingError;
     use crate::lock::LockError;
-    use crate::meta::MetaError;
-    use crate::ops::resolve::ResolveError;
     use crate::reference::{Candidate, ReferenceError};
-    use crate::remote::RemoteError;
     use jiff::Timestamp;
     use serde_json::json;
 
@@ -322,13 +216,8 @@ mod tests {
             (ErrorKind::AmbiguousReference, "ambiguous_reference", 1),
             (ErrorKind::UnknownReference, "unknown_reference", 1),
             (ErrorKind::OutsideCollection, "outside_collection", 1),
-            (ErrorKind::Brake, "brake", 1),
             (ErrorKind::LockHeld, "lock_held", 1),
-            (ErrorKind::NoRemote, "no_remote", 1),
-            (ErrorKind::RemoteAway, "remote_away", 4),
-            (ErrorKind::RemoteBroken, "remote_broken", 1),
             (ErrorKind::FormatTooNew, "format_too_new", 1),
-            (ErrorKind::Unsupported, "unsupported", 1),
             (ErrorKind::Other, "other", 1),
         ];
         assert_eq!(table.len(), ErrorKind::ALL.len());
@@ -391,32 +280,7 @@ mod tests {
                 ErrorKind::LockHeld,
             ),
             (
-                BrakeError::Held(BrakeHold::new(3, 10, vec![])).into(),
-                ErrorKind::Brake,
-            ),
-            (RemoteError::NoRemote.into(), ErrorKind::NoRemote),
-            (
-                RemoteError::Away {
-                    message: "no route".into(),
-                    overdue: false,
-                }
-                .into(),
-                ErrorKind::RemoteAway,
-            ),
-            (
-                RemoteError::Broken("wrong marker".into()).into(),
-                ErrorKind::RemoteBroken,
-            ),
-            (
-                RemoteError::Unsupported("ssh".into()).into(),
-                ErrorKind::Unsupported,
-            ),
-            (
-                ResolveError::Unsupported("--mine".into()).into(),
-                ErrorKind::Unsupported,
-            ),
-            (
-                MetaError::FormatTooNew { found: 2 }.into(),
+                ListingError::FormatTooNew { found: 2 }.into(),
                 ErrorKind::FormatTooNew,
             ),
         ];
@@ -450,19 +314,6 @@ mod tests {
                 {"id": "01ABCDYYYYYYYYYYYYYYYYYYYY", "path": "projects/b"},
             ]})
         );
-    }
-
-    #[test]
-    fn brake_details_cut_the_items_to_ten() {
-        let items: Vec<Candidate> = (0..12)
-            .map(|n| candidate(&format!("ID{n:02}"), &format!("p{n}")))
-            .collect();
-        let error: Error = BrakeError::Held(BrakeHold::new(12, 40, items)).into();
-        let details = serde_json::Value::Object(error.details());
-        assert_eq!(details["planned"], json!(12));
-        assert_eq!(details["set_size"], json!(40));
-        assert_eq!(details["items"].as_array().map(Vec::len), Some(10));
-        assert_eq!(details["items"][9], json!({"id": "ID09", "path": "p9"}));
     }
 
     #[test]

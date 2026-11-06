@@ -7,15 +7,14 @@
 
 pub mod cmd;
 pub mod output;
+pub mod table;
 pub mod tty;
 
 use self::output::Output;
 use self::tty::TtyInteraction;
-use antiq::brake::BrakeError;
 use antiq::error::ErrorKind;
 use antiq::interact::{Interaction, NonInteractive};
-use antiq::remote::policy::{self, Outcome};
-use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::Map;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -52,24 +51,12 @@ pub enum Command {
     Pin(PieceArgs),
     /// Let a piece be archived again
     Unpin(PieceArgs),
-    /// Exchange backups and archives with the remote
-    Sync(SyncArgs),
-    /// Answer pending decisions
-    Resolve(ResolveArgs),
-    /// Attach, show and detach the remote
-    Remote {
-        #[command(subcommand)]
-        command: RemoteCommand,
-    },
-    /// Bring the index in line with the stored metadata
-    Reconcile(ReconcileArgs),
     /// Register existing compressed tar archives as archived pieces
     Import(ImportArgs),
 }
 
 impl Command {
-    /// The name a JSON envelope carries: the words of the command line,
-    /// joined by one space.
+    /// The name a JSON envelope carries.
     pub fn name(&self) -> &'static str {
         match self {
             Command::Init(_) => "init",
@@ -79,41 +66,7 @@ impl Command {
             Command::Fork(_) => "fork",
             Command::Pin(_) => "pin",
             Command::Unpin(_) => "unpin",
-            Command::Sync(_) => "sync",
-            Command::Resolve(_) => "resolve",
-            Command::Remote { command } => command.name(),
-            Command::Reconcile(_) => "reconcile",
             Command::Import(_) => "import",
-        }
-    }
-
-    /// Whether the command was started with `--if-reachable`.
-    pub fn if_reachable(&self) -> bool {
-        match self {
-            Command::Unearth(args) => args.if_reachable,
-            Command::Sync(args) => args.if_reachable,
-            Command::Reconcile(args) => args.if_reachable,
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RemoteCommand {
-    /// Attach a remote
-    Add(RemoteAddArgs),
-    /// Show the attached remote
-    Show,
-    /// Detach the remote
-    Remove(RemoteRemoveArgs),
-}
-
-impl RemoteCommand {
-    pub fn name(&self) -> &'static str {
-        match self {
-            RemoteCommand::Add(_) => "remote add",
-            RemoteCommand::Show => "remote show",
-            RemoteCommand::Remove(_) => "remote remove",
         }
     }
 }
@@ -151,9 +104,6 @@ pub struct UnearthArgs {
     /// Print the plan and change nothing
     #[arg(long)]
     pub dry_run: bool,
-    /// Exit 0 when the remote is away
-    #[arg(long)]
-    pub if_reachable: bool,
 }
 
 #[derive(Debug, Args)]
@@ -175,90 +125,6 @@ pub struct PieceArgs {
     /// Print the plan and change nothing
     #[arg(long)]
     pub dry_run: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct SyncArgs {
-    /// Print the plan and change nothing
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Exit 0 when the remote is away
-    #[arg(long)]
-    pub if_reachable: bool,
-}
-
-/// One decision at most is answered per run, and only for a named piece.
-#[derive(Debug, Args)]
-#[command(group = ArgGroup::new("answer").multiple(false))]
-pub struct ResolveArgs {
-    /// Path or ULID of the piece; without it every pending decision is
-    /// gone through
-    pub piece: Option<OsString>,
-    /// Keep this machine's version
-    #[arg(long, requires = "piece", group = "answer")]
-    pub mine: bool,
-    /// Take the other machine's version
-    #[arg(long, requires = "piece", group = "answer")]
-    pub theirs: bool,
-    /// Keep both as separate pieces
-    #[arg(long, requires = "piece", group = "answer")]
-    pub fork: bool,
-    /// Replace the archive although content is lost
-    #[arg(long, requires = "piece", group = "answer")]
-    pub replace: bool,
-    /// Leave the piece as it is
-    #[arg(long, requires = "piece", group = "answer")]
-    pub skip: bool,
-    /// Delete the superseded archive
-    #[arg(long, requires = "piece", group = "answer")]
-    pub drop_superseded: bool,
-    /// Go on although the brake holds
-    #[arg(long)]
-    pub force: bool,
-    /// Print the plan and change nothing
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct RemoteAddArgs {
-    /// ssh://[user@]host[:port]/path or an absolute local path
-    pub url: String,
-    /// Create the remote root instead of attaching an existing one
-    #[arg(long)]
-    pub init: bool,
-    /// Name under which the host key is looked up
-    #[arg(long, value_name = "ALIAS")]
-    pub host_key_alias: Option<String>,
-    /// Print the plan and change nothing
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct RemoteRemoveArgs {
-    /// Go on although the brake holds
-    #[arg(long)]
-    pub force: bool,
-    /// Print the plan and change nothing
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct ReconcileArgs {
-    /// Drop entries that are missing on the remote
-    #[arg(long)]
-    pub prune: bool,
-    /// Go on although the brake holds
-    #[arg(long)]
-    pub force: bool,
-    /// Print the plan and change nothing
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Exit 0 when the remote is away
-    #[arg(long)]
-    pub if_reachable: bool,
 }
 
 #[derive(Debug, Args)]
@@ -314,7 +180,7 @@ pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
             let result = dispatch(&cli, out);
-            finish(&cli, result, out, policy::outcome)
+            finish(&cli, result, out)
         }
         Err(error) => report_usage_error(&error, &args, out),
     }
@@ -327,17 +193,13 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
     };
     match &cli.command {
         Command::Init(args) => cmd::init::run(&ctx, args, out),
-        Command::Status => cmd::status::run(&ctx, out),
-        Command::Archive(args) => cmd::archive::run(&ctx, args, out),
-        Command::Unearth(args) => cmd::unearth::run(&ctx, args, out),
-        Command::Fork(args) => cmd::fork::run(&ctx, args, out),
-        Command::Pin(args) => cmd::pin::run(&ctx, args, out),
-        Command::Unpin(args) => cmd::unpin::run(&ctx, args, out),
-        Command::Sync(args) => cmd::sync::run(&ctx, args, out),
-        Command::Resolve(args) => cmd::resolve::run(&ctx, args, out),
-        Command::Remote { command } => cmd::remote::run(&ctx, command, out),
-        Command::Reconcile(args) => cmd::reconcile::run(&ctx, args, out),
-        Command::Import(args) => cmd::import::run(&ctx, args, out),
+        Command::Status => cmd::not_implemented(&ctx, "status"),
+        Command::Archive(_) => cmd::not_implemented(&ctx, "archive"),
+        Command::Unearth(_) => cmd::not_implemented(&ctx, "unearth"),
+        Command::Fork(_) => cmd::not_implemented(&ctx, "fork"),
+        Command::Pin(_) => cmd::not_implemented(&ctx, "pin"),
+        Command::Unpin(_) => cmd::not_implemented(&ctx, "unpin"),
+        Command::Import(_) => cmd::not_implemented(&ctx, "import"),
     }
 }
 
@@ -383,76 +245,23 @@ fn describe(error: &anyhow::Error) -> Description<'_> {
 }
 
 /// Reports the failure of a command and returns the exit code.
-fn finish(
-    cli: &Cli,
-    result: anyhow::Result<u8>,
-    out: &mut Output,
-    decide: fn(bool, &antiq::Error) -> Outcome,
-) -> u8 {
+fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     let error = match result {
         Ok(code) => return code,
         Err(error) => error,
     };
     let description = describe(&error);
-    let (kind, details, outcome) = match description.library_error {
-        Some(library_error) => (
-            library_error.kind(),
-            library_error.details(),
-            decide(cli.command.if_reachable(), library_error),
-        ),
-        None => (ErrorKind::Other, Map::new(), Outcome::Fail),
+    let (kind, details) = match description.library_error {
+        Some(library_error) => (library_error.kind(), library_error.details()),
+        None => (ErrorKind::Other, Map::new()),
     };
-    // The envelope is all that `--json` prints of a run that stopped at its
-    // remote, so the drops of its local part ride along.
-    let mut details = details;
-    if let Some(stop) = error.downcast_ref::<RemoteStop>()
-        && !stop.pruned.is_empty()
-    {
-        details.insert(
-            "pruned".into(),
-            serde_json::to_value(&stop.pruned).expect("pieces are plain strings and serialise"),
-        );
-    }
     // When the output itself fails there is nowhere left to report that.
     let _ = if cli.json {
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
     } else {
         out.plain_error(&description.root, &description.contexts)
-            .and_then(|()| match description.library_error {
-                Some(antiq::Error::Brake(BrakeError::Held(hold))) => hold
-                    .item_lines()
-                    .iter()
-                    .try_for_each(|line| out.note(&format!("  {}", cmd::status::sanitize(line)))),
-                _ => Ok(()),
-            })
     };
-    match outcome {
-        // A run that was partial before the remote stopped it stays partial.
-        Outcome::TreatAsSuccess
-            if error
-                .downcast_ref::<RemoteStop>()
-                .is_some_and(|stop| stop.partial) =>
-        {
-            3
-        }
-        Outcome::TreatAsSuccess => 0,
-        Outcome::Fail => kind.exit_code(),
-    }
-}
-
-/// The context of an error that stopped a run at its remote part, after
-/// its local part was done. `partial` is whether that local part left
-/// something out, `pruned` the pieces it dropped.
-#[derive(Debug)]
-pub struct RemoteStop {
-    pub partial: bool,
-    pub pruned: Vec<antiq::ops::reconcile::PieceRef>,
-}
-
-impl std::fmt::Display for RemoteStop {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("use the remote")
-    }
+    kind.exit_code()
 }
 
 /// Reports an error of clap. Help and version are not errors: clap prints
@@ -497,31 +306,24 @@ fn first_paragraph(rendered: &str) -> String {
 }
 
 /// The command a failed command line was meant for, as far as the
-/// arguments tell: `remote` when the nested command is missing or unknown.
+/// arguments tell: the first positional argument, when it names a command.
 fn guess_command(args: &[OsString]) -> Option<String> {
-    let root = Cli::command();
-    let (index, name) = next_positional(args, 1)?;
-    let command = root.find_subcommand(&name)?;
-    if command.has_subcommands()
-        && let Some((_, nested)) = next_positional(args, index + 1)
-        && command.find_subcommand(&nested).is_some()
-    {
-        return Some(format!("{name} {nested}"));
-    }
+    let name = first_positional(args)?;
+    Cli::command().find_subcommand(&name)?;
     Some(name)
 }
 
-/// The first argument from `from` on that is neither a flag nor the value
-/// of `-C`, with its index. Only global options can come before a command.
-fn next_positional(args: &[OsString], from: usize) -> Option<(usize, String)> {
-    let mut index = from;
+/// The first argument that is neither a flag nor the value of `-C`. Only
+/// global options can come before a command.
+fn first_positional(args: &[OsString]) -> Option<String> {
+    let mut index = 1;
     while index < args.len() {
         let arg = args[index].to_str()?;
         match arg {
             "--" => return None,
             "-C" => index += 2,
             _ if arg.starts_with('-') => index += 1,
-            _ => return Some((index, arg.to_string())),
+            _ => return Some(arg.to_string()),
         }
     }
     None
@@ -532,7 +334,6 @@ mod tests {
     use super::output::testing::{Capture, FailsOnFlush};
     use super::*;
     use antiq::lock::LockError;
-    use antiq::remote::RemoteError;
     use anyhow::Context as _;
 
     fn os(args: &[&str]) -> Vec<OsString> {
@@ -557,7 +358,7 @@ mod tests {
 
     fn finish_captured(cli: &Cli, result: anyhow::Result<u8>) -> (u8, String, String) {
         let capture = Capture::default();
-        let code = finish(cli, result, &mut capture.output(false), policy::outcome);
+        let code = finish(cli, result, &mut capture.output(false));
         (code, capture.stdout(), capture.stderr())
     }
 
@@ -591,16 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn the_command_name_of_a_nested_command_has_all_its_words() {
-        let (_, stdout, _) = run_captured(&["--json", "remote", "remove"]);
-        assert!(stdout.contains("\"command\":\"remote remove\""), "{stdout}");
-    }
-
-    #[test]
     fn a_plain_run_reports_on_stderr() {
         let root = tempfile::tempdir().expect("a temp dir");
         let (code, stdout, stderr) =
-            run_captured(&["-C", root.path().to_str().expect("UTF-8"), "reconcile"]);
+            run_captured(&["-C", root.path().to_str().expect("UTF-8"), "status"]);
         assert_eq!(code, 1);
         assert_eq!(stdout, "");
         assert_eq!(
@@ -635,79 +430,6 @@ mod tests {
             finish_captured(&cli, Ok(3)),
             (3, String::new(), String::new())
         );
-    }
-
-    #[test]
-    fn the_exit_code_comes_from_the_kind_of_the_library_error() {
-        let cli = parse(&["status"]);
-        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
-            message: "no route to host".into(),
-            overdue: false,
-        })
-        .into();
-        assert_eq!(finish_captured(&cli, Err(away)).0, 4);
-        let broken: anyhow::Error =
-            antiq::Error::from(RemoteError::Broken("wrong marker".into())).into();
-        assert_eq!(finish_captured(&cli, Err(broken)).0, 1);
-    }
-
-    #[test]
-    fn if_reachable_ends_a_run_with_an_away_remote_with_zero() {
-        let cli = parse(&["sync", "--if-reachable"]);
-        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
-            message: "no route to host".into(),
-            overdue: false,
-        })
-        .into();
-        assert_eq!(finish_captured(&cli, Err(away)).0, 0);
-    }
-
-    #[test]
-    fn if_reachable_leaves_an_overdue_away_remote_at_exit_four() {
-        let cli = parse(&["sync", "--if-reachable"]);
-        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
-            message: "no route to host".into(),
-            overdue: true,
-        })
-        .into();
-        assert_eq!(finish_captured(&cli, Err(away)).0, 4);
-    }
-
-    #[test]
-    fn an_away_remote_without_the_flag_exits_with_four() {
-        let cli = parse(&["sync"]);
-        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
-            message: "no route to host".into(),
-            overdue: false,
-        })
-        .into();
-        assert_eq!(finish_captured(&cli, Err(away)).0, 4);
-    }
-
-    #[test]
-    fn a_policy_can_end_a_failed_run_with_zero_and_still_report_the_error() {
-        let cli = parse(&["--json", "sync", "--if-reachable"]);
-        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
-            message: "no route to host".into(),
-            overdue: false,
-        })
-        .into();
-        let capture = Capture::default();
-        let code = finish(
-            &cli,
-            Err(away),
-            &mut capture.output(false),
-            |if_reachable, _| {
-                assert!(
-                    if_reachable,
-                    "the flag of the command line reaches the policy"
-                );
-                Outcome::TreatAsSuccess
-            },
-        );
-        assert_eq!(code, 0);
-        let stdout = capture.stdout();
-        assert!(stdout.contains("\"kind\":\"remote_away\""), "{stdout}");
     }
 
     #[test]
@@ -799,13 +521,13 @@ mod tests {
         assert!(asks_for_json(&os(&["antiq", "--json", "status"])));
         assert!(asks_for_json(&os(&["antiq", "status", "--json"])));
         assert!(!asks_for_json(&os(&["antiq", "status"])));
-        assert!(!asks_for_json(&os(&["antiq", "find", "--", "--json"])));
+        assert!(!asks_for_json(&os(&["antiq", "status", "--", "--json"])));
     }
 
     #[test]
     fn the_message_of_a_usage_error_is_its_first_paragraph() {
         let rendered = "error: the following required arguments were not provided:\n  \
-                        <PIECE>\n\nUsage: antiq resolve --mine <PIECE>\n\nFor more information, try '--help'.\n";
+                        <PIECE>\n\nUsage: antiq pin <PIECE>\n\nFor more information, try '--help'.\n";
         assert_eq!(
             first_paragraph(rendered),
             "the following required arguments were not provided: <PIECE>"
@@ -831,19 +553,6 @@ mod tests {
         );
         assert_eq!(guess(&["antiq", "--", "status"]), None);
         assert_eq!(guess(&["antiq"]), None);
-        assert_eq!(guess(&["antiq", "remote"]).as_deref(), Some("remote"));
-        assert_eq!(
-            guess(&["antiq", "remote", "help"]).as_deref(),
-            Some("remote")
-        );
-        assert_eq!(
-            guess(&["antiq", "-Cx", "remote", "bogus"]).as_deref(),
-            Some("remote")
-        );
-        assert_eq!(
-            guess(&["antiq", "remote", "add", "--bogus"]).as_deref(),
-            Some("remote add")
-        );
     }
 
     #[cfg(unix)]

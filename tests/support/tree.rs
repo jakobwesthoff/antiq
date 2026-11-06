@@ -13,6 +13,7 @@ use std::fs::{self, File, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 /// A tree of files in a temp directory. Paths are relative to its root.
@@ -168,4 +169,13 @@ impl TempCollection {
     pub fn tree(&mut self) -> &mut Tree {
         &mut self.tree
     }
+}
+
+/// Seconds since the epoch, `days` before now.
+pub fn days_ago(days: i64) -> i64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs() as i64;
+    now - days * 86_400
 }

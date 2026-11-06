@@ -4,6 +4,8 @@
 
 //! Free space.
 
+#![allow(dead_code, reason = "used again by C4 and C6")]
+
 use super::{FsxError, io_error};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};

@@ -40,17 +40,10 @@ impl LockHeldWithoutHolder for crate::run::RunError {
     }
 }
 
-impl LockHeldWithoutHolder for crate::ops::archive::ArchiveError {
-    fn is_lock_held_without_holder(&self) -> bool {
-        matches!(self, crate::ops::archive::ArchiveError::Run(error) if error.is_lock_held_without_holder())
-    }
-}
-
 impl LockHeldWithoutHolder for crate::error::Error {
     fn is_lock_held_without_holder(&self) -> bool {
         match self {
             crate::error::Error::Run(error) => error.is_lock_held_without_holder(),
-            crate::error::Error::Archive(error) => error.is_lock_held_without_holder(),
             crate::error::Error::Lock(error) => {
                 matches!(error, crate::lock::LockError::HeldUnknown)
             }
@@ -114,11 +107,8 @@ mod tests {
     fn the_errors_that_wrap_a_run_error_pass_the_lock_state_on() {
         use super::LockHeldWithoutHolder;
         use crate::error::Error;
-        use crate::ops::archive::ArchiveError;
 
-        assert!(ArchiveError::Run(unattributed()).is_lock_held_without_holder());
         assert!(Error::Run(unattributed()).is_lock_held_without_holder());
-        assert!(Error::Archive(ArchiveError::Run(unattributed())).is_lock_held_without_holder());
         assert!(Error::Lock(LockError::HeldUnknown).is_lock_held_without_holder());
         let holder = LockError::Held {
             pid: 7,

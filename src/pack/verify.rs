@@ -10,7 +10,7 @@ use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
 use crate::fsx::tree::{TreeError, TreeRoot};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
-use crate::relpath::{Name, RelPath};
+use crate::relpath::RelPath;
 use crate::select::Rules;
 use crate::tree::{EntryKind, TreeEntry};
 use crate::walk::{MAX_DEPTH, walk_piece};
@@ -594,22 +594,6 @@ fn compare(
         }
     }
     differences
-}
-
-/// The differences between two listings of a folder: `before` is what an
-/// archive holds, `after` what a later packing of the folder holds.
-/// Directory times and junk files in `before` do not count, as in a
-/// comparison with the folder itself.
-pub(crate) fn changes(
-    before: &[ListingEntry],
-    after: &[ListingEntry],
-    junk: &[Name],
-) -> Vec<Difference> {
-    let rules = WalkRules {
-        junk: junk.to_vec(),
-        staged: false,
-    };
-    compare(&without_junk(before, &rules), after, &[], false)
 }
 
 /// The fields in which two lines of one path differ. A different type
@@ -1803,57 +1787,5 @@ mod tests {
             error.to_string(),
             "the folder differs from the package: 2 differences, the first: `notes.txt` is gone from the folder"
         );
-    }
-
-    // =====================================================
-    // Changes between two listings
-    // =====================================================
-
-    fn junk(name: &str) -> Vec<Name> {
-        vec![Name::from_bytes(name.as_bytes().to_vec()).expect("a valid name")]
-    }
-
-    #[test]
-    fn a_path_missing_from_the_later_listing_is_removed() {
-        let tree = mixed();
-        let before = packed(&tree);
-        std::fs::remove_file(tree.path("proj/notes.txt")).expect("removed");
-        let after = packed(&tree);
-        assert_eq!(
-            changes(&before, &after, &[]),
-            [Difference::Removed(path("notes.txt"))]
-        );
-    }
-
-    #[test]
-    fn a_junk_file_only_the_earlier_listing_holds_is_no_difference() {
-        let mut tree = mixed();
-        tree.file_with("proj/.DS_Store", "junk", 0o644, 1_000_000_002);
-        let before = packed(&tree);
-        std::fs::remove_file(tree.path("proj/.DS_Store")).expect("removed");
-        let after = packed(&tree);
-        assert_eq!(
-            changes(&before, &after, &junk(".DS_Store")),
-            [],
-            "junk is dropped"
-        );
-        assert_eq!(
-            changes(&before, &after, &[]),
-            [Difference::Removed(path(".DS_Store"))],
-            "it counts without the junk list"
-        );
-    }
-
-    #[test]
-    fn a_directory_time_is_no_difference() {
-        let tree = mixed();
-        let before = packed(&tree);
-        filetime::set_file_mtime(
-            tree.path("proj/src"),
-            FileTime::from_unix_time(1_000_000_500, 0),
-        )
-        .expect("the time is set");
-        let after = packed(&tree);
-        assert_eq!(changes(&before, &after, &[]), []);
     }
 }

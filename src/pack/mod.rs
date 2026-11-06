@@ -5,10 +5,7 @@
 //! Packing, verifying and unpacking archives.
 
 pub mod extract;
-pub mod frames;
 pub mod hashing;
-pub mod live;
-pub mod manifest;
 pub mod names;
 pub mod pool;
 pub mod read;

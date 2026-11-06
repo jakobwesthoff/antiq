@@ -5,7 +5,6 @@
 //! Archive listings: one JSON line per entry of an archive, compressed.
 
 use crate::error::{ErrorKind, HasKind};
-use crate::meta::FileName;
 use crate::pack::hashing::HashingWriter;
 use crate::pack::zstd::decoder;
 use crate::relpath::{RelPath, escape, unescape};
@@ -262,20 +261,6 @@ pub fn read_all<R: Read>(input: R) -> Result<Vec<ListingEntry>, ListingError> {
     Reader::new(input)?.collect()
 }
 
-/// The name of the listing of the payload with this SHA-256: its first 16
-/// digits, so the name follows from the payload.
-pub fn file_name(payload_sha256: &str) -> Result<FileName, ListingError> {
-    if !is_sha256_hex(payload_sha256) {
-        return Err(ListingError::InvalidDigest {
-            digest: payload_sha256.to_string(),
-        });
-    }
-    Ok(
-        FileName::new(format!("{}.listing.zst", &payload_sha256[..16]))
-            .expect("16 hex digits and a suffix are a plain name"),
-    )
-}
-
 /// Errors of archive listings.
 #[derive(Debug, thiserror::Error)]
 pub enum ListingError {
@@ -289,8 +274,6 @@ pub enum ListingError {
     Line { number: usize, reason: String },
     #[error("the entry {path} cannot be listed: {reason}")]
     Entry { path: String, reason: String },
-    #[error("`{digest}` is not a SHA-256 in lower-case hex")]
-    InvalidDigest { digest: String },
 }
 
 impl HasKind for ListingError {
@@ -861,48 +844,5 @@ mod tests {
         let mut sink = Failing { on_write: false };
         let result = write(&all_entries(), &mut sink);
         assert!(matches!(result, Err(ListingError::Io { .. })), "{result:?}");
-    }
-
-    const PAYLOAD_SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    #[test]
-    fn a_listing_is_named_after_the_first_16_digits_of_its_payload() {
-        let name = file_name(PAYLOAD_SHA256).expect("a digest");
-        assert_eq!(name.as_str(), "0123456789abcdef.listing.zst");
-        assert!(crate::meta::is_listing_file_name(name.as_str()));
-    }
-
-    #[test]
-    fn a_short_digest_names_no_listing() {
-        assert!(matches!(
-            file_name("0123456789abcdef"),
-            Err(ListingError::InvalidDigest { .. })
-        ));
-    }
-
-    #[test]
-    fn an_upper_case_digest_names_no_listing() {
-        assert!(matches!(
-            file_name(&PAYLOAD_SHA256.to_uppercase()),
-            Err(ListingError::InvalidDigest { .. })
-        ));
-    }
-
-    #[test]
-    fn a_digest_with_a_multi_byte_character_names_no_listing() {
-        let digest = format!("{}é", &PAYLOAD_SHA256[..62]);
-        assert_eq!(digest.len(), 64);
-        assert!(matches!(
-            file_name(&digest),
-            Err(ListingError::InvalidDigest { .. })
-        ));
-    }
-
-    #[test]
-    fn a_digest_of_65_digits_names_no_listing() {
-        assert!(matches!(
-            file_name(&format!("{PAYLOAD_SHA256}0")),
-            Err(ListingError::InvalidDigest { .. })
-        ));
     }
 }

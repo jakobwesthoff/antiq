@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::lock::{self, Holder, LockError, RunLock};
 use crate::machine::MachineError;
-use crate::repair::{self, Effects, RealEffects, RepairError};
+use crate::repair::{self, RepairError};
 use crate::report::Warning;
 
 /// Errors of the run guard.
@@ -49,24 +49,14 @@ pub struct RunGuard {
 impl RunGuard {
     /// Takes the lock and repairs what an earlier run left behind.
     pub(crate) fn begin(collection: &Collection, clock: &dyn Clock) -> Result<RunGuard, RunError> {
-        RunGuard::begin_with(collection, clock, &RealEffects)
-    }
-
-    /// [`RunGuard::begin`] with the repairs' effects given, so that a test
-    /// can watch them or make one fail.
-    pub(crate) fn begin_with(
-        collection: &Collection,
-        clock: &dyn Clock,
-        effects: &dyn Effects,
-    ) -> Result<RunGuard, RunError> {
         let machine = collection.machine_name()?;
         let lock = lock::acquire(&collection.lock_path(), &machine, clock)?;
-        let warnings = repair::run(collection, &lock, clock, effects)?;
+        let warnings = repair::run(collection, &lock, clock)?;
         Ok(RunGuard { lock, warnings })
     }
 
-    /// The lock, which the stores and the tracking entries take as their
-    /// proof that the run lock is held.
+    /// The lock, which code that changes the collection takes as its proof
+    /// that the run lock is held.
     pub fn lock(&self) -> &RunLock {
         &self.lock
     }
@@ -89,8 +79,8 @@ pub enum Started {
 }
 
 /// Starts a state-changing command. With `dry_run` nothing is locked,
-/// repaired or written, so a `DryRun` has no [`RunLock`] to hand to a store
-/// or a tracking entry.
+/// repaired or written, so a `DryRun` has no [`RunLock`] to hand to anything
+/// that writes.
 pub fn start(
     collection: &Collection,
     clock: &dyn Clock,
@@ -167,16 +157,6 @@ mod tests {
         assert!(matches!(error, RunError::Machine(_)), "{error}");
         assert_eq!(error.kind(), ErrorKind::Other);
         assert!(!collection.lock_path().exists(), "no lock was taken");
-    }
-
-    #[test]
-    fn a_repair_that_fails_is_an_error_of_the_run() {
-        let error = RunError::from(RepairError::Io {
-            action: "open",
-            path: "/collection".to_string(),
-            source: std::io::Error::other("refused by the test"),
-        });
-        assert_eq!(error.kind(), ErrorKind::Other);
     }
 
     #[test]
@@ -261,30 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn a_real_run_empties_the_run_directories_before_it_starts() {
-        let mut temp = TempCollection::minimal();
-        temp.tree().file(".antiq/trash/leftover/f", "x");
-        temp.tree().file(".antiq/tmp/upload.part", "x");
-        temp.tree().file(".antiq/staging/tree/f", "x");
-        let collection = collection(&temp);
-
-        let guard = begin(&collection).expect("starts");
-
-        assert!(guard.warnings().is_empty());
-        for directory in ["trash", "tmp", "staging"] {
-            let path = temp.root().join(".antiq").join(directory);
-            assert_eq!(fs::read_dir(path).expect("lists").count(), 0, "{directory}");
-        }
-    }
-
-    #[test]
     fn a_dry_run_leaves_the_run_directories_and_everything_else_alone() {
         let mut temp = TempCollection::minimal();
         temp.tree().file(".antiq/trash/leftover/f", "x");
         temp.tree().file(".antiq/tmp/upload.part", "x");
         temp.tree().file(".antiq/staging/tree/f", "x");
         temp.tree().file(".antiq/recovered/old/f", "x");
-        temp.tree().file(".antiq/tracking/damaged.json", "not json");
+        temp.tree().file(".antiq/tmp/leftover", "x");
         temp.tree().file("projects/a/notes.txt", "hello");
         let collection = collection(&temp);
         let before = snapshot(temp.root());

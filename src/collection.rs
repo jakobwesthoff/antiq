@@ -40,7 +40,7 @@ impl Collection {
         })?;
         // The marker is looked at without following links: a link to
         // another collection's `.antiq` would borrow that collection's
-        // objects, tracking and lock.
+        // store and lock.
         resolved
             .ancestors()
             .find(|dir| {
@@ -89,46 +89,6 @@ impl Collection {
         self.antiq_dir().join("lock")
     }
 
-    /// When the remote was last reachable.
-    pub fn remote_state_path(&self) -> PathBuf {
-        self.antiq_dir().join("remote-state.json")
-    }
-
-    /// The objects this machine dropped on purpose.
-    pub fn pruned_path(&self) -> PathBuf {
-        self.antiq_dir().join("pruned.json")
-    }
-
-    pub fn objects_dir(&self) -> PathBuf {
-        self.antiq_dir().join("objects")
-    }
-
-    pub fn object_dir(&self, id: ObjectId) -> PathBuf {
-        self.objects_dir().join(id.to_string())
-    }
-
-    /// A recorded metadata change that `sync` has not committed yet.
-    pub fn meta_pending_path(&self, id: ObjectId) -> PathBuf {
-        self.object_dir(id).join("meta.pending")
-    }
-
-    pub fn tracking_dir(&self) -> PathBuf {
-        self.antiq_dir().join("tracking")
-    }
-
-    pub fn tracking_path(&self, id: ObjectId) -> PathBuf {
-        self.tracking_dir().join(format!("{id}.json"))
-    }
-
-    pub fn manifest_path(&self, id: ObjectId) -> PathBuf {
-        self.tracking_dir().join(format!("{id}.manifest.json"))
-    }
-
-    /// Derived and rebuildable, private to this machine.
-    pub fn index_dir(&self) -> PathBuf {
-        self.antiq_dir().join("index")
-    }
-
     pub fn tmp_dir(&self) -> PathBuf {
         self.antiq_dir().join("tmp")
     }
@@ -139,11 +99,6 @@ impl Collection {
 
     pub fn trash_dir(&self) -> PathBuf {
         self.antiq_dir().join("trash")
-    }
-
-    /// A folder on its way out.
-    pub fn trash_path(&self, id: ObjectId) -> PathBuf {
-        self.trash_dir().join(id.to_string())
     }
 
     pub fn recovered_dir(&self) -> PathBuf {
@@ -331,40 +286,12 @@ mod tests {
         let temp = TempCollection::minimal();
         let collection = Collection::find(temp.root()).expect("a collection");
         let antiq = canonical(temp.root()).join(".antiq");
-        let object = id("01BX5ZZKBKACTAV9WEVGEMMVRY");
         assert_eq!(collection.antiq_dir(), antiq);
         assert_eq!(collection.config_path(), antiq.join("config.toml"));
         assert_eq!(collection.lock_path(), antiq.join("lock"));
-        assert_eq!(
-            collection.remote_state_path(),
-            antiq.join("remote-state.json")
-        );
-        assert_eq!(collection.objects_dir(), antiq.join("objects"));
-        assert_eq!(
-            collection.object_dir(object),
-            antiq.join("objects/01BX5ZZKBKACTAV9WEVGEMMVRY")
-        );
-        assert_eq!(
-            collection.meta_pending_path(object),
-            antiq.join("objects/01BX5ZZKBKACTAV9WEVGEMMVRY/meta.pending")
-        );
-        assert_eq!(collection.tracking_dir(), antiq.join("tracking"));
-        assert_eq!(
-            collection.tracking_path(object),
-            antiq.join("tracking/01BX5ZZKBKACTAV9WEVGEMMVRY.json")
-        );
-        assert_eq!(
-            collection.manifest_path(object),
-            antiq.join("tracking/01BX5ZZKBKACTAV9WEVGEMMVRY.manifest.json")
-        );
-        assert_eq!(collection.index_dir(), antiq.join("index"));
         assert_eq!(collection.tmp_dir(), antiq.join("tmp"));
         assert_eq!(collection.staging_dir(), antiq.join("staging"));
         assert_eq!(collection.trash_dir(), antiq.join("trash"));
-        assert_eq!(
-            collection.trash_path(object),
-            antiq.join("trash/01BX5ZZKBKACTAV9WEVGEMMVRY")
-        );
         assert_eq!(collection.recovered_dir(), antiq.join("recovered"));
     }
 

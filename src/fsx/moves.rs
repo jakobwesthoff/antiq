@@ -6,6 +6,8 @@
 //!
 //! Callers hold the run lock; see the module docs of [`crate::fsx`].
 
+#![allow(dead_code, reason = "used again by F6")]
+
 use super::tree::TreeRoot;
 use super::{FsxError, failure, shown};
 use crate::relpath::RelPath;

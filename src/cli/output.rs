@@ -173,6 +173,7 @@ impl Output {
     }
 
     /// How data on stdout is laid out and coloured.
+    #[allow(dead_code, reason = "used again by C1")]
     pub fn stdout_style(&self) -> Style {
         self.stdout_style
     }

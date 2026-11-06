@@ -10,20 +10,10 @@ mod support;
 use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
+use support::tree::TempCollection;
 
-const COMMANDS: [&str; 12] = [
-    "init",
-    "status",
-    "archive",
-    "unearth",
-    "fork",
-    "pin",
-    "unpin",
-    "sync",
-    "resolve",
-    "remote",
-    "reconcile",
-    "import",
+const COMMANDS: [&str; 8] = [
+    "init", "status", "archive", "unearth", "fork", "pin", "unpin", "import",
 ];
 
 /// Runs `antiq --json <args>`.
@@ -32,7 +22,7 @@ fn json_run(args: &[&str]) -> support::cmd::Run {
 }
 
 #[test]
-fn help_lists_the_twelve_subcommands() {
+fn help_lists_the_eight_subcommands() {
     let run = Antiq::new().arg("--help").run();
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let mut listed: Vec<&str> = run
@@ -61,18 +51,6 @@ fn the_help_subcommand_is_disabled() {
     );
 }
 
-#[test]
-fn the_remote_help_subcommand_is_disabled() {
-    let run = json_run(&["remote", "help"]);
-    assert_eq!(run.code(), 2);
-    assert_eq!(run.error_kind(), "usage");
-    assert!(
-        run.error_message().contains("'help'"),
-        "message: {}",
-        run.error_message()
-    );
-}
-
 // A flag a command does not take is a usage error. Each of these also
 // has an accepting twin below, so a pass cannot come from a surface that
 // rejects everything.
@@ -92,46 +70,8 @@ fn status_takes_no_dry_run() {
     );
 }
 
-#[test]
-fn find_is_not_a_command() {
-    let dir = tempfile::tempdir().expect("the temp dir is writable");
-    let run = json_run(&["-C", dir.path().to_str().expect("UTF-8"), "find"]);
-    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
-    assert_eq!(run.error_kind(), "usage");
-    assert!(
-        run.error_message()
-            .contains("unrecognized subcommand 'find'"),
-        "message: {}",
-        run.error_message()
-    );
-}
-
-#[test]
-fn status_takes_no_if_reachable() {
-    assert_usage_error(
-        &["status", "--if-reachable"],
-        "unexpected argument '--if-reachable' found",
-    );
-}
-
-#[test]
-fn an_answer_of_resolve_needs_a_piece() {
-    assert_usage_error(
-        &["resolve", "--mine"],
-        "the following required arguments were not provided: <PIECE>",
-    );
-}
-
-#[test]
-fn resolve_takes_one_answer_at_most() {
-    assert_usage_error(
-        &["resolve", "piece", "--mine", "--theirs"],
-        "the argument '--mine' cannot be used with '--theirs'",
-    );
-}
-
-/// For a command that is implemented: its options parse, and outside a
-/// collection it fails with the kind `not_a_collection`.
+/// For a command: its options parse, and outside a collection it fails
+/// with the kind `not_a_collection`.
 macro_rules! accepts_and_needs_a_collection {
     ($name:ident, $command:expr, [$($arg:expr),*]) => {
         #[test]
@@ -178,8 +118,7 @@ accepts_and_needs_a_collection!(
         "out",
         "--version",
         "3",
-        "--dry-run",
-        "--if-reachable"
+        "--dry-run"
     ]
 );
 accepts_and_needs_a_collection!(
@@ -194,99 +133,108 @@ accepts_and_needs_a_collection!(
     ["unpin", "piece", "--dry-run"]
 );
 accepts_and_needs_a_collection!(
-    sync_takes_dry_run_and_if_reachable,
-    "sync",
-    ["sync", "--dry-run", "--if-reachable"]
-);
-accepts_and_needs_a_collection!(resolve_takes_nothing, "resolve", ["resolve"]);
-accepts_and_needs_a_collection!(resolve_takes_a_piece, "resolve", ["resolve", "piece"]);
-accepts_and_needs_a_collection!(
-    resolve_takes_mine,
-    "resolve",
-    ["resolve", "piece", "--mine", "--force", "--dry-run"]
-);
-accepts_and_needs_a_collection!(
-    resolve_takes_theirs,
-    "resolve",
-    ["resolve", "piece", "--theirs"]
-);
-accepts_and_needs_a_collection!(
-    resolve_takes_fork,
-    "resolve",
-    ["resolve", "piece", "--fork"]
-);
-accepts_and_needs_a_collection!(
-    resolve_takes_replace,
-    "resolve",
-    ["resolve", "piece", "--replace"]
-);
-accepts_and_needs_a_collection!(
-    resolve_takes_skip,
-    "resolve",
-    ["resolve", "piece", "--skip"]
-);
-accepts_and_needs_a_collection!(
-    resolve_takes_drop_superseded,
-    "resolve",
-    ["resolve", "piece", "--drop-superseded"]
-);
-/// `remote add` is implemented, so a command line it accepts runs and, away
-/// from a collection, fails there.
-#[test]
-fn remote_add_takes_its_options() {
-    let run = json_run(&[
-        "remote",
-        "add",
-        "--init",
-        "--host-key-alias",
-        "nas",
-        "ssh://nas/backup",
-        "--dry-run",
-    ]);
-    assert_eq!(
-        run.code(),
-        1,
-        "stdout: {}, stderr: {}",
-        run.stdout,
-        run.stderr
-    );
-    assert_eq!(run.error_kind(), "not_a_collection");
-    assert_eq!(run.json()["command"], "remote add");
-}
-accepts_and_needs_a_collection!(remote_show_takes_nothing, "remote show", ["remote", "show"]);
-accepts_and_needs_a_collection!(
-    remote_remove_takes_force_and_dry_run,
-    "remote remove",
-    ["remote", "remove", "--force", "--dry-run"]
-);
-accepts_and_needs_a_collection!(
-    reconcile_takes_its_options,
-    "reconcile",
-    [
-        "reconcile",
-        "--prune",
-        "--force",
-        "--dry-run",
-        "--if-reachable"
-    ]
-);
-accepts_and_needs_a_collection!(
     import_takes_a_file_and_a_path,
     "import",
     ["import", "--path", "dir", "one.tar.zst", "--dry-run"]
 );
 
+/// For a command without an implementation: inside a collection its
+/// options parse and the run fails with the kind `not_implemented`.
+macro_rules! is_not_implemented {
+    ($name:ident, $command:expr, [$($arg:expr),*]) => {
+        #[test]
+        fn $name() {
+            let collection = TempCollection::minimal();
+            let run = Antiq::new()
+                .args(["--json", "-C"])
+                .arg(collection.root())
+                .args([$($arg),*])
+                .run();
+            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
+            assert_eq!(run.error_kind(), "not_implemented");
+            assert_eq!(run.error_message(), concat!($command, " is not implemented"));
+            assert_eq!(run.json()["command"], $command);
+        }
+    };
+}
+
+is_not_implemented!(status_is_not_implemented, "status", ["status"]);
+is_not_implemented!(
+    archive_is_not_implemented,
+    "archive",
+    ["archive", "--dry-run"]
+);
+is_not_implemented!(
+    unearth_is_not_implemented,
+    "unearth",
+    [
+        "unearth",
+        "piece",
+        "--to",
+        "out",
+        "--version",
+        "3",
+        "--dry-run"
+    ]
+);
+is_not_implemented!(
+    fork_is_not_implemented,
+    "fork",
+    ["fork", "piece", "--name", "copy", "--dry-run"]
+);
+is_not_implemented!(
+    import_is_not_implemented,
+    "import",
+    ["import", "--path", "dir", "one.tar.zst", "--dry-run"]
+);
+is_not_implemented!(pin_is_not_implemented, "pin", ["pin", "piece", "--dry-run"]);
+is_not_implemented!(
+    unpin_is_not_implemented,
+    "unpin",
+    ["unpin", "piece", "--dry-run"]
+);
+accepts_and_needs_a_collection!(archive_takes_dry_run, "archive", ["archive", "--dry-run"]);
+
+/// A name that is not a command is a usage error that names no command.
+macro_rules! is_not_a_command {
+    ($name:ident, $arg0:literal, [$($arg:expr),*]) => {
+        #[test]
+        fn $name() {
+            let dir = tempfile::tempdir().expect("the temp dir is writable");
+            let run = Antiq::new()
+                .args(["--json", "-C"])
+                .arg(dir.path())
+                .args([$($arg),*])
+                .run();
+            assert_eq!(run.code(), 2, "stdout: {}, stderr: {}", run.stdout, run.stderr);
+            assert_eq!(run.error_kind(), "usage");
+            assert!(
+                run.error_message().contains(concat!("unrecognized subcommand '", $arg0, "'")),
+                "message: {}",
+                run.error_message()
+            );
+            assert!(run.json()["command"].is_null(), "stdout: {}", run.stdout);
+        }
+    };
+}
+
+is_not_a_command!(find_is_not_a_command, "find", ["find"]);
+is_not_a_command!(sync_is_not_a_command, "sync", ["sync"]);
+is_not_a_command!(reconcile_is_not_a_command, "reconcile", ["reconcile"]);
+is_not_a_command!(resolve_is_not_a_command, "resolve", ["resolve"]);
+is_not_a_command!(remote_is_not_a_command, "remote", ["remote", "show"]);
+
 #[test]
 fn a_json_run_prints_one_error_envelope() {
     let dir = tempfile::tempdir().expect("the temp dir is writable");
-    let run = json_run(&["-C", dir.path().to_str().expect("UTF-8"), "reconcile"]);
+    let run = json_run(&["-C", dir.path().to_str().expect("UTF-8"), "status"]);
     assert_eq!(run.code(), 1);
     assert_eq!(run.stderr, "");
     let json = run.json();
     let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
     assert_eq!(keys, ["format", "command", "error"]);
     assert_eq!(json["format"], 1);
-    assert_eq!(json["command"], "reconcile");
+    assert_eq!(json["command"], "status");
     assert_eq!(json["error"]["kind"], "not_a_collection");
     assert_eq!(
         json["error"]["message"],
@@ -297,11 +245,7 @@ fn a_json_run_prints_one_error_envelope() {
 #[test]
 fn a_plain_run_prints_its_error_to_stderr() {
     let dir = tempfile::tempdir().expect("the temp dir is writable");
-    let run = Antiq::new()
-        .arg("-C")
-        .arg(dir.path())
-        .arg("reconcile")
-        .run();
+    let run = Antiq::new().arg("-C").arg(dir.path()).arg("status").run();
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
     assert_eq!(
@@ -334,14 +278,6 @@ fn the_directory_option_does_not_name_the_command() {
     let run = json_run(&["-C", "status", "bogus"]);
     assert_eq!(run.code(), 2);
     assert!(run.json()["command"].is_null());
-}
-
-#[test]
-fn a_missing_remote_subcommand_names_remote() {
-    let run = json_run(&["remote"]);
-    assert_eq!(run.code(), 2);
-    assert_eq!(run.error_kind(), "usage");
-    assert_eq!(run.json()["command"], "remote");
 }
 
 #[test]
@@ -382,13 +318,6 @@ fn a_closed_stdout_keeps_the_exit_code_and_does_not_panic() {
         .run();
     assert_eq!(run.code(), 1, "stderr: {}", run.stderr);
     assert!(!run.stderr.contains("panicked"), "stderr: {}", run.stderr);
-}
-
-#[test]
-fn if_reachable_does_not_hide_an_error_that_is_not_an_away_remote() {
-    let run = json_run(&["sync", "--if-reachable"]);
-    assert_eq!(run.code(), 1);
-    assert_eq!(run.error_kind(), "not_a_collection");
 }
 
 #[test]

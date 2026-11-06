@@ -4,23 +4,19 @@
 
 //! The ordered actions a command intends to take.
 
-use crate::brake::BrakeHold;
 use serde::Serialize;
 
-/// What a command is going to do, in order, and where the brake would hold
-/// it. `A` is the action type of the command.
+/// What a command is going to do, in order. `A` is the action type of the
+/// command.
 #[derive(Debug, Serialize)]
 pub struct Plan<A> {
     pub actions: Vec<A>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brake: Option<BrakeHold>,
 }
 
 impl<A> Plan<A> {
     pub fn new() -> Self {
         Plan {
             actions: Vec::new(),
-            brake: None,
         }
     }
 
@@ -60,7 +56,7 @@ pub struct DryRun<'a, A> {
 
 impl<A: PlanAction> Plan<A> {
     /// The plan as the JSON payload of a dry run: `dry_run: true` first,
-    /// then `actions`, then `brake` where it would hold.
+    /// then `actions`.
     pub fn dry_run(&self) -> DryRun<'_, A> {
         DryRun {
             dry_run: true,
@@ -69,8 +65,7 @@ impl<A: PlanAction> Plan<A> {
     }
 
     /// The plan as the console prints it for a dry run: a `Would ...` line
-    /// per action, or `Nothing to do.`, and the places the brake would
-    /// hold.
+    /// per action, or `Nothing to do.`.
     pub fn lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
             .actions
@@ -80,17 +75,6 @@ impl<A: PlanAction> Plan<A> {
         if lines.is_empty() {
             lines.push("Nothing to do.".to_string());
         }
-        if let Some(hold) = &self.brake {
-            lines.push(format!(
-                "The brake would hold at {} of {}:",
-                hold.planned, hold.set_size
-            ));
-            lines.extend(
-                hold.items()
-                    .iter()
-                    .map(|item| format!("  {} ({})", item.path, item.id)),
-            );
-        }
         lines
     }
 }
@@ -98,12 +82,10 @@ impl<A: PlanAction> Plan<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brake::BrakeHold;
-    use crate::reference::Candidate;
     use serde_json::json;
 
     #[test]
-    fn a_plan_without_a_brake_serialises_its_actions_only() {
+    fn a_plan_serialises_its_actions_only() {
         let mut plan = Plan::new();
         assert!(plan.is_empty());
         plan.push("archive projects/a");
@@ -116,35 +98,9 @@ mod tests {
     }
 
     #[test]
-    fn a_default_plan_is_empty_and_has_no_brake() {
+    fn a_default_plan_is_empty() {
         let plan = Plan::<String>::default();
         assert!(plan.is_empty());
-        assert!(plan.brake.is_none());
-    }
-
-    #[test]
-    fn a_plan_with_a_brake_serialises_where_it_holds() {
-        let mut plan = Plan::new();
-        plan.push("delete p");
-        plan.brake = Some(BrakeHold::new(
-            1,
-            4,
-            vec![Candidate {
-                id: "01ABC".into(),
-                path: "p".into(),
-            }],
-        ));
-        assert_eq!(
-            serde_json::to_value(&plan).expect("plan serialises"),
-            json!({
-                "actions": ["delete p"],
-                "brake": {
-                    "planned": 1,
-                    "set_size": 4,
-                    "items": [{"id": "01ABC", "path": "p"}],
-                },
-            })
-        );
     }
 
     #[derive(Serialize)]
@@ -155,26 +111,6 @@ mod tests {
         fn describe(&self) -> String {
             self.0.to_string()
         }
-    }
-
-    fn held_plan() -> Plan<Step> {
-        let mut plan = Plan::new();
-        plan.push(Step("remove projects/a"));
-        plan.brake = Some(BrakeHold::new(
-            3,
-            10,
-            vec![
-                Candidate {
-                    id: "01ABC".into(),
-                    path: "projects/a".into(),
-                },
-                Candidate {
-                    id: "01ABD".into(),
-                    path: "projects/b".into(),
-                },
-            ],
-        ));
-        plan
     }
 
     #[test]
@@ -190,9 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_in_json_carries_the_brake_only_when_it_holds() {
-        let held = serde_json::to_value(held_plan().dry_run()).expect("serialises");
-        assert_eq!(held["brake"]["planned"], 3);
+    fn an_empty_dry_run_in_json_has_no_actions() {
         let free = serde_json::to_value(Plan::<Step>::new().dry_run()).expect("serialises");
         assert_eq!(free, json!({"dry_run": true, "actions": []}));
     }
@@ -211,18 +145,5 @@ mod tests {
     #[test]
     fn an_empty_plan_has_nothing_to_do() {
         assert_eq!(Plan::<Step>::new().lines(), ["Nothing to do."]);
-    }
-
-    #[test]
-    fn a_brake_that_would_hold_is_listed_after_the_actions() {
-        assert_eq!(
-            held_plan().lines(),
-            [
-                "Would remove projects/a",
-                "The brake would hold at 3 of 10:",
-                "  projects/a (01ABC)",
-                "  projects/b (01ABD)",
-            ]
-        );
     }
 }

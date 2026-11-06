@@ -27,8 +27,6 @@ pub(crate) struct Container {
 /// What reading a package to its end found.
 #[derive(Debug)]
 pub(crate) struct Package {
-    /// The name of the top-level directory.
-    pub name: Name,
     pub container: Container,
     /// One entry per member below the top-level directory, in archive
     /// order, with the SHA-256 of every file computed from the stream.
@@ -209,7 +207,7 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
             sha256,
         });
     }
-    let (name, container) =
+    let (_, container) =
         container.ok_or_else(|| PackError::Damaged("the package is empty".into()))?;
     finish_stream(archive.into_inner())?;
     if count.get() < members_end + END_MARKER {
@@ -217,12 +215,7 @@ pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackE
             "the archive ends without its end-of-archive marker; the file may be cut".into(),
         ));
     }
-    let name = Name::from_bytes(name).expect("the name was checked when the container was read");
-    Ok(Package {
-        name,
-        container,
-        entries,
-    })
+    Ok(Package { container, entries })
 }
 
 /// Reads what is left of the stream after the tar reader stopped. The zstd
@@ -510,13 +503,6 @@ mod tests {
         tar.resize(tar.len() + 511, 0);
         let reason = damaged_by(&compress(&tar));
         assert!(reason.contains("end-of-archive"), "{reason}");
-    }
-
-    #[test]
-    fn the_package_has_the_name_of_its_top_level_directory() {
-        let (_dir, path) = on_disk(&compress(&tar_ending_in(2)));
-        let package = read_package(&path).expect("reads");
-        assert_eq!(package.name.as_bytes(), b"proj");
     }
 
     #[test]

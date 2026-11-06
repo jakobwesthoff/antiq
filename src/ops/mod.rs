@@ -4,14 +4,4 @@
 
 //! One module per command.
 
-pub mod archive;
-pub mod fork;
-pub mod import;
 pub mod init;
-pub mod pin;
-pub mod reconcile;
-pub mod remote;
-pub mod resolve;
-pub mod status;
-pub mod sync;
-pub mod unearth;
