@@ -26,6 +26,7 @@ pub mod machine;
 pub mod markers;
 pub mod pin;
 pub mod plan;
+pub mod progress;
 pub mod query;
 pub mod reference;
 pub mod relpath;
