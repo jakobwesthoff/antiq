@@ -680,6 +680,10 @@ mod tests {
         assert!(temp_leftovers(&tree).is_empty());
     }
 
+    #[allow(
+        clippy::useless_conversion,
+        reason = "the mode bits are a u16 on macOS and already a u32 on Linux"
+    )]
     fn current_umask() -> u32 {
         let mask = rustix::process::umask(rustix::fs::Mode::empty());
         rustix::process::umask(mask);

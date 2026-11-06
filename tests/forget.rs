@@ -12,7 +12,10 @@ mod support;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use support::cmd::{hold_lock, snapshot};
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};

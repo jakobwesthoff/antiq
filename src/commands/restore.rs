@@ -788,7 +788,7 @@ pub(crate) struct TreeFlush {
 }
 
 impl TreeFlush {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn begin(extract_dir: &Path) -> io::Result<TreeFlush> {
         TreeFlush::begin_with(extract_dir, Platform::real())
     }

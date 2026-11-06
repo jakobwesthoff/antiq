@@ -82,6 +82,10 @@ pub(crate) enum FsKind {
 }
 
 /// The kind named by the type name macOS reports (`f_fstypename`).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS `fs_kind` reads the type name")
+)]
 fn kind_from_name(name: &str) -> FsKind {
     match name {
         "apfs" | "hfs" => FsKind::Local,

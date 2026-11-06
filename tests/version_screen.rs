@@ -50,7 +50,7 @@ fn on_terminal(
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut window,
+            &raw mut window,
         )
     };
     assert_eq!(opened, 0, "openpty failed");
