@@ -1015,15 +1015,18 @@ in place.
 
 ### list
 
-`list [query]` prints one row per version, newest first within a piece;
-the query matches piece paths fuzzily. Each row reads only the head of its
-listing. SIZE is the archive file's size (`archive-bytes`) in decimal
-units (1 GB = 10^9 bytes); `--json` also carries the unpacked size and the
-file count. Damaged and incomplete versions are marked. The piece is in
-every row, so each row stands on its own after `sort` or `grep`. With no
-version, or no piece matching the query, `list` exits 0 and says so on
-stderr. A held lock is noted on stderr, and under `--json` in a `note`
-field. (ADR 0021)
+`list [query]` prints one row per version: pieces by path, the versions of
+a piece newest first. The query matches piece paths fuzzily, as a search
+word does, and keeps the pieces that match. Each row reads only the head of
+its listing. SIZE is the archive file's size (`archive-bytes`) in decimal
+units (B, kB, MB, GB, TB; 1 kB = 1000 bytes; one decimal below 10, none
+from 10 on); `--json` also carries the unpacked size and the file count.
+The piece is in every row, so each row stands on its own after `sort` or
+`grep`. (ADR 0021)
+
+On a terminal the rows are a table. VERSION is the local time with seconds,
+with the UTC offset added where two versions of a piece render alike (see
+"Naming a version"); FILES is grouped by thousands with a space.
 
 ```text
 $ antiq list scan
@@ -1032,6 +1035,44 @@ projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
 projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
 tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
+
+Without a terminal there is no header and a row is one line of tab-separated
+fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
+and the numbers unformatted. A control character in a piece path is written
+as `%` and the two hexadecimal digits of each of its bytes, on a terminal and
+in a pipe.
+
+A version that is not sound is marked in a last column on a terminal, in
+the `state` field in a pipe and in the `state` key of `--json`:
+
+| State | Mark on a terminal | Colour | Meaning |
+|-------|--------------------|--------|---------|
+| `ok` | none | | |
+| `damaged` | `damaged` | red | a damaged version (see "Damage") |
+| `incomplete` | `incomplete` | yellow | an incomplete version; its VERSION is the stamp, as it is named by its stamp only |
+| `newer-format` | `newer format` | magenta | a listing of a newer format than antiq reads |
+
+SIZE and FILES are `-` on a terminal and in a pipe, and null in `--json`,
+where the head of the listing lacks the number; SIZE is the size the listing
+records, also when the archive on disk has another. Each fault of a damaged version
+is a note on stderr, `note: <piece> <stamp> is damaged: <fault>`, and the
+`damage` list of its `--json` row. A folder that holds sidecars only is
+searched too, and its incomplete versions are listed. A version whose archive
+is staged in `tmp/pack/` is being moved into the store by a run and has no
+row.
+
+On a narrow terminal (see "Console output") a piece path that does not fit is
+shortened in the middle to the width the other columns leave, but not below
+8 columns.
+
+With no version in the store `list` exits 0 and says `note: no versions in
+the collection` on stderr; with versions but no piece matching the query it
+exits 0 and says ``note: no piece matches `<query>` ``, also under `--json`.
+Damaged versions do not change the exit code. `list` takes no lock and
+writes nothing. A held lock is noted on stderr, `note: another run holds the
+lock (pid ..., machine ..., started ...)`, and under `--json` in the `note`
+field instead of on stderr. Notes on stderr come in the order: settings of
+the collection, the lock, nothing to list, the faults of damaged versions.
 
 ### grep
 
@@ -1402,6 +1443,10 @@ form.
 
 `--help` and the top-level `--version` print text and exit 0, also under `--json`.
 
-`list` adds the unpacked size and the file count of each version, and a
-`note` field while the lock is held. The keys that the other commands add
-are not yet established.
+`list` adds `versions`, `warnings` (the notes on the settings of the
+collection, as `{message}` objects) and, while a run holds the lock, `note`
+(a text). Each version is `piece`, `stamp` (the version stamp, which has the
+counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
+"list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
+null where the head of the listing lacks them) and `damage` (a list of texts).
+The keys that the other commands add are not yet established.
