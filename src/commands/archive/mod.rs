@@ -6,8 +6,8 @@
 
 mod remove;
 mod report;
-mod seams;
-mod store;
+pub(crate) mod seams;
+pub(crate) mod store;
 
 pub use report::{
     ArchiveAction, ArchivePlan, ArchiveReport, ArchivedPiece, Outcome, Reason, RefusedPiece,
@@ -443,6 +443,8 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
         tree: &tree,
         rules: &setup.piece_rules,
         imported: None,
+        outside: None,
+        time: None,
     };
     let stored = match store_version(&store_context, &request) {
         Ok(stored) => stored,
@@ -527,7 +529,10 @@ fn went(destination: Destination, stamp: &Stamp, piece: &RelPath) -> String {
 }
 
 /// The store folder of `piece` in the spelling the volume already holds.
-fn stored_spelling_of(collection: &Collection, piece: &RelPath) -> Result<RelPath, ArchiveError> {
+pub(crate) fn stored_spelling_of(
+    collection: &Collection,
+    piece: &RelPath,
+) -> Result<RelPath, ArchiveError> {
     let pieces_dir = collection.pieces_dir();
     let pieces = TreeRoot::open(&pieces_dir).map_err(|source| ArchiveError::OpenStore {
         path: pieces_dir.display().to_string(),

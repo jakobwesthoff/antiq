@@ -66,7 +66,7 @@ pub struct Reason {
 
 impl Reason {
     /// A piece named on the command line carries a pin.
-    pub(super) fn pinned(pin: &RelPath) -> Reason {
+    pub(crate) fn pinned(pin: &RelPath) -> Reason {
         Reason {
             kind: "pinned",
             path: pin.to_string(),
@@ -76,7 +76,7 @@ impl Reason {
     }
 
     /// A piece named on the command line has no file that counts.
-    pub(super) fn empty(piece: &RelPath) -> Reason {
+    pub(crate) fn empty(piece: &RelPath) -> Reason {
         Reason {
             kind: "empty",
             path: piece.to_string(),

@@ -705,6 +705,8 @@ mod tests {
             tree: &tree,
             rules: &rules,
             imported: None,
+            outside: None,
+            time: None,
         };
         match store_version(&context, &request) {
             Ok(stored) => stored,

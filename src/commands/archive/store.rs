@@ -64,6 +64,12 @@ pub(crate) struct StoreRequest<'a> {
     pub tree: &'a PieceTree,
     pub rules: &'a PieceRules,
     pub imported: Option<Timestamp>,
+    /// The folder itself, opened as a root, when it lies outside the
+    /// collection. Without it the folder is `live` in the collection.
+    pub outside: Option<&'a TreeRoot>,
+    /// The version time. Without it the version gets the time of the clock
+    /// once the piece has its room and its workers.
+    pub time: Option<Timestamp>,
 }
 
 /// A version in the store, complete and verified against the folder.
@@ -137,9 +143,9 @@ pub(crate) fn store_version(
         ARCHIVE_WORKER_BYTES,
     );
 
-    // The version time is taken once the piece has its room and its workers,
-    // since a piece may wait for both for a long time.
-    let time = context.clock.now();
+    // The clock is read once the piece has its room and its workers, since
+    // a piece may wait for both for a long time.
+    let time = request.time.unwrap_or_else(|| context.clock.now());
     let tmp_dir = context.collection.tmp_dir();
     let stamp = fresh_stamp(
         &context.collection.pieces_dir(),
@@ -211,7 +217,7 @@ fn verify_abort(error: ArchiveError) -> Abort {
 }
 
 /// `pack/<stamp>/<piece>` below `tmp/`.
-pub(super) fn staging_chain(stamp: &Stamp, stored: &RelPath) -> RelPath {
+pub(crate) fn staging_chain(stamp: &Stamp, stored: &RelPath) -> RelPath {
     let pack = Name::from_bytes(b"pack".to_vec()).expect("`pack` is a name");
     let stamp = Name::from_bytes(stamp.to_string().into_bytes()).expect("a stamp is a name");
     RelPath::root().join(&pack).join(&stamp).concat(stored)
@@ -260,12 +266,19 @@ fn stage_and_store(
             source,
         )))
     })?;
-    let live_root = collection_root.sub(request.live).map_err(|source| {
-        Abort::of(stage_error(io_error(
-            "open",
-            Path::new(&request.live.to_string()),
-        )(source)))
-    })?;
+    let live_in_collection;
+    let live_root = match request.outside {
+        Some(folder) => folder,
+        None => {
+            live_in_collection = collection_root.sub(request.live).map_err(|source| {
+                Abort::of(stage_error(io_error(
+                    "open",
+                    Path::new(&request.live.to_string()),
+                )(source)))
+            })?;
+            &live_in_collection
+        }
+    };
 
     let create = |file: &str| -> Result<(File, RelPath), Abort> {
         let rel = RelPath::parse(file).expect("a version file name is a plain name");
@@ -297,7 +310,7 @@ fn stage_and_store(
     };
     let packed = {
         let mut sink = context.seams.pack_sink(Box::new(BufWriter::new(&archive)));
-        TarZstd.pack(&live_root, request.tree, &settings, &mut *sink)
+        TarZstd.pack(live_root, request.tree, &settings, &mut *sink)
     }
     .map_err(|source| {
         Abort::of(ArchiveError::Pack {
@@ -372,7 +385,7 @@ fn stage_and_store(
         staged: false,
     };
     let verified = TarZstd
-        .verify_strict(&archive_path, &live_root, &rules)
+        .verify_strict(&archive_path, live_root, &rules)
         .map_err(|source| verify_abort(verify_error(source)))?;
     if verified.listing() != packed.listing.as_slice() {
         return Err(Abort::of(verify_error(PackError::Damaged(
@@ -449,7 +462,7 @@ fn stage_and_store(
 /// finds them empty and removes them, so a run leaves `tmp/` empty. A failure
 /// leaves the folder for repair 2, which deletes what `tmp/` holds, so it is
 /// not reported.
-pub(super) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPath) {
+pub(crate) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPath) {
     let Ok(tmp) = TreeRoot::open(tmp_dir) else {
         return;
     };
@@ -673,6 +686,8 @@ mod tests {
             tree: &tree,
             rules: &rules,
             imported: None,
+            outside: None,
+            time: None,
         };
         store_version(&context, &request)
     }
@@ -781,6 +796,110 @@ mod tests {
             Vec::<String>::new(),
             "pieces/ is empty"
         );
+    }
+
+    // =========================================================
+    // A folder outside the collection
+    // =========================================================
+
+    /// Stores a folder `folder` that lies in a directory of its own, outside
+    /// the collection, as a version of the piece `folder`. Its tree is named
+    /// after the folder, as the packer needs.
+    fn store_outside(
+        world: &World,
+        source: &Path,
+        time: Option<Timestamp>,
+    ) -> Result<Stored, StoreFailure> {
+        let collection = Collection::find(world.temp.root()).expect("a collection");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let root = TreeRoot::open(source).expect("the source opens");
+        let selection = Rules::new(&[], &[]).expect("no patterns are valid");
+        let walked =
+            walk_piece(&root, &RelPath::root(), &selection, &rules).expect("the walk succeeds");
+        let piece = path("folder");
+        let tree = PieceTree::new(
+            piece.clone(),
+            walked.entries().to_vec(),
+            walked.problems().to_vec(),
+        );
+        let zstd = |_workers: u32| ZstdSettings::fast();
+        let context = StoreContext {
+            collection: &collection,
+            clock: &world.clock,
+            pool: shared_pool(),
+            ledger: &world.ledger,
+            seams: &RealSeams,
+            run_dirs: &world.run_dirs,
+            zstd: &zstd,
+        };
+        let request = StoreRequest {
+            live: &piece,
+            stored: &piece,
+            tree: &tree,
+            rules: &rules,
+            imported: None,
+            outside: Some(&root),
+            time,
+        };
+        store_version(&context, &request)
+    }
+
+    fn outside_source() -> tempfile::TempDir {
+        let source = tempfile::tempdir().expect("a temporary directory");
+        fs::write(source.path().join("a.txt"), "alpha").expect("a file");
+        source
+    }
+
+    #[test]
+    fn a_folder_outside_the_collection_is_stored_as_a_version_of_the_given_path() {
+        let world = world();
+        let source = outside_source();
+
+        let stored = store_outside(&world, source.path(), None)
+            .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
+
+        let folder = world.temp.root().join(".antiq/pieces/folder");
+        assert_eq!(entries_of(&folder).len(), 3);
+        assert_eq!(stored.files, 1);
+        assert_eq!(entries_of(source.path()), ["a.txt"], "the source stays");
+    }
+
+    #[test]
+    fn the_archive_of_a_folder_outside_has_the_folder_name_as_its_top_directory() {
+        let world = world();
+        let source = outside_source();
+
+        let stored = store_outside(&world, source.path(), None)
+            .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
+
+        let archive = world
+            .temp
+            .root()
+            .join(".antiq/pieces/folder")
+            .join(&stored.names.archive);
+        let decoded = zstd::stream::Decoder::new(fs::File::open(archive).expect("the archive"))
+            .expect("zstd");
+        let members: Vec<String> = tar::Archive::new(decoded)
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                let entry = entry.expect("an entry");
+                entry.path().expect("a path").to_string_lossy().into_owned()
+            })
+            .collect();
+        assert_eq!(members, ["folder/", "folder/a.txt"]);
+    }
+
+    #[test]
+    fn the_version_time_is_the_given_one() {
+        let world = world();
+        let source = outside_source();
+        let given: Timestamp = "2020-01-02T03:04:05Z".parse().expect("a time");
+
+        let stored = store_outside(&world, source.path(), Some(given))
+            .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
+
+        assert_eq!(stored.stamp.to_string(), "2020-01-02T030405");
     }
 
     // =========================================================
