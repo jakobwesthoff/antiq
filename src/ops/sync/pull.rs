@@ -286,6 +286,7 @@ mod tests {
             lock: &lock,
             clock: &ben.clock,
             machine: "ben",
+            ids: &ben.ids,
             jobs: 1,
         };
         let id = object(3);

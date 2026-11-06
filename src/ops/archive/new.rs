@@ -1074,7 +1074,7 @@ fn file_sha256(path: &Path) -> io::Result<String> {
 
 /// The time an object's ID is minted for: the oldest time inside the
 /// folder.
-fn id_time_of(tree: &PieceTree, minted_at: Timestamp) -> IdTime {
+pub(crate) fn id_time_of(tree: &PieceTree, minted_at: Timestamp) -> IdTime {
     // A time a `Timestamp` cannot hold counts as absent. The epoch stands
     // in for a modification time, since `id_time` ignores everything
     // before 1990.

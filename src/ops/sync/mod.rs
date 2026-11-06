@@ -18,7 +18,7 @@ mod fixture;
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{Error, ErrorKind, HasKind};
-use crate::id::ObjectId;
+use crate::id::{IdSource, ObjectId, RandomIds};
 use crate::index::IndexError;
 use crate::listing::ListingError;
 use crate::lock::{Holder, RunLock};
@@ -121,6 +121,53 @@ pub struct SkippedObject {
     pub message: String,
 }
 
+/// Why a piece got no live backup in this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnbackedReason {
+    /// Something in the piece cannot be read.
+    Unreadable,
+    /// Another filesystem is mounted inside the piece.
+    MountPoint,
+    /// An entry of the exclude list lies inside the piece.
+    Excluded,
+    /// A collection of its own lies inside the piece.
+    NestedCollection,
+    /// The piece kept changing while it was read.
+    Stale,
+    /// A local operation on the piece failed.
+    Error,
+}
+
+impl UnbackedReason {
+    /// The reasons that make the run partial. A piece that selection or
+    /// the exclude list keeps out of the archive is not a failure of the
+    /// run.
+    fn makes_partial(self) -> bool {
+        matches!(
+            self,
+            UnbackedReason::Unreadable | UnbackedReason::Stale | UnbackedReason::Error
+        )
+    }
+}
+
+/// A piece `sync` could not back up or give an ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnbackedPiece {
+    /// `null` for a piece that has no ID yet.
+    pub id: Option<ObjectId>,
+    pub path: RelPath,
+    pub reason: UnbackedReason,
+    pub message: String,
+}
+
+/// A new piece that got its ID in this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MintedPiece {
+    pub id: ObjectId,
+    pub path: RelPath,
+}
+
 /// A payload or listing that was written to the remote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadedFile {
@@ -154,14 +201,23 @@ pub struct SyncReport {
     pub listings: Vec<ObjectId>,
     pub uploaded: Vec<UploadedFile>,
     pub committed: Vec<CommittedVersion>,
+    /// New pieces that got their ID in this run.
+    pub minted: Vec<MintedPiece>,
     pub skipped: Vec<SkippedObject>,
+    /// Pieces that got no live backup or no ID.
+    pub unbacked: Vec<UnbackedPiece>,
     pub cleanup: CleanupReport,
     pub warnings: Vec<Warning>,
 }
 
 impl CommandReport for SyncReport {
     fn partial(&self) -> bool {
-        !self.skipped.is_empty() || self.cleanup.failed
+        !self.skipped.is_empty()
+            || self
+                .unbacked
+                .iter()
+                .any(|piece| piece.reason.makes_partial())
+            || self.cleanup.failed
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -198,6 +254,10 @@ pub enum SyncAction {
     Commit {
         id: ObjectId,
     },
+    /// A new piece gets an ID and live metadata.
+    MintId {
+        path: RelPath,
+    },
     /// A removal on the remote that cleanup would make; `age_unknown` is
     /// set where the file's age decides and a dry run does not read the
     /// remote's clock.
@@ -224,6 +284,7 @@ impl PlanAction for SyncAction {
             }
             SyncAction::Upload { id, file, .. } => format!("upload {file} of {id}"),
             SyncAction::Commit { id } => format!("commit the change to {id}"),
+            SyncAction::MintId { path } => format!("give {path} an ID"),
             SyncAction::RemoveLeftover {
                 id,
                 name,
@@ -259,6 +320,8 @@ pub struct SyncContext<'a> {
     pub lock: &'a RunLock,
     pub clock: &'a dyn Clock,
     pub machine: &'a str,
+    /// Mints the IDs of new pieces.
+    pub ids: &'a dyn IdSource,
     /// At most this many remote operations run at once.
     pub jobs: usize,
 }
@@ -277,6 +340,33 @@ pub fn sync_with(
     remote: &dyn Remote,
     dry_run: bool,
 ) -> Result<Synced, Error> {
+    sync_using(&SyncRequest {
+        collection,
+        clock,
+        remote,
+        ids: &RandomIds,
+        dry_run,
+    })
+}
+
+/// Everything a run of [`sync_using`] depends on.
+pub struct SyncRequest<'a> {
+    pub collection: &'a Collection,
+    pub clock: &'a dyn Clock,
+    pub remote: &'a dyn Remote,
+    pub ids: &'a dyn IdSource,
+    pub dry_run: bool,
+}
+
+/// [`sync_with`] with the source of IDs given.
+pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
+    let SyncRequest {
+        collection,
+        clock,
+        remote,
+        ids,
+        dry_run,
+    } = *request;
     let started = run::start(collection, clock, dry_run)?;
     let now = clock.now();
     let machine = collection.machine_name()?;
@@ -321,6 +411,7 @@ pub fn sync_with(
                     lock: guard.lock(),
                     clock,
                     machine: &machine,
+                    ids,
                     jobs: collection.config().collection.remote_jobs.max(1) as usize,
                 };
                 let mut report = SyncReport {
@@ -334,9 +425,9 @@ pub fn sync_with(
             Started::DryRun { holder } => {
                 let mut plan = Plan::new();
                 let mut notes = report::setting_notes(collection);
-                if let Some(would_pull) =
-                    pull::plan_pull(collection, remote, &mut plan, &mut notes)?
-                {
+                let would_pull = pull::plan_pull(collection, remote, &mut plan, &mut notes)?;
+                live::plan(collection, clock, &mut plan)?;
+                if let Some(would_pull) = would_pull {
                     commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
                 }
                 plan_cleanup(collection, remote, &machine, &mut plan)?;
@@ -385,7 +476,7 @@ fn plan_cleanup(
 /// The phases of a real run, in the order of the spec.
 fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
     let pull_failed = pull::run(ctx, report)?;
-    live::refresh(ctx)?;
+    live::refresh(ctx, report)?;
     if pull_failed {
         commit::skip_all(
             ctx,

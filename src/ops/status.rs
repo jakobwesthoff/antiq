@@ -909,7 +909,7 @@ fn relative_to_collection(collection: &Collection, path: &Path) -> String {
     escape(relative.as_os_str().as_bytes())
 }
 
-fn last_name(path: &RelPath) -> Name {
+pub(crate) fn last_name(path: &RelPath) -> Name {
     let last = path
         .components()
         .last()

@@ -45,7 +45,11 @@ pub fn run(ctx: &Context, args: &SyncArgs, out: &mut Output) -> anyhow::Result<u
                     .warnings
                     .iter()
                     .map(|warning| warning.message.clone());
-                for note in warnings.chain(skipped) {
+                let unbacked = report
+                    .unbacked
+                    .iter()
+                    .map(|piece| format!("{}: {}", piece.path, piece.message));
+                for note in warnings.chain(skipped).chain(unbacked) {
                     out.note(&format!("note: {}", sanitize(&note)))
                         .context("print the notes")?;
                 }
@@ -87,6 +91,9 @@ fn lines(report: &SyncReport) -> Vec<String> {
     for id in &report.listings {
         lines.push(format!("Fetched the listing of {id}"));
     }
+    for minted in &report.minted {
+        lines.push(format!("Gave {} the ID {}", minted.path, minted.id));
+    }
     for uploaded in &report.uploaded {
         lines.push(format!(
             "Uploaded {} of {} ({} bytes)",
@@ -105,7 +112,7 @@ fn lines(report: &SyncReport) -> Vec<String> {
             report.cleanup.removed
         ));
     }
-    if lines.is_empty() && report.skipped.is_empty() {
+    if lines.is_empty() && report.skipped.is_empty() && report.unbacked.is_empty() {
         lines.push("Nothing to sync.".to_string());
     }
     lines

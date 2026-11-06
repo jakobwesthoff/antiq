@@ -269,6 +269,86 @@ fn the_json_of_a_sync_lists_uploads_and_commits() {
 }
 
 // =========================================================
+// New pieces
+// =========================================================
+
+#[test]
+fn a_new_folder_gets_its_id_and_its_metadata_is_committed() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree().file("proj/a.txt", "hello");
+
+    let run = antiq_in(&anna, &["sync"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", run.stdout);
+    assert!(lines[0].starts_with("Gave proj the ID "), "{}", run.stdout);
+    assert!(
+        lines[1].starts_with("Committed version 1 of "),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn the_json_of_a_sync_names_the_ids_it_minted() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree().file("proj/a.txt", "hello");
+
+    let json = antiq_in(&anna, &["--json", "sync"]).json();
+
+    assert_eq!(json["minted"][0]["path"], "proj");
+    assert_eq!(json["minted"][0]["id"], json["committed"][0]["id"]);
+    assert_eq!(json["unbacked"], serde_json::json!([]));
+}
+
+#[test]
+fn a_dry_run_says_which_folders_would_get_an_id() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree().file("proj/a.txt", "hello");
+
+    let run = antiq_in(&anna, &["sync", "--dry-run"]);
+
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stdout.contains("Would give proj an ID"),
+        "{}",
+        run.stdout
+    );
+    let objects = fs::read_dir(anna.root().join(".antiq/objects")).expect("lists");
+    assert_eq!(objects.count(), 0);
+}
+
+#[test]
+fn a_folder_that_cannot_be_read_gets_no_id_and_the_run_exits_3() {
+    use std::os::unix::fs::PermissionsExt;
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree().file("proj/a.txt", "hello");
+    let locked = anna.tree().dir("proj/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("locked");
+    assert!(
+        fs::read_dir(&locked).is_err(),
+        "the precondition: the directory cannot be read"
+    );
+
+    let run = antiq_in(&anna, &["sync"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlocked");
+
+    assert_eq!(run.code(), 3, "{}{}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("proj: `proj/locked` cannot be read"),
+        "{}",
+        run.stderr
+    );
+    let objects = fs::read_dir(anna.root().join(".antiq/objects")).expect("lists");
+    assert_eq!(objects.count(), 0);
+}
+
+// =========================================================
 // An away remote
 // =========================================================
 

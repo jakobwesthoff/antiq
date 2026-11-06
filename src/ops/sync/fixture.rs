@@ -11,7 +11,7 @@ use crate::id::{ObjectId, SeqIds};
 use crate::lock;
 use crate::meta::{HistoryAction, HistoryEntry};
 use crate::ops::import::{ImportRequest, import};
-use crate::ops::sync::{SyncReport, Synced, sync_with};
+use crate::ops::sync::{SyncAction, SyncReport, SyncRequest, Synced, sync_using};
 use crate::remote::Remote;
 use crate::remote::testing::{FaultRemote, REMOTE_ID, path_remote, remote_root};
 use crate::store::Store;
@@ -81,6 +81,16 @@ impl Machine {
 
     /// A machine that runs `jobs` remote operations at once.
     pub fn with_jobs(shared: &Shared, name: &'static str, jobs: u32) -> Machine {
+        Machine::configured(shared, name, jobs, "")
+    }
+
+    /// A machine whose `[collection]` table has the lines `extra` besides
+    /// its ID.
+    pub fn with_settings(shared: &Shared, name: &'static str, extra: &str) -> Machine {
+        Machine::configured(shared, name, 1, extra)
+    }
+
+    fn configured(shared: &Shared, name: &'static str, jobs: u32, extra: &str) -> Machine {
         let id = if name == "anna" {
             COLLECTION_ID
         } else {
@@ -88,7 +98,7 @@ impl Machine {
         };
         let mut temp = TempCollection::minimal();
         let config = format!(
-            "[collection]\nid = \"{id}\"\nremote_jobs = {jobs}\n\n[machine]\nname = \"{name}\"\n\n[[remote]]\nurl = \"{}\"\nid = \"{REMOTE_ID}\"\n",
+            "[collection]\nid = \"{id}\"\nremote_jobs = {jobs}\n{extra}\n\n[machine]\nname = \"{name}\"\n\n[[remote]]\nurl = \"{}\"\nid = \"{REMOTE_ID}\"\n",
             shared.root.path().display()
         );
         temp.tree().file(".antiq/config.toml", config);
@@ -119,10 +129,45 @@ impl Machine {
     }
 
     pub fn sync_with(&self, remote: &dyn Remote) -> SyncReport {
-        match sync_with(&self.collection, &self.clock, remote, false).expect("the sync runs") {
+        match self.sync_request(remote, false).expect("the sync runs") {
             Synced::Done(report) => report,
             Synced::Planned { .. } => panic!("expected a real run"),
         }
+    }
+
+    /// A dry run against this machine's view of the remote.
+    pub fn plan(&self) -> Vec<SyncAction> {
+        match self
+            .sync_request(&self.remote(), true)
+            .expect("the dry run works")
+        {
+            Synced::Planned { plan, .. } => plan.actions,
+            Synced::Done(_) => panic!("expected a dry run"),
+        }
+    }
+
+    /// The result of a run that mints its IDs from this machine's sequence.
+    pub fn sync_request(
+        &self,
+        remote: &dyn Remote,
+        dry_run: bool,
+    ) -> Result<Synced, crate::error::Error> {
+        sync_using(&SyncRequest {
+            collection: &self.collection,
+            clock: &self.clock,
+            remote,
+            ids: &self.ids,
+            dry_run,
+        })
+    }
+
+    /// A folder with one file in it at the top of the collection: a new
+    /// piece, as the user's own folder is.
+    pub fn folder(&self, name: &str, file: &str, content: &str) -> PathBuf {
+        let folder = self.collection.root().join(name);
+        fs::create_dir_all(&folder).expect("the folder is made");
+        fs::write(folder.join(file), content).expect("the file is written");
+        folder
     }
 
     /// The tracking entry of `id`.

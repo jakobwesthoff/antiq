@@ -499,7 +499,7 @@ read or has a higher `format`.
 | reclaiming | lifecycle `archived`, live payload removed, history |
 | `unearth` | lifecycle `live`, owning collection, path and name (the target), history |
 | `fork` | old ID: lifecycle `archived`, live payload removed, history; new ID created with source `fork`, lifecycle `live`, no payload, history |
-| `sync` | live payload replaced, `verified` times, history |
+| `sync` | new ID (lifecycle `live`, a live payload if it backs up), live payload replaced or removed, `verified` times, history |
 | `import` | new ID with its archive payload |
 | `resolve` | replacing with loss: as `archive`, with the history action `resolve`; the other decisions are not answerable yet |
 
@@ -1638,8 +1638,18 @@ temp names of uploads that are still pending. A cleanup that fails for a
 reason other than the remote's being gone is a warning and makes the run
 exit 3. A run that reaches its end writes `last_sync`.
 
-`sync` gives new pieces their ID. With `backup_live = false` it still
-does, and commits their metadata without a live payload. After a fork,
+`sync` gives new pieces their ID. With `backup_live = false`, or for a
+piece the `live_exclude` list covers, it still does, and commits their
+metadata without a live payload. A pinned piece gets its ID too. The ID's
+metadata is recorded as `meta.pending` with the history action `sync`, then
+the piece's entry is written (`live`, version taken out `pending`); the
+commit of the run commits the metadata as the object's first version. A new
+piece gets no ID while its walk reports a problem: something in it cannot
+be read, another filesystem is mounted in it, an exclude entry lies in it
+or it holds a collection of its own. The unreadable piece makes the run
+exit 3; the other three leave the exit code alone. A step that fails on one
+piece leaves that piece for the next run, whose repairs write a missing
+entry, and makes the run exit 3. After a fork,
 the old ID's live package is deleted once the fork's change is
 committed. A dry run reads the remote and writes nothing, locally or on
 the remote. It lists what the run would do against the versions it would
@@ -2429,11 +2439,17 @@ the objects whose listing was fetched), `uploaded` (`{id, file, size}` for
 each file written to the remote), `committed` (`{id, version}`), `cleanup`
 (`{removed, skipped}`), `skipped` (a list of `{id, path,
 reason, message}`, `path` null where the piece's metadata cannot be read,
-`reason` one of `pull`, `error`, `conflict`, `contested` and `refused`)
-and `warnings`. The plan of a `--dry-run` has `pull_metadata` actions
-(`id`, `version`), `fetch_listing` (`id`, `file`), `settle` (`id`,
-`version`), `conflict` (`id`), `upload` (`id`, `file`, `size`), `commit`
-(`id`) and `remove_leftover` (`id`, `name`, `what`, `age_unknown`).
+`reason` one of `pull`, `error`, `conflict`, `contested` and `refused`),
+`minted` (`{id, path}` for each new piece that got its ID), `unbacked` (`{id,
+path, reason, message}` for each piece that got no ID or no live backup, `id`
+null where it has none, `reason` one of `unreadable`, `mount_point`,
+`excluded`, `nested_collection` and `error`; only `unreadable` and `error`
+make the run exit 3) and `warnings`. The plan of a `--dry-run` has
+`pull_metadata` actions (`id`, `version`), `fetch_listing` (`id`, `file`),
+`settle` (`id`, `version`), `conflict` (`id`), `upload` (`id`, `file`,
+`size`), `commit` (`id`), `mint_id` (`path`; the ID does not exist yet, so
+there is no `commit` for it) and `remove_leftover` (`id`, `name`, `what`,
+`age_unknown`).
 
 `resolve` adds, for an answer that was executed, `resolved` (`{kind,
 answer}`: `kind` is `replacing_with_loss`, `answer` is `replace`, `fork`
