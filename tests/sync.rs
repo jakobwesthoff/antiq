@@ -282,10 +282,15 @@ fn a_new_folder_gets_its_id_and_its_metadata_is_committed() {
 
     assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
     let lines: Vec<&str> = run.stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "{}", run.stdout);
+    assert_eq!(lines.len(), 3, "{}", run.stdout);
     assert!(lines[0].starts_with("Gave proj the ID "), "{}", run.stdout);
     assert!(
-        lines[1].starts_with("Committed version 1 of "),
+        lines[1].starts_with("Uploaded ") && lines[1].contains("-proj.tar.zst of "),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        lines[2].starts_with("Committed version 1 of "),
         "{}",
         run.stdout
     );

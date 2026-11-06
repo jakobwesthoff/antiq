@@ -1182,3 +1182,99 @@ fn a_real_sshd_takes_init_and_shows_the_remote() {
     );
     assert_eq!(shown.json()["state"], "reachable");
 }
+
+// =========================================================
+// sync of live pieces
+// =========================================================
+
+/// Bytes that do not repeat, so that a compressed package keeps their size.
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// The literal bytes each rsync call of the log sent, in order.
+fn literal_bytes(log: &Path) -> Vec<u64> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("Literal data: "))
+        .map(|rest| {
+            rest.split_whitespace()
+                .next()
+                .expect("a number")
+                .replace(',', "")
+                .parse()
+                .expect("a count")
+        })
+        .collect()
+}
+
+#[test]
+fn a_seeded_upload_over_the_shim_sends_less_than_the_file() {
+    let nas = Nas::new();
+    let mut collection = nas.attached();
+    // Records what rsync reports about each transfer and runs the real one.
+    let tools = tempfile::tempdir().expect("temp dir");
+    let log = tools.path().join("stats.log");
+    let wrapper = tools.path().join("rsync");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nout=$('{}' \"$@\")\nstatus=$?\nprintf '%s\\n' \"$out\" >> '{}'\nprintf '%s\\n' \"$out\"\nexit $status\n",
+            real_rsync().display(),
+            log.display()
+        ),
+    )
+    .expect("the wrapper is written");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
+    let config = config_of(&collection);
+    fs::write(
+        collection.root().join(".antiq/config.toml"),
+        format!(
+            "{config}\n[machine]\nname = \"anna\"\nrsync = \"{}\"\n",
+            wrapper.display()
+        ),
+    )
+    .expect("the config is written");
+    let mut content = noise(400_000, 1);
+    collection.tree().file("proj/big.bin", &content);
+
+    let first = nas.antiq(&collection, &["--json", "sync"]);
+    assert_eq!(
+        first.code(),
+        0,
+        "stdout: {} stderr: {}",
+        first.stdout,
+        first.stderr
+    );
+    content[200_000..200_100].copy_from_slice(&noise(100, 2));
+    collection.tree().file("proj/big.bin", &content);
+    let second = nas.antiq(&collection, &["--json", "sync"]);
+    assert_eq!(
+        second.code(),
+        0,
+        "stdout: {} stderr: {}",
+        second.stdout,
+        second.stderr
+    );
+
+    let sent = literal_bytes(&log);
+    let uploads: Vec<u64> = sent.into_iter().filter(|bytes| *bytes > 1_000).collect();
+    assert_eq!(uploads.len(), 2, "{uploads:?}");
+    assert!(
+        uploads[0] > 300_000,
+        "the first package goes whole: {uploads:?}"
+    );
+    assert!(
+        uploads[1] < 150_000,
+        "the second package is sent as a difference: {uploads:?}"
+    );
+}

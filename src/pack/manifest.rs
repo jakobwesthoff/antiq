@@ -51,6 +51,15 @@ pub struct Manifest {
     entries: Vec<ManifestEntry>,
 }
 
+/// A manifest as the file holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    pub manifest: Manifest,
+    /// The SHA-256 of the package the manifest was written for; `None` for
+    /// a file that names none.
+    pub package: Option<String>,
+}
+
 /// One recorded property of an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -180,6 +189,12 @@ impl Manifest {
     /// a record of what the last package was built from, so a caller can
     /// answer such an error like a changed tree and pack again.
     pub fn read(path: &Path) -> Result<Option<Manifest>, ManifestError> {
+        Ok(Manifest::read_recorded(path)?.map(|recorded| recorded.manifest))
+    }
+
+    /// [`Manifest::read`], with the SHA-256 of the package the manifest was
+    /// written for, when the file names one.
+    pub fn read_recorded(path: &Path) -> Result<Option<Recorded>, ManifestError> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -210,14 +225,28 @@ impl Manifest {
                 "its entries are not in strictly increasing path order".to_string(),
             ));
         }
-        Ok(Some(Manifest { entries }))
+        Ok(Some(Recorded {
+            manifest: Manifest { entries },
+            package: file.package,
+        }))
+    }
+
+    /// [`Manifest::write`], with the SHA-256 of the package built from the
+    /// manifest's tree recorded alongside.
+    pub fn write_recorded(&self, path: &Path, package: &str) -> Result<(), ManifestError> {
+        self.write_file(path, Some(package))
     }
 
     /// Replaces the manifest at `path`.
     pub fn write(&self, path: &Path) -> Result<(), ManifestError> {
+        self.write_file(path, None)
+    }
+
+    fn write_file(&self, path: &Path, package: Option<&str>) -> Result<(), ManifestError> {
         let text = serde_json::to_vec(&WrittenFile {
             format: FORMAT,
             entries: &self.entries,
+            package,
         })
         .expect("a manifest of plain numbers and strings serialises");
         write_atomic(path, &text)?;
@@ -229,12 +258,16 @@ impl Manifest {
 struct WrittenFile<'a> {
     format: u32,
     entries: &'a [ManifestEntry],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
 struct StoredFile {
     format: u32,
     entries: serde_json::Value,
+    #[serde(default)]
+    package: Option<String>,
 }
 
 fn changed_fields(before: &ManifestEntry, after: &ManifestEntry) -> Vec<Field> {
@@ -492,6 +525,46 @@ mod tests {
                 .to_string()
                 .contains(&dir.path().display().to_string()),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_written_for_a_package_reads_back_with_its_hash() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = file_in(&dir);
+        let manifest = manifest_of(&[entry("a", EntryKind::File)]);
+
+        manifest
+            .write_recorded(&file, "ab12")
+            .expect("the manifest is written");
+
+        let recorded = Manifest::read_recorded(&file)
+            .expect("reads")
+            .expect("is there");
+        assert_eq!(recorded.manifest, manifest);
+        assert_eq!(recorded.package.as_deref(), Some("ab12"));
+        assert_eq!(Manifest::read(&file).expect("reads"), Some(manifest));
+    }
+
+    #[test]
+    fn a_manifest_written_without_a_package_names_none() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = file_in(&dir);
+        Manifest::default().write(&file).expect("written");
+
+        let recorded = Manifest::read_recorded(&file)
+            .expect("reads")
+            .expect("is there");
+
+        assert_eq!(recorded.package, None);
+    }
+
+    #[test]
+    fn a_missing_manifest_has_no_record() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        assert_eq!(
+            Manifest::read_recorded(&file_in(&dir)).expect("a missing file is no error"),
+            None
         );
     }
 

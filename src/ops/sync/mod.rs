@@ -24,6 +24,8 @@ use crate::listing::ListingError;
 use crate::lock::{Holder, RunLock};
 use crate::meta::MetaError;
 use crate::ops::status::{self, StatusError};
+use crate::pack::manifest::ManifestError;
+use crate::pack::pool::Pool;
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
 use crate::remote::away::{self, AwayError};
@@ -50,6 +52,8 @@ pub enum SyncError {
     Listing(#[from] ListingError),
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
     #[error(transparent)]
     Away(#[from] AwayError),
     #[error(transparent)]
@@ -254,6 +258,11 @@ pub enum SyncAction {
     Commit {
         id: ObjectId,
     },
+    /// The live package of a piece is made again.
+    PackLive {
+        id: ObjectId,
+        path: RelPath,
+    },
     /// A new piece gets an ID and live metadata.
     MintId {
         path: RelPath,
@@ -284,6 +293,7 @@ impl PlanAction for SyncAction {
             }
             SyncAction::Upload { id, file, .. } => format!("upload {file} of {id}"),
             SyncAction::Commit { id } => format!("commit the change to {id}"),
+            SyncAction::PackLive { id, path } => format!("pack {path} ({id}) as a live package"),
             SyncAction::MintId { path } => format!("give {path} an ID"),
             SyncAction::RemoveLeftover {
                 id,
@@ -322,6 +332,8 @@ pub struct SyncContext<'a> {
     pub machine: &'a str,
     /// Mints the IDs of new pieces.
     pub ids: &'a dyn IdSource,
+    /// The compression workers live packages are made with.
+    pub pool: &'a Pool,
     /// At most this many remote operations run at once.
     pub jobs: usize,
 }
@@ -340,11 +352,21 @@ pub fn sync_with(
     remote: &dyn Remote,
     dry_run: bool,
 ) -> Result<Synced, Error> {
+    // A dry run packs nothing, so it needs no workers.
+    let pool = if dry_run {
+        None
+    } else {
+        Some(
+            Pool::for_machine(collection.config().collection.memory_percent())
+                .map_err(Error::from)?,
+        )
+    };
     sync_using(&SyncRequest {
         collection,
         clock,
         remote,
         ids: &RandomIds,
+        pool: pool.as_ref(),
         dry_run,
     })
 }
@@ -355,6 +377,9 @@ pub struct SyncRequest<'a> {
     pub clock: &'a dyn Clock,
     pub remote: &'a dyn Remote,
     pub ids: &'a dyn IdSource,
+    /// The workers for live packages. A dry run needs none; a real run
+    /// without one fails.
+    pub pool: Option<&'a Pool>,
     pub dry_run: bool,
 }
 
@@ -365,6 +390,7 @@ pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
         clock,
         remote,
         ids,
+        pool,
         dry_run,
     } = *request;
     let started = run::start(collection, clock, dry_run)?;
@@ -405,6 +431,9 @@ pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
         remote.begin_phase()?;
         match &started {
             Started::Guarded(guard) => {
+                let pool = pool.ok_or_else(|| {
+                    SyncError::Failed("a real run needs a pool of compression workers".into())
+                })?;
                 let ctx = SyncContext {
                     collection,
                     remote,
@@ -412,6 +441,7 @@ pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
                     clock,
                     machine: &machine,
                     ids,
+                    pool,
                     jobs: collection.config().collection.remote_jobs.max(1) as usize,
                 };
                 let mut report = SyncReport {
@@ -426,7 +456,7 @@ pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
                 let mut plan = Plan::new();
                 let mut notes = report::setting_notes(collection);
                 let would_pull = pull::plan_pull(collection, remote, &mut plan, &mut notes)?;
-                live::plan(collection, clock, &mut plan)?;
+                live::plan(collection, clock, &machine, &mut plan)?;
                 if let Some(would_pull) = would_pull {
                     commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
                 }
@@ -476,7 +506,7 @@ fn plan_cleanup(
 /// The phases of a real run, in the order of the spec.
 fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
     let pull_failed = pull::run(ctx, report)?;
-    live::refresh(ctx, report)?;
+    live::refresh(ctx, report, pull_failed)?;
     if pull_failed {
         commit::skip_all(
             ctx,

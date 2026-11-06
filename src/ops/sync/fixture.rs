@@ -12,6 +12,7 @@ use crate::lock;
 use crate::meta::{HistoryAction, HistoryEntry};
 use crate::ops::import::{ImportRequest, import};
 use crate::ops::sync::{SyncAction, SyncReport, SyncRequest, Synced, sync_using};
+use crate::pack::pool::Pool;
 use crate::remote::Remote;
 use crate::remote::testing::{FaultRemote, REMOTE_ID, path_remote, remote_root};
 use crate::store::Store;
@@ -69,6 +70,7 @@ pub(super) struct Machine {
     pub collection: Collection,
     pub clock: FixedClock,
     pub ids: SeqIds,
+    pub pool: Pool,
     inputs: tempfile::TempDir,
     remote_root: PathBuf,
 }
@@ -109,9 +111,20 @@ impl Machine {
             collection,
             clock: FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time")),
             ids: SeqIds::new(if name == "anna" { 1 } else { 100 }),
+            pool: Pool::new(2, 1 << 30),
             inputs: tempfile::tempdir().expect("a temp dir"),
             remote_root: shared.root.path().to_path_buf(),
         }
+    }
+
+    /// Adds the line `setting` to the `[collection]` table of the config
+    /// and reads the collection again.
+    pub fn set_setting(&mut self, setting: &str) {
+        let path = self.collection.root().join(".antiq/config.toml");
+        let config = fs::read_to_string(&path).expect("the config reads");
+        let config = config.replace("\n\n[machine]", &format!("\n{setting}\n\n[machine]"));
+        fs::write(&path, config).expect("the config is written");
+        self.collection = Collection::find(self.collection.root()).expect("a collection");
     }
 
     pub fn store(&self) -> Store<'_> {
@@ -157,6 +170,7 @@ impl Machine {
             clock: &self.clock,
             remote,
             ids: &self.ids,
+            pool: (!dry_run).then_some(&self.pool),
             dry_run,
         })
     }

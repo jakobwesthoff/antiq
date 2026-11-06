@@ -1200,7 +1200,8 @@ files. Each entry is a path relative to the collection root. The entry
 and everything below it is left out of the live package and of its
 manifest. A piece whose top directory is an entry, or lies below one, has
 no live package. The packer reports the entries that left something out
-of a package.
+of a package, and `sync` records them in the live payload as the key
+`left_out`, a list of paths in the escaped form of the metadata.
 
 Symlinks are archived and restored as they are, whatever their target.
 An archive with a member whose path leads outside the piece is refused,
@@ -1307,10 +1308,17 @@ sorted by path bytes. Fifos, sockets and devices are not packed and are
 not in the manifest. A live piece is packed again when its tree differs
 from the manifest: a path was added or removed, or the type, size,
 modification time, ctime or inode of a path changed. A manifest that
-cannot be read counts as a tree that differs. When the
-new package has the same SHA-256 as the current one, only the manifest
-is replaced: no new version, no transfer, no history entry. The first
-sync after unearthing packs once.
+cannot be read counts as a tree that differs. The manifest file also
+holds the top-level key `package`, the SHA-256 of the package built from
+it. A tree counts as unchanged only when the manifest names the checksum
+of the newest live payload of this machine; a manifest without the key
+counts as different. When the new package has the same SHA-256 as the
+current one, only the manifest is replaced: no new version, no transfer,
+no history entry. The first sync after unearthing packs once. A piece
+that `backup_live = false` or `live_exclude` no longer lets `sync`
+refresh gets `stale_backup_since` from the first run that notices, if it
+has a live package of this machine and no mark yet; the package is not
+deleted for that reason.
 
 ## Operations
 
@@ -1643,13 +1651,40 @@ piece the `live_exclude` list covers, it still does, and commits their
 metadata without a live payload. A pinned piece gets its ID too. The ID's
 metadata is recorded as `meta.pending` with the history action `sync`, then
 the piece's entry is written (`live`, version taken out `pending`); the
-commit of the run commits the metadata as the object's first version. A new
+commit of the run commits the metadata as the object's first version,
+with the live payload of the piece's first package when backing up is on. A new
 piece gets no ID while its walk reports a problem: something in it cannot
 be read, another filesystem is mounted in it, an exclude entry lies in it
 or it holds a collection of its own. The unreadable piece makes the run
 exit 3; the other three leave the exit code alone. A step that fails on one
 piece leaves that piece for the next run, whose repairs write a missing
-entry, and makes the run exit 3. After a fork,
+entry, and makes the run exit 3.
+
+Before the uploads, `sync` brings the live package of each live or
+unearthed piece of this collection up to date, when backing up is on
+and the live exclude list does not cover the piece. It builds nothing on
+metadata the pull could not read, on an object the pull left alone, or
+on a recorded change that is already committed or conflicts; those are
+left to the commit phase. A piece with a decision open or a diverged
+folder is left alone. Only objects of lifecycle `live` get a package.
+When the walk differs from the manifest (see "Change detection"), the
+piece is packed into `.antiq/tmp/`, stored in the object's directory as
+`<first 16 hex digits of the SHA-256>-<name part>.tar.zst` and recorded in
+a live payload of this machine, whose version is one above the highest
+live version of the committed version and of the other machines'
+packages. The payload replaces this machine's earlier live payload in the
+recorded change, which gets the history action `sync` unless one is
+recorded already. A package that only a replaced recorded change named
+is removed. The commit phase uploads and commits it like any other
+payload. A piece that keeps changing while it is read, after
+`live_retries` restarts, gets `stale_backup_since` if it has none, keeps
+its previous package and manifest, is listed under `unbacked` with the
+reason `stale` and makes the run exit 3; a later run that packs the
+piece, or finds it unchanged, removes the mark. A piece whose walk
+reports a problem is listed with the matching reason and not packed. A
+failure of one piece makes the run exit 3 and leaves the piece for the
+next run, except for a shortage of file descriptors, which ends the run.
+After a fork,
 the old ID's live package is deleted once the fork's change is
 committed. A dry run reads the remote and writes nothing, locally or on
 the remote. It lists what the run would do against the versions it would
@@ -2443,11 +2478,11 @@ reason, message}`, `path` null where the piece's metadata cannot be read,
 `minted` (`{id, path}` for each new piece that got its ID), `unbacked` (`{id,
 path, reason, message}` for each piece that got no ID or no live backup, `id`
 null where it has none, `reason` one of `unreadable`, `mount_point`,
-`excluded`, `nested_collection` and `error`; only `unreadable` and `error`
-make the run exit 3) and `warnings`. The plan of a `--dry-run` has
+`excluded`, `nested_collection`, `stale` and `error`; only `unreadable`,
+`stale` and `error` make the run exit 3) and `warnings`. The plan of a `--dry-run` has
 `pull_metadata` actions (`id`, `version`), `fetch_listing` (`id`, `file`),
 `settle` (`id`, `version`), `conflict` (`id`), `upload` (`id`, `file`,
-`size`), `commit` (`id`), `mint_id` (`path`; the ID does not exist yet, so
+`size`), `commit` (`id`), `pack_live` (`id`, `path`), `mint_id` (`path`; the ID does not exist yet, so
 there is no `commit` for it) and `remove_leftover` (`id`, `name`, `what`,
 `age_unknown`).
 

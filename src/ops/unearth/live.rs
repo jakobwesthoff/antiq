@@ -79,7 +79,8 @@ fn package_warnings(plan: &UnearthPlan) -> Vec<Warning> {
             plan.target
         )));
     }
-    // TODO(I32): read the typed `left_out` field of `Payload` once I32 adds it.
+    // `sync` records the entries the live exclude list left out under the
+    // payload's `left_out` key.
     let left_out = plan
         .payload
         .extra
