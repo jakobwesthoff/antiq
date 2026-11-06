@@ -1194,9 +1194,17 @@ impl SshRemote {
 
 /// Every name the remote is given is one component of an object's
 /// directory. The names come from the metadata of other machines, so a
-/// name that reaches outside the directory is refused.
+/// name that reaches outside the directory is refused. Only the
+/// characters a listing shows (`LIST_DIR`) are accepted: rsync before
+/// 3.2.4 hands the remote path to the far shell and later versions expand
+/// globs in it, so a space, `;`, `$`, `*` or a leading `-` in a name must
+/// never get that far. A leading `-` is refused too, as the shell and
+/// rsync would read it as an option.
 fn plain_name(name: &str) -> Result<(), RemoteError> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+    let listable = name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'-'));
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') || !listable {
         return Err(RemoteError::InvalidName { name: name.into() });
     }
     Ok(())
@@ -2937,6 +2945,67 @@ exec /usr/bin/stat "$@""#,
                 remote.delete_partial(object(), name),
                 Err(RemoteError::InvalidName { .. })
             ));
+        }
+        assert_eq!(far.commands(), 0);
+    }
+
+    /// Names the shell or rsync would read as more than a literal file name.
+    const UNSAFE_NAMES: [&str; 8] = ["a b", "a;b", "$x", "a*b", "-x", "a?b", "a'b", "a\nb"];
+
+    #[test]
+    fn writing_refuses_names_outside_the_listing_alphabet() {
+        let far = Far::new();
+        let remote = far.remote();
+        for name in UNSAFE_NAMES {
+            assert!(matches!(
+                remote.create_exclusive(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.write_temp(object(), name, b"x"),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.delete(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.read_file(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+        }
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn a_get_refuses_names_outside_the_listing_alphabet() {
+        let far = Far::new();
+        let to = far.state.path().join("fetched.tar");
+        let remote = far.remote_with_seams(SshSeams::default());
+        for name in UNSAFE_NAMES {
+            let error = remote.get_payload(object(), name, &to).expect_err("name");
+            assert!(matches!(error, RemoteError::InvalidName { .. }), "{error}");
+        }
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn a_put_refuses_temp_final_and_seed_names_outside_the_listing_alphabet() {
+        let far = Far::new();
+        let source = far.local("pack.tar", b"x");
+        let sha = sha_of(b"x");
+        let remote = far.remote_with_seams(SshSeams::default());
+        for name in UNSAFE_NAMES {
+            let bad_temp = Upload::new(object(), name, "pack.tar", &source, &sha);
+            let bad_final = Upload::new(object(), ".t", name, &source, &sha);
+            let bad_seed = Upload {
+                seed: Some(name),
+                ..Upload::new(object(), ".t", "pack.tar", &source, &sha)
+            };
+            for upload in [bad_temp, bad_final, bad_seed] {
+                let error = remote.put_payload(&upload).expect_err("name");
+                assert!(matches!(error, RemoteError::InvalidName { .. }), "{error}");
+            }
         }
         assert_eq!(far.commands(), 0);
     }

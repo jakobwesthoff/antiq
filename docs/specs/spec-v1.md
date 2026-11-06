@@ -1019,7 +1019,12 @@ checksum of a file is computed on the NAS by the first of `sha256sum`,
 exactly 64 lower-case hexadecimal digits; no such tool makes the remote
 broken. So does a NAS whose `stat` works in neither the GNU (`-c`) nor
 the BSD (`-f`) form. Every file name given to the remote is one path component, as
-on the path remote.
+on the path remote. The SSH remote accepts only names from
+`[A-Za-z0-9._%-]` other than `.`, `..` and a name with a leading `-`,
+for transfers, temp names and partial names alike, and refuses any
+other with `InvalidName` before it runs a command: rsync before 3.2.4
+hands the remote path to the NAS's shell and later versions expand globs
+in it.
 
 Writing a temp file, creating a claim and renaming a temp do not make
 anything durable by themselves. antiq flushes, which runs `sync` on the
