@@ -1972,5 +1972,6 @@ fn an_ssh_target_that_refuses_the_connection_is_unreachable() {
     let reason = unreachable_reason(&push(&collection, &[]));
 
     assert!(reason.contains("Connection refused"), "{reason}");
-    assert_eq!(push(&collection, &["--if-reachable"]).code(), 0);
+    let again = push(&collection, &["--if-reachable"]);
+    assert_eq!(again.code(), 0, "{} {}", again.stdout, again.stderr);
 }

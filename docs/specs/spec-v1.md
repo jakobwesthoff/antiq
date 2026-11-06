@@ -1490,9 +1490,12 @@ target. `--init` and `--force` are each refused together with
 
    rsync runs with `LC_ALL=C`. The listing carries the mirror's `-e`,
    `--rsync-path`, `--timeout` and `rsync_args`, but not `--fsync`. Over
-   ssh, exit 255 counts as "cannot connect" only when ssh's line starts with `ssh: connect to host` or
-   `ssh: Could not resolve hostname`, or contains `timed out`; any other
-   255 (a changed host key, a refused key) is exit 1 with the line. Exit
+   ssh, exit 255 counts as "cannot connect" only when ssh's line starts
+   with `ssh: connect to host` or `ssh: Could not resolve hostname`, or
+   contains `timed out`; any other 255 (a changed host key, a refused key)
+   is exit 1 with the line. rsync reports exit 12 with the line
+   `connection unexpectedly closed` instead of 255 when it notices the
+   closed connection before it has reaped ssh; that counts as 255. Exit
    23 counts as "does not exist" only when the failing `change_dir` or
    `link_stat` line ends in `(2)`, or openrsync's `(l)stat:` line ends in
    `No such file or directory`; any other 23 is exit 1. A listing counts

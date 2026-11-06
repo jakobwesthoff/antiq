@@ -480,7 +480,11 @@ pub(super) fn inspect_ssh(remote: &Remote, run: Runner) -> Result<Probe, PushErr
     let stderr = String::from_utf8_lossy(&listing.stderr);
     match listing.code {
         Some(0) => {}
-        Some(255) => {
+        // rsync passes on ssh's 255, or reports exit 12 for the closed
+        // connection when it notices that before it has reaped ssh.
+        Some(code)
+            if code == 255 || (code == 12 && stderr.contains("connection unexpectedly closed")) =>
+        {
             let gone = stderr.lines().any(|line| {
                 line.starts_with("ssh: connect to host")
                     || line.starts_with("ssh: Could not resolve hostname")
@@ -1182,6 +1186,29 @@ mod tests {
             let reason = unreachable_text(ssh().inspect(&script));
             assert!(reason.contains(line), "{reason}");
             assert!(reason.contains("backup@nas:/srv/antiq"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_closed_connection_with_an_ssh_line_counts_like_a_255() {
+        // rsync reports exit 12 instead of ssh's 255 when it notices the
+        // closed connection before it has reaped ssh.
+        let closed = "rsync: connection unexpectedly closed (0 bytes received so far) [Receiver]\n\
+                      rsync error: error in rsync protocol data stream (code 12) at io.c(303)\n";
+        let refused = format!("ssh: connect to host nas port 22: Connection refused\n{closed}");
+        let script = Script::new(vec![outcome(Some(12), "", &refused)]);
+        let reason = unreachable_text(ssh().inspect(&script));
+        assert!(reason.contains("Connection refused"), "{reason}");
+
+        for stderr in [
+            closed,
+            "ssh: connect to host nas port 22: Connection refused\n",
+        ] {
+            let script = Script::new(vec![outcome(Some(12), "", stderr)]);
+            assert!(
+                matches!(ssh().inspect(&script), Err(PushError::Target { .. })),
+                "{stderr}"
+            );
         }
     }
 
