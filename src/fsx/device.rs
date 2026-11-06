@@ -321,6 +321,38 @@ mod tests {
         assert!(tree.path("src/precious").exists(), "the source was emptied");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
+    fn the_walk_reports_a_bind_mount_inside_a_piece_and_as_a_piece() {
+        use crate::select::Rules;
+        use crate::tree::Problem;
+        use crate::walk::walk_piece;
+        let mut tree = Tree::new();
+        tree.file("src/precious", "x");
+        tree.file("p/before", "y");
+        tree.dir("p/mnt");
+        tree.dir("bound");
+        let _inside = BindMount::new(&tree.path("src"), &tree.path("p/mnt"));
+        let _as_piece = BindMount::new(&tree.path("src"), &tree.path("bound"));
+
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let rules = Rules::new(&[], &[]).expect("no patterns are valid");
+        let path = |text: &str| RelPath::parse(text).expect("valid path");
+        let inside = walk_piece(&root, &path("p"), &[], &rules).expect("walks");
+        assert_eq!(
+            inside.problems(),
+            [Problem::MountPoint { other: path("mnt") }]
+        );
+        let as_piece = walk_piece(&root, &path("bound"), &[], &rules).expect("walks");
+        assert_eq!(
+            as_piece.problems(),
+            [Problem::MountPoint {
+                other: RelPath::root()
+            }]
+        );
+    }
+
     #[test]
     fn macos_type_names_map_to_kinds() {
         for (name, kind) in [

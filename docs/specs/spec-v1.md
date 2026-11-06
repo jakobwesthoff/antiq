@@ -141,20 +141,31 @@ the piece's top directory. A piece that contains another device (a
 mount point or a btrfs subvolume) is never archived, reclaimed or packed
 for backup; `status` lists it with the path of the mount point. A piece
 whose top directory is itself on another device than the collection
-root counts as containing a mount point, at its own path. The walk
+root, or is itself a mount root, counts as containing a mount point, at
+its own path. The walk
 compares the device of every entry with the top directory's, not only
 that of directories: an entry on another device is recorded, and a
-directory there is not entered. Mount points are found by comparing
-device numbers, so a bind mount from the same filesystem is not seen.
+directory there is not entered. The same holds for the root of a mounted
+filesystem that shares its parent's device, such as a bind mount: the
+walk reads whether an entry is a mount root. On Linux that is the
+`STATX_ATTR_MOUNT_ROOT` attribute of `statx`; a kernel older than 5.8
+does not report it, and there only the device numbers decide. On macOS
+it is the mount point name of the directory (`f_mntonname`) differing
+from its parent's. A firmlink at the top of the system volume compares as
+a mount root there, so a piece containing one is refused, which is the
+safe direction. A directory that cannot be searched is not compared on
+macOS; the delete helper reads its flag again once it has given the
+directory owner access and has opened it.
 The walk does not enter an excluded directory either: a piece that
 contains an existing exclude entry is treated like one that contains a
 mount point, and `status` lists it with the excluded path. A walk enters
 directories up to 512 levels below the piece's top, since each level holds
 one directory open. A deeper directory is not entered and makes the piece
 unreadable.
-The delete helper never crosses a device boundary, and stops at the same
-depth: a directory more than 512 levels below the top it removes is not
-entered and fails the removal, naming that directory.
+The delete helper never crosses a device boundary or enters a mount root,
+refuses the root of its own tree, and stops at the same depth: a
+directory more than 512 levels below the top it removes is not entered
+and fails the removal, naming that directory.
 
 An entry the walk cannot read makes the piece unreadable: it is never
 idle, never archived, its live package is not refreshed, and `status`

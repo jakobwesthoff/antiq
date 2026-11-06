@@ -35,6 +35,12 @@ pub(crate) trait Hooks {
         reported
     }
 
+    /// Whether the entry at `path`, relative to the piece's top, is the
+    /// root of a mount, in place of the `reported` answer.
+    fn mount_root(&self, _path: &RelPath, reported: bool) -> bool {
+        reported
+    }
+
     /// An error to raise instead of making the call of kind `call` that
     /// works on `path`.
     fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error>;
@@ -88,7 +94,7 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// Entries come back relative to the top, with the top itself as the
 /// entry with the root path. Nothing is followed: every entry is read with
 /// `lstat`, and a directory is entered only while it stays on the device of
-/// the top directory. Files named in `junk` are left out; a directory
+/// the top directory and is no mount root. Files named in `junk` are left out; a directory
 /// with a junk name is walked like any other. An entry that is on the
 /// exclude list of `rules` is reported and, if a directory, not entered.
 /// A directory more than [`MAX_DEPTH`] levels below the top is not entered
@@ -132,9 +138,11 @@ pub(crate) fn walk_piece_with(
     if let Some((mut top_entry, collection_device)) = read_top {
         top_entry.path = root.clone();
         walker.top_device = hooks.device(&root, top_entry.device);
-        // A top directory on another device is a mount point of its own,
-        // although nothing inside it differs from the top.
-        if walker.top_device != collection_device {
+        // A top directory on another device, or the root of a mount on the
+        // collection's device, is a mount point of its own, although
+        // nothing inside it differs from the top.
+        let top_is_mount_root = hooks.mount_root(&root, top_entry.mount_root);
+        if walker.top_device != collection_device || top_is_mount_root {
             walker.mount_points.push(root.clone());
         }
         let is_directory = top_entry.kind == EntryKind::Directory;
@@ -278,7 +286,8 @@ impl Walker<'_> {
         }
         entry.path = child.clone();
 
-        let foreign = self.hooks.device(&child, entry.device) != self.top_device;
+        let foreign = self.hooks.device(&child, entry.device) != self.top_device
+            || self.hooks.mount_root(&child, entry.mount_root);
         if foreign {
             self.mount_points.push(child.clone());
         }
@@ -336,6 +345,7 @@ mod tests {
     #[derive(Default)]
     struct Staged {
         foreign: Vec<RelPath>,
+        mount_roots: Vec<RelPath>,
         faults: Vec<(RelPath, Call, Errno)>,
         depth: Option<usize>,
     }
@@ -351,6 +361,10 @@ mod tests {
             } else {
                 reported
             }
+        }
+
+        fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
+            reported || self.mount_roots.contains(path)
         }
 
         fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
@@ -567,6 +581,82 @@ mod tests {
             walked.problems(),
             [Problem::MountPoint {
                 other: path("sub/mnt")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_mount_root_on_the_pieces_device_is_recorded_and_not_entered() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/mnt/inside", "x");
+        tree.file("piece/sub/f", "x");
+        let hooks = Staged {
+            mount_roots: vec![path("sub/mnt")],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(paths(&walked), ["", "sub", "sub/f", "sub/mnt"]);
+        assert_eq!(
+            walked.problems(),
+            [Problem::MountPoint {
+                other: path("sub/mnt")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_a_mount_root_is_recorded_too() {
+        let mut tree = Tree::new();
+        tree.file("piece/bound", "x");
+        let hooks = Staged {
+            mount_roots: vec![path("bound")],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            walked.problems(),
+            [Problem::MountPoint {
+                other: path("bound")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_top_that_is_a_mount_root_counts_as_a_mount_point_at_its_own_path() {
+        let mut tree = Tree::new();
+        tree.file("piece/sub/f", "x");
+        let hooks = Staged {
+            mount_roots: vec![RelPath::root()],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            paths(&walked),
+            ["", "sub", "sub/f"],
+            "the content is walked"
+        );
+        assert_eq!(
+            walked.problems(),
+            [Problem::MountPoint {
+                other: RelPath::root()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_top_on_another_device_that_is_also_a_mount_root_is_listed_once() {
+        let mut tree = Tree::new();
+        tree.file("piece/f", "x");
+        let hooks = Staged {
+            foreign: vec![RelPath::root(), path("f")],
+            mount_roots: vec![RelPath::root()],
+            ..Staged::default()
+        };
+        let walked = walk_with(&tree, "piece", &[], &hooks).expect("the walk succeeds");
+        assert_eq!(
+            walked.problems(),
+            [Problem::MountPoint {
+                other: RelPath::root()
             }]
         );
     }
