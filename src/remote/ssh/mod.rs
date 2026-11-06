@@ -2662,13 +2662,14 @@ mod tests {
     }
 
     /// Runs `check` while `dir` cannot be listed (mode 0300), then gives the
-    /// directory its permissions back. Does nothing when the directory stays
-    /// listable, as for the superuser.
+    /// directory its permissions back.
     fn with_unlistable(dir: &Path, check: impl FnOnce()) {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o300)).expect("chmod");
-        if std::fs::read_dir(dir).is_err() {
-            check();
-        }
+        assert!(
+            std::fs::read_dir(dir).is_err(),
+            "the directory is unlistable"
+        );
+        check();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     }
 
@@ -2799,12 +2800,11 @@ mod tests {
         assert!(matches!(error, RemoteError::Io { .. }), "{error}");
     }
 
-    /// Takes all permissions from `path` and says whether that made it
-    /// unreadable. The superuser reads it anyway, and a test that depends
-    /// on the failure returns early then.
-    fn make_unreadable(path: &Path) -> bool {
+    /// Takes all permissions from `path`. `Far::new` has refused to run as
+    /// the superuser, who would read it anyway.
+    fn make_unreadable(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        std::fs::File::open(path).is_err()
+        assert!(std::fs::File::open(path).is_err(), "the path is unreadable");
     }
 
     #[test]
@@ -2812,9 +2812,7 @@ mod tests {
         let far = Far::new();
         let file = far.object_dir(OBJECT).join("payload");
         std::fs::write(&file, "abc").expect("file");
-        if !make_unreadable(&file) {
-            return;
-        }
+        make_unreadable(&file);
         let error = far
             .remote()
             .checksum(object(), "payload")
@@ -2841,9 +2839,7 @@ mod tests {
         let source = far.local("pack.tar", b"x");
         let there = far_file(&far, "pack.tar");
         std::fs::write(&there, "other").expect("there already");
-        if !make_unreadable(&there) {
-            return;
-        }
+        make_unreadable(&there);
         let error = far
             .remote_with(&fake, SshSeams::default())
             .put_payload(&upload(&source, &sha_of(b"x")))
