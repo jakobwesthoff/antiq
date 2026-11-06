@@ -331,6 +331,11 @@ impl KnownVersions {
         self.0.insert(id, number);
     }
 
+    /// Every object with a known version and its highest.
+    pub fn iter(&self) -> impl Iterator<Item = (ObjectId, u32)> + '_ {
+        self.0.iter().map(|(id, number)| (*id, *number))
+    }
+
     /// The highest version known of the object; 0 when it is unknown.
     pub fn highest(&self, id: ObjectId) -> u32 {
         self.0.get(&id).copied().unwrap_or(0)

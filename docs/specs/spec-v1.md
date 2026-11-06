@@ -974,6 +974,18 @@ answer, and `begin_phase` does the same check over the new master. The
 clock is `date +%s` on the NAS, printed first by a script that begins
 with that check.
 
+A listing gives, for each entry of an object's directory, its name, its
+kind, its size and its modification time, dot names included. A name
+with a byte outside `[A-Za-z0-9._%-]` is left out. The metadata pull is
+one script for all objects: for each object it prints the
+`meta.<digits>` files (no leading zero) above the highest version this
+machine has, and antiq then applies the version rules to the names. The
+checksum of a file is computed on the NAS by the first of `sha256sum`,
+`shasum -a 256`, `sha256 -q` and `openssl dgst -sha256 -r` that prints
+exactly 64 lower-case hexadecimal digits; no such tool makes the remote
+broken. Every file name given to the remote is one path component, as
+on the path remote.
+
 After writing a run's temp files and before their renames, antiq runs
 `sync` on the NAS, and once more after the renames.
 

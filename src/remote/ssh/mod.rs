@@ -24,6 +24,7 @@ use crate::report::Warning;
 use jiff::Timestamp;
 use script::Script;
 use session::{Output, Session, SessionError, SessionSettings, Target};
+use std::num::NonZeroU32;
 use std::path::Path;
 
 /// Where an ssh remote lives: the parts of its URL.
@@ -50,6 +51,80 @@ const NO_STAT: i32 = 43;
 /// searched.
 const ROOT_UNUSABLE: i32 = 49;
 const MARKER_UNREADABLE: i32 = 50;
+/// The file the operation names is not there.
+const FILE_MISSING: i32 = 44;
+
+/// Lists the directory `$1/$2` as one `@entry <name> <d|f> <size> <mtime>`
+/// frame without a body per entry. Names with a byte outside
+/// `[A-Za-z0-9._%-]` are left out since they could not be told apart in a
+/// frame header. The three globs cover the dot names that interrupted
+/// uploads leave.
+const LIST_DIR: &str = r#"_dir="$1/$2"
+[ -d "$_dir" ] || exit 0
+for _f in "$_dir"/* "$_dir"/.[!.]* "$_dir"/..?*; do
+    [ -e "$_f" ] || [ -h "$_f" ] || continue
+    _n=${_f##*/}
+    case $_n in *[!A-Za-z0-9._%-]*) continue ;; esac
+    if [ -d "$_f" ] && [ ! -h "$_f" ]; then _k=d; else _k=f; fi
+    _st=$(antiq_stat "$_f")
+    _rc=$?
+    [ "$_rc" -eq 43 ] && exit 43
+    [ "$_rc" -eq 0 ] || continue
+    printf '@entry %s %s %s %s 0\n\n' "$_n" "$_k" "${_st%% *}" "${_st#* }"
+done
+"#;
+
+const LIST_OBJECTS: &str = r#"for _d in "$1"/objects/*; do
+    [ -d "$_d" ] || continue
+    _n=${_d##*/}
+    case $_n in *[!A-Za-z0-9]*) continue ;; esac
+    printf '@object %s 0\n\n' "$_n"
+done
+"#;
+
+/// The head of the metadata pull; the `case` arms that name the highest
+/// known version of each object follow, then [`PULL_TAIL`].
+const PULL_HEAD: &str = r#"for _d in "$1"/objects/*; do
+    [ -d "$_d" ] || continue
+    _o=${_d##*/}
+    case $_o in *[!A-Za-z0-9]*) continue ;; esac
+    case $_o in
+"#;
+
+/// Of each object the `meta.<digits>` files without a leading zero that
+/// are above the known number. A number is compared by its length first and
+/// by `sort` among equal lengths, so the shell does no arithmetic and a
+/// name too long for a number is not an error. The result is a
+/// prefilter: antiq applies its own version rules to what comes back.
+const PULL_TAIL: &str = r#"        *) _h=0 ;;
+    esac
+    for _f in "$_d"/meta.[1-9]*; do
+        [ -f "$_f" ] || continue
+        _n=${_f##*/}
+        _v=${_n#meta.}
+        case $_v in *[!0-9]*) continue ;; esac
+        if [ "${#_v}" -lt "${#_h}" ]; then continue; fi
+        if [ "${#_v}" -eq "${#_h}" ]; then
+            [ "$_v" = "$_h" ] && continue
+            [ "$(printf '%s\n%s\n' "$_h" "$_v" | sort | tail -n 1)" = "$_v" ] || continue
+        fi
+        antiq_emit meta "$_f" "$_o" "$_n" || exit $?
+    done
+done
+"#;
+
+const READ_FILE: &str = r#"_f="$1/objects/$2/$3"
+[ -e "$_f" ] || exit 44
+antiq_emit file "$_f" || exit $?
+"#;
+
+const CHECKSUM: &str = r#"_f="$1/objects/$2/$3"
+[ -e "$_f" ] || exit 44
+_h=$(antiq_sha256 "$_f")
+_rc=$?
+[ "$_rc" -eq 0 ] || exit "$_rc"
+printf '@sum %s 0\n\n' "$_h"
+"#;
 
 /// Shell functions every script of the remote starts with. They use
 /// only POSIX `sh` and tools every NAS has.
@@ -61,8 +136,8 @@ const MARKER_UNREADABLE: i32 = 50;
 ///   that gives exactly that; status 42 when none does. Tools differ in
 ///   what they print and a NAS may carry a broken one, so only a result
 ///   of the right shape counts.
-/// - `antiq_emit KIND FILE` prints `@KIND <length>`, the file and a
-///   newline.
+/// - `antiq_emit KIND FILE [ARG...]` prints `@KIND ARG... <length>`, the
+///   file and a newline.
 /// - `antiq_root_check ROOT` ends the script unless ROOT is a directory
 ///   with a readable marker, and prints the marker as a frame.
 pub(crate) const PRELUDE: &str = r#"antiq_stat() {
@@ -88,14 +163,19 @@ antiq_sha256() {
     return 42
 }
 antiq_emit() {
-    _stat=$(antiq_stat "$2")
+    _kind=$1
+    _file=$2
+    shift 2
+    _stat=$(antiq_stat "$_file")
     _rc=$?
     [ "$_rc" -eq 0 ] || return "$_rc"
-    printf '@%s %s
-' "$1" "${_stat%% *}"
-    cat "$2" || return 1
-    printf '
-'
+    printf '@%s' "$_kind"
+    for _arg in "$@"; do
+        printf ' %s' "$_arg"
+    done
+    printf ' %s\n' "${_stat%% *}"
+    cat "$_file" || return 1
+    printf '\n'
 }
 antiq_root_check() {
     if [ ! -d "$1" ]; then
@@ -343,9 +423,121 @@ impl SshRemote {
         }
     }
 
+    fn exec(&self, script: &Script) -> Result<Output, RemoteError> {
+        self.session.run(script).map_err(map_session)
+    }
+
+    /// Runs a script that names one file of an object. A file that is not
+    /// there is an Io error of kind `NotFound`.
+    fn run_on_file(
+        &self,
+        body: &str,
+        id: ObjectId,
+        name: &str,
+        action: &'static str,
+    ) -> Result<Answer, RemoteError> {
+        plain_name(name)?;
+        let script = self.script(body).arg(id.to_string()).arg(name);
+        let output = self.exec(&script)?;
+        if output.status == FILE_MISSING {
+            return Err(RemoteError::Io {
+                action,
+                path: format!("{}/objects/{id}/{name}", self.root),
+                source: std::io::ErrorKind::NotFound.into(),
+            });
+        }
+        self.answer(output, false, action)
+    }
+
+    fn entries(&self, id: ObjectId, subdir: &str) -> Result<Vec<RemoteFile>, RemoteError> {
+        let script = self.script(LIST_DIR).arg(format!("objects/{id}{subdir}"));
+        let answer = self.run(&script, false, "list")?;
+        parse_entries(&answer.frames)
+    }
+
     fn check_root(&self, body: &str, action: &'static str) -> Result<(), RemoteError> {
         self.run(&self.script(body), false, action).map(|_| ())
     }
+}
+
+/// Every name the remote is given is one component of an object's
+/// directory. The names come from the metadata of other machines, so a
+/// name that reaches outside the directory is refused.
+fn plain_name(name: &str) -> Result<(), RemoteError> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err(RemoteError::InvalidName { name: name.into() });
+    }
+    Ok(())
+}
+
+fn number<T: std::str::FromStr>(text: &str) -> Result<T, RemoteError> {
+    text.parse().map_err(|_| malformed("a number is not one"))
+}
+
+fn checksum_of(frames: &[Frame]) -> Result<String, RemoteError> {
+    let sum = frames
+        .first()
+        .and_then(|frame| frame.args.first())
+        .filter(|sum| {
+            sum.len() == 64 && sum.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or_else(|| malformed("the checksum is not a SHA-256"))?;
+    Ok(sum.clone())
+}
+
+fn parse_entries(frames: &[Frame]) -> Result<Vec<RemoteFile>, RemoteError> {
+    frames
+        .iter()
+        .map(|frame| match frame.args.as_slice() {
+            [name, kind, size, mtime] if frame.kind == "entry" => Ok(RemoteFile {
+                name: name.clone(),
+                size: number(size)?,
+                modified: Timestamp::from_second(number(mtime)?)
+                    .map_err(|_| malformed("a time is out of range"))?,
+                is_dir: kind == "d",
+            }),
+            _ => Err(malformed("an entry has the wrong form")),
+        })
+        .collect()
+}
+
+/// The versions of the frames that are above what is known. The far side
+/// filtered by name already; the version rules are applied here.
+fn parse_meta(frames: Vec<Frame>, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError> {
+    let mut files = Vec::new();
+    for frame in frames {
+        let [object, name] = frame.args.as_slice() else {
+            return Err(malformed("a metadata frame has the wrong form"));
+        };
+        let (Some(id), Some(number)) =
+            (canonical_object(object), crate::store::version_number(name))
+        else {
+            continue;
+        };
+        if number > known.highest(id) {
+            files.push(MetaFile {
+                id,
+                number: NonZeroU32::new(number).expect("a version number is above zero"),
+                bytes: frame.bytes,
+            });
+        }
+    }
+    Ok(files)
+}
+
+/// The bytes of the first frame, which must be a file.
+fn file_bytes(frames: Vec<Frame>) -> Result<Vec<u8>, RemoteError> {
+    match frames.into_iter().next() {
+        Some(frame) if frame.kind == "file" => Ok(frame.bytes),
+        _ => Err(malformed("the file is missing from the answer")),
+    }
+}
+
+/// The object a frame names, if it is written in the canonical form: a
+/// directory of another spelling is not one of antiq's.
+fn canonical_object(text: &str) -> Option<ObjectId> {
+    let id: ObjectId = text.parse().ok()?;
+    (id.to_string() == text).then_some(id)
 }
 
 fn pending() -> RemoteError {
@@ -388,20 +580,34 @@ impl Remote for SshRemote {
         self.session.finish();
     }
 
-    fn pull_metadata(&self, _known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError> {
-        Err(pending())
+    fn pull_metadata(&self, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError> {
+        let mut body = String::from(PULL_HEAD);
+        for (id, highest) in known.iter() {
+            body.push_str(&format!("        {id}) _h={highest} ;;\n"));
+        }
+        body.push_str(PULL_TAIL);
+        let answer = self.run(&self.script(&body), false, "pull metadata of")?;
+        parse_meta(answer.frames, known)
     }
     fn list_objects(&self) -> Result<Vec<ObjectId>, RemoteError> {
-        Err(pending())
+        let answer = self.run(&self.script(LIST_OBJECTS), false, "list")?;
+        let mut objects: Vec<ObjectId> = answer
+            .frames
+            .iter()
+            .filter_map(|frame| frame.args.first().and_then(|name| canonical_object(name)))
+            .collect();
+        objects.sort();
+        Ok(objects)
     }
-    fn list_dir(&self, _id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
-        Err(pending())
+    fn list_dir(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
+        self.entries(id, "")
     }
-    fn list_partial(&self, _id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
-        Err(pending())
+    fn list_partial(&self, id: ObjectId) -> Result<Vec<RemoteFile>, RemoteError> {
+        self.entries(id, "/.antiq-partial")
     }
-    fn read_file(&self, _id: ObjectId, _name: &str) -> Result<Vec<u8>, RemoteError> {
-        Err(pending())
+    fn read_file(&self, id: ObjectId, name: &str) -> Result<Vec<u8>, RemoteError> {
+        let answer = self.run_on_file(READ_FILE, id, name, "read")?;
+        file_bytes(answer.frames)
     }
     fn get_payload(&self, _id: ObjectId, _name: &str, _to: &Path) -> Result<Transfer, RemoteError> {
         Err(pending())
@@ -429,8 +635,9 @@ impl Remote for SshRemote {
     fn delete_partial(&self, _id: ObjectId, _name: &str) -> Result<(), RemoteError> {
         Err(pending())
     }
-    fn checksum(&self, _id: ObjectId, _name: &str) -> Result<String, RemoteError> {
-        Err(pending())
+    fn checksum(&self, id: ObjectId, name: &str) -> Result<String, RemoteError> {
+        let answer = self.run_on_file(CHECKSUM, id, name, "hash")?;
+        checksum_of(&answer.frames)
     }
 }
 
@@ -1133,5 +1340,410 @@ mod tests {
         assert!(!warnings.is_empty());
         assert!(remote.take_warnings().is_empty(), "taken once");
         remote.finish();
+    }
+
+    // ----- reading -----
+
+    const OBJECT: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
+
+    fn object() -> ObjectId {
+        OBJECT.parse().expect("a ULID")
+    }
+
+    impl Far {
+        /// The directory of an object on the far side, made.
+        fn object_dir(&self, id: &str) -> PathBuf {
+            let dir = self.root().join("objects").join(id);
+            std::fs::create_dir_all(&dir).expect("object directory");
+            dir
+        }
+
+        /// How many commands the shim ran.
+        fn commands(&self) -> usize {
+            std::fs::read_to_string(self.state.path().join("calls.log"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("/bin/sh -s"))
+                .count()
+        }
+    }
+
+    #[test]
+    fn the_objects_are_the_canonical_ulid_directories_in_order() {
+        let far = Far::new();
+        let second = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        for name in [
+            OBJECT,
+            second,
+            "01arz3ndektsv4rrffq69g5fav",
+            "not-an-id",
+            ".hidden",
+        ] {
+            far.object_dir(name);
+        }
+        std::fs::write(
+            far.root().join("objects/01BX5ZZKBKACTAV9WEVGEMMVRY"),
+            "a file",
+        )
+        .expect("file");
+        let found = far.remote().list_objects().expect("listed");
+        let expected: Vec<ObjectId> = [second, OBJECT]
+            .iter()
+            .map(|text| text.parse().expect("a ULID"))
+            .collect();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_remote_without_objects_has_none() {
+        let far = Far::new();
+        assert_eq!(far.remote().list_objects().expect("listed"), vec![]);
+    }
+
+    fn set_mtime(path: &Path, seconds: u64) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .or_else(|_| std::fs::File::open(path))
+            .expect("open");
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .expect("mtime");
+    }
+
+    #[test]
+    fn a_directory_lists_names_sizes_times_and_kinds() {
+        let far = Far::new();
+        let dir = far.object_dir(OBJECT);
+        std::fs::write(dir.join("meta.1"), "12345").expect("file");
+        set_mtime(&dir.join("meta.1"), 1_700_000_000);
+        std::fs::create_dir(dir.join(".antiq-partial")).expect("dir");
+        let mut found = far.remote().list_dir(object()).expect("listed");
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<(&str, u64, bool)> = found
+            .iter()
+            .map(|file| (file.name.as_str(), file.size, file.is_dir))
+            .collect();
+        assert_eq!(
+            names,
+            [(".antiq-partial", names[0].1, true), ("meta.1", 5, false)]
+        );
+        assert_eq!(found[1].modified.as_second(), 1_700_000_000);
+    }
+
+    #[test]
+    fn dot_names_of_interrupted_work_are_listed() {
+        let far = Far::new();
+        let dir = far.object_dir(OBJECT);
+        for name in [".x.laptop.part", ".x.laptop.part.Ab12Cd", ".y", "..z"] {
+            std::fs::write(dir.join(name), "d").expect("file");
+        }
+        let mut names: Vec<String> = far
+            .remote()
+            .list_dir(object())
+            .expect("listed")
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["..z", ".x.laptop.part", ".x.laptop.part.Ab12Cd", ".y"]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_absent_directory_lists_nothing() {
+        let far = Far::new();
+        assert_eq!(far.remote().list_dir(object()).expect("absent"), vec![]);
+        far.object_dir(OBJECT);
+        assert_eq!(far.remote().list_dir(object()).expect("empty"), vec![]);
+    }
+
+    #[test]
+    fn a_name_with_a_tab_or_a_space_is_not_listed() {
+        let far = Far::new();
+        let dir = far.object_dir(OBJECT);
+        for name in ["tab\tname", "a b", "good"] {
+            std::fs::write(dir.join(name), "d").expect("file");
+        }
+        let names: Vec<String> = far
+            .remote()
+            .list_dir(object())
+            .expect("listed")
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        assert_eq!(names, ["good"]);
+    }
+
+    #[test]
+    fn the_partial_directory_lists_its_files_dot_names_included() {
+        let far = Far::new();
+        let partial = far.object_dir(OBJECT).join(".antiq-partial");
+        std::fs::create_dir(&partial).expect("dir");
+        std::fs::write(partial.join(".temp.part"), "abc").expect("file");
+        std::fs::write(partial.join("plain"), "abcd").expect("file");
+        let mut found = far.remote().list_partial(object()).expect("listed");
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<(&str, u64)> = found
+            .iter()
+            .map(|file| (file.name.as_str(), file.size))
+            .collect();
+        assert_eq!(names, [(".temp.part", 3), ("plain", 4)]);
+        assert_eq!(
+            far.remote()
+                .list_partial("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("id"))
+                .expect("absent"),
+            vec![]
+        );
+    }
+
+    fn put_meta(far: &Far, id: &str, name: &str, bytes: &str) {
+        std::fs::write(far.object_dir(id).join(name), bytes).expect("file");
+    }
+
+    #[test]
+    fn only_versions_above_the_known_ones_are_pulled() {
+        let far = Far::new();
+        for (name, bytes) in [
+            ("meta.1", "one"),
+            ("meta.2", "two"),
+            ("meta.10", "ten"),
+            ("meta.9", "nine"),
+            ("meta.2.claim", ""),
+            ("meta.3.tmp.laptop", "t"),
+            ("meta.x", "x"),
+            ("meta.01", "z"),
+            ("meta.010", "z"),
+            ("meta.4294967296", "big"),
+            ("payload.tar", "p"),
+        ] {
+            put_meta(&far, OBJECT, name, bytes);
+        }
+        let mut known = KnownVersions::new();
+        known.insert(object(), 2);
+        let mut found = far.remote().pull_metadata(&known).expect("pulled");
+        found.sort_by_key(|file| file.number);
+        let versions: Vec<(u32, &[u8])> = found
+            .iter()
+            .map(|file| (file.number.get(), file.bytes.as_slice()))
+            .collect();
+        assert_eq!(versions, [(9, &b"nine"[..]), (10, &b"ten"[..])]);
+        assert!(found.iter().all(|file| file.id == object()));
+    }
+
+    #[test]
+    fn unknown_objects_are_pulled_from_version_one() {
+        let far = Far::new();
+        put_meta(&far, OBJECT, "meta.1", "a");
+        put_meta(&far, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "meta.1", "b\0c\n");
+        put_meta(&far, "not-an-id", "meta.1", "z");
+        let mut found = far
+            .remote()
+            .pull_metadata(&KnownVersions::new())
+            .expect("pulled");
+        found.sort_by_key(|file| file.bytes.clone());
+        let bytes: Vec<&[u8]> = found.iter().map(|file| file.bytes.as_slice()).collect();
+        assert_eq!(bytes, [&b"a"[..], &b"b\0c\n"[..]]);
+    }
+
+    #[test]
+    fn five_hundred_objects_are_pulled_in_one_call() {
+        let far = Far::new();
+        for n in 0..500u64 {
+            let id = ObjectId::from_ulid(ulid::Ulid::from_parts(1_000 + n, 7)).to_string();
+            put_meta(&far, &id, "meta.1", "m");
+        }
+        let before = far.commands();
+        let found = far
+            .remote()
+            .pull_metadata(&KnownVersions::new())
+            .expect("pulled");
+        assert_eq!(found.len(), 500);
+        assert_eq!(far.commands() - before, 1);
+    }
+
+    #[test]
+    fn a_small_file_is_read_whole() {
+        let far = Far::new();
+        let bytes: &[u8] = b"a\0b\n\nc\n";
+        std::fs::write(far.object_dir(OBJECT).join("listing"), bytes).expect("file");
+        assert_eq!(
+            far.remote().read_file(object(), "listing").expect("read"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn an_empty_file_is_read_as_nothing() {
+        let far = Far::new();
+        std::fs::write(far.object_dir(OBJECT).join("empty"), "").expect("file");
+        assert_eq!(
+            far.remote().read_file(object(), "empty").expect("read"),
+            b""
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_not_found() {
+        let far = Far::new();
+        far.object_dir(OBJECT);
+        let error = far
+            .remote()
+            .read_file(object(), "nothing")
+            .expect_err("missing");
+        match error {
+            RemoteError::Io { ref source, .. } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound, "{error}")
+            }
+            other => panic!("expected an Io error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_io_error() {
+        let far = Far::new();
+        let file = far.object_dir(OBJECT).join("locked");
+        std::fs::write(&file, "x").expect("file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let error = far
+            .remote()
+            .read_file(object(), "locked")
+            .expect_err("unreadable");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn the_checksum_is_the_sha256_of_the_bytes_on_the_far_side() {
+        let far = Far::new();
+        std::fs::write(far.object_dir(OBJECT).join("payload"), "abc").expect("file");
+        assert_eq!(
+            far.remote().checksum(object(), "payload").expect("hashed"),
+            ABC
+        );
+    }
+
+    #[test]
+    fn the_checksum_of_a_missing_file_is_not_found() {
+        let far = Far::new();
+        far.object_dir(OBJECT);
+        let error = far
+            .remote()
+            .checksum(object(), "nothing")
+            .expect_err("missing");
+        assert!(
+            matches!(error, RemoteError::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_checksum_without_a_hash_tool_is_broken() {
+        let far = Far::new();
+        std::fs::write(far.object_dir(OBJECT).join("payload"), "abc").expect("file");
+        for tool in ["sha256sum", "shasum", "sha256", "openssl"] {
+            far.wrap(tool, "exit 1");
+        }
+        let error = far
+            .remote()
+            .checksum(object(), "payload")
+            .expect_err("no tool");
+        assert!(matches!(error, RemoteError::Broken(_)), "{error}");
+    }
+
+    #[test]
+    fn a_checksum_that_is_no_hash_is_an_error_and_never_a_mismatch() {
+        let far = Far::new();
+        let output = Output {
+            status: 0,
+            stdout: b"@sum zzz 0\n\n".to_vec(),
+            stderr: vec![],
+        };
+        let frames = read_frames(&output.stdout).expect("frames");
+        let error = checksum_of(&frames).expect_err("junk");
+        assert!(error.to_string().contains("SHA-256"), "{error}");
+        let _ = far;
+    }
+
+    #[test]
+    fn names_that_reach_outside_the_directory_are_refused_before_any_script_runs() {
+        let far = Far::new();
+        let remote = far.remote();
+        for name in ["", ".", "..", "a/b", "../x", "nul\0byte"] {
+            for result in [
+                remote.read_file(object(), name).map(|_| ()),
+                remote.checksum(object(), name).map(|_| ()),
+            ] {
+                assert!(
+                    matches!(result, Err(RemoteError::InvalidName { .. })),
+                    "{name:?}"
+                );
+            }
+        }
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn a_frame_can_carry_arguments_from_the_prelude() {
+        let work = tempfile::tempdir().expect("temp dir");
+        std::fs::write(work.path().join("f"), "xy").expect("file");
+        let (status, out) = run_prelude("antiq_emit meta f 01ARZ meta.3", work.path());
+        assert_eq!((status, out.as_str()), (0, "@meta 01ARZ meta.3 2\nxy\n"));
+    }
+
+    fn frame(kind: &str, args: &[&str]) -> Frame {
+        Frame {
+            kind: kind.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            bytes: vec![],
+        }
+    }
+
+    #[test]
+    fn an_entry_with_the_wrong_number_of_fields_is_malformed() {
+        let error = parse_entries(&[frame("entry", &["a", "f", "1"])]).expect_err("short");
+        assert!(error.to_string().contains("wrong form"), "{error}");
+    }
+
+    #[test]
+    fn a_frame_of_another_kind_is_no_entry() {
+        let error = parse_entries(&[frame("object", &["a", "f", "1", "2"])]).expect_err("kind");
+        assert!(error.to_string().contains("wrong form"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_with_a_size_that_is_no_number_is_malformed() {
+        let error = parse_entries(&[frame("entry", &["a", "f", "big", "2"])]).expect_err("size");
+        assert!(error.to_string().contains("not one"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_with_a_time_out_of_range_is_malformed() {
+        let error = parse_entries(&[frame("entry", &["a", "f", "1", "99999999999999999"])])
+            .expect_err("time");
+        assert!(error.to_string().contains("out of range"), "{error}");
+    }
+
+    #[test]
+    fn a_metadata_frame_without_object_and_name_is_malformed() {
+        let error = parse_meta(vec![frame("meta", &["only-one"])], &KnownVersions::new())
+            .expect_err("form");
+        assert!(error.to_string().contains("wrong form"), "{error}");
+    }
+
+    #[test]
+    fn an_answer_without_a_file_frame_is_malformed() {
+        let error = file_bytes(vec![frame("sum", &[])]).expect_err("kind");
+        assert!(error.to_string().contains("missing"), "{error}");
+        let error = file_bytes(vec![]).expect_err("none");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn a_checksum_frame_without_a_hash_is_malformed() {
+        assert!(checksum_of(&[]).is_err());
+        assert!(checksum_of(&[frame("sum", &[])]).is_err());
+        assert!(checksum_of(&[frame("sum", &[&ABC.to_uppercase()])]).is_err());
+        assert_eq!(checksum_of(&[frame("sum", &[ABC])]).expect("hash"), ABC);
     }
 }
