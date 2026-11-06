@@ -300,7 +300,9 @@ The idle clock of a piece is the later of
 
 Directories, symlinks and special files do not count. A piece is due when
 its idle clock is older than `idle_days`; a day is 24 hours, and a piece
-exactly that old is not yet due. (ADR 0013, ADR 0037)
+exactly that old is not yet due. A piece that is not yet due is soon when
+it will be due in at most `soon_days` days; a piece that is due is not
+soon. (ADR 0013, ADR 0037)
 
 A file time or a marker time in the future counts like any other, so the
 piece is not due before that time has passed; `status` lists such files
