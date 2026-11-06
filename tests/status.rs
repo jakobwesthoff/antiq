@@ -271,7 +271,7 @@ fn every_note_shows_up_in_text_and_in_json() {
         &notes[1..],
         [
             "! 1 damaged version: tools/scan-old 2024-06-30 08:12:45 (no listing)",
-            "! 1 incomplete version: tools/scan-old 2024-07-01 08:12:45",
+            "! 1 incomplete version: tools/scan-old 2024-07-01T081245",
             "! 1 folder in recovered/: recovered/2024-09-01T000000/lost",
             "! 1 tree left in trash/: trash/2024-09-02T000000/tools",
             "! 1 leftover in doomed/: doomed/2024-09-03T000000/gone, first entry dir-y",

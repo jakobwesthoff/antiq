@@ -1453,8 +1453,10 @@ several are indented below it. The kinds, in this order:
   (`unreadable: <dir>`);
 - files in store folders whose names do not parse.
 
-Versions are shown by their local time with seconds, with the UTC offset
-added where two versions of a piece render alike. A tree in `trash/` or
+Damaged and newer-format versions are shown by their local time with
+seconds, with the UTC offset added where two of a piece render alike. An
+incomplete version is shown by its stamp, as it can be named by its stamp
+only. A tree in `trash/` or
 `recovered/` is named by the piece whose version has the tree's stamp,
 matched by the volume's name equality, and by the first component below the
 stamp when no version has it. Paths of these trees and of files in the

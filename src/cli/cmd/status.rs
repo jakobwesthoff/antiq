@@ -265,16 +265,23 @@ fn note(count_of: (&str, &str), items: Vec<String>) -> Vec<String> {
     }
 }
 
+/// A version as a note names it: the piece, the label of the version and
+/// the reasons it is damaged, if any.
+fn version_text(note: &VersionNote, label: &str) -> String {
+    let base = format!("{} {label}", shown(&note.piece));
+    if note.reasons.is_empty() {
+        base
+    } else {
+        format!("{base} ({})", sanitize(&note.reasons.join("; ")))
+    }
+}
+
 fn notes(report: &StatusReport, zone: &TimeZone) -> Vec<String> {
     // Versions of one piece that render alike get the UTC offset, so the
-    // labels are made for all the versions of a piece named in any note.
+    // labels are made for the damaged and newer-format versions of a piece.
+    // An incomplete version is named by its stamp only and takes no part.
     let mut stamps: BTreeMap<&RelPath, BTreeSet<Stamp>> = BTreeMap::new();
-    for version in report
-        .damaged
-        .iter()
-        .chain(&report.incomplete)
-        .chain(&report.newer_format)
-    {
+    for version in report.damaged.iter().chain(&report.newer_format) {
         stamps
             .entry(&version.piece)
             .or_default()
@@ -287,15 +294,8 @@ fn notes(report: &StatusReport, zone: &TimeZone) -> Vec<String> {
             labels.insert((piece, *stamp), label);
         }
     }
-    let version = |note: &VersionNote| {
-        let label = &labels[&(&note.piece, note.stamp)];
-        let base = format!("{} {label}", shown(&note.piece));
-        if note.reasons.is_empty() {
-            base
-        } else {
-            format!("{base} ({})", sanitize(&note.reasons.join("; ")))
-        }
-    };
+    let version = |note: &VersionNote| version_text(note, &labels[&(&note.piece, note.stamp)]);
+    let incomplete = |note: &VersionNote| version_text(note, &note.stamp.to_string());
 
     let mut future: Vec<&FutureTime> = report
         .pieces
@@ -348,7 +348,7 @@ fn notes(report: &StatusReport, zone: &TimeZone) -> Vec<String> {
     ));
     lines.extend(note(
         ("incomplete version", "incomplete versions"),
-        report.incomplete.iter().map(version).collect(),
+        report.incomplete.iter().map(incomplete).collect(),
     ));
     lines.extend(note(
         ("version in a newer format", "versions in a newer format"),
@@ -915,7 +915,7 @@ mod tests {
             &lines(&shown)[1..],
             [
                 "",
-                "! 1 incomplete version: notes 2026-11-04 09:02:11",
+                "! 1 incomplete version: notes 2026-11-04T090211",
                 "! 1 version in a newer format: notes 2026-11-05 09:02:11",
                 "! 1 folder in recovered/: recovered/2026-11-04T090211/projects",
                 "! 1 tree left in trash/: trash/2026-11-04T090211/projects/scanner",
@@ -933,7 +933,7 @@ mod tests {
     fn versions_that_render_alike_in_local_time_carry_the_utc_offset() {
         let berlin = TimeZone::get("Europe/Berlin").expect("the time zone database knows Berlin");
         let mut report = one(piece("a", Verdict::Plain, Some(2)));
-        report.incomplete = ["2026-10-25T003000", "2026-10-25T013000"]
+        report.newer_format = ["2026-10-25T003000", "2026-10-25T013000"]
             .iter()
             .map(|text| VersionNote {
                 piece: path("notes"),
@@ -947,9 +947,35 @@ mod tests {
         assert_eq!(
             &lines(&shown)[2..],
             [
-                "! 2 incomplete versions:",
+                "! 2 versions in a newer format:",
                 "    notes 2026-10-25 02:30:00 +02:00",
                 "    notes 2026-10-25 02:30:00 +01:00",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_incomplete_version_is_named_by_its_stamp_and_does_not_tell_others_apart() {
+        let berlin = TimeZone::get("Europe/Berlin").expect("the time zone database knows Berlin");
+        let mut report = one(piece("a", Verdict::Plain, Some(2)));
+        let note = |text: &str| VersionNote {
+            piece: path("notes"),
+            stamp: stamp(text),
+            reasons: vec!["no listing".to_string()],
+        };
+        report.damaged = vec![note("2026-10-25T003000")];
+        report.incomplete = vec![VersionNote {
+            reasons: Vec::new(),
+            ..note("2026-10-25T013000")
+        }];
+
+        let shown = render(&report, wide(), &berlin, now());
+
+        assert_eq!(
+            &lines(&shown)[2..],
+            [
+                "! 1 damaged version: notes 2026-10-25 02:30:00 (no listing)",
+                "! 1 incomplete version: notes 2026-10-25T013000",
             ]
         );
     }
