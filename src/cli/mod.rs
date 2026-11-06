@@ -317,32 +317,32 @@ impl Context {
 pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
-            let result = dispatch(&cli);
+            let result = dispatch(&cli, out);
             finish(&cli, result, out, policy::outcome)
         }
         Err(error) => report_usage_error(&error, &args, out),
     }
 }
 
-fn dispatch(cli: &Cli) -> anyhow::Result<u8> {
+fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
     let ctx = Context {
         json: cli.json,
         directory: cli.directory.clone(),
     };
     match &cli.command {
-        Command::Init(args) => cmd::init::run(&ctx, args),
-        Command::Status => cmd::status::run(&ctx),
-        Command::Archive(args) => cmd::archive::run(&ctx, args),
-        Command::Unearth(args) => cmd::unearth::run(&ctx, args),
-        Command::Find(args) => cmd::find::run(&ctx, args),
-        Command::Fork(args) => cmd::fork::run(&ctx, args),
-        Command::Pin(args) => cmd::pin::run(&ctx, args),
-        Command::Unpin(args) => cmd::unpin::run(&ctx, args),
-        Command::Sync(args) => cmd::sync::run(&ctx, args),
-        Command::Resolve(args) => cmd::resolve::run(&ctx, args),
-        Command::Remote { command } => cmd::remote::run(&ctx, command),
-        Command::Reconcile(args) => cmd::reconcile::run(&ctx, args),
-        Command::Import(args) => cmd::import::run(&ctx, args),
+        Command::Init(args) => cmd::init::run(&ctx, args, out),
+        Command::Status => cmd::status::run(&ctx, out),
+        Command::Archive(args) => cmd::archive::run(&ctx, args, out),
+        Command::Unearth(args) => cmd::unearth::run(&ctx, args, out),
+        Command::Find(args) => cmd::find::run(&ctx, args, out),
+        Command::Fork(args) => cmd::fork::run(&ctx, args, out),
+        Command::Pin(args) => cmd::pin::run(&ctx, args, out),
+        Command::Unpin(args) => cmd::unpin::run(&ctx, args, out),
+        Command::Sync(args) => cmd::sync::run(&ctx, args, out),
+        Command::Resolve(args) => cmd::resolve::run(&ctx, args, out),
+        Command::Remote { command } => cmd::remote::run(&ctx, command, out),
+        Command::Reconcile(args) => cmd::reconcile::run(&ctx, args, out),
+        Command::Import(args) => cmd::import::run(&ctx, args, out),
     }
 }
 

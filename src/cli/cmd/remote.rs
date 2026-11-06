@@ -4,8 +4,9 @@
 
 //! The `remote add`, `remote show` and `remote remove` commands.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, RemoteCommand};
 
-pub fn run(_ctx: &Context, args: &RemoteCommand) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, args: &RemoteCommand, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented(args.name())
 }

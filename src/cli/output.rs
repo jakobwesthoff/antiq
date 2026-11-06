@@ -129,6 +129,18 @@ impl Output {
         self.json(command, &payload)
     }
 
+    /// Writes a line of a command's result to stdout.
+    #[allow(dead_code, reason = "the commands print through it as they are built")]
+    pub fn line(&mut self, text: &str) -> io::Result<()> {
+        self.stdout.write_line(text)
+    }
+
+    /// Writes a line of a message to the user to stderr.
+    #[allow(dead_code, reason = "the commands print through it as they are built")]
+    pub fn note(&mut self, text: &str) -> io::Result<()> {
+        self.stderr.write_line(text)
+    }
+
     /// Writes what went wrong, then what the run was doing, to stderr.
     pub fn plain_error(&mut self, message: &str, contexts: &[String]) -> io::Result<()> {
         let label = if self.colored {
@@ -310,6 +322,44 @@ mod tests {
             .expect("a closed pipe is no error");
         out.json(Some("find"), &json!({}))
             .expect("a closed pipe is no error");
+        assert_eq!(
+            *flushes.lock().expect("no test panics while counting"),
+            1,
+            "nothing is written after the pipe closed"
+        );
+    }
+
+    #[test]
+    fn a_line_goes_to_stdout_and_a_note_to_stderr() {
+        let capture = Capture::default();
+        let mut out = capture.output(false);
+        out.line("Created the collection")
+            .expect("memory accepts writes");
+        out.note("nothing else was done")
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "Created the collection\n");
+        assert_eq!(capture.stderr(), "nothing else was done\n");
+    }
+
+    #[test]
+    fn a_line_to_a_closed_pipe_is_dropped() {
+        let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
+        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()), false);
+        out.line("one").expect("a closed pipe is no error");
+        out.line("two").expect("a closed pipe is no error");
+        assert_eq!(
+            *flushes.lock().expect("no test panics while counting"),
+            1,
+            "nothing is written after the pipe closed"
+        );
+    }
+
+    #[test]
+    fn a_note_to_a_closed_pipe_is_dropped() {
+        let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
+        let mut out = Output::new(Box::new(Vec::new()), Box::new(pipe), false);
+        out.note("one").expect("a closed pipe is no error");
+        out.note("two").expect("a closed pipe is no error");
         assert_eq!(
             *flushes.lock().expect("no test panics while counting"),
             1,

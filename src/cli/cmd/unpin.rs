@@ -4,8 +4,9 @@
 
 //! The `unpin` command.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, PieceArgs};
 
-pub fn run(_ctx: &Context, _args: &PieceArgs) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _args: &PieceArgs, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("unpin")
 }

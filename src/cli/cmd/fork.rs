@@ -4,8 +4,9 @@
 
 //! The `fork` command.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, ForkArgs};
 
-pub fn run(_ctx: &Context, _args: &ForkArgs) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _args: &ForkArgs, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("fork")
 }

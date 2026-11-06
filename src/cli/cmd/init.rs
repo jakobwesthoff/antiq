@@ -4,8 +4,9 @@
 
 //! The `init` command.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
 
-pub fn run(_ctx: &Context, _args: &InitArgs) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _args: &InitArgs, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("init")
 }

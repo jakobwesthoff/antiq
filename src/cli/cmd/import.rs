@@ -4,8 +4,9 @@
 
 //! The `import` command.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, ImportArgs};
 
-pub fn run(_ctx: &Context, _args: &ImportArgs) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _args: &ImportArgs, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("import")
 }

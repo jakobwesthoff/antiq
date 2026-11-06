@@ -5,7 +5,8 @@
 //! The `status` command.
 
 use crate::cli::Context;
+use crate::cli::output::Output;
 
-pub fn run(_ctx: &Context) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("status")
 }

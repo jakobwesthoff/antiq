@@ -4,8 +4,9 @@
 
 //! The `archive` command.
 
+use crate::cli::output::Output;
 use crate::cli::{Context, DryRunArgs};
 
-pub fn run(_ctx: &Context, _args: &DryRunArgs) -> anyhow::Result<u8> {
+pub fn run(_ctx: &Context, _args: &DryRunArgs, _out: &mut Output) -> anyhow::Result<u8> {
     super::not_implemented("archive")
 }
