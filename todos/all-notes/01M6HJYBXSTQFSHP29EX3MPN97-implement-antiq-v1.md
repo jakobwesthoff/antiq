@@ -2559,6 +2559,10 @@ the same commit; the lead checks that at acceptance.
   root, exit 1; the walk reports a collection marker deeper inside a
   piece as a problem, so such a piece is never archived (I03 follow-up
   batch).
+- 2026-11-04 (I11 delivery): `init` builds `.antiq-init-<pid>-<n>` and
+  renames it to `.antiq` without replacing, so the collection exists
+  complete or not at all; an invalid `--pattern` is a usage error (exit
+  2), an invalid pattern in the config stays kind `other`.
 
 ### I14
 
