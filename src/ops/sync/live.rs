@@ -857,12 +857,11 @@ fn plan_fork_removal(
             versions.len().checked_sub(2).map(|index| versions[index])
         }
     };
-    let Some(files) = before
+    // A version that cannot be read names nothing to remove.
+    let files = before
         .and_then(|number| read_version(&store, id, number))
         .map(|version| live_files(&version, machine))
-    else {
-        return;
-    };
+        .unwrap_or_default();
     let Some(heir) = heir_of(collection, &store, metadata, fork) else {
         return;
     };
@@ -3079,6 +3078,29 @@ mod tests {
         assert!(!shared.names(old).contains(&file));
     }
 
+    /// A second fork at the path `proj`, made by the same machine a second
+    /// later.
+    fn add_rival_fork(anna: &Machine, later: Timestamp) {
+        let rival = crate::ops::fork::forked_new(
+            anna.ids.mint(later),
+            anna.collection.id(),
+            &path("proj"),
+            anna.name,
+            later + jiff::SignedDuration::from_secs(1),
+        );
+        let lock = crate::lock::acquire(&anna.collection.lock_path(), anna.name, &anna.clock)
+            .expect("free");
+        anna.store().write_pending(&lock, &rival).expect("recorded");
+        let mut entry = crate::tracking::TrackingEntry::new(
+            rival.id,
+            path("proj"),
+            EntryState::Gone,
+            VersionTakenOut::Pending,
+            anna.clock.now(),
+        );
+        crate::tracking::write(&anna.collection, &lock, &anna.clock, &mut entry).expect("written");
+    }
+
     fn removals(actions: &[SyncAction], id: ObjectId) -> Vec<&SyncAction> {
         actions
             .iter()
@@ -3148,32 +3170,103 @@ mod tests {
         );
     }
 
+    /// The state of a fork whose change is committed and whose new ID has no
+    /// package yet: the first upload of the new ID failed.
+    fn fork_committed_without_the_new_package(shared: &Shared) -> (Machine, ObjectId, String) {
+        let (anna, old, file) = backed_up(shared);
+        fork_by_hand(&anna, old, "proj", None);
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&remote);
+        (anna, old, file)
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_for_a_committed_fork_whose_marker_is_gone() {
+        let shared = Shared::new();
+        let (anna, old, _) = fork_committed_without_the_new_package(&shared);
+        fs::remove_file(anna.collection.manifest_path(old)).expect("the marker goes");
+
+        let actions = anna.plan();
+
+        assert!(removals(&actions, old).is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_for_a_fork_whose_version_before_it_cannot_be_read() {
+        let shared = Shared::new();
+        let (anna, old, _) = fork_committed_without_the_new_package(&shared);
+        fs::write(anna.store().meta_path(old, 1), "not json").expect("damaged");
+
+        let actions = anna.plan();
+
+        assert!(removals(&actions, old).is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_when_two_forks_could_be_the_new_id() {
+        let shared = Shared::new();
+        let (anna, old, _) = backed_up(&shared);
+        let later = anna.clock.now() + jiff::SignedDuration::from_secs(5);
+        fork_by_hand(&anna, old, "proj", Some(later));
+        add_rival_fork(&anna, later);
+
+        let actions = anna.plan();
+
+        assert!(removals(&actions, old).is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_pack_for_a_piece_the_live_exclude_covers() {
+        let shared = Shared::new();
+        let mut anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        change(&folder, "a.txt", "hello again");
+        anna.set_setting("live_exclude = [\"proj\"]");
+
+        let actions = anna.plan();
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SyncAction::PackLive { .. })),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_does_not_stop_the_removal_of_the_local_packages() {
+        let shared = Shared::new();
+        let (anna, id, first) = backed_up(&shared);
+        let folder = anna.collection.root().join("proj");
+        change(&folder, "a.txt", "hello again");
+        anna.sync();
+        fs::write(anna.store().meta_path(id, 1), "not json").expect("damaged");
+        change(&folder, "a.txt", "hello once more");
+
+        let report = anna.sync();
+
+        assert_eq!(report.committed.len(), 1, "{report:?}");
+        let second = live_payloads(&anna, id).remove(0).file;
+        assert_ne!(second.as_str(), first);
+        assert!(
+            !anna
+                .collection
+                .object_dir(id)
+                .join(second.as_str())
+                .exists(),
+            "the newest package is not kept locally"
+        );
+    }
+
     #[test]
     fn two_forks_that_could_be_the_new_id_delete_nothing() {
         let shared = Shared::new();
         let (anna, old, file) = backed_up(&shared);
         let later = anna.clock.now() + jiff::SignedDuration::from_secs(5);
         fork_by_hand(&anna, old, "proj", Some(later));
-        // A second fork at the same path, made by the same machine.
-        let rival = crate::ops::fork::forked_new(
-            anna.ids.mint(later),
-            anna.collection.id(),
-            &path("proj"),
-            anna.name,
-            later + jiff::SignedDuration::from_secs(1),
-        );
-        let lock = crate::lock::acquire(&anna.collection.lock_path(), anna.name, &anna.clock)
-            .expect("free");
-        anna.store().write_pending(&lock, &rival).expect("recorded");
-        let mut entry = crate::tracking::TrackingEntry::new(
-            rival.id,
-            path("proj"),
-            EntryState::Gone,
-            VersionTakenOut::Pending,
-            anna.clock.now(),
-        );
-        crate::tracking::write(&anna.collection, &lock, &anna.clock, &mut entry).expect("written");
-        drop(lock);
+        add_rival_fork(&anna, later);
 
         let report = anna.sync();
 
