@@ -95,11 +95,77 @@ pub fn check(
     if !tree.problems().is_empty() {
         return Err(IdleError::Problems);
     }
+    let Times {
+        newest,
+        marker_ns,
+        future,
+    } = times(collection, tree, now.as_nanosecond())?;
+
+    // The marker's time never makes a piece non-empty: a piece without a
+    // countable file is empty whatever the marker says.
+    let Some(newest) = newest else {
+        return Ok(IdleCheck {
+            verdict: IdleVerdict::Empty,
+            future,
+        });
+    };
+    let now_ns = now.as_nanosecond();
+    let clock_ns = marker_ns.map_or(newest, |time| newest.max(time));
+    let clock = timestamp(clock_ns);
+    let left_ns = i128::from(settings.idle_days) * DAY_NS - (now_ns - clock_ns);
+    let verdict = if left_ns < 0 {
+        IdleVerdict::Idle { clock }
+    } else if left_ns <= i128::from(settings.soon_days) * DAY_NS {
+        IdleVerdict::Soon { clock }
+    } else {
+        IdleVerdict::Active { clock }
+    };
+    Ok(IdleCheck { verdict, future })
+}
+
+/// The idle clock of a piece and the paths of its files and markers whose
+/// times lie in the future, whatever the verdict is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleClock {
+    /// `None` when no file counts.
+    pub clock: Option<Timestamp>,
+    pub future: Vec<RelPath>,
+}
+
+/// The idle clock of the piece in `tree` at `now`, also for a pinned piece
+/// and for one the walk could not read completely, which have no verdict.
+/// The clock of an incomplete tree is the newest time among the entries
+/// the walk did see.
+pub fn clock(
+    collection: &TreeRoot,
+    tree: &PieceTree,
+    now: Timestamp,
+) -> Result<IdleClock, MarkerError> {
+    let Times {
+        newest,
+        marker_ns,
+        future,
+    } = times(collection, tree, now.as_nanosecond())?;
+    let clock = newest.map(|newest| timestamp(marker_ns.map_or(newest, |time| newest.max(time))));
+    Ok(IdleClock { clock, future })
+}
+
+/// What the entries and the marker of a piece say about time, in
+/// nanoseconds since the epoch.
+struct Times {
+    /// The newest time of a counted file.
+    newest: Option<i128>,
+    /// The time in `.antiq-restored`.
+    marker_ns: Option<i128>,
+    /// The files and the marker whose times lie after `now`, sorted.
+    future: Vec<RelPath>,
+}
+
+fn times(collection: &TreeRoot, tree: &PieceTree, now_ns: i128) -> Result<Times, MarkerError> {
     let restored = markers::read_restored(collection, tree.top())?;
 
     // Times are compared as nanoseconds: a time the file system reports
     // can lie outside what a `Timestamp` holds.
-    let now_ns = now.as_nanosecond();
     let mut future = Vec::new();
     let mut newest: Option<i128> = None;
     for entry in tree.entries() {
@@ -116,26 +182,11 @@ pub fn check(
         future.push(RelPath::parse(RESTORED_FILE).expect("the marker name is a valid path"));
     }
     future.sort();
-
-    // The marker's time never makes a piece non-empty: a piece without a
-    // countable file is empty whatever the marker says.
-    let Some(newest) = newest else {
-        return Ok(IdleCheck {
-            verdict: IdleVerdict::Empty,
-            future,
-        });
-    };
-    let clock_ns = marker_ns.map_or(newest, |time| newest.max(time));
-    let clock = timestamp(clock_ns);
-    let left_ns = i128::from(settings.idle_days) * DAY_NS - (now_ns - clock_ns);
-    let verdict = if left_ns < 0 {
-        IdleVerdict::Idle { clock }
-    } else if left_ns <= i128::from(settings.soon_days) * DAY_NS {
-        IdleVerdict::Soon { clock }
-    } else {
-        IdleVerdict::Active { clock }
-    };
-    Ok(IdleCheck { verdict, future })
+    Ok(Times {
+        newest,
+        marker_ns,
+        future,
+    })
 }
 
 /// The timestamp for `ns` nanoseconds since the epoch; a time that
@@ -1135,5 +1186,86 @@ mod tests {
             run_ruled(&tree, &["vendor/"]).expect("checks"),
             idle(-100 * DAY)
         );
+    }
+
+    // =========================================================
+    // The clock without a verdict
+    // =========================================================
+
+    fn clock_of(tree: &Tree) -> Result<IdleClock, MarkerError> {
+        let root = TreeRoot::open(tree.root()).expect("the root opens");
+        clock(&root, &walk(&root), at(0))
+    }
+
+    #[test]
+    fn a_pinned_piece_has_its_clock() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiq-pin", "");
+        file(&mut tree, "old", -100 * DAY);
+
+        let found = clock_of(&tree).expect("the clock is read");
+
+        assert_eq!(found.clock, Some(at(-100 * DAY)));
+    }
+
+    #[test]
+    fn the_clock_takes_a_later_marker_time() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        tree.file("piece/.antiq-restored", "restored 2033-05-18T03:33:20Z\n");
+
+        let found = clock_of(&tree).expect("the clock is read");
+
+        // NOW is 2033-05-18T03:33:20Z.
+        assert_eq!(found.clock, Some(at(0)));
+    }
+
+    #[test]
+    fn a_piece_without_a_counted_file_has_no_clock() {
+        let mut tree = Tree::new();
+        tree.dir("piece/a");
+        tree.file("piece/.antiq-restored", "restored 2033-05-18T03:33:20Z\n");
+
+        let found = clock_of(&tree).expect("the clock is read");
+
+        assert_eq!(found.clock, None);
+    }
+
+    #[test]
+    fn a_piece_the_walk_could_not_read_has_the_clock_of_what_was_seen() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        let locked = tree.unreadable_dir("piece/locked");
+        assert!(
+            fs::read_dir(&locked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let found = clock_of(&tree).expect("the clock is read");
+
+        assert_eq!(found.clock, Some(at(-100 * DAY)));
+    }
+
+    #[test]
+    fn a_pinned_piece_lists_its_future_files_and_marker() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiq-pin", "");
+        file(&mut tree, "later", 5 * DAY);
+        tree.file("piece/.antiq-restored", "restored 2033-05-19T03:33:20Z\n");
+
+        let found = clock_of(&tree).expect("the clock is read");
+
+        assert_eq!(found.future, [path(".antiq-restored"), path("later")]);
+    }
+
+    #[test]
+    fn an_unparsable_marker_fails_the_clock() {
+        let mut tree = Tree::new();
+        file(&mut tree, "old", -100 * DAY);
+        tree.file("piece/.antiq-restored", "garbage\n");
+
+        let error = clock_of(&tree).expect_err("the marker does not parse");
+
+        assert!(matches!(error, MarkerError::Invalid { .. }), "{error}");
     }
 }
