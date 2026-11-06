@@ -832,6 +832,9 @@ impl Repairs<'_> {
         entry.state = EntryState::Live;
         entry.unearthed = Some(entry.written);
         entry.version_taken_out = taken_out(source);
+        // The folder is back, so the package it came from is not behind
+        // the folder any more.
+        entry.stale_backup_since = None;
         self.write(entry)
     }
 
@@ -2792,6 +2795,54 @@ mod tests {
         assert_eq!(entry.state, EntryState::Live);
         assert_eq!(entry.unearthed_payload_version, Some(1));
         assert_eq!(entry.unearthed, Some(time(WRITTEN)));
+    }
+
+    #[test]
+    fn a_recorded_unearth_clears_the_stale_mark_of_the_entry_it_settles() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        record_the_unearth(&world, ID);
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.stale_backup_since = Some(time(NOW));
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.stale_backup_since, None);
+    }
+
+    #[test]
+    fn an_unearthing_whose_metadata_change_repair_records_clears_the_stale_mark() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.stale_backup_since = Some(time(NOW));
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Live);
+        assert_eq!(entry.stale_backup_since, None);
+    }
+
+    #[test]
+    fn a_dropped_unearthing_keeps_the_stale_mark() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        let mut entry = unearthing(&world, ID, "projects/a");
+        entry.committed_versions = vec![1];
+        entry.stale_backup_since = Some(time(NOW));
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.stale_backup_since, Some(time(NOW)));
     }
 
     #[test]

@@ -358,6 +358,11 @@ fn place(
             entry.state = EntryState::Live;
             entry.unearthed = Some(unearthed);
             entry.version_taken_out = VersionTakenOut::Pending;
+            // The folder is back, so the package it came from is not behind
+            // the folder any more.
+            if plan.source == UnearthSource::LivePackage {
+                entry.stale_backup_since = None;
+            }
             tracking::write(collection, lock, clock, &mut entry)?;
             warnings.extend(Arrived::update_index(collection, lock, &stored));
             warnings.extend(live::finish(collection, plan));

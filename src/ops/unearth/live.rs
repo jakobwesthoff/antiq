@@ -95,7 +95,8 @@ fn package_warnings(plan: &UnearthPlan) -> Vec<Warning> {
 }
 
 /// The entry of a gone piece while it comes back: what it listed stays,
-/// and the stale mark of the package it comes back from is cleared.
+/// and so does the stale mark of the package it comes back from, until the
+/// folder is in place.
 pub(super) fn restore_entry(plan: &UnearthPlan) -> TrackingEntry {
     let mut entry = plan
         .entry
@@ -107,7 +108,6 @@ pub(super) fn restore_entry(plan: &UnearthPlan) -> TrackingEntry {
     entry.unearthed = None;
     entry.unearthed_payload_version = None;
     entry.removing_payload = None;
-    entry.stale_backup_since = None;
     entry.set_diverged(false);
     entry
 }
@@ -442,6 +442,31 @@ mod tests {
         live.unearth().expect("the unearth works");
 
         assert_eq!(live.fx.entry(ID).stale_backup_since, None);
+    }
+
+    #[test]
+    fn the_unearthing_entry_of_a_restore_keeps_the_stale_mark_until_the_folder_is_in_place() {
+        let live = Live::own();
+        mark_stale(&live);
+        let seen = std::cell::RefCell::new(None);
+        let rename = |from: &TreeRoot, from_name: &RelPath, to: &TreeRoot, to_name: &RelPath| {
+            let entry = live.fx.entry(ID);
+            *seen.borrow_mut() = Some((entry.state, entry.stale_backup_since));
+            crate::fsx::moves::move_dir(from, from_name, to, to_name)
+        };
+        let rename: super::super::local::Rename<'_> = &rename;
+
+        live.unearth_through(
+            &live.fx.request(ID),
+            Some(&live.remote),
+            &Live::environment(&available_space, &rename),
+        )
+        .expect("the unearth works");
+
+        assert_eq!(
+            seen.into_inner(),
+            Some((EntryState::Unearthing, Some(time("2026-11-03T09:00:00Z"))))
+        );
     }
 
     #[test]
