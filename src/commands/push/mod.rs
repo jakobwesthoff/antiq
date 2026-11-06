@@ -168,7 +168,9 @@ pub enum PushError {
     /// the modes of the files it wrote.
     #[diagnostic(
         code(antiq::push::target_refuses_modes),
-        help("Add this to `.antiq/config.toml`:\n\n  [target]\n  rsync_args = [\"--no-perms\"]")
+        help(
+            "Add this to `.antiq/config.toml`:\n\n  [target]\n  rsync_args = [\"--no-perms\"]\n\nFiles in the live folders on the target then get the share's own modes, while the archived versions keep theirs."
+        )
     )]
     #[error("the mirror failed: the target does not let rsync set file modes (rsync exit 23)")]
     TargetRefusesModes {

@@ -271,6 +271,9 @@ way to reach a NAS.
 > [target]
 > rsync_args = ["--no-perms"]
 > ```
+>
+> Files in the live folders on the target then get the share's own modes,
+> while the archived versions keep theirs.
 
 A push that fails names the log of the run, a compressed file with
 everything rsync printed. On macOS the logs are in `~/Library/Logs/antiq`,

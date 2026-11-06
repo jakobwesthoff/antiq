@@ -1865,7 +1865,9 @@ target. `--init` and `--force` are each refused together with
    set file modes. `push` then fails with the message "the mirror failed:
    the target does not let rsync set file modes (rsync exit 23)", the code
    `antiq::push::target_refuses_modes` and kind `other`. Its fix names
-   `rsync_args = ["--no-perms"]` under `[target]` in `.antiq/config.toml`.
+   `rsync_args = ["--no-perms"]` under `[target]` in `.antiq/config.toml`
+   and says that the files in the live folders on the target then get the
+   share's own modes, while the archived versions keep theirs.
    Any other refusal of the receiver gets the generic message. The `IO error
    encountered` case takes precedence when both apply. Exit 12 with ``unrecognized option `--fsync'``
    (openrsync) or `--fsync: unknown option` (older rsync) is reported as:

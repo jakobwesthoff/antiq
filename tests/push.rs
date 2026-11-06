@@ -1770,6 +1770,10 @@ fn a_target_that_refuses_file_modes_gets_the_option_that_fixes_it() {
         );
         let fix = run.error_fix();
         assert!(fix.contains("rsync_args = [\"--no-perms\"]"), "{fix}");
+        assert!(
+            fix.contains("get the share's own modes, while the archived versions keep theirs"),
+            "{fix}"
+        );
         assert!(!fix.contains("does not let rsync set file modes"), "{fix}");
         assert!(!fix.contains("[receiver]"), "{fix}");
         assert!(json["error"].get("rsync_said").is_none());
