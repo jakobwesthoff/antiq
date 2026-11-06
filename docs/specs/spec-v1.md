@@ -1837,8 +1837,25 @@ target. `--init` and `--force` are each refused together with
 8. **Result.** rsync exit 0 is success; 24 (files vanished during the run)
    is success with a note on stderr naming the paths of the `file has
    vanished` lines. Everything else, including any failure after the pre-check, is
-   exit 1 with rsync's message (rsync ended by a signal included), also
-   under `--if-reachable`. With exit 23
+   exit 1 (rsync ended by a signal included), also under `--if-reachable`.
+   The message is "the mirror failed: rsync ended with exit N (<meaning>)",
+   where the meaning is the one `rsync(1)` documents for the exit code
+   (23: "some files or attributes were not transferred"; 255, the code of
+   ssh: "ssh reported an error"), or "rsync was ended by signal N". An
+   undocumented exit code has no meaning in the message. What rsync said on
+   stderr follows in a section of its own, "What rsync said" on a terminal
+   and `rsync said:` in a pipe: lines are grouped by their text with each
+   double-quoted part replaced by `"…"`, in order of first appearance, and
+   the first 5 groups show as `<count>× <line>` with `e.g. <what the first
+   line quoted>` under it, then `and N more kinds of lines`, then `Full
+   output: <path of the run log>` and the command that reads it (see
+   "Run log"). The JSON error carries the same as `program_said`,
+   `{"program": "rsync", "groups": [{"count": <n>, "line": "...",
+   "example": "..." | null}, ...]}` with all groups, and `log`, the path
+   of the log or `null`, and `log_warning` where the log is missing or
+   incomplete. A failure that has a log but no
+   words of rsync, such as a refused rsync, names the log in a section
+   "Run log" (`log:` in a pipe). With exit 23
    and the line `IO error encountered -- skipping file deletion`, push
    says that no deletion reached the target and names the directories
    rsync could not open. With exit 23 and a line of the target's side
@@ -1848,10 +1865,7 @@ target. `--init` and `--force` are each refused together with
    the target does not let rsync set file modes (rsync exit 23)", the code
    `antiq::push::target_refuses_modes` and kind `other`. Its fix names
    `rsync_args = ["--no-perms"]` under `[target]` in `.antiq/config.toml`.
-   The first three lines of rsync's error output and the number of the
-   lines beyond them follow in a section of their own, "What rsync said"
-   on a terminal and `rsync said:` in a pipe; the JSON error carries them
-   as `rsync_said`, `{"lines": [...], "more": <count>}`. The `IO error
+   Any other refusal of the receiver gets the generic message. The `IO error
    encountered` case takes precedence when both apply. Exit 12 with ``unrecognized option `--fsync'``
    (openrsync) or `--fsync: unknown option` (older rsync) is reported as:
    the target's rsync (openrsync, or older than 3.2.4) lacks `--fsync`;
@@ -1878,6 +1892,27 @@ target. `--init` and `--force` are each refused together with
    updated, N deleted`, a sentence that says the marker now records this
    antiq collection and host, and a table with the columns PIECE, CREATED,
    UPDATED and DELETED for the other files; a zero is dim.
+
+### Run log
+
+Every run of `push` that starts rsync writes one log of everything the
+rsync calls of the run printed. The probe, the listing, the marker runs and
+the mirror runs append to it, each with its command line, its start time,
+every line of standard output and standard error marked by its stream and
+its offset from the start of the call, and its exit code or signal and
+duration. A line is stamped with the time its first byte arrived, so a
+progress line can appear in the file after a later error line. Nothing is
+left out. The log is a zstd stream; `zstd -dc <path> | less` reads it.
+(ADR 0066)
+
+The logs are in `~/Library/Logs/antiq` on macOS, else in `antiq` in the
+state directory (`$XDG_STATE_HOME`, else `~/.local/state`). Each collection
+has a directory named by its folder name and 8 hex digits of the hash of
+its canonical path, and each log is `<command>-<local time>.log.zst` in it.
+Directories are mode 0700 and files 0600. `push` keeps the 10 newest logs
+of a collection, and a run that fails renames its log to end in
+`-failed.log.zst`; the newest such log is kept beyond the 10. A log that
+cannot be written is a warning in the report and does not fail the push.
 
 With `--fsync` the target flushes each file's content before it is renamed
 into place; a power loss can then at most lose the newest names, which the
@@ -2420,7 +2455,8 @@ fails to parse before naming a command has `"command": null`. An error is
   `message` and is absent where that explanation has no help. A usage
   error of the command line parser carries neither `code` nor `fix`.
 - The details are the keys that a kind adds, such as `pid` and `started`.
-  The error of a push to a target that refuses file modes adds `rsync_said`.
+  The error of a failed rsync run adds `program_said`, and `log` and
+  `log_warning` where a log exists (see "Run log").
 
 `push` over a held lock:
 

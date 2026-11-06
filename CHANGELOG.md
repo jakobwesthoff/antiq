@@ -37,6 +37,10 @@ target.
 - `push` mirrors the live folders and the versions to a local or ssh
   target with rsync 3.2.4 or newer; `--init` claims the target,
   `--if-reachable` lets an unattended run skip an unreachable one
+- A failed `push` names a compressed log of everything rsync printed
+  (`zstd -dc <path> | less` reads it) and groups similar error lines
+  under the exit code's meaning; antiq keeps the last 10 logs of a
+  collection
 - Progress cards with a bar for every piece on a terminal, plain lines in
   a pipe, and one JSON object with `--json`
 - `-n` / `--dry-run` on every command that changes something

@@ -29,9 +29,9 @@ pub const SUFFIX: &str = ".log.zst";
 /// one of these beyond the [`KEPT`] newest logs.
 const FAILED_SUFFIX: &str = "-failed.log.zst";
 
-/// How long output may wait in the compressor. A run that is killed loses at
-/// most this much of its stdout; stderr lines and the ends of calls are
-/// flushed at once.
+/// How long a line of stdout may wait in the compressor before the next line
+/// flushes it. Stderr lines and the starts and ends of calls are flushed at
+/// once.
 const FLUSH_AFTER: Duration = Duration::from_secs(1);
 
 /// How many characters of the collection's folder name go into the name of

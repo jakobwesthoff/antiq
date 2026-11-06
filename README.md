@@ -272,6 +272,12 @@ way to reach a NAS.
 > rsync_args = ["--no-perms"]
 > ```
 
+A push that fails names the log of the run, a compressed file with
+everything rsync printed. On macOS the logs are in `~/Library/Logs/antiq`,
+elsewhere in `antiq` in the state directory, and the error shows the
+command that reads one: `zstd -dc <path> | less`. antiq keeps the 10 newest
+logs of a collection.
+
 The target is a mirror, not a backup: whatever is deleted in the
 collection is deleted on the target by the next push. The reference below
 says more under "Good to know".
