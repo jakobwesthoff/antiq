@@ -52,13 +52,22 @@ pub enum NameProblem {
     SymlinkUnsupported {
         path: RelPath,
     },
+    /// A symlink whose target is longer than the volume stores.
+    TargetTooLong {
+        path: RelPath,
+        length: usize,
+        limit: usize,
+    },
 }
 
 /// What a member is, as far as the volume's rules care.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberKind {
     Plain,
-    Symlink,
+    /// A symlink; the length of its target in bytes, as stored.
+    Symlink {
+        target_len: usize,
+    },
     HardLink,
 }
 
@@ -118,6 +127,14 @@ impl fmt::Display for NameProblem {
             NameProblem::SymlinkUnsupported { path } => {
                 write!(f, "`{path}` is a symlink, which this volume cannot hold")
             }
+            NameProblem::TargetTooLong {
+                path,
+                length,
+                limit,
+            } => write!(
+                f,
+                "`{path}` points to a target of {length} bytes, the volume allows {limit}"
+            ),
         }
     }
 }
@@ -156,6 +173,7 @@ impl TargetRules {
             requires_utf8: true,
             hard_links: true,
             symlinks: true,
+            symlink_target_limit: 1023,
             name_limit: NameLimit {
                 max: 255,
                 unit: LengthUnit::Utf16Units,
@@ -172,6 +190,7 @@ impl TargetRules {
             requires_utf8: false,
             hard_links: true,
             symlinks: true,
+            symlink_target_limit: 4095,
             name_limit: NameLimit {
                 max: 255,
                 unit: LengthUnit::Bytes,
@@ -260,8 +279,15 @@ pub fn check_members(members: &[MemberName], rules: &TargetRules) -> Vec<NamePro
             MemberKind::HardLink if !rules.hard_links => {
                 problems.push(NameProblem::HardLinkUnsupported { path: path.clone() });
             }
-            MemberKind::Symlink if !rules.symlinks => {
+            MemberKind::Symlink { .. } if !rules.symlinks => {
                 problems.push(NameProblem::SymlinkUnsupported { path: path.clone() });
+            }
+            MemberKind::Symlink { target_len } if target_len > rules.symlink_target_limit => {
+                problems.push(NameProblem::TargetTooLong {
+                    path: path.clone(),
+                    length: target_len,
+                    limit: rules.symlink_target_limit,
+                });
             }
             _ => {}
         }
@@ -422,6 +448,14 @@ const NAME_LIMIT_UNIT: LengthUnit = if cfg!(target_os = "macos") {
     LengthUnit::Bytes
 };
 
+/// The longest symlink target in bytes: one below the platform's path
+/// limit of 1024 on macOS and 4096 on Linux.
+const SYMLINK_TARGET_LIMIT: usize = if cfg!(target_os = "macos") {
+    1023
+} else {
+    4095
+};
+
 impl TargetRules {
     /// The rules of the volume that `root` is on, found by trying them in
     /// a directory of their own below `root`, which is empty again when
@@ -462,6 +496,7 @@ impl TargetRules {
             requires_utf8,
             hard_links,
             symlinks,
+            symlink_target_limit: SYMLINK_TARGET_LIMIT,
             name_limit: NameLimit {
                 max,
                 unit: NAME_LIMIT_UNIT,
@@ -705,12 +740,79 @@ mod tests {
 
     #[test]
     fn a_symlink_is_a_problem_on_a_volume_without_symlinks() {
-        let members = [member("link", MemberKind::Symlink)];
+        let members = [member("link", MemberKind::Symlink { target_len: 4 })];
         assert_eq!(
             check_members(&members, &without_links()),
             [NameProblem::SymlinkUnsupported { path: rel("link") }]
         );
         assert_eq!(check_members(&members, &TargetRules::linux()), []);
+    }
+
+    fn symlink_with_target(target_len: usize) -> [MemberName; 1] {
+        [member("link", MemberKind::Symlink { target_len })]
+    }
+
+    #[test]
+    fn a_symlink_target_of_1023_bytes_fits_on_macos() {
+        assert_eq!(
+            check_members(&symlink_with_target(1023), &TargetRules::macos()),
+            []
+        );
+    }
+
+    #[test]
+    fn a_symlink_target_of_1024_bytes_is_too_long_on_macos() {
+        assert_eq!(
+            check_members(&symlink_with_target(1024), &TargetRules::macos()),
+            [NameProblem::TargetTooLong {
+                path: rel("link"),
+                length: 1024,
+                limit: 1023,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_symlink_target_of_4095_bytes_fits_on_linux_and_4096_does_not() {
+        assert_eq!(
+            check_members(&symlink_with_target(4095), &TargetRules::linux()),
+            []
+        );
+        assert_eq!(
+            check_members(&symlink_with_target(4096), &TargetRules::linux()),
+            [NameProblem::TargetTooLong {
+                path: rel("link"),
+                length: 4096,
+                limit: 4095,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_symlink_on_a_volume_without_symlinks_is_not_also_measured() {
+        let rules = TargetRules {
+            symlinks: false,
+            ..TargetRules::macos()
+        };
+        assert_eq!(
+            check_members(&symlink_with_target(5000), &rules),
+            [NameProblem::SymlinkUnsupported { path: rel("link") }]
+        );
+    }
+
+    #[test]
+    fn archive_time_warnings_include_a_target_macos_cannot_hold() {
+        assert_eq!(
+            portability_warnings(&symlink_with_target(1024)),
+            [PortabilityWarning {
+                platform: Platform::MacOs,
+                problem: NameProblem::TargetTooLong {
+                    path: rel("link"),
+                    length: 1024,
+                    limit: 1023,
+                },
+            }]
+        );
     }
 
     #[test]
@@ -719,7 +821,7 @@ mod tests {
             assert!(rules.hard_links && rules.symlinks);
         }
         let members = [
-            member("link", MemberKind::Symlink),
+            member("link", MemberKind::Symlink { target_len: 4 }),
             member("again", MemberKind::HardLink),
         ];
         assert_eq!(portability_warnings(&members), []);
@@ -851,6 +953,12 @@ mod tests {
             collision(&["a", "b", "c"]).to_string(),
             NameProblem::HardLinkUnsupported { path: rel("h") }.to_string(),
             NameProblem::SymlinkUnsupported { path: rel("s") }.to_string(),
+            NameProblem::TargetTooLong {
+                path: rel("t"),
+                length: 1024,
+                limit: 1023,
+            }
+            .to_string(),
             PortabilityWarning {
                 platform: Platform::MacOs,
                 problem: collision(&["a", "A"]),
@@ -872,6 +980,7 @@ mod tests {
                 "`a`, `b` and `c` become one name on this volume".to_string(),
                 "`h` is a hard link, which this volume cannot hold".to_string(),
                 "`s` is a symlink, which this volume cannot hold".to_string(),
+                "`t` points to a target of 1024 bytes, the volume allows 1023".to_string(),
                 "on macOS: `a` and `A` become one name on this volume".to_string(),
                 "on Linux: `a` and `A` become one name on this volume".to_string(),
             ]
@@ -993,6 +1102,7 @@ mod probe_tests {
         let rules = TargetRules::probe(&root).expect("the probe runs");
         assert!(rules.hard_links);
         assert!(rules.symlinks);
+        assert_eq!(rules.symlink_target_limit, SYMLINK_TARGET_LIMIT);
         assert!(is_empty(&root));
     }
 
@@ -1065,6 +1175,7 @@ mod probe_tests {
         assert_eq!(rules.name_limit.max, name_max);
         assert_eq!(rules.name_limit.unit, LengthUnit::Utf16Units);
         assert!(!rules.decomposes, "APFS keeps names as written");
+        assert_eq!(rules.symlink_target_limit, 1023);
     }
 
     /// A disk image with a file system of its own, attached below a temp

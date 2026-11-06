@@ -96,6 +96,10 @@ own on the staging volume and reads the answers. Disk images made with
 - exFAT answers a name that is not UTF-8 with `EINVAL`, where APFS
   answers `EILSEQ` (**measured**). The probe takes both as "the volume
   refuses such names".
+- On APFS a symlink target of 1023 bytes is created and one of 1024
+  fails with errno 63, "File name too long" (**measured**, 2026-11-04).
+  The limit for Linux, 4095, is the path limit of 4096 less one; it was
+  not run on Linux.
 - On exFAT and on FAT32 (`-fs MS-DOS`) a hard link fails with errno 45,
   "Operation not supported", and a symlink is created (**measured**).
   The probe tries both calls once and takes only `EPERM`, `ENOTSUP` and

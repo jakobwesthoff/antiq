@@ -136,6 +136,8 @@ pub struct TargetRules {
     pub hard_links: bool,
     /// A symlink can be created.
     pub symlinks: bool,
+    /// The longest symlink target in bytes, as stored.
+    pub symlink_target_limit: usize,
     /// The longest name one directory entry can have.
     pub name_limit: names::NameLimit,
 }

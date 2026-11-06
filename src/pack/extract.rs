@@ -626,7 +626,9 @@ fn gather(package: &Path) -> Result<Vec<MemberName>, PackError> {
             .map_err(|refusal| member.refused(refusal))?;
         if !member.path.is_root() {
             let kind = match member.kind {
-                Kind::Symlink(_) => MemberKind::Symlink,
+                Kind::Symlink(target) => MemberKind::Symlink {
+                    target_len: target.len(),
+                },
                 Kind::HardLink(_) => MemberKind::HardLink,
                 Kind::Directory | Kind::File => MemberKind::Plain,
             };
@@ -1944,6 +1946,43 @@ mod tests {
         assert_eq!(
             name_problems(&archive, &rules),
             [names::NameProblem::SymlinkUnsupported { path: rel("link") }]
+        );
+    }
+
+    fn symlink_with_target_of(length: usize) -> RawArchive {
+        let mut archive = container();
+        archive.long_link(&vec![b't'; length]).member(
+            b"proj/link",
+            b'2',
+            0o777,
+            1_000_000_000,
+            b"t",
+            b"",
+        );
+        archive
+    }
+
+    #[test]
+    fn a_symlink_target_longer_than_the_volume_stores_is_refused_up_front() {
+        assert_eq!(
+            name_problems(&symlink_with_target_of(1024), &TargetRules::macos()),
+            [names::NameProblem::TargetTooLong {
+                path: rel("link"),
+                length: 1024,
+                limit: 1023,
+            }]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_symlink_target_of_1023_bytes_is_extracted_on_apfs() {
+        let (_dir, staged) = staging();
+        let package = package_file(&symlink_with_target_of(1023).finish());
+        unpack(&package.path, &staged, &TargetRules::macos()).expect("the target fits");
+        assert_eq!(
+            staged.read_link(&rel("link")).expect("a symlink").len(),
+            1023
         );
     }
 
