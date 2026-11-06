@@ -556,12 +556,12 @@ mod tests {
 
     #[test]
     fn a_command_without_an_implementation_reports_not_implemented() {
-        let (code, stdout, stderr) = run_captured(&["--json", "status"]);
+        let (code, stdout, stderr) = run_captured(&["--json", "archive"]);
         assert_eq!(code, 1);
         assert_eq!(
             stdout,
-            "{\"format\":1,\"command\":\"status\",\"error\":\
-             {\"kind\":\"not_implemented\",\"message\":\"status is not implemented\"}}\n"
+            "{\"format\":1,\"command\":\"archive\",\"error\":\
+             {\"kind\":\"not_implemented\",\"message\":\"archive is not implemented\"}}\n"
         );
         assert_eq!(stderr, "");
     }

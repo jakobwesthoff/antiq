@@ -86,7 +86,7 @@ pub enum PieceKind {
 }
 
 impl Piece {
-    fn new(id: Option<ObjectId>, path: RelPath, name: Name, state: PieceKind) -> Piece {
+    pub fn new(id: Option<ObjectId>, path: RelPath, name: Name, state: PieceKind) -> Piece {
         Piece {
             id,
             path,
@@ -94,6 +94,7 @@ impl Piece {
             state,
             flags: Vec::new(),
             remote_only_in_days: None,
+            archives_in_days: None,
             age_days: None,
             detail: Detail::default(),
             unearthed: None,
@@ -203,6 +204,10 @@ pub struct Piece {
     /// archived piece whose archive is on the remote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_only_in_days: Option<i64>,
+    /// Whole days until the piece is idle and the next `archive` takes it,
+    /// for a piece that is active and not diverged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archives_in_days: Option<i64>,
     /// Whole days since the idle clock, where the piece has a verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_days: Option<i64>,
@@ -612,7 +617,14 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
         // walked nor judged.
         if has_folder && piece.detail.below_unreadable.is_none() {
             let tree = walk::walk_piece_with(&root, &piece.path, &junk, &rules, walk_hooks)?;
-            judge(piece, &tree, &root, idle_settings.as_ref(), now)?;
+            judge(
+                piece,
+                &tree,
+                &root,
+                idle_settings.as_ref(),
+                config.idle_days,
+                now,
+            )?;
         }
         piece.flags.sort();
         piece.flags.dedup();
@@ -685,6 +697,7 @@ fn judge(
     tree: &PieceTree,
     root: &TreeRoot,
     settings: Option<&idle::Settings>,
+    idle_days: u32,
     now: Timestamp,
 ) -> Result<(), StatusError> {
     // The walk reports paths relative to the piece's top, which is the
@@ -744,7 +757,14 @@ fn judge(
         IdleVerdict::Pinned => piece.flags.push(Flag::Pinned),
         IdleVerdict::Empty => piece.flags.push(Flag::Empty),
         IdleVerdict::OnlyFuture => {}
-        IdleVerdict::Active { clock, .. } => note_age(piece, clock, now),
+        IdleVerdict::Active { clock, .. } => {
+            note_age(piece, clock, now);
+            // A diverged folder waits for a decision, not for archiving.
+            if !piece.diverged {
+                let left = i64::from(idle_days) * 86_400 - (now.as_second() - clock.as_second());
+                piece.archives_in_days = Some((left + 86_399).div_euclid(86_400).max(1));
+            }
+        }
         IdleVerdict::Idle { clock, .. } => {
             note_age(piece, clock, now);
             // A diverged folder waits for a decision, not for archiving.
@@ -2067,6 +2087,37 @@ mod tests {
         let piece = world.only();
         assert_eq!(piece.state, PieceKind::Live);
         assert_eq!(piece.flags, [Flag::Idle]);
+    }
+
+    #[test]
+    fn an_active_piece_knows_the_days_until_it_is_archived() {
+        let mut world = world();
+        world.file("busy/note.txt", 3);
+        assert_eq!(world.only().archives_in_days, Some(11));
+    }
+
+    #[test]
+    fn a_piece_archived_within_the_day_has_one_day_left() {
+        let mut world = world();
+        world.file("busy/note.txt", 14);
+        assert_eq!(world.only().archives_in_days, Some(1));
+    }
+
+    #[test]
+    fn an_idle_piece_has_no_days_left() {
+        let mut world = world();
+        world.file("old/note.txt", 30);
+        assert_eq!(world.only().archives_in_days, None);
+    }
+
+    #[test]
+    fn a_diverged_active_piece_is_not_archived_later() {
+        let mut world = world();
+        world.file("work/note.txt", 3);
+        let mut entry = world.live_entry_of("work", true);
+        entry.diverged = true;
+        world.write_entry(&entry);
+        assert_eq!(world.only().archives_in_days, None);
     }
 
     #[test]

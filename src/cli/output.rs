@@ -75,13 +75,11 @@ const DEFAULT_WIDTH: usize = 80;
 
 /// How data on stdout is laid out and coloured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "the commands render through it as they are built")]
 pub struct Style {
     pub width: usize,
     pub color: bool,
 }
 
-#[allow(dead_code, reason = "the commands render through it as they are built")]
 impl Style {
     /// The style for a stream. `columns` is what the terminal reports, if
     /// the stream is one. Without a terminal the width is 80 and nothing
@@ -117,7 +115,6 @@ impl Style {
 
 /// The columns a terminal reports for itself, `None` when the stream is
 /// no terminal or reports none.
-#[allow(dead_code, reason = "the commands render through it as they are built")]
 pub fn terminal_columns(stream: impl AsFd) -> Option<u16> {
     let size = rustix::termios::tcgetwinsize(stream).ok()?;
     (size.ws_col > 0).then_some(size.ws_col)
@@ -160,14 +157,12 @@ impl Output {
     }
 
     /// The same output with `style` for what goes to stdout.
-    #[allow(dead_code, reason = "the commands render through it as they are built")]
     pub fn with_stdout_style(mut self, style: Style) -> Output {
         self.stdout_style = style;
         self
     }
 
     /// How data on stdout is laid out and coloured.
-    #[allow(dead_code, reason = "the commands render through it as they are built")]
     pub fn stdout_style(&self) -> Style {
         self.stdout_style
     }

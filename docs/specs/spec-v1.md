@@ -1216,21 +1216,31 @@ local part only.
 
 ### status
 
-`status` is read-only. On the console it lists only the pieces that need
-the user or change at the next run, one table row each with the state,
-the piece's path, the days since its last activity and what is
-pending: needing a decision, diverged, a stale backup, a superseded
-archive, pending remote work, missing on the remote, a recovered tree,
-unreadable, containing a mount point, future modification times, gone,
-new, or archiving at the next run. A line above the table gives the
-remote's state, the time of the last sync and the counts of live and
-archived pieces; a hint line below it names `antiq resolve` when a
-decision is pending and `antiq find` for every piece. Without such a
-piece it says that nothing is to do and names the next change, a piece
-that archives or becomes remote-only, with the days until then. Pinned
-and empty pieces and skipped symlinks and dot entries are counted, not
-listed. The JSON output carries every piece. `status` exits 0 whatever
+`status` is read-only: it takes no lock and writes nothing below
+`.antiq/`. On the console it lists only the pieces that need the user or
+change at the next run, one table row each with the state, the piece's
+path, the days since its last activity and what is pending: an error of the
+piece, needing a decision, diverged, a superseded archive, a stale backup,
+missing on the remote, a recovered tree, unreadable, containing a mount
+point or an excluded path, future modification times, gone, archiving at
+the next run, waiting for the upload, or new. A piece with several of
+these has one row, in the state that comes first in that order, and its
+text names them all. A damaged tracking file or object has a row of its
+own. Rows of one state are listed by path, those of archiving at the next
+run by age. A line above the table gives the remote's state, the time of
+the last sync (or that there was none) and the counts of live and archived
+pieces. Without a remote the line says so and no row waits for the upload.
+A line below the table counts the pinned and empty pieces and the skipped
+symlinks and dot entries, which are counted, not listed; a hint line below
+that names `antiq resolve` when a decision is pending and `antiq find` for
+every piece. Without a row `status` says that nothing is to do and names
+the next change, a piece that archives or becomes remote-only, with the
+days until then. Notes, such as a run holding the lock, go to stderr. The
+JSON output carries every piece and the notes. `status` exits 0 whatever
 it shows, unless the command itself fails.
+
+On a terminal the table adapts to the width, see "Command line". Its wide
+layout adds the command that deals with a row where there is room.
 
 ### Safety
 
@@ -1321,7 +1331,9 @@ on a wide terminal tables and progress rows use their wide layout, with
 full paths and extra columns such as sizes and transfer rates, since it
 reads more easily; on a terminal of 80 columns they use their narrow
 layout, in which a path that does not fit is shortened in the middle,
-keeping its start and its end. Without a terminal the width is 80.
+keeping its start and its end. A terminal of 100 columns or more is wide.
+Without a terminal the width is 80. Colour is used only on a terminal, and
+not when the environment variable `NO_COLOR` is set to a non-empty value.
 
 Long runs show one row per piece: its path, its size, a progress bar,
 the operation running on it (packing, verifying, storing, removing,
@@ -1444,7 +1456,8 @@ piece whose archive is on the remote, the days until the archive becomes
 remote-only, at least 0, counted from the commit of the current archive
 (the earliest history entry of an `archive`, `import`, `resolve` or `fork`
 action from the creation of the archive on); it is left out while the
-archive still has to go up or no remote is attached. `state` is one
+archive still has to go up or no remote is attached. `archives_in_days` is
+the whole days until an active piece that is not diverged is idle, at least 1. `state` is one
 of the states under "States" (`new`, `live`, `unearthed`, `gone`,
 `archived`, `remote-only`, `live-on-another-machine`) or `error`, the
 state of a piece whose entry, metadata or object cannot be used; the

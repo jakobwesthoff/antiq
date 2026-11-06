@@ -134,7 +134,25 @@ macro_rules! accepts {
     };
 }
 
-accepts!(status_takes_nothing, "status", ["status"]);
+#[test]
+fn status_takes_nothing() {
+    let dir = tempfile::tempdir().expect("the temp dir is writable");
+    let run = Antiq::new()
+        .args(["--json", "-C"])
+        .arg(dir.path())
+        .arg("status")
+        .run();
+    assert_eq!(
+        run.code(),
+        1,
+        "stdout: {}, stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(run.error_kind(), "not_a_collection");
+    assert_eq!(run.json()["command"], "status");
+}
+
 accepts!(archive_takes_dry_run, "archive", ["archive", "--dry-run"]);
 accepts!(
     unearth_takes_its_options,
@@ -249,24 +267,24 @@ accepts!(
 
 #[test]
 fn a_json_run_prints_one_not_implemented_envelope() {
-    let run = json_run(&["status"]);
+    let run = json_run(&["archive"]);
     assert_eq!(run.code(), 1);
     assert_eq!(run.stderr, "");
     let json = run.json();
     let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
     assert_eq!(keys, ["format", "command", "error"]);
     assert_eq!(json["format"], 1);
-    assert_eq!(json["command"], "status");
+    assert_eq!(json["command"], "archive");
     assert_eq!(json["error"]["kind"], "not_implemented");
-    assert_eq!(json["error"]["message"], "status is not implemented");
+    assert_eq!(json["error"]["message"], "archive is not implemented");
 }
 
 #[test]
 fn a_plain_run_prints_its_error_to_stderr() {
-    let run = Antiq::new().arg("status").run();
+    let run = Antiq::new().arg("archive").run();
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
-    assert_eq!(run.stderr, "error: status is not implemented\n");
+    assert_eq!(run.stderr, "error: archive is not implemented\n");
 }
 
 #[test]
@@ -324,7 +342,7 @@ fn the_global_options_work_after_the_subcommand() {
         .arg("--json")
         .run();
     assert_eq!(run.code(), 1);
-    assert_eq!(run.error_kind(), "not_implemented");
+    assert_eq!(run.error_kind(), "not_a_collection");
 }
 
 #[test]
