@@ -982,7 +982,9 @@ not judged.
    empty are removed, up to and including `<stamp>/`.
 8. One output line per folder on stdout, `archived <piece>`, `skipped
    <piece>: <message>` or `refused <piece>: <reasons>`, then the summary
-   `Archived N, skipped N, refused N.` The repairs of the start of the run
+   `Archived N, skipped N, refused N.` On a terminal the folders show as
+   cards and leave one finished line each, then a summary line (see
+   "Progress cards"); these lines are for a pipe. The repairs of the start of the run
    go to stderr as `note:` lines and the warnings as `warning:` lines. A dry run prints the
    repair lines and `Would archive <piece>` lines, then `Refused <piece>:
    <reasons>` for each refused piece, and `Nothing to do.` when it prints
@@ -1125,8 +1127,9 @@ checks it would make. (ADR 0061)
   folder names the piece's path as given.
 - The top of the unearthed folder has the modification time of the last
   write of `.antiq-restored`, not the archived one.
-- On the console a run prints `Unearthed <piece> (version <version>)` on
-  stdout. The repairs that were done (`note: repaired: <repair>`) and the
+- On a pipe a run prints `Unearthed <piece> (version <version>)` on
+  stdout. On a terminal it shows a card and leaves one finished line and the
+  summary `Unearthed to <path>` (see "Progress cards"). The repairs that were done (`note: repaired: <repair>`) and the
   warnings (`warning: <warning>`) go to stderr. A skipped version prints
   `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout
   line, the sizes in decimal units. In `-n` the `Would skip` line reads
@@ -1818,12 +1821,13 @@ target. `--init` and `--force` are each refused together with
    ...` where other paths changed; where nothing changed it is `Pushed to
    <target>. Nothing changed.` (`The target <target> is up to date.` in a
    dry run). A written marker adds `Claimed the push target <target> for this
-   antiq collection.` before it. On a terminal a push that wrote the marker
-   prints `✔ Claimed the push target <target>: N created, N updated, N
-   deleted`, a sentence that says the marker now records this antiq
-   collection and host, and a table with the columns PIECE, CREATED, UPDATED
-   and DELETED for the pieces that changed and the other files; a zero is
-   dim.
+   antiq collection.` before it. These lines are for a pipe. On a terminal a
+   push that changed pieces shows them as cards and ends with the summary
+   (see "Progress cards"). On a terminal a push that wrote the marker and
+   changed no piece prints `✔ Claimed the push target <target>: N created, N
+   updated, N deleted`, a sentence that says the marker now records this
+   antiq collection and host, and a table with the columns PIECE, CREATED,
+   UPDATED and DELETED for the other files; a zero is dim.
 
 With `--fsync` the target flushes each file's content before it is renamed
 into place; a power loss can then at most lose the newest names, which the
@@ -2140,6 +2144,81 @@ contains is not repeated, on the console and in the JSON `message`. Under
 output, and a usage error too prints the JSON envelope (kind `usage`) and
 exits 2. When the reader of stdout or stderr is gone, antiq stops writing to
 that stream without a panic, and the run ends with the exit code it would have had.
+
+#### Progress cards
+
+A real run of `archive`, `push` or `unearth` on a rich stdout shows its
+progress as cards (ADR 0064). A dry run, `--json` and a stdout that is not a
+terminal print the lines they print without cards. The warnings and notes
+of the run follow the result as always.
+
+A piece that is working has a card of two lines. The first has a mark that
+turns, the piece in bold, its size and the operation: `packing`,
+`verifying`, `storing` and `removing` for `archive`, `storing` and
+`removing` for `push`, `extracting`, `verifying` and `removing` for
+`unearth`. The second has a bar, the percentage and a count: `N/M files`,
+`N/M created` and `N/M deleted` for the storing and removing of `push`, and
+`N/M entries` for the removing of `archive`. An operation whose total is not
+known yet has a bar with a moving lit part and no percentage or count. The
+percentage is rounded and stays at 99 until the operation is done.
+
+A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
+refused or unfinished piece, `⚠` yellow for a skipped one), the piece in
+bold, its size, its result and the time as `m:ss`. The result is `N files`
+for `archive` and `unearth`, the non-zero ones of `N created`, `N updated`
+and `N deleted` for `push`, and `refused`, `skipped` or `unfinished`. The
+line of an `unearth` has `version <local time>` after the piece, in the
+form `unearth` uses on a terminal. A refused, skipped or unfinished piece
+has its reasons under the line, indented by four columns and wrapped to the
+width, one paragraph for each reason. A named piece that carries a pin
+reads `pinned, so it stays as it is. antiq unpin <piece> releases it`, with
+the `-C` of the run in the command when it had one. A skip for lack of room
+reads `<size> needed, <size> free`.
+
+The finished lines scroll away like any output, so that the scrollback
+holds all of them in the order the pieces finished. At the bottom stay the
+cards of the running pieces in the order they started, then one line
+`○ N waiting` for the pieces that have not started, with `, K more running`
+when the terminal has too few rows for all cards. That region has at most as
+many lines as the terminal has rows, less one. The size of the terminal is
+read at each redraw, and a terminal that reports none has the columns of the
+environment and 24 rows.
+
+Lines are laid out for at most 100 columns. The size column is left out
+below 50 columns, the count below 60, and the bar is 40 cells wide from 70
+columns, 12 from 40 and 10 below. A name too long for its column is shortened
+in the middle; with the version of an `unearth` the name is shortened to as
+few as 8 columns before the version is left out. Sizes are in decimal units.
+
+The last line of the run follows the finished lines after an empty line. Its
+mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
+
+- `archive`: `4 archived · 0 skipped · 1 refused`.
+- `push`: `4 pieces pushed · 9 files changed`, where a push that wrote the
+  marker starts with `Claimed <target> ·` and is followed by the sentence
+  that says what the marker is for.
+- `unearth`: `Unearthed to ./projects/recipe-api`, the path from the
+  directory the command runs in, or `Skipped <piece>` with a `⚠`.
+
+A run with no piece to tell about prints the line of the pipe form, such as
+`Archived 0, skipped 0, refused 0.`. A piece that never reported progress, as
+when the files `archive` may hold open ran out, gets its finished line at the
+end without size and time. A `push` prints `Pushing to <target>` and an empty
+line above its cards once it has pieces to send; a claim that sends no piece
+keeps the headline, the sentence and the table of what was sent.
+
+On a terminal the mirror of a `push` first runs once as a dry run, to learn
+the files and bytes of each piece. When that dry run lists nothing it can
+read, the pieces appear as finished lines only.
+
+The region is redrawn in place at most every 100 ms, with the carriage
+return, cursor up and erase to the end of the screen. antiq sets no
+terminal mode, uses no alternate screen and no scroll region, and does not
+hide the cursor. A `TERM` that is unset or `dumb` gets no region: each
+finished line is printed when its piece ends, then the summary. A finished
+line is never erased. After Ctrl-C the screen can show a partial frame, and
+the repairs of the next run clean up as after any interrupted run. A panic
+clears the region before its text is written.
 
 ### JSON output
 

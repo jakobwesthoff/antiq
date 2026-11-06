@@ -236,6 +236,7 @@ impl<'a> Live<'a> {
                 name: &name,
                 bytes: expected.bytes,
                 stamp: None,
+                siblings: &[],
             });
         }
         let (operation, total) = match phase {

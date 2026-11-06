@@ -167,6 +167,39 @@ impl World {
         }
     }
 
+    /// `run_tty_env` on a terminal whose window is `columns` by `rows`. The
+    /// bytes of the terminal come back as they are written, with the
+    /// carriage return and the escape sequences of the redraw, so that a
+    /// test can replay them on a screen.
+    pub fn run_tty_sized(
+        &self,
+        args: &[&str],
+        columns: u16,
+        rows: u16,
+        envs: &[(&str, &str)],
+    ) -> Outcome {
+        let mut terminal = Terminal::open_sized(Some((columns, rows)));
+        let mut antiq = Antiq::new()
+            .arg("-C")
+            .arg(self.collection.root())
+            .args(args)
+            .env("TZ", TIME_ZONE)
+            .stdout(terminal.slave());
+        for (key, value) in envs {
+            antiq = antiq.env(key, value);
+        }
+        let run = antiq
+            .run_within(TTY_DEADLINE)
+            .expect("the command finishes on a terminal");
+        Outcome {
+            code: run.code(),
+            stdout: terminal.finish(),
+            stderr: run.stderr,
+            mode: Mode::Text,
+            value: None,
+        }
+    }
+
     /// Runs the command with stderr on a pseudo-terminal, `envs` added to
     /// its environment. What it wrote to stderr comes back as `stderr`
     /// with the terminal's `\r\n` as `\n`; stdout is piped.
@@ -471,16 +504,32 @@ struct Terminal {
 
 impl Terminal {
     fn open() -> Terminal {
+        Terminal::open_sized(None)
+    }
+
+    /// A terminal with a window of `size` columns and rows, or with the zero
+    /// size of a fresh pseudo-terminal.
+    fn open_sized(size: Option<(u16, u16)>) -> Terminal {
         let (mut master, mut slave) = (0, 0);
-        // SAFETY: both out-pointers refer to live integers, and the three
-        // optional arguments (name, termios, window size) are null.
+        let mut window = size.map(|(columns, rows)| libc::winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        });
+        let window_pointer = window
+            .as_mut()
+            .map_or(std::ptr::null_mut(), |window| window as *mut libc::winsize);
+        // SAFETY: both out-pointers refer to live integers, the name and
+        // termios arguments are null, and the window size is null or points
+        // to a `winsize` that lives through the call.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                window_pointer,
             )
         };
         assert_eq!(result, 0, "openpty failed");

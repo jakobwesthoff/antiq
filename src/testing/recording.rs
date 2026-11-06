@@ -113,7 +113,9 @@ impl Observer for Recorder {
     fn event(&self, event: Event<'_>) {
         let seen = match event {
             Event::Planned { items } => Seen::Planned(items.to_vec()),
-            Event::Started { name, bytes, stamp } => Seen::Started {
+            Event::Started {
+                name, bytes, stamp, ..
+            } => Seen::Started {
                 name: name.to_string(),
                 bytes,
                 stamp: stamp.map(str::to_string),

@@ -4,7 +4,10 @@
 
 //! The `push` command: mirrors the collection to the target.
 
+use super::progress;
+use crate::cli::console::cards::Kind;
 use crate::cli::console::env::Env;
+use crate::cli::console::live::observed;
 use crate::cli::console::render::{available, flow, paint};
 use crate::cli::console::rich::Rich;
 use crate::cli::console::symbols::Symbols;
@@ -15,7 +18,7 @@ use crate::cli::table::{pad, pad_left, sanitize};
 use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
-use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push};
+use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push, push_observed};
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -29,7 +32,38 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };
-    let outcome = push(&collection, &request, &SystemClock)
+    // On a terminal the pieces show as cards while they are sent, and the
+    // lines they leave behind replace the table of the report.
+    let mut cards = None;
+    let result = if progress::is_live(ctx, args.dry_run, out) {
+        let target = collection.config().target.url.clone().unwrap_or_default();
+        let header = format!(
+            "Pushing to {}",
+            paint(&out.stdout_env(), theme::BOLD, &sanitize(&target))
+        );
+        let setup = progress::setup(
+            Kind::Push,
+            ctx,
+            out,
+            Some(header),
+            Box::new(|stamp, _| stamp.to_string()),
+        );
+        let run = observed(
+            out,
+            setup,
+            |observer| push_observed(&collection, &request, &SystemClock, observer),
+            |result| match result {
+                Ok(PushOutcome::Report(report)) => progress::push_pieces(report),
+                _ => Vec::new(),
+            },
+        )
+        .context("show the progress")?;
+        cards = Some((run.cards, run.took));
+        run.value
+    } else {
+        push(&collection, &request, &SystemClock)
+    };
+    let outcome = result
         .map_err(antiq::Error::from)
         .context("push the antiq collection")?;
 
@@ -66,7 +100,18 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     Notice::Note(line.strip_prefix("note: ").unwrap_or(&line).to_string())
                 }));
                 let env = out.stdout_env();
-                let lines = if env.rich && report.initialized && report.plan.is_none() {
+                let shown = cards.as_ref().filter(|_| {
+                    report.reason.is_none() && !report.dry_run && !report.changes.pieces.is_empty()
+                });
+                let lines = if let Some((cards, took)) = shown {
+                    let target = report.initialized.then(|| sanitize(&report.target));
+                    let summary = progress::push_summary(&report, target.as_deref(), *took);
+                    let mut lines = vec![String::new(), cards.summary_line(&summary)];
+                    if report.initialized {
+                        lines.extend(marker_sentence(&env));
+                    }
+                    lines
+                } else if env.rich && report.initialized && report.plan.is_none() {
                     claimed(&report, &env)
                 } else {
                     report.lines()
@@ -84,6 +129,14 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         }
     }
     Ok(0)
+}
+
+/// What the marker file of a claimed target is for.
+fn marker_sentence(env: &Env) -> Vec<String> {
+    let why = Rich::parse(
+        "The marker file `.antiq-target` on the target now records this antiq collection and host, so another antiq collection cannot push there by mistake.",
+    );
+    flow(env, &why, anstyle::Style::new(), available(env, 0))
 }
 
 /// What a terminal gets after `push --init` has claimed the target: the
@@ -120,10 +173,7 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
     let done = paint(env, theme::GREEN, Symbols::for_env(env).done);
     let mut lines = vec![format!("{done} {}", paint(env, theme::BOLD, &headline))];
 
-    let why = Rich::parse(
-        "The marker file `.antiq-target` on the target now records this antiq collection and host, so another antiq collection cannot push there by mistake.",
-    );
-    lines.extend(flow(env, &why, anstyle::Style::new(), available(env, 0)));
+    lines.extend(marker_sentence(env));
 
     if rows.is_empty() {
         return lines;

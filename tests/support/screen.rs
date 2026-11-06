@@ -103,7 +103,7 @@ impl Screen {
         if self.row + 1 == self.rows {
             let top = self.grid.remove(0);
             let continued = self.continued.remove(0);
-            self.scrollback.push((text_of(&top), continued));
+            self.scrollback.push((raw_text_of(&top), continued));
             self.grid.push(Vec::new());
             self.continued.push(false);
         } else {
@@ -157,8 +157,9 @@ impl Screen {
             .iter()
             .cloned()
             .chain(
-                self.screen()
-                    .into_iter()
+                self.grid
+                    .iter()
+                    .map(|row| raw_text_of(row))
                     .zip(self.continued.iter().copied()),
             )
             .collect::<Vec<_>>();
@@ -168,6 +169,10 @@ impl Screen {
                 _ => lines.push(text),
             }
         }
+        let mut lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.trim_end().to_string())
+            .collect();
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
@@ -230,14 +235,17 @@ impl Screen {
         while self.grid.len() > rows {
             let top = self.grid.remove(0);
             let continued = self.continued.remove(0);
-            self.scrollback.push((text_of(&top), continued));
+            self.scrollback.push((raw_text_of(&top), continued));
             self.row = self.row.saturating_sub(1);
         }
         self.row = self.row.min(rows - 1);
     }
 }
 
+fn raw_text_of(row: &[char]) -> String {
+    row.iter().filter(|cell| **cell != '\0').collect()
+}
+
 fn text_of(row: &[char]) -> String {
-    let text: String = row.iter().filter(|cell| **cell != '\0').collect();
-    text.trim_end().to_string()
+    raw_text_of(row).trim_end().to_string()
 }

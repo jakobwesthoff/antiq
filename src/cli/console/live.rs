@@ -9,11 +9,6 @@
 //! The driver moves the cursor with ANSI sequences only. It switches no
 //! terminal mode, so there is nothing to restore when a run ends by Ctrl-C.
 
-#![allow(
-    dead_code,
-    reason = "the wiring of commit 7 is its caller and removes this"
-)]
-
 use crate::cli::console::cards::{Cards, Config, Msg, Ready};
 use crate::cli::output::Output;
 use antiq::progress::{Event, Observer};
@@ -124,7 +119,10 @@ impl<'o> Driver<'o> {
         } else {
             Vec::new()
         };
-        if lines.is_empty() && region == self.shown && size == self.last_size {
+        if lines.is_empty()
+            && region == self.shown
+            && (self.shown.is_empty() || size == self.last_size)
+        {
             return Ok(());
         }
         self.last_size = size;
@@ -198,7 +196,7 @@ pub(crate) struct Feed {
     sender: Sender<Packet>,
     start: Instant,
     /// How the version of an unearth is shown.
-    label: Box<dyn Fn(&str) -> String + Send + Sync>,
+    label: Label,
 }
 
 impl Observer for Feed {
@@ -210,10 +208,15 @@ impl Observer for Feed {
                     .map(|item| (item.name.clone(), item.bytes))
                     .collect(),
             ),
-            Event::Started { name, bytes, stamp } => Msg::Started {
+            Event::Started {
+                name,
+                bytes,
+                stamp,
+                siblings,
+            } => Msg::Started {
                 name: name.to_string(),
                 bytes,
-                label: stamp.map(|stamp| (self.label)(stamp)),
+                label: stamp.map(|stamp| (self.label)(stamp, siblings)),
             },
             Event::Operation {
                 name,
@@ -282,12 +285,16 @@ fn render<'o>(
     Ok(driver)
 }
 
+/// Shows the version of an unearth: its stamp and the stamps of the other
+/// complete versions of the piece.
+pub(crate) type Label = Box<dyn Fn(&str, &[String]) -> String + Send + Sync>;
+
 /// What a command gives to [`observed`].
 pub(crate) struct Setup {
     pub config: Config,
     /// Printed above the cards when the first event arrives.
     pub header: Option<String>,
-    pub label: Box<dyn Fn(&str) -> String + Send + Sync>,
+    pub label: Label,
     /// Install the panic hook that clears the region before the panic text
     /// is written. Tests that run in parallel leave it off, since a hook
     /// is global to the process.

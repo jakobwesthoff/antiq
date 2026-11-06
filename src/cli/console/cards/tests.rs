@@ -828,3 +828,26 @@ fn the_ascii_symbol_set_reaches_every_glyph_of_a_finished_line_and_the_summary()
         "ok 1 archived - 1 refused   took 0:03"
     );
 }
+
+#[test]
+fn the_version_of_an_unearth_keeps_its_place_by_cutting_the_name_and_goes_last() {
+    let mut cards = cards(Kind::Unearth);
+    cards.apply(
+        Msg::Started {
+            name: "projects/recipe-api".to_string(),
+            bytes: 5,
+            label: Some("2026-11-05 13:02:11".to_string()),
+        },
+        secs(0),
+    );
+    cards.apply(
+        finished("projects/recipe-api", 5, Outcome::Files(1)),
+        secs(1),
+    );
+    let ready = cards.take_ready();
+    let eighty = cards.finished_lines(&ready[0], 80);
+    assert!(eighty[0].contains("…") && eighty[0].contains("version 2026-11-05 13:02:11"));
+    assert!(eighty[0].chars().count() <= 80);
+    let forty = cards.finished_lines(&ready[0], 40);
+    assert!(!forty[0].contains("version"));
+}

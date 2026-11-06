@@ -4,7 +4,10 @@
 
 //! The `unearth` command: brings a version back and removes it.
 
+use super::progress;
 use crate::cli::console::block::Block;
+use crate::cli::console::cards::{Kind, Summary, Tone};
+use crate::cli::console::live::observed;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
@@ -13,7 +16,7 @@ use crate::cli::{Context, UnearthArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::unearth::{
-    DryRunPlan, Outcome, UnearthAction, UnearthReport, UnearthRequest, unearth,
+    DryRunPlan, Outcome, UnearthAction, UnearthReport, UnearthRequest, unearth, unearth_observed,
 };
 use antiq::plan::Step;
 use antiq::report::CommandReport;
@@ -33,10 +36,37 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
         dry_run: args.dry_run,
     };
     let zone = system_zone();
-    let outcome = unearth(&collection, &request, &SystemClock, &zone)
+    let style = out.stdout_style();
+    // On a terminal the piece shows as a card while it comes back, and its
+    // line replaces the line of the pipe.
+    let mut cards = None;
+    let result = if progress::is_live(ctx, args.dry_run, out) {
+        let label_zone = zone.clone();
+        let setup = progress::setup(
+            Kind::Unearth,
+            ctx,
+            out,
+            None,
+            Box::new(move |stamp, siblings| {
+                let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
+                label(stamp, &siblings, style, &label_zone)
+            }),
+        );
+        let run = observed(
+            out,
+            setup,
+            |observer| unearth_observed(&collection, &request, &SystemClock, &zone, observer),
+            |_| Vec::new(),
+        )
+        .context("show the progress")?;
+        cards = Some((run.cards, run.took));
+        run.value
+    } else {
+        unearth(&collection, &request, &SystemClock, &zone)
+    };
+    let outcome = result
         .map_err(antiq::Error::from)
         .context("unearth the version")?;
-    let style = out.stdout_style();
 
     match outcome {
         Outcome::Held(held) => {
@@ -77,16 +107,52 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
                     .context("print the result")?;
             } else {
                 let lines = done_lines(&report, style, &zone);
-                for line in &lines.stdout {
-                    out.line(line).context("print the result")?;
+                if let Some((cards, took)) = &cards {
+                    let summary = done_summary(&report, collection.root(), &ctx.start, *took);
+                    out.line("").context("print the result")?;
+                    out.line(&cards.summary_line(&summary))
+                        .context("print the result")?;
+                } else {
+                    for line in &lines.stdout {
+                        out.line(line).context("print the result")?;
+                    }
                 }
                 out.notices(&lines.notices).context("print the notes")?;
-                for line in &lines.stderr {
-                    out.note(line).context("print the notes")?;
+                if cards.is_none() {
+                    for line in &lines.stderr {
+                        out.note(line).context("print the notes")?;
+                    }
                 }
             }
             Ok(if report.partial() { 3 } else { 0 })
         }
+    }
+}
+
+/// The last line of an unearth that showed cards: where the piece came
+/// back to, or that it stayed in the store.
+fn done_summary(
+    report: &UnearthReport,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    took: std::time::Duration,
+) -> Summary {
+    let piece = sanitize(&report.piece);
+    let (text, tone) = if report.skipped.is_some() {
+        (format!("Skipped {piece}"), Tone::Warn)
+    } else {
+        let destination = sanitize(&progress::destination(root, &report.path, cwd));
+        let tone = if report.unfinished {
+            Tone::Bad
+        } else {
+            Tone::Ok
+        };
+        (format!("Unearthed to {destination}"), tone)
+    };
+    Summary {
+        tone,
+        parts: vec![(text, tone)],
+        took,
     }
 }
 

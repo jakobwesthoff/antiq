@@ -46,10 +46,7 @@ impl Env {
     }
 
     /// The same environment with the cursor switch set.
-    #[allow(
-        dead_code,
-        reason = "the wiring of commit 7 is its caller and removes this"
-    )]
+    #[cfg(test)]
     pub fn with_cursor(mut self, cursor: bool) -> Env {
         self.cursor = cursor;
         self

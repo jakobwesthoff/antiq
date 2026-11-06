@@ -657,7 +657,7 @@ fn process(shared: &Shared<'_>, piece: &RelPath, planned: bool) -> Done {
         }
     }
 
-    tracker.started(bytes, None);
+    tracker.started(bytes, None, &[]);
     let done = store_and_remove(shared, piece, &tree, tracker);
     let outcome = match &done.finished {
         Finished::Archived(archived) => Progress::Files(archived.files),

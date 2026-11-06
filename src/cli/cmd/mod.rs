@@ -12,6 +12,7 @@ pub mod import;
 pub mod init;
 pub mod list;
 pub mod pin;
+mod progress;
 pub mod push;
 pub mod rebuild;
 pub mod status;

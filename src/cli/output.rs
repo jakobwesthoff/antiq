@@ -215,10 +215,7 @@ impl Output {
     }
 
     /// The same output with the size that `stdout_size` reports.
-    #[allow(
-        dead_code,
-        reason = "the wiring of commit 7 is its caller and removes this"
-    )]
+    #[cfg(test)]
     pub fn with_stdout_size(mut self, size: Option<(usize, usize)>) -> Output {
         self.size = Size::Given(size);
         self

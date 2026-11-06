@@ -9,11 +9,6 @@
 //! [`Cards`] is a pure state. The driver feeds it messages and the time and
 //! asks it for lines; it touches no terminal.
 
-#![allow(
-    dead_code,
-    reason = "the wiring of commit 7 is its caller and removes this"
-)]
-
 use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::output::Style;
@@ -34,6 +29,9 @@ const RESULT: usize = 20;
 const TIME: usize = 4;
 /// A name never gets less than this.
 const MIN_NAME: usize = 6;
+/// A name shown with a version is cut to this many columns before the
+/// version is dropped.
+const MIN_LABELLED_NAME: usize = 8;
 /// The lit part of a bar without a total.
 const HEAD: usize = 4;
 /// The time between two frames of the spinner and of the moving bar.
@@ -342,7 +340,7 @@ impl Cards {
         let label = label.map(|label| format!("version {}", sanitize(label)));
         if let Some(label) = label {
             let room = width.saturating_sub(1 + label.width());
-            if room >= 12 {
+            if room >= MIN_LABELLED_NAME {
                 let shown = mid(&name, room, ellipsis);
                 let cell_width = shown.width() + 1 + label.width();
                 return (

@@ -372,11 +372,16 @@ fn a_terminal_names_the_version_by_its_local_time() {
         "{:?}",
         dry.stdout
     );
-    let run = world.run_tty(&["unearth", "projects/scanner"]);
+    let run = world.run_tty_sized(
+        &["unearth", "projects/scanner"],
+        120,
+        24,
+        &[("NO_COLOR", "1")],
+    );
     run.expect_code(0);
     assert!(
         run.stdout
-            .contains("Unearthed projects/scanner (version 2026-11-04 22:02:11)"),
+            .contains("projects/scanner version 2026-11-04 22:02:11"),
         "{:?}",
         run.stdout
     );
@@ -390,10 +395,15 @@ fn the_offset_tells_apart_versions_that_render_alike_on_a_terminal() {
             .version("projects/notes", "2026-04-04T133000", &[("a.txt", "a")])
             .version("projects/notes", "2026-04-04T143000", &[("a.txt", "a")]);
     });
-    let run = world.run_tty(&["unearth", "projects/notes"]);
+    let run = world.run_tty_sized(
+        &["unearth", "projects/notes"],
+        120,
+        24,
+        &[("NO_COLOR", "1")],
+    );
     run.expect_code(0);
     assert!(
-        run.stdout.contains("(version 2026-04-05 02:30:00 +12:00)"),
+        run.stdout.contains("version 2026-04-05 02:30:00 +12:00"),
         "{:?}",
         run.stdout
     );

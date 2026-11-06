@@ -13,6 +13,7 @@ use antiq::progress::{Counter, Operation, Outcome, Planned};
 mod screen;
 
 use screen::Screen;
+use std::sync::Arc;
 
 fn secs(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
@@ -415,7 +416,7 @@ fn setup(cols: usize) -> Setup {
     Setup {
         config: config(cols),
         header: None,
-        label: Box::new(|stamp| stamp.to_string()),
+        label: Box::new(|stamp, _| stamp.to_string()),
         panic_hook: false,
     }
 }
@@ -453,6 +454,7 @@ fn a_run_with_a_session_leaves_the_lines_and_hands_back_its_value_and_cards() {
                 name: "a",
                 bytes: 10,
                 stamp: Some("2026-11-05T13-02-11Z"),
+                siblings: &[],
             });
             observer.event(Event::Finished {
                 name: "a",
@@ -501,6 +503,7 @@ fn an_error_of_the_run_leaves_no_region_behind() {
                 name: "a",
                 bytes: 10,
                 stamp: None,
+                siblings: &[],
             });
             thread::sleep(Duration::from_millis(250));
             Err("the run failed")
@@ -515,23 +518,56 @@ fn an_error_of_the_run_leaves_no_region_behind() {
     assert!(watcher.sync().visible().is_empty());
 }
 
-#[test]
-fn a_panicking_run_ends_the_renderer_instead_of_hanging() {
-    let (_capture, mut out) = terminal(100, 24, true);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+/// Runs `run` with a panic in it on a terminal and returns how many rows
+/// the screen held when the panic text would have been written.
+fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
+    let (capture, mut out) = terminal(100, 24, true);
+    let sampled = Arc::new(Mutex::new(None));
+    let drawn = Arc::new(Mutex::new(false));
+    let previous = panic::take_hook();
+    let (sampler, sample, seen) = (capture.clone(), sampled.clone(), drawn.clone());
+    panic::set_hook(Box::new(move |info| {
+        let mut screen = Screen::new(100, 24);
+        screen.feed(&sampler.stdout_bytes());
+        *sample.lock().unwrap() = Some(screen.visible().len());
+        *seen.lock().unwrap() = String::from_utf8_lossy(&sampler.stdout_bytes()).contains("10 B");
+        previous(info);
+    }));
+    let mut setup = setup(100);
+    setup.panic_hook = panic_hook;
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = observed(
             &mut out,
-            setup(100),
+            setup,
             |observer| {
                 observer.event(Event::Started {
                     name: "a",
                     bytes: 10,
                     stamp: None,
+                    siblings: &[],
                 });
+                thread::sleep(Duration::from_millis(300));
                 panic!("the run panics");
             },
             |_: &()| Vec::new(),
         );
     }));
     assert!(result.is_err());
+    let rows = sampled.lock().unwrap().expect("the hook ran");
+    let drawn = *drawn.lock().unwrap();
+    (rows, drawn)
+}
+
+#[test]
+fn a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_text() {
+    // One test, as the hook is global to the process.
+    let (rows, drawn) = rows_at_the_panic(false);
+    assert!(drawn);
+    assert_eq!(
+        rows, 2,
+        "without the hook the cards are still on the screen"
+    );
+    let (rows, drawn) = rows_at_the_panic(true);
+    assert!(drawn);
+    assert_eq!(rows, 0, "the hook cleared the cards first");
 }

@@ -71,6 +71,18 @@ archived tools/scan-old
 Archived 2, skipped 0, refused 0.
 ```
 
+That is the output into a pipe or a file. On a terminal, `archive`, `push`
+and `unearth` show each piece working as a card with a progress bar, and
+leave one line per piece and a summary behind:
+
+```console
+$ antiq archive
+  ✔ projects/scanner                            13 B                1 file  0:00
+  ✔ tools/scan-old                              13 B                1 file  0:00
+
+✔ 2 archived · 0 skipped · 0 refused   took 0:00
+```
+
 Find a version by piece name or by the files it holds, and bring it back:
 
 ```console
@@ -88,6 +100,9 @@ tools/scan-old     1 version, 2026-11-05
 $ antiq unearth scan-old
 Unearthed tools/scan-old (version 2026-11-05 16:02:01)
 ```
+
+On a terminal the last command prints the line of the piece and
+`✔ Unearthed to ./tools/scan-old   took 0:00` instead.
 
 To mirror the collection, add a `[target]` block to
 `.antiq/config.toml`, create an empty folder on the target, and let

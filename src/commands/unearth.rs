@@ -415,7 +415,12 @@ impl Run<'_> {
         let name = chosen.piece.to_string();
         let tracker = Tracker::new(self.observer.unwrap_or(&Silent), &name);
         let bytes = chosen.listing.bytes;
-        tracker.started(bytes, Some(&chosen.stamp.to_string()));
+        let siblings: Vec<String> = self
+            .siblings(&chosen.piece)
+            .iter()
+            .map(Stamp::to_string)
+            .collect();
+        tracker.started(bytes, Some(&chosen.stamp.to_string()), &siblings);
         let brought = bring_back_to(
             self.collection,
             self.places,

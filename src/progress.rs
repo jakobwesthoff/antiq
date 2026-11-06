@@ -100,6 +100,9 @@ pub enum Event<'a> {
         name: &'a str,
         bytes: u64,
         stamp: Option<&'a str>,
+        /// The stamps of the complete versions of the piece, so that the
+        /// observer can tell apart two that read alike.
+        siblings: &'a [String],
     },
     /// The item moves to an operation, whose progress `counter` shows.
     Operation {
@@ -153,11 +156,12 @@ impl<'a> Tracker<'a> {
         }
     }
 
-    pub(crate) fn started(&self, bytes: u64, stamp: Option<&str>) {
+    pub(crate) fn started(&self, bytes: u64, stamp: Option<&str>, siblings: &[String]) {
         self.observer.event(Event::Started {
             name: self.name,
             bytes,
             stamp,
+            siblings,
         });
     }
 
@@ -257,6 +261,7 @@ mod tests {
             name: "projects/scanner",
             bytes: 4211,
             stamp: None,
+            siblings: &[],
         });
         observer.event(Event::Operation {
             name: "projects/scanner",

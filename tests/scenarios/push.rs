@@ -83,7 +83,7 @@ fn expected_marker(world: &World) -> Vec<u8> {
 }
 
 #[test]
-fn a_terminal_gets_the_claim_of_the_target_with_a_table_of_what_was_sent() {
+fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
     let clock = crate::support::scenario::collection::Clock::now();
     let world = World::new(
         pushing_setup(&clock),
@@ -95,23 +95,53 @@ fn a_terminal_gets_the_claim_of_the_target_with_a_table_of_what_was_sent() {
         .path()
         .display()
         .to_string();
-    let run = world.run_tty_env(&["push", "--init"], &[("NO_COLOR", "1")]);
+    // The archive of the stored version is compressed from a tree with the
+    // times of this run, so its size changes with the clock.
+    let stored_size: u64 = fs::read_dir(world.collection().path(".antiq/pieces/old/client-site"))
+        .expect("the piece has a store folder")
+        .map(|entry| entry.expect("an entry").metadata().expect("metadata").len())
+        .sum();
+    let run = world.run_tty_sized(&["push", "--init"], 80, 24, &[("NO_COLOR", "1")]);
     run.expect_code(0);
+    let mut screen = crate::support::screen::Screen::new(80, 24);
+    screen.feed(run.stdout.as_bytes());
+    // The seconds of the times depend on the machine; the tests allow one.
+    let lines: Vec<String> = screen
+        .lines()
+        .into_iter()
+        .map(|line| match line.strip_suffix("0:01") {
+            Some(rest) => format!("{rest}0:00"),
+            None => line,
+        })
+        .collect();
+    let (summary, rest) = (&lines[6], &lines[7..]);
     assert_eq!(
-        run.stdout,
-        format!(
-            "\
-✔ Claimed the push target {shown}: 10 created, 0 updated, 0 deleted
-The marker file .antiq-target on the target now records this antiq collection
-and host, so another antiq collection cannot push there by mistake.
-
-PIECE              CREATED   UPDATED   DELETED
-notes/daily              1         0         0
-old/client-site          3         0         0
-projects/scanner         4         0         0
-other files              2         0         0
-"
-        )
+        lines[..6],
+        [
+            format!("Pushing to {shown}"),
+            String::new(),
+            format!(
+                "  ✔ old/client-site                          {stored_size:>5} B             3 created  0:00"
+            ),
+            "  ✔ notes/daily                                  6 B             1 created  0:00"
+                .to_string(),
+            "  ✔ projects/scanner                            43 B             4 created  0:00"
+                .to_string(),
+            String::new(),
+        ]
+    );
+    assert!(
+        summary.starts_with(&format!(
+            "✔ Claimed {shown} · 3 pieces pushed · 10 files changed   took 0:0"
+        )),
+        "{summary}"
+    );
+    assert_eq!(
+        rest,
+        [
+            "The marker file .antiq-target on the target now records this antiq collection",
+            "and host, so another antiq collection cannot push there by mistake.",
+        ]
     );
 }
 
@@ -146,16 +176,24 @@ fn a_push_dry_run_on_a_terminal_tags_its_actions_and_ends_with_the_footer() {
 
 #[test]
 fn the_zeros_of_the_claim_table_are_dim() {
+    // Files outside every piece have no card, so a claim that sends only
+    // those keeps the table of the report.
     let clock = crate::support::scenario::collection::Clock::now();
+    let collection = Collection::build(&clock)
+        .patterns(&["*/*"])
+        .outside("README.md", "the collection\n")
+        .finish();
     let world = World::new(
-        pushing_setup(&clock),
+        Setup::new(collection)
+            .with_target(Target::new())
+            .with_real_rsync(),
         crate::support::scenario::world::Mode::Text,
     );
     let run = world.run_tty_env(&["push", "--init"], &[]);
     run.expect_code(0);
     assert!(
         run.stdout
-            .contains("notes/daily              1         \x1b[2m0\x1b[0m"),
+            .contains("other files         2         \x1b[2m0\x1b[0m"),
         "{:?}",
         run.stdout
     );
