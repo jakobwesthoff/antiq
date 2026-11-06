@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::lock::{self, Holder, LockError, RunLock};
 use crate::machine::MachineError;
-use crate::repair::RepairError;
+use crate::repair::{self, Effects, RealEffects, RepairError};
 use crate::report::Warning;
 
 /// Errors of the run guard.
@@ -49,12 +49,20 @@ pub struct RunGuard {
 impl RunGuard {
     /// Takes the lock and repairs what an earlier run left behind.
     pub(crate) fn begin(collection: &Collection, clock: &dyn Clock) -> Result<RunGuard, RunError> {
+        RunGuard::begin_with(collection, clock, &RealEffects)
+    }
+
+    /// [`RunGuard::begin`] with the repairs' effects given, so that a test
+    /// can watch them or make one fail.
+    pub(crate) fn begin_with(
+        collection: &Collection,
+        clock: &dyn Clock,
+        effects: &dyn Effects,
+    ) -> Result<RunGuard, RunError> {
         let machine = collection.machine_name()?;
         let lock = lock::acquire(&collection.lock_path(), &machine, clock)?;
-        Ok(RunGuard {
-            lock,
-            warnings: Vec::new(),
-        })
+        let warnings = repair::run(collection, &lock, clock, effects)?;
+        Ok(RunGuard { lock, warnings })
     }
 
     /// The lock, which the stores and the tracking entries take as their
@@ -162,6 +170,16 @@ mod tests {
     }
 
     #[test]
+    fn a_repair_that_fails_is_an_error_of_the_run() {
+        let error = RunError::from(RepairError::Io {
+            action: "open",
+            path: "/collection".to_string(),
+            source: std::io::Error::other("refused by the test"),
+        });
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
     fn a_dry_run_names_the_run_that_holds_the_lock() {
         let temp = TempCollection::minimal();
         let collection = collection(&temp);
@@ -213,6 +231,68 @@ mod tests {
             matches!(error, RunError::Lock(LockError::Io { .. })),
             "{error}"
         );
+    }
+
+    /// Every path below `dir` with its content, directories as `None`.
+    fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+        fn walk(
+            base: &std::path::Path,
+            dir: &std::path::Path,
+            seen: &mut std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        ) {
+            for item in fs::read_dir(dir).expect("lists") {
+                let path = item.expect("an item").path();
+                let name = path
+                    .strip_prefix(base)
+                    .expect("below")
+                    .display()
+                    .to_string();
+                if path.is_dir() {
+                    seen.insert(name, None);
+                    walk(base, &path, seen);
+                } else {
+                    seen.insert(name, Some(fs::read(&path).expect("reads")));
+                }
+            }
+        }
+        let mut seen = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut seen);
+        seen
+    }
+
+    #[test]
+    fn a_real_run_empties_the_run_directories_before_it_starts() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().file(".antiq/trash/leftover/f", "x");
+        temp.tree().file(".antiq/tmp/upload.part", "x");
+        temp.tree().file(".antiq/staging/tree/f", "x");
+        let collection = collection(&temp);
+
+        let guard = begin(&collection).expect("starts");
+
+        assert!(guard.warnings().is_empty());
+        for directory in ["trash", "tmp", "staging"] {
+            let path = temp.root().join(".antiq").join(directory);
+            assert_eq!(fs::read_dir(path).expect("lists").count(), 0, "{directory}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_leaves_the_run_directories_and_everything_else_alone() {
+        let mut temp = TempCollection::minimal();
+        temp.tree().file(".antiq/trash/leftover/f", "x");
+        temp.tree().file(".antiq/tmp/upload.part", "x");
+        temp.tree().file(".antiq/staging/tree/f", "x");
+        temp.tree().file(".antiq/recovered/old/f", "x");
+        temp.tree().file(".antiq/tracking/damaged.json", "not json");
+        temp.tree().file("projects/a/notes.txt", "hello");
+        let collection = collection(&temp);
+        let before = snapshot(temp.root());
+
+        let started = start(&collection, &clock(), true).expect("starts");
+
+        assert_eq!(snapshot(temp.root()), before);
+        assert!(matches!(started, Started::DryRun { holder: None }));
     }
 
     #[test]

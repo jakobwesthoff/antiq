@@ -1012,15 +1012,30 @@ Every state-changing run, right after taking the lock, in this order:
 
 - finishes `removing` entries, for a folder still in place and for a
   tree in `.antiq/trash/<ulid>` alike, by comparing the tree with the
-  listing of the archive payload the entry names before deleting it,
-  since the lstat
-  record of the verify does not survive a crash; a tree that differs is
-  kept as unearthed at the committed version, a trashed one renamed back
-  to its path first, and moved to `.antiq/recovered/<ulid>-<time>/` when
-  that path is taken;
-- empties `.antiq/trash/`, `.antiq/tmp/` and `.antiq/staging/`; an
-  entry that cannot be removed after one retry with owner write added
-  stays, with a warning, and does not fail the run;
+  listing of the archive payload the entry names (read from the current
+  metadata) before deleting it, since the lstat record of the verify does
+  not survive a crash. A tree in the trash decides over a folder at the
+  path. A tree that holds nothing the archive lacks is deleted and the
+  entry set to `gone`: only paths are missing from it and every remaining
+  path equals the listing, which is what an interrupted delete leaves (a
+  directory whose owner access was added to empty it counts as equal).
+  A tree that differs in any other way, or that cannot be compared (no
+  payload named, no metadata, no listing, a listing or a walk that cannot
+  be read), is kept as unearthed at the committed version: a trashed one
+  is renamed back to its path, and moved to
+  `.antiq/recovered/<ulid>-<time>/` (the time as `YYYYMMDDTHHMMSSZ`) when
+  that path is taken or another `unearthing`, `live` or `removing` entry
+  holds it, and its entry becomes `gone`. The move is flushed, with the
+  directory it came from, before the entry is written. A `recovered/`
+  tree of the entry that is newer than the entry means the move already
+  happened: the entry becomes `gone` and a folder at the path is a new
+  piece. A tree that cannot be moved or deleted stays in the trash, with
+  a warning;
+- empties `.antiq/trash/`, `.antiq/tmp/` and `.antiq/staging/`, except
+  the trash trees of IDs whose tracking entry cannot be read and of the
+  entries above that stayed; an entry that cannot be removed after one
+  retry with owner write added stays, with a warning, and does not fail
+  the run;
 - removes the temp files an interrupted atomic write left in `.antiq/`
   and below it, outside `.antiq/recovered/`;
 - turns an `unearthing` entry whose folder matches the version's listing
