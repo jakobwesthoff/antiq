@@ -2689,6 +2689,16 @@ the same commit; the lead checks that at acceptance.
   `RsyncError::Failed { code, stderr }`, which I23 and I28 wrap and
   classify (255 from ssh). The probe has no time limit. Tests with the
   real rsync are opt-in.
+- 2026-11-04 (merged, opus diff review D1-D8 fixed): `run::start(collection,
+  clock, dry_run)` is the only way in; `guard.lock()` gives the
+  `&RunLock`, `guard.warnings()` the repair warnings each command puts
+  into its report. A stat error other than NotFound on `trash/<ulid>`
+  keeps the entry `removing` and the tree protected; a tree whose
+  archive payload cannot be resolved is kept as unearthed without a
+  payload version (spec "Operations"). Junk names the archive holds as
+  files count as content when comparing. Plan wording lives in
+  `Plan::lines` (`src/plan.rs`); every action implements
+  `PlanAction::describe`.
 
 ### I12
 
