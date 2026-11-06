@@ -2506,6 +2506,24 @@ mod tests {
     }
 
     #[test]
+    fn the_removal_counts_the_ignored_entries_it_deletes_too() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let mtime = now().as_second() - 40 * DAY;
+        for path in ["piece/node_modules/x.js", "piece/node_modules/deep/y.js"] {
+            world.tree().file_with(path, "ignored", 0o644, mtime);
+        }
+        let recorder = Recorder::new();
+
+        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+            .expect("the run ends");
+
+        // The piece folder, a.txt, sub, sub/b.txt, node_modules, x.js, deep
+        // and y.js.
+        assert_eq!(recorder.lines_of("piece")[4], "piece Removing 8/8");
+    }
+
+    #[test]
     fn a_hard_linked_file_is_counted_once_in_the_verify_and_per_name_in_the_packing() {
         let mut world = world("");
         add(&mut world, "piece", 40);
