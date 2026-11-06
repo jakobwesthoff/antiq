@@ -222,7 +222,7 @@ since removal gives itself owner access. The directory that holds the
 top is locked when it carries such a flag or when the user cannot write
 it, whoever owns it, since antiq changes nothing outside the piece.
 `status` names it as "locked: <path>", the path relative to the collection
-root.
+root, `.` for the root itself.
 
 The walk before packing also enters ignored paths for these checks (see
 "Ignore and timeless rules").
@@ -322,7 +322,8 @@ a symlink of that name pins the piece, a dangling symlink included. A
 directory or any other entry of that name is not a pin: it refuses the
 piece (see "Control files and markers"), and `unpin` refuses to remove it.
 `pin` and `unpin` create and remove the file and refuse on a piece whose
-folder is not present. A piece that is in the state asked for is left as
+folder is not present, and on a folder that no pattern selects (kind
+`unknown_reference`). A piece that is in the state asked for is left as
 it is and reported as such. `pin` writes the file the way every marker is
 written (see "Control files and markers"), and `unpin` gives a top without
 owner write that permission for the removal and its mode back right
@@ -654,7 +655,8 @@ back or move to `recovered/`); its other actions assume the repairs were
 done. A dry run that finds the lock held says so, names the holder and
 lists no repairs, since the running command owns those directories; it
 reads nothing else. A holder that has not yet written its pid does not
-count as a holder here, so the repairs are listed. It exits 0, and under
+count as a holder here, so the repairs are listed, and neither does a pid
+that names no running process. The time on the console is UTC, RFC 3339. It exits 0, and under
 `--json` the plan is `{"dry_run": true, "lock_held": {"pid": ...,
 "started": ...}, "actions": []}`; on the console it is the line `The
 lock is held by pid <pid>, started <time>. No repairs are listed.` Each
@@ -701,7 +703,7 @@ after.
 | 0 | success |
 | 1 | error, a held lock included |
 | 2 | usage error |
-| 3 | partial: a step failed for some pieces (packing, verifying, moving, a difference in step 6 of `archive`, a refused rename, a failed deletion, no room) |
+| 3 | partial: a step failed for some pieces (packing, verifying, moving, a difference in step 6 of `archive`, a refused rename, a failed deletion, no room), or an `unearth` or `fork` that did not finish (see there) |
 | 4 | target unreachable (only `push`, and 0 instead under `--if-reachable`) |
 
 Pieces the walk refuses do not change the exit code; `status` and the
@@ -919,7 +921,10 @@ not judged.
    listing of the packing must equal the members the strict verify reads.
    A folder that changes meanwhile is skipped.
 4. Move the listing, then the `.tar.zst.sha256`, then the `.tar.zst` into
-   `.antiq/pieces/<path>/`, flushing each and the directory.
+   `.antiq/pieces/<path>/`, flushing each and the directory. When a flush
+   fails the version stays in the store and the folder stays: the piece is
+   skipped with reason `error`, and the next run archives the folder again
+   as a further version.
 5. Rename the folder to `.antiq/trash/<version stamp>/<piece path>/`,
    under its live spelling (one rename on the same device; a piece on
    another device counts as containing a mount point and never gets
@@ -943,7 +948,8 @@ not judged.
    inside `recovered/` is created and flushed) and list it in `status`;
    the version stays.
 7. Rename the tree to `.antiq/doomed/<version stamp>/<piece path>/`,
-   flush, and delete it from there. A deletion that fails leaves the tree
+   flush, and delete it from there. A rename that is refused gives the
+   tree back as in step 6 and skips the piece with reason `error`. A deletion that fails leaves the tree
    in `doomed/`, where the repairs try again; `status` names the tree and
    its first entry in walk order, with a cause it can read (a locked flag,
    a directory it cannot write). The error itself appears in the output of
@@ -1109,7 +1115,8 @@ the version and the destination path. (ADR 0061)
 `forget <piece> (<version> | --all-versions --force)` deletes exactly one
 version: the `.tar.zst` first, then the listing and the checksum file. It
 also takes the stamp of an incomplete version and removes its sidecars,
-saying that the version was incomplete. Deleting every version of a piece
+saying that the version was incomplete. The store folders that the deletion
+leaves empty are removed with it. Deleting every version of a piece
 takes `--all-versions --force`, which also removes the piece's incomplete
 versions and says so for each. A crash inside `forget` can leave an
 incomplete version; running the same `forget` again removes it. The next
@@ -1233,7 +1240,8 @@ in place.
   their original timestamps somewhere temporary, then import each folder.
   (ADR 0009, ADR 0055)
 - `-n` lists the repairs, then `Would import <folder> as <piece>, version
-  <stamp>` (the stamp with the counter the run would get), then `Would
+  <stamp>` (`<folder>` is the canonical path of the source, the stamp has
+  the counter the run would get), then `Would
   leave out <path>` for each ignored entry (a folder once, with a trailing
   `/`) and for `.antiq-restored`. When the import would not fit it prints
   `Would skip <piece>: <message>` instead of the import line and exits 3.
@@ -1873,10 +1881,10 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
-| `unknown_reference` | 1 | a piece reference matches no candidate | |
+| `unknown_reference` | 1 | a piece reference matches no candidate, or `unearth`, `fork` or `rebuild` is given a piece that holds only incomplete versions | |
 | `outside_collection` | 1 | a path given as a piece, `--as` or `--name` lies outside the collection | |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
 | `target_unreachable` | 4 | the target cannot be reached; the message is the reason | |
