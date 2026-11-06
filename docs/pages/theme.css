@@ -116,3 +116,48 @@
     justify-content: center;
   }
 }
+
+/* Captures of the console: rounded like a terminal window, on the page's own
+   dark background. */
+.showcase img,
+.docs img {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.showcase .shot {
+  margin: var(--space-xl) 0;
+}
+
+.showcase figcaption {
+  margin-top: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+}
+
+/* The captures are 1900 pixels wide with 28 px type, so only the full content
+   width keeps their text readable. */
+.shot-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-md);
+}
+
+.use-cases .highlights-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+@media (max-width: 860px) {
+  .use-cases .highlights-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.docs img {
+  margin: var(--space-md) 0;
+}
+
+.use-cases h2 {
+  margin-bottom: var(--space-lg);
+  text-align: center;
+}

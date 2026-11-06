@@ -24,19 +24,20 @@ cargo install --path .</code></pre>
 
     <h3>Basic Usage</h3>
     <div class="code-block">
-      <pre><code class="language-bash"># Make the current directory a collection of folders two levels down
-antiq init --pattern '*/*'
+      <pre><code class="language-bash"># Make the current directory a collection; every folder directly inside it is a piece
+antiq init --pattern '*'
 
-# Show what is due, then archive it
+# Show what is idle, what would be archived, then archive it
 antiq status
+antiq archive -n
 antiq archive
 
 # Find a version by piece name or by the files it holds
 antiq list scan
 antiq grep 'main\.rs'
 
-# Bring a version back as a folder
-antiq unearth scan-old
+# Bring a version back as a folder, keeping the version
+antiq fork scanner
 
 # Mirror the collection to the target set in .antiq/config.toml
 antiq push --init</code></pre>

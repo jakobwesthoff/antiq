@@ -52,6 +52,15 @@ jobs:
             --output dist \
             --templates generator/templates
 
+      # The README links its images by their repository path, and the page
+      # shows the README text as it is. The generator copies only
+      # docs/pages/assets to dist/assets, so the same path has to exist in
+      # dist as well.
+      - name: Copy the README images to their repository path
+        run: |
+          mkdir -p dist/docs/pages
+          cp -r project/docs/pages/assets dist/docs/pages/assets
+
       # Setup GitHub Pages
       - name: Setup Pages
         uses: actions/configure-pages@v4
