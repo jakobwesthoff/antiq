@@ -152,7 +152,9 @@ mount point, and `status` lists it with the excluded path. A walk enters
 directories up to 512 levels below the piece's top, since each level holds
 one directory open. A deeper directory is not entered and makes the piece
 unreadable.
-The delete helper never crosses a device boundary.
+The delete helper never crosses a device boundary, and stops at the same
+depth: a directory more than 512 levels below the top it removes is not
+entered and fails the removal, naming that directory.
 
 An entry the walk cannot read makes the piece unreadable: it is never
 idle, never archived, its live package is not refreshed, and `status`

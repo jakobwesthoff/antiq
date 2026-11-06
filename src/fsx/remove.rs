@@ -14,6 +14,7 @@ use super::{FsxError, failure, io_error, shown};
 use crate::fsx::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
 use crate::tree::{EntryKind, TreeEntry};
+use crate::walk::MAX_DEPTH;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -26,13 +27,20 @@ use std::path::Path;
 /// changed. Nothing is followed across a device boundary: a top or a
 /// directory on another device than `root` fails with
 /// [`FsxError::ForeignDevice`], leaving what it holds untouched. An entry
-/// that is gone already counts as removed. The root path is refused as an
+/// that is gone already counts as removed. A directory more than
+/// [`MAX_DEPTH`] levels below the top is not entered: the removal fails
+/// with [`FsxError::TooDeep`] naming it, each level holding one directory
+/// open. The root path is refused as an
 /// `InvalidInput` failure, before anything is looked at: the tree cannot
 /// remove itself.
 pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
-    remove_tree_with(root, path, &|entry| entry.device, &|dir| {
-        dir.read_dir(&RelPath::root())
-    })
+    remove_tree_with(
+        root,
+        path,
+        &|entry| entry.device,
+        &|dir| dir.read_dir(&RelPath::root()),
+        MAX_DEPTH,
+    )
 }
 
 /// Removes the entry at `path`, for a path short enough to open its
@@ -71,11 +79,14 @@ type List<'a> = &'a dyn Fn(&TreeRoot) -> io::Result<Vec<DirEntry>>;
 
 /// `device_of` and `list` are seams: tests report other devices than the
 /// filesystem has, and entries the directory does not describe truthfully.
+/// `max_depth` is the deepest level of directories below the top that is
+/// entered.
 fn remove_tree_with(
     root: &TreeRoot,
     path: &RelPath,
     device_of: DeviceOf<'_>,
     list: List<'_>,
+    max_depth: usize,
 ) -> Result<(), FsxError> {
     // The root path names the tree itself, which has no directory above it
     // to take the last `remove_dir` from. Refusing here keeps the removal
@@ -105,64 +116,108 @@ fn remove_tree_with(
         return Err(foreign_device(root, path));
     }
 
-    let opened = retry_once_with_access(&mut || grant_owner(root, path, top.mode), &mut || {
-        root.sub(path)
-    });
-    let opened = skip_if_missing(opened).map_err(failure("open", root, path))?;
-    // A directory that vanished in between has nothing left to remove.
-    opened
-        .map(|directory| {
-            let mut grant = || grant_owner(root, path, top.mode);
-            remove_contents(&directory, &mut grant, reference, device_of, list)
-        })
-        .transpose()?;
+    // One open directory per level is kept in a list of its own and not on
+    // the call stack, so a deep tree costs no deep recursion. `max_depth`
+    // keeps the open directories few.
+    let mut frames: Vec<Frame> = Vec::new();
+    frames.extend(open_frame(root, path, top.mode, list)?);
+    while let Some(innermost) = frames.len().checked_sub(1) {
+        let Some(entry) = frames[innermost].entries.next() else {
+            let finished = frames.pop().expect("a frame was just looked at");
+            // The top itself is removed below, from the directory that
+            // holds it, which is never changed.
+            if let Some(parent) = innermost.checked_sub(1) {
+                let holder = &frames[parent].directory;
+                let removal =
+                    retry_once_with_access(&mut || grant_frame(root, &frames, parent), &mut || {
+                        holder.remove_dir(&finished.name)
+                    });
+                skip_if_missing(removal).map_err(failure("remove", holder, &finished.name))?;
+            }
+            continue;
+        };
+
+        let directory = &frames[innermost].directory;
+        let name = RelPath::root().join(&entry.name);
+        let stat = skip_if_missing(directory.lstat(&name));
+        let stat = stat.map_err(failure("stat", directory, &name))?;
+        let Some(stat) = stat else { continue };
+        if stat.kind != EntryKind::Directory {
+            let removal =
+                retry_once_with_access(&mut || grant_frame(root, &frames, innermost), &mut || {
+                    directory.remove_file(&name)
+                });
+            skip_if_missing(removal).map_err(failure("remove", directory, &name))?;
+            continue;
+        }
+        if device_of(&stat) != reference {
+            return Err(foreign_device(directory, &name));
+        }
+        if frames.len() > max_depth {
+            return Err(FsxError::TooDeep {
+                path: shown(directory, &name),
+                limit: max_depth,
+            });
+        }
+        if let Some(child) = open_frame(directory, &name, stat.mode, list)? {
+            frames.push(child);
+        }
+    }
     skip_if_missing(root.remove_dir(path))
         .map(|_| ())
         .map_err(failure("remove", root, path))
 }
 
-/// Removes everything inside `directory`. The kind and device of every
-/// entry come from its own `lstat`, as a directory listing may leave the
-/// kind open.
-///
-/// `grant_itself` gives `directory` owner access through the directory
-/// that holds it: asking the directory itself fails once it has lost its
-/// search permission.
-fn remove_contents(
-    directory: &TreeRoot,
-    grant_itself: &mut dyn FnMut() -> io::Result<()>,
-    reference: u64,
-    device_of: DeviceOf<'_>,
-    list: List<'_>,
-) -> Result<(), FsxError> {
-    let itself = RelPath::root();
-    let entries = retry_once_with_access(&mut *grant_itself, &mut || list(directory))
-        .map_err(failure("list", directory, &itself))?;
+/// A directory whose entries are being removed.
+struct Frame {
+    directory: TreeRoot,
+    /// Where the directory lies in the handle of the frame above it, or in
+    /// the tree's root for the first frame.
+    name: RelPath,
+    /// The mode the directory had, which a grant builds on.
+    mode: u32,
+    entries: std::vec::IntoIter<DirEntry>,
+}
 
-    for entry in entries {
-        let name = RelPath::root().join(&entry.name);
-        let stat = skip_if_missing(directory.lstat(&name));
-        let stat = stat.map_err(failure("stat", directory, &name))?;
-        let Some(stat) = stat else { continue };
-        let removal = if stat.kind == EntryKind::Directory {
-            if device_of(&stat) != reference {
-                return Err(foreign_device(directory, &name));
-            }
-            let opened = retry_once_with_access(
-                &mut || grant_owner(directory, &name, stat.mode),
-                &mut || directory.sub(&name),
-            );
-            let opened = skip_if_missing(opened).map_err(failure("open", directory, &name))?;
-            let Some(child) = opened else { continue };
-            let mut grant_child = || grant_owner(directory, &name, stat.mode);
-            remove_contents(&child, &mut grant_child, reference, device_of, list)?;
-            retry_once_with_access(&mut *grant_itself, &mut || directory.remove_dir(&name))
-        } else {
-            retry_once_with_access(&mut *grant_itself, &mut || directory.remove_file(&name))
-        };
-        skip_if_missing(removal).map_err(failure("remove", directory, &name))?;
-    }
-    Ok(())
+/// Opens the directory `name` of `parent` and lists it, giving it owner
+/// access once where either is denied. `None` when it has vanished. The
+/// kind and device of every entry are read later from its own `lstat`, as
+/// a directory listing may leave the kind open.
+fn open_frame(
+    parent: &TreeRoot,
+    name: &RelPath,
+    mode: u32,
+    list: List<'_>,
+) -> Result<Option<Frame>, FsxError> {
+    let grant = &mut || grant_owner(parent, name, mode);
+    let opened = retry_once_with_access(grant, &mut || parent.sub(name));
+    let opened = skip_if_missing(opened).map_err(failure("open", parent, name))?;
+    let Some(directory) = opened else {
+        return Ok(None);
+    };
+    // The directory is given access through the one that holds it: asking
+    // the directory itself fails once it has lost its search permission.
+    let entries = retry_once_with_access(grant, &mut || list(&directory)).map_err(failure(
+        "list",
+        &directory,
+        &RelPath::root(),
+    ))?;
+    Ok(Some(Frame {
+        directory,
+        name: name.clone(),
+        mode,
+        entries: entries.into_iter(),
+    }))
+}
+
+/// Gives the directory of `frames[index]` owner access through the
+/// directory that holds it.
+fn grant_frame(root: &TreeRoot, frames: &[Frame], index: usize) -> io::Result<()> {
+    let holder = match index.checked_sub(1) {
+        Some(above) => &frames[above].directory,
+        None => root,
+    };
+    grant_owner(holder, &frames[index].name, frames[index].mode)
 }
 
 /// Adds owner read, write and search to the directory at `path`.
@@ -331,8 +386,8 @@ mod tests {
         tree.file("t/mnt/file", "x");
         tree.file("t/other", "y");
         let device = |entry: &TreeEntry| if last_name(entry) == b"mnt" { 9 } else { 8 };
-        let error =
-            remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list).expect_err("stops");
+        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list, MAX_DEPTH)
+            .expect_err("stops");
         assert!(
             matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
@@ -345,7 +400,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.file("t/a", "x");
         let device = |entry: &TreeEntry| if last_name(entry) == b"t" { 9 } else { 8 };
-        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list)
+        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list, MAX_DEPTH)
             .expect_err("refused");
         assert!(
             matches!(&error, FsxError::ForeignDevice { path } if path == "t"),
@@ -367,7 +422,8 @@ mod tests {
             Ok(entries)
         };
         let device = |entry: &TreeEntry| entry.device;
-        remove_tree_with(&root_of(&tree), &path("t"), &device, &unknown).expect("removes");
+        remove_tree_with(&root_of(&tree), &path("t"), &device, &unknown, MAX_DEPTH)
+            .expect("removes");
         assert!(!tree.path("t").exists());
     }
 
@@ -386,7 +442,107 @@ mod tests {
             Ok(entries)
         };
         let device = |entry: &TreeEntry| entry.device;
-        remove_tree_with(&root_of(&tree), &path("t"), &device, &ghost).expect("removes");
+        remove_tree_with(&root_of(&tree), &path("t"), &device, &ghost, MAX_DEPTH).expect("removes");
+        assert!(!tree.path("t").exists());
+    }
+
+    /// Raises the soft limit of open files, which a tree this deep needs
+    /// one of per level, and asserts that it is high enough. The default
+    /// soft limit on macOS is 256.
+    fn allow_many_open_files() {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        const NEEDED: u64 = 1_200;
+        let limit = getrlimit(Resource::Nofile);
+        let wanted = limit.maximum.map_or(NEEDED, |maximum| maximum.min(NEEDED));
+        if limit.current.is_none_or(|current| current < wanted) {
+            let raised = Rlimit {
+                current: Some(wanted),
+                maximum: limit.maximum,
+            };
+            setrlimit(Resource::Nofile, raised).expect("the soft limit can be raised");
+        }
+        let now = getrlimit(Resource::Nofile).current;
+        assert!(
+            now.is_none_or(|now| now >= NEEDED),
+            "the test needs {NEEDED} open files, the limit is {now:?}"
+        );
+    }
+
+    /// `t/d/d/.../d/f` with `levels` directories named `d` below `t`.
+    /// Built level by level through the directory just made, since the
+    /// whole path is far past the path limit.
+    fn chain(root: &TreeRoot, levels: usize) {
+        let d = Name::from_bytes(b"d".to_vec()).expect("name");
+        let d = RelPath::root().join(&d);
+        root.create_dir(&path("t"), 0o755).expect("created");
+        let mut deepest = root.sub(&path("t")).expect("opens");
+        for _ in 0..levels {
+            deepest.create_dir(&d, 0o755).expect("created");
+            deepest = deepest.sub(&d).expect("opens");
+        }
+        deepest.create_file(&path("f"), 0o644).expect("created");
+    }
+
+    /// `t` followed by `levels` times `/d`.
+    fn chain_path(levels: usize) -> RelPath {
+        path(&format!("t{}", "/d".repeat(levels)))
+    }
+
+    #[test]
+    fn a_tree_512_levels_deep_is_removed() {
+        allow_many_open_files();
+        let tree = Tree::new();
+        let root = root_of(&tree);
+        chain(&root, 512);
+        remove_tree(&root, &path("t")).expect("removes");
+        assert!(root.read_dir(&RelPath::root()).expect("listed").is_empty());
+    }
+
+    #[test]
+    fn a_tree_600_levels_deep_is_refused_at_the_first_directory_past_the_cap() {
+        allow_many_open_files();
+        let tree = Tree::new();
+        let root = root_of(&tree);
+        chain(&root, 600);
+        let error = remove_tree(&root, &path("t")).expect_err("too deep");
+        let first_past = chain_path(513).to_string();
+        assert!(
+            matches!(&error, FsxError::TooDeep { path, limit } if *path == first_past && *limit == 512),
+            "{error}"
+        );
+        assert!(
+            root.lstat(&chain_path(600)).is_ok(),
+            "the deepest directory is gone"
+        );
+    }
+
+    #[test]
+    fn a_cap_below_the_default_refuses_the_first_directory_past_it() {
+        let tree = Tree::new();
+        let root = root_of(&tree);
+        chain(&root, 4);
+        let device = |entry: &TreeEntry| entry.device;
+        let error = remove_tree_with(&root, &path("t"), &device, &real_list, 2).expect_err("deep");
+        let first_past = chain_path(3).to_string();
+        assert!(
+            matches!(&error, FsxError::TooDeep { path, limit } if *path == first_past && *limit == 2),
+            "{error}"
+        );
+        assert!(
+            root.lstat(&chain_path(4)).is_ok(),
+            "the deepest directory is gone"
+        );
+    }
+
+    #[test]
+    fn a_locked_directory_six_levels_down_is_granted_through_its_parent() {
+        let mut tree = Tree::new();
+        tree.file("t/a/b/c/d/e/locked/f", "x");
+        let locked = tree.path("t/a/b/c/d/e/locked");
+        let _guard = RestoreModes(vec![locked.clone()]);
+        fs::set_permissions(&locked, Permissions::from_mode(0o000)).expect("chmod");
+        locked_out(&locked);
+        remove_tree(&root_of(&tree), &path("t")).expect("removes");
         assert!(!tree.path("t").exists());
     }
 
@@ -408,6 +564,21 @@ mod tests {
         );
         assert!(tree.path("t/a").exists(), "the tree was emptied");
         assert!(tree.path("b").exists(), "the tree was emptied");
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_listed_fails_the_removal_naming_it() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        let broken = |_: &TreeRoot| Err(io::Error::from(io::ErrorKind::Other));
+        let device = |entry: &TreeEntry| entry.device;
+        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &broken, MAX_DEPTH)
+            .expect_err("fails");
+        assert!(
+            matches!(&error, FsxError::Io { action: "list", path, .. } if path == "t"),
+            "{error}"
+        );
+        assert!(tree.path("t/a").exists());
     }
 
     #[test]

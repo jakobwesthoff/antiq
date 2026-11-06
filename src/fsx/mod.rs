@@ -36,6 +36,9 @@ pub enum FsxError {
     /// asked to remove.
     #[error("{path} is on another device than the tree being removed")]
     ForeignDevice { path: String },
+    /// A removal met a directory nested deeper than it descends.
+    #[error("{path} is nested more than {limit} levels below the tree being removed")]
+    TooDeep { path: String, limit: usize },
     #[error("cannot move {from} to {to}: they are on different devices")]
     CrossesDevices { from: String, to: String },
 }
@@ -110,7 +113,15 @@ mod tests {
             crossing.to_string(),
             "cannot move a to b: they are on different devices"
         );
-        for error in [io, foreign, crossing] {
+        let deep = FsxError::TooDeep {
+            path: "t/d".into(),
+            limit: 512,
+        };
+        assert_eq!(
+            deep.to_string(),
+            "t/d is nested more than 512 levels below the tree being removed"
+        );
+        for error in [io, foreign, crossing, deep] {
             assert_eq!(error.kind(), ErrorKind::Other);
         }
     }
