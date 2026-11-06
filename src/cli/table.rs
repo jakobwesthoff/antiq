@@ -12,13 +12,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub(super) const WIDE_FROM: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "variants no command uses yet")]
 pub(super) enum Color {
-    Plain,
-    Dim,
     Bold,
     Red,
-    Green,
     Yellow,
     Magenta,
     Cyan,
@@ -26,11 +22,8 @@ pub(super) enum Color {
 
 pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
     let code = match color {
-        Color::Plain => return text.to_string(),
-        Color::Dim => "\x1b[2m",
         Color::Bold => "\x1b[1m",
         Color::Red => "\x1b[31m",
-        Color::Green => "\x1b[32m",
         Color::Yellow => "\x1b[33m",
         Color::Magenta => "\x1b[35m",
         Color::Cyan => "\x1b[36m",
@@ -283,10 +276,8 @@ mod tests {
     #[test]
     fn paint_wraps_text_in_the_escape_of_its_color() {
         let expected = [
-            (Color::Dim, "\x1b[2m"),
             (Color::Bold, "\x1b[1m"),
             (Color::Red, "\x1b[31m"),
-            (Color::Green, "\x1b[32m"),
             (Color::Yellow, "\x1b[33m"),
             (Color::Magenta, "\x1b[35m"),
             (Color::Cyan, "\x1b[36m"),
@@ -297,8 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_leaves_plain_empty_and_uncolored_text_alone() {
-        assert_eq!(paint(colored(), Color::Plain, "x"), "x");
+    fn paint_leaves_empty_and_uncolored_text_alone() {
         assert_eq!(paint(colored(), Color::Red, ""), "");
         assert_eq!(paint(plain(), Color::Red, "x"), "x");
     }

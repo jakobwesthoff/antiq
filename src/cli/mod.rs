@@ -216,7 +216,6 @@ pub struct PushArgs {
 
 /// What every command gets to know about the invocation.
 #[derive(Debug)]
-#[allow(dead_code, reason = "each command reads the fields it needs")]
 pub struct Context {
     pub json: bool,
     /// The directory the command runs in: the one `-C` names, else the

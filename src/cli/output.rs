@@ -215,7 +215,6 @@ impl Output {
     }
 
     /// Writes a line of a command's result to stdout.
-    #[allow(dead_code, reason = "the commands print through it as they are built")]
     pub fn line(&mut self, text: &str) -> io::Result<()> {
         self.stdout.write_line(text)
     }
@@ -227,7 +226,6 @@ impl Output {
     }
 
     /// Writes a line of a message to the user to stderr.
-    #[allow(dead_code, reason = "the commands print through it as they are built")]
     pub fn note(&mut self, text: &str) -> io::Result<()> {
         self.stderr.write_line(text)
     }
