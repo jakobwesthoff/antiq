@@ -37,8 +37,8 @@ pub enum StoreError {
         "the highest metadata version {number} cannot be read, so nothing is written on top of it"
     )]
     UnreadableHighest { number: u32 },
-    #[error("no version of the object can be read; unreadable versions: {versions:?}")]
-    NothingReadable { versions: Vec<u32> },
+    #[error("no version of the object can be read; unreadable versions: {}", numbers(.unreadable))]
+    NothingReadable { unreadable: Vec<Unreadable> },
     #[error("there is no recorded change to commit")]
     NoPending,
     #[error("version {number} is not above the highest local version {highest}")]
@@ -57,9 +57,29 @@ impl HasKind for StoreError {
     fn kind(&self) -> ErrorKind {
         match self {
             StoreError::Meta(error) => error.kind(),
+            // The versions are listed highest first. When the highest one
+            // states a format this version does not know, the object is
+            // out of reach because antiq is too old, not because it is
+            // broken.
+            StoreError::NothingReadable { unreadable }
+                if unreadable
+                    .first()
+                    .and_then(|version| version.format)
+                    .is_some_and(|format| format > meta::FORMAT) =>
+            {
+                ErrorKind::FormatTooNew
+            }
             _ => ErrorKind::Other,
         }
     }
+}
+
+fn numbers(versions: &[Unreadable]) -> String {
+    let numbers: Vec<String> = versions
+        .iter()
+        .map(|version| version.number.to_string())
+        .collect();
+    numbers.join(", ")
 }
 
 /// Where the current metadata of an object comes from.
@@ -123,6 +143,7 @@ pub enum Put {
 ///     let _ = store.write_pending(metadata);
 /// }
 /// ```
+#[derive(Debug, Clone, Copy)]
 pub struct Store<'c> {
     collection: &'c Collection,
 }
@@ -208,9 +229,7 @@ impl<'c> Store<'c> {
                 unreadable,
             })),
             None if unreadable.is_empty() => Ok(None),
-            None => Err(StoreError::NothingReadable {
-                versions: unreadable.iter().map(|version| version.number).collect(),
-            }),
+            None => Err(StoreError::NothingReadable { unreadable }),
         }
     }
 
@@ -252,9 +271,17 @@ impl<'c> Store<'c> {
     /// Nothing is written on top of a committed version that has a higher
     /// `format` than this version knows (it would be a write to a file
     /// that is read-only to us) or that cannot be read: the document that
-    /// sync would commit has to be built from a version that was seen.
+    /// sync would commit has to be built from a version that was seen. An
+    /// earlier recorded change that cannot be read is not replaced either.
     pub fn write_pending(&self, _lock: &RunLock, metadata: &Metadata) -> Result<(), StoreError> {
         let bytes = meta::to_bytes(metadata)?;
+        // An earlier recorded change that cannot be read is the only copy
+        // of that change; this write would replace it.
+        let pending_path = self.collection.meta_pending_path(metadata.id);
+        if let Some(pending) = read_if_present(&pending_path)? {
+            parse_for(metadata.id, &pending)
+                .map_err(|reason| StoreError::PendingUnreadable { reason })?;
+        }
         self.check_highest_is_writable(metadata.id)?;
         self.ensure_object_dir(metadata.id)?;
         write_atomic(&self.collection.meta_pending_path(metadata.id), &bytes)?;
@@ -318,6 +345,10 @@ impl<'c> Store<'c> {
     /// `meta.pending` whose content is also the committed version, which
     /// the next sync pulls as `meta.<number>`. Promoting again then finds
     /// the version in place and removes the leftover recorded change.
+    ///
+    /// When only the final flush of the directory fails, the rename or the
+    /// removal has happened and the error means that it may not be
+    /// durable.
     ///
     /// ```compile_fail,E0061
     /// use antiq::id::ObjectId;
@@ -391,7 +422,11 @@ impl<'c> Store<'c> {
     /// The file is flushed before it is renamed and the directory after,
     /// so a name in place always has all its bytes. Nothing else writes in
     /// the directory while the run lock is held, so the check for the name
-    /// and the rename cannot race. A failure leaves `from` where it was.
+    /// and the rename cannot race. A failure before the rename leaves
+    /// `from` where it was. When only the final flush of the directory
+    /// fails, the file is already in place and the error means that its
+    /// entry may not be durable; putting it again finds the name and
+    /// returns [`Put::AlreadyPresent`].
     ///
     /// ```compile_fail,E0061
     /// use antiq::id::ObjectId;
@@ -532,7 +567,7 @@ mod tests {
     use crate::meta::FORMAT;
     use crate::testing::tree::TempCollection;
     use std::cell::RefCell;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     const ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const OTHER_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
@@ -831,8 +866,22 @@ mod tests {
         fx.put(ID, "meta.2", "{ not json");
         let error = fx.store().current(id(ID)).expect_err("nothing reads");
         assert!(
-            matches!(&error, StoreError::NothingReadable { versions } if versions == &[2, 1]),
+            matches!(&error, StoreError::NothingReadable { unreadable }
+                if unreadable.iter().map(|version| version.number).collect::<Vec<_>>() == [2, 1]),
             "{error:?}"
+        );
+        assert!(error.to_string().ends_with("versions: 2, 1"), "{error}");
+    }
+
+    #[test]
+    fn an_object_whose_only_version_is_of_a_later_format_is_too_new_and_not_just_unreadable() {
+        let mut fx = Fixture::new();
+        fx.put(ID, "meta.1", r#"{"format":2,"surprise":true}"#);
+        let error = fx.store().current(id(ID)).expect_err("nothing fits");
+        assert_eq!(error.kind(), ErrorKind::FormatTooNew);
+        assert_eq!(
+            crate::error::Error::from(error).kind(),
+            ErrorKind::FormatTooNew
         );
     }
 
@@ -944,6 +993,24 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_change_that_cannot_be_read_is_not_replaced() {
+        let mut fx = Fixture::new();
+        fx.put(ID, "meta.pending", "{ not json");
+        let error = fx
+            .store()
+            .write_pending(&fx.lock, &metadata(ID, 1))
+            .expect_err("the only copy of a change");
+        assert!(
+            matches!(error, StoreError::PendingUnreadable { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            fs::read(fx.collection.meta_pending_path(id(ID))).expect("a file"),
+            b"{ not json"
+        );
+    }
+
+    #[test]
     fn a_failed_write_leaves_the_recorded_change_as_it_was() {
         let fx = Fixture::new();
         fx.store()
@@ -1051,9 +1118,13 @@ mod tests {
         fx.store()
             .store_committed(&fx.lock, id(ID), number(4), &bytes)
             .expect("stores");
+        let path = fx.object_dir(ID).join("meta.4");
+        let before = fs::metadata(&path).expect("a file").ino();
         fx.store()
             .store_committed(&fx.lock, id(ID), number(4), &bytes)
             .expect("again");
+        // A rewrite renames a new file over the old one.
+        assert_eq!(fs::metadata(&path).expect("a file").ino(), before);
     }
 
     #[test]

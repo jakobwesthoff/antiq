@@ -460,10 +460,13 @@ version", which gives its number, and renames it locally to that
 
 The rename leaves the bytes as they are, so the local and the committed
 copy are identical. It is refused when `N` is not above the highest
-committed version in the object's directory. A `meta.pending` that cannot
-be read is an error, not a reason to use an older version, as it holds the
-only copy of the change. No change is recorded on top of a committed
-version that cannot be read or has a higher `format`.
+committed version in the object's directory, unless `meta.<N>` already
+holds the same bytes, which a promotion cut short by a crash leaves
+behind; then the leftover `meta.pending` is removed. A `meta.pending`
+that cannot be read is an error, not a reason to use an older version,
+as it holds the only copy of the change, and no change is recorded on top
+of it. No change is recorded on top of a committed version that cannot be
+read or has a higher `format`.
 
 | Command | Changes |
 |---------|---------|
@@ -528,8 +531,9 @@ into the object's directory, which is then flushed. Every other file antiq
 writes in `.antiq/` (metadata, manifests, tracking, index, config) goes
 through one atomic write: a temp file in the same directory, `sync_all`
 with a fallback to plain `fsync` on `ENOTSUP`, rename, `fsync` of the
-directory. Whenever antiq writes into an object's directory, it flushes
-`objects/` and `.antiq/` as well, so the directory itself is durable.
+directory. Whenever antiq may create an object's directory (recording a
+change, storing a pulled version, putting a file), it flushes `objects/`
+and `.antiq/` as well, so the directory itself is durable.
 
 The index is derived from metadata and listings, kept as plain files,
 rebuildable, and behind a module interface. Listings are fetched

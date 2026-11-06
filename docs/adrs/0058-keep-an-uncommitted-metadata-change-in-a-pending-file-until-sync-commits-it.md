@@ -29,10 +29,13 @@ which gives its version number, and then renames it locally to that
 
 The rename leaves the bytes as they are, so the local and the committed
 copy are identical, and it is refused when the number is not above the
-highest committed version in the directory. A `meta.pending` that cannot
-be read is an error, not a reason to use an older version, as it holds the
-only copy of the change. No change is recorded on top of a committed
-version that cannot be read or has a higher `format`.
+highest committed version in the directory, unless `meta.<N>` already
+holds the same bytes, which a promotion cut short by a crash leaves
+behind; then the leftover `meta.pending` is removed. A `meta.pending`
+that cannot be read is an error, not a reason to use an older version, as
+it holds the only copy of the change, and no change is recorded on top of
+it. No change is recorded on top of a committed version that cannot be
+read or has a higher `format`.
 
 ## Consequences
 
