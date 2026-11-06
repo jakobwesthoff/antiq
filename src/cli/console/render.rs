@@ -1,0 +1,303 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Blocks as lines of text, in the rich form of a terminal and the plain
+//! form of a pipe.
+
+use super::block::{Block, Kind, Para};
+use super::env::Env;
+use super::rich::{Rich, Role, Word};
+use super::symbols::Symbols;
+use super::theme;
+use anstyle::Style;
+use unicode_width::UnicodeWidthStr;
+
+/// Prose is never wrapped wider than this, however wide the terminal is.
+const MAX_WIDTH: usize = 100;
+
+/// Below this width wrapping is off: a narrow column of fragments reads
+/// worse than lines the terminal wraps itself.
+const MIN_WRAP_WIDTH: usize = 40;
+
+/// `blocks` one after the other. A terminal gets an empty line between
+/// blocks; a pipe gets the plain lines of the blocks that have one.
+pub fn render_blocks(blocks: &[Block], env: &Env) -> Vec<String> {
+    let mut lines = Vec::new();
+    for block in blocks {
+        let rendered = if env.rich {
+            block.render(env)
+        } else {
+            block.render_plain()
+        };
+        if rendered.is_empty() {
+            continue;
+        }
+        if env.rich && !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(rendered);
+    }
+    lines
+}
+
+fn paint(env: &Env, style: Style, text: &str) -> String {
+    if env.color && !text.is_empty() {
+        format!("{style}{text}{style:#}")
+    } else {
+        text.to_string()
+    }
+}
+
+fn role_style(role: Role, base: Style) -> Style {
+    match role {
+        Role::Plain => base,
+        Role::Strong => theme::BOLD,
+        Role::Dim => theme::DIM,
+        Role::Matched => theme::MATCH,
+    }
+}
+
+fn paint_word(env: &Env, word: &Word, base: Style) -> String {
+    word.iter()
+        .map(|(role, text)| paint(env, role_style(*role, base), text))
+        .collect()
+}
+
+fn word_width(word: &Word) -> usize {
+    word.iter().map(|(_, text)| text.width()).sum()
+}
+
+/// Fills lines with words up to `width` columns. A word wider than the
+/// line stands alone on one.
+fn wrap(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
+    let mut lines: Vec<Vec<&Word>> = Vec::new();
+    let mut used = 0;
+    for word in words {
+        let columns = word_width(word);
+        match lines.last_mut() {
+            Some(line) if used + 1 + columns <= width => {
+                line.push(word);
+                used += 1 + columns;
+            }
+            _ => {
+                lines.push(vec![word]);
+                used = columns;
+            }
+        }
+    }
+    lines
+}
+
+/// The painted lines of `text` wrapped to `width` columns.
+fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
+    wrap(&text.words(), width)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|word| paint_word(env, word, base))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// How wide the text of a line may be after `indent` columns.
+fn available(env: &Env, indent: usize) -> usize {
+    if env.width < MIN_WRAP_WIDTH {
+        usize::MAX
+    } else {
+        env.width.min(MAX_WIDTH).saturating_sub(indent)
+    }
+}
+
+fn badge_word(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Error => "ERROR",
+        Kind::Warning => "WARNING",
+        Kind::Info => "INFO",
+        Kind::Hint => "HINT",
+    }
+}
+
+fn badge_text(kind: Kind, symbols: &Symbols) -> String {
+    let symbol = match kind {
+        Kind::Error => symbols.error,
+        Kind::Warning => symbols.warning,
+        Kind::Info => symbols.info,
+        Kind::Hint => symbols.hint,
+    };
+    format!(" {symbol} {} ", badge_word(kind))
+}
+
+/// The left edge of the lines of a block.
+struct Bar {
+    painted: String,
+}
+
+impl Bar {
+    /// The bar with `rest` after it, or the bar alone for an empty rest.
+    fn line(&self, rest: &str) -> String {
+        if rest.is_empty() {
+            self.painted.clone()
+        } else {
+            format!("{} {rest}", self.painted)
+        }
+    }
+}
+
+impl Block {
+    /// The block as a terminal shows it, one string per line.
+    pub fn render(&self, env: &Env) -> Vec<String> {
+        let symbols = Symbols::for_env(env);
+        let badge = badge_text(self.kind, &symbols);
+        let bar = Bar {
+            painted: paint(env, theme::bar(self.kind), symbols.bar),
+        };
+        let mut lines = Vec::new();
+
+        match self.kind {
+            Kind::Error => {
+                lines.push(if env.color {
+                    paint(env, theme::badge(self.kind), &badge)
+                } else {
+                    badge.trim_end().to_string()
+                });
+                for line in flow(env, &self.title, theme::BOLD, available(env, 2)) {
+                    lines.push(bar.line(&line));
+                }
+                self.section(env, &bar, "Why it happened", &self.why, &mut lines);
+                self.section(env, &bar, "How to fix it", &self.how, &mut lines);
+                if let Some(phrase) = &self.doing {
+                    let sentence =
+                        Para::Text(Rich::new().text(&format!("Attempting to {phrase}.")));
+                    self.section(env, &bar, "What antiq was doing", &[sentence], &mut lines);
+                }
+            }
+            Kind::Hint => {
+                let hang = badge.width() + 1;
+                let first = paint(env, theme::badge(self.kind), &badge);
+                let body = flow(env, &self.title, Style::new(), available(env, hang));
+                self.push_hanging(&mut lines, &first, hang, &body);
+            }
+            Kind::Warning | Kind::Info => {
+                let hang = badge.width() + 1;
+                let first = paint(env, theme::badge(self.kind), &badge);
+                let title = flow(env, &self.title, theme::BOLD, available(env, hang));
+                self.push_hanging(&mut lines, &first, hang, &title);
+                for paragraph in &self.text {
+                    self.push_paragraph(env, &bar, paragraph, &mut lines);
+                }
+                if let Some(fix) = &self.fix {
+                    let arrow = paint(env, theme::bar(self.kind), symbols.hint);
+                    let prefix = symbols.hint.width() + 2;
+                    let fixed = flow(env, fix, Style::new(), available(env, prefix + 1));
+                    for (index, line) in fixed.iter().enumerate() {
+                        if index == 0 {
+                            lines.push(bar.line(&format!("{arrow} {line}")));
+                        } else {
+                            lines.push(bar.line(&format!("{}{line}", " ".repeat(prefix))));
+                        }
+                    }
+                }
+            }
+        }
+        lines
+    }
+
+    /// `body` lines after `first`, the later ones indented by `hang`.
+    fn push_hanging(&self, lines: &mut Vec<String>, first: &str, hang: usize, body: &[String]) {
+        for (index, line) in body.iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("{first} {line}"));
+            } else {
+                lines.push(format!("{}{line}", " ".repeat(hang)));
+            }
+        }
+        if body.is_empty() {
+            lines.push(first.trim_end().to_string());
+        }
+    }
+
+    fn section(
+        &self,
+        env: &Env,
+        bar: &Bar,
+        heading: &str,
+        paragraphs: &[Para],
+        lines: &mut Vec<String>,
+    ) {
+        if paragraphs.is_empty() {
+            return;
+        }
+        lines.push(bar.line(""));
+        lines.push(bar.line(&paint(env, theme::label(self.kind), heading)));
+        for paragraph in paragraphs {
+            self.push_paragraph(env, bar, paragraph, lines);
+        }
+    }
+
+    fn push_paragraph(&self, env: &Env, bar: &Bar, paragraph: &Para, lines: &mut Vec<String>) {
+        match paragraph {
+            Para::Text(text) => {
+                for line in flow(env, text, Style::new(), available(env, 4)) {
+                    lines.push(bar.line(&format!("  {line}")));
+                }
+            }
+            Para::Pre(line) => {
+                lines.push(bar.line(&format!("  {}", paint(env, theme::BOLD, line))))
+            }
+            Para::Blank => lines.push(bar.line("")),
+        }
+    }
+
+    /// The block as a pipe on stderr gets it: lines a script can grep.
+    /// Info and hint exist only for a person at a terminal.
+    pub fn render_plain(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        match self.kind {
+            Kind::Error => {
+                lines.push(format!("error: {}", self.title.to_plain()));
+                labelled(&mut lines, "why", &self.why);
+                labelled(&mut lines, "fix", &self.how);
+                if let Some(phrase) = &self.doing {
+                    lines.push(format!("  while attempting to {phrase}"));
+                }
+            }
+            Kind::Warning => {
+                lines.push(format!("warning: {}", self.title.to_plain()));
+                for paragraph in &self.text {
+                    if let Some(text) = plain_paragraph(paragraph) {
+                        lines.push(format!("  {text}"));
+                    }
+                }
+                if let Some(fix) = &self.fix {
+                    lines.push(format!("  fix: {}", fix.to_plain()));
+                }
+            }
+            Kind::Info | Kind::Hint => {}
+        }
+        lines
+    }
+}
+
+fn plain_paragraph(paragraph: &Para) -> Option<String> {
+    match paragraph {
+        Para::Text(text) => Some(text.to_plain()),
+        Para::Pre(line) => Some(line.clone()),
+        Para::Blank => None,
+    }
+}
+
+/// The paragraphs of a section behind `label:`, the later ones aligned
+/// under the first.
+fn labelled(lines: &mut Vec<String>, label: &str, paragraphs: &[Para]) {
+    let indent = " ".repeat(label.len() + 4);
+    for (index, text) in paragraphs.iter().filter_map(plain_paragraph).enumerate() {
+        if index == 0 {
+            lines.push(format!("  {label}: {text}"));
+        } else {
+            lines.push(format!("{indent}{text}"));
+        }
+    }
+}

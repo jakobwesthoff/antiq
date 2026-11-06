@@ -1,0 +1,114 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! The message blocks: error, warning, info and hint.
+
+use super::rich::Rich;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
+/// One paragraph of a block section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Para {
+    /// Prose, wrapped to the width.
+    Text(Rich),
+    /// A line kept as written, such as a line of a config file.
+    Pre(String),
+    Blank,
+}
+
+impl Para {
+    pub fn pre(line: &str) -> Para {
+        Para::Pre(line.to_string())
+    }
+}
+
+impl From<Rich> for Para {
+    fn from(text: Rich) -> Para {
+        Para::Text(text)
+    }
+}
+
+/// A message to the reader. Rendering is in `render`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub(super) kind: Kind,
+    pub(super) title: Rich,
+    pub(super) text: Vec<Para>,
+    pub(super) fix: Option<Rich>,
+    pub(super) why: Vec<Para>,
+    pub(super) how: Vec<Para>,
+    pub(super) doing: Option<String>,
+}
+
+impl Block {
+    fn new(kind: Kind, title: Rich) -> Block {
+        Block {
+            kind,
+            title,
+            text: Vec::new(),
+            fix: None,
+            why: Vec::new(),
+            how: Vec::new(),
+            doing: None,
+        }
+    }
+
+    pub fn error(title: Rich) -> Block {
+        Block::new(Kind::Error, title)
+    }
+
+    pub fn warning(title: Rich) -> Block {
+        Block::new(Kind::Warning, title)
+    }
+
+    pub fn info(title: Rich) -> Block {
+        Block::new(Kind::Info, title)
+    }
+
+    pub fn hint(text: Rich) -> Block {
+        Block::new(Kind::Hint, text)
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// A paragraph below the title of a warning or info.
+    pub fn text(mut self, paragraph: impl Into<Para>) -> Block {
+        self.text.push(paragraph.into());
+        self
+    }
+
+    /// The `→` line of a warning or info: what repairs the situation.
+    pub fn fix(mut self, fix: Rich) -> Block {
+        self.fix = Some(fix);
+        self
+    }
+
+    /// A paragraph of the "Why it happened" section of an error.
+    pub fn why(mut self, paragraph: impl Into<Para>) -> Block {
+        self.why.push(paragraph.into());
+        self
+    }
+
+    /// A paragraph of the "How to fix it" section of an error.
+    pub fn how(mut self, paragraph: impl Into<Para>) -> Block {
+        self.how.push(paragraph.into());
+        self
+    }
+
+    /// What the run was doing when an error stopped it, as the rest of
+    /// the sentence "Attempting to ...".
+    pub fn doing(mut self, phrase: &str) -> Block {
+        self.doing = Some(phrase.to_string());
+        self
+    }
+}

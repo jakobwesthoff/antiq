@@ -5,6 +5,7 @@
 //! The pieces of a console table: padding, cutting, wrapping and colour
 //! by display width, and the escaping of names that a terminal would act on.
 
+use crate::cli::console::theme;
 use crate::cli::output::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -21,15 +22,15 @@ pub(super) enum Color {
 }
 
 pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
-    let code = match color {
-        Color::Bold => "\x1b[1m",
-        Color::Red => "\x1b[31m",
-        Color::Yellow => "\x1b[33m",
-        Color::Magenta => "\x1b[35m",
-        Color::Cyan => "\x1b[36m",
+    let look = match color {
+        Color::Bold => theme::BOLD,
+        Color::Red => theme::RED,
+        Color::Yellow => theme::YELLOW,
+        Color::Magenta => theme::MAGENTA,
+        Color::Cyan => theme::CYAN,
     };
     if style.color && !text.is_empty() {
-        format!("{code}{text}\x1b[0m")
+        format!("{look}{text}{look:#}")
     } else {
         text.to_string()
     }

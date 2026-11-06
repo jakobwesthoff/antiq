@@ -9,6 +9,7 @@
 //! it is what `antiq status | head` ends with, so a stream whose reader is
 //! gone silently drops what is written to it from then on.
 
+use crate::cli::console::env::Env;
 use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -142,6 +143,8 @@ pub struct Output {
     stderr: Sink,
     colored: bool,
     stdout_style: Style,
+    stdout_env: Env,
+    stderr_env: Env,
 }
 
 /// Whether the label of an error on stderr is coloured: on a terminal, and
@@ -163,6 +166,7 @@ impl Output {
             ),
         )
         .with_stdout_style(Style::of(io::stdout()))
+        .with_envs(Env::detect(&io::stdout()), Env::detect(&io::stderr()))
     }
 
     pub fn new(
@@ -179,7 +183,34 @@ impl Output {
                 color: false,
                 terminal: false,
             },
+            stdout_env: Env::pipe(),
+            stderr_env: Env::pipe(),
         }
+    }
+
+    /// The same output with the environments of its two streams.
+    pub fn with_envs(mut self, stdout: Env, stderr: Env) -> Output {
+        self.stdout_env = stdout;
+        self.stderr_env = stderr;
+        self
+    }
+
+    /// How blocks and symbols on stdout are rendered.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no command reads the environments yet")
+    )]
+    pub fn stdout_env(&self) -> Env {
+        self.stdout_env
+    }
+
+    /// How blocks and symbols on stderr are rendered.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no command reads the environments yet")
+    )]
+    pub fn stderr_env(&self) -> Env {
+        self.stderr_env
     }
 
     /// The same output with `style` for what goes to stdout.
@@ -372,6 +403,18 @@ mod tests {
             capture.stdout(),
             "{\"format\":1,\"command\":\"status\",\"pieces\":[],\"remote\":\"none\"}\n"
         );
+    }
+
+    #[test]
+    fn each_stream_has_its_own_environment() {
+        let capture = Capture::default();
+        let out = capture.output(false);
+        assert_eq!(out.stdout_env(), Env::pipe());
+        assert_eq!(out.stderr_env(), Env::pipe());
+        let terminal = Env::new(true, false, true, 100);
+        let out = out.with_envs(terminal, Env::pipe());
+        assert_eq!(out.stdout_env(), terminal);
+        assert_eq!(out.stderr_env(), Env::pipe());
     }
 
     #[test]

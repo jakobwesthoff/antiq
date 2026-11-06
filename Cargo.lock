@@ -65,6 +65,8 @@ dependencies = [
 name = "antiq"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "anyhow",
  "clap",
  "filetime",

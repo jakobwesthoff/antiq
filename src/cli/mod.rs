@@ -6,6 +6,8 @@
 //! command modules, and how a failed run is reported.
 
 pub mod cmd;
+#[expect(dead_code, reason = "no command renders a block yet")]
+pub mod console;
 pub mod output;
 pub mod table;
 
