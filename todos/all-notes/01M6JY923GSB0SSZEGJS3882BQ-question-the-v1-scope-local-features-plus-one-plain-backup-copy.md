@@ -308,6 +308,42 @@ Concept round 2 (asqr 01M6K5JFV3VWECWFMV0X8BHE1Q and
 - The user's session note: is `archive` the right name for the command?
   To discuss (round 3).
 
+Concept rounds 3 to 7 (asqr 01M6K6Z625AFW27THQM1V2BDWW,
+01M6K7MDA54ATMFCZVQX3YSRY7, 01M6K848GKD8QHT8446P0Q8SCV,
+01M6K8B4GVJ09ZJGKJ4HRDPJ2Y, 01M6K8EQHKPYXPG4Q16GRP1SMF, and chat):
+
+- `archive <piece>` archives one piece now, however recent; pinned is
+  refused until unpinned.
+- Kept unchanged: patterns with `**` and shallowest match, the dot
+  rule, exclude as literal paths, symlinks (never pieces, never
+  followed), mount points, nested collections, unreadable entries,
+  empty pieces.
+- Symlinks: rsync copies them as links; whether something on the
+  target follows them is the target's permission matter, documented,
+  not solved.
+- Future file times count normally; `status` points to the files so
+  the user fixes them. The one-day tolerance rule goes.
+- Ignore rules: `ignore` (config) and `.antiqignore` now mean "not
+  packed, not counted, deleted with the folder" (the git meaning), the
+  user's example being `node_modules/`; default `[".DS_Store"]`, the
+  separate junk list goes. Rules that only keep paths out of the idle
+  check are `timeless` (config) and `.antiq-timeless`. The user
+  confirmed gitignore anchoring (`docs/*.log` is anchored).
+- `push` mirrors live folders whole, ignored paths included.
+- `init` creates without a question and without `archive.sh`
+  detection; it prints the count of due folders only if that is a few
+  lines on code that already exists (lead decides at implementation),
+  else only that it was created.
+- Command names: `archive` and `unearth` (the user tried `bury` and
+  `shelve`, then preferred `archive`, since `shelve` does not go with
+  `unearth`). The noun is "version" everywhere; "archive file" only for
+  the `.tar.zst` on disk.
+- Control files: `.antiqignore` like `.gitignore`, the others with a
+  dash: `.antiq-timeless`, `.antiq-pin`, `.antiq-unearthed`. The tool
+  name antiq stays.
+- Go for the adversarial review of the concept (fable, opus, sonnet,
+  haiku).
+
 ## Presented
 
 - The grep study was presented in round 8

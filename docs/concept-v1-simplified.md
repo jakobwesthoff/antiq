@@ -3,8 +3,7 @@
 Status: draft for review. It replaces the multi-machine design of
 `docs/specs/spec-v1.md` once agreed; the spec and the ADRs are then
 rewritten to match (ADRs stay rewritable until the first release).
-Sections marked **Proposal** are not decided yet; the open questions
-are collected at the end.
+Sections marked **Proposal** have not been confirmed one by one yet.
 
 ## Goal
 
@@ -13,14 +12,14 @@ a while, finds them again by name or by the files they hold, brings
 them back, and mirrors the whole collection to one backup target.
 
 - All work happens on one machine. The target is a plain copy of the
-  collection: copying it back restores everything, folders and
-  archives alike.
+  collection: copying it back restores everything, live folders and
+  versions alike.
 - Everything antiq writes can be understood and used without antiq:
-  archives are `tar.zst`, listings are checksum files that `shasum -c`
+  archive files are `tar.zst`, listings are checksum files that `shasum -c`
   reads, and names say what a file is.
 - There is no multi-machine support, no version conflicts, no claims,
   no versioned metadata documents and no tiers. A second machine that
-  needs an archive copies it from the target by hand. A later version
+  needs a version copies its files from the target by hand. A later version
   may add more; the layout does not block that.
 
 ## Concepts
@@ -31,11 +30,58 @@ them back, and mirrors the whole collection to one backup target.
   identity: archiving the same path again adds a version of the same
   piece.
 - **Live:** a piece that exists as a folder.
-- **Archived version:** one archive of a piece, made at one moment.
-  A piece can have several versions side by side.
+- **Version:** one archived state of a piece, made at one moment. A
+  piece can have several versions side by side. User-facing text calls
+  it a version throughout; "archive" is only the verb.
+- **Archive file:** the `.tar.zst` of a version. The word appears only
+  where the files on disk matter.
 - **Pinned:** a live piece with a `.antiq-pin` file, never archived.
 - **Target:** the backup location, a path (a mounted NAS) or
   `user@host:path` reached over ssh by rsync.
+
+## Selection, walk and idle check
+
+These rules carry over from the current spec and code unchanged, except
+where noted.
+
+- **Patterns:** glob patterns select the pieces, default `*`; `**` is
+  allowed. When matches nest, the shallowest match is the piece.
+- **Dot entries:** a folder whose name starts with a dot is a piece
+  only when a pattern names that dot literally.
+- **Exclude:** literal paths, not patterns, that are never pieces,
+  together with everything below them; another spelling the volume
+  treats as the same name is excluded as well.
+- **Symlinks:** never pieces, and no walk follows a link. Links inside
+  a piece are archived as links, and rsync copies them as links. A link
+  on the target points to whatever its path names there; the user
+  documentation says so.
+- **Mount points:** a piece that contains another device is never
+  archived; `status` names the mount point.
+- **Nested collections:** a piece that contains a `.antiq/` directory
+  is never archived; `status` names it.
+- **Unreadable entries:** a piece with an entry the walk cannot read is
+  never archived; `status` names the first such entry.
+- **Ignored paths:** what the `ignore` lines of the config and the
+  `.antiqignore` files match is not packed, not listed and does not
+  count for the idle check; `archive` deletes it with the folder. The
+  default is `ignore = [".DS_Store"]`; the separate junk list goes. A
+  typical use is `node_modules/`, which can be fetched again.
+- **Timeless paths:** what the `timeless` lines of the config and the
+  `.antiq-timeless` files match is packed but does not count for the idle
+  check, such as `.git/`, which changes on every `git fetch`. Default
+  empty.
+- **Rule syntax** for both kinds is gitignore's. Config lines are
+  anchored at each piece's top, a file's lines at its directory. A
+  pattern without a `/` except at its end matches at any depth below;
+  a `/` at the start or in the middle anchors it, so `docs/*.log` in
+  `a/.antiqignore` matches `a/docs/x.log` but not `a/b/docs/x.log`
+  (that needs `**/docs/*.log`). The nearest file wins, then those
+  further out, then the config. Rule files themselves are packed.
+- **Future times:** a file time in the future counts like any other, so
+  the piece is not due before that time has passed; `status` lists such
+  files so the user can fix them. (The current spec ignores times more
+  than a day ahead; that rule goes.)
+- **Empty pieces:** a piece without a countable file is never archived.
 
 ## Store layout
 
@@ -52,16 +98,17 @@ them back, and mirrors the whole collection to one backup target.
 ```
 
 - The folder under `.antiq/pieces/` is the piece's path.
-- File names carry the normalized piece path and the archive time.
+- File names carry the normalized piece path and the time of archiving.
   Normalizing replaces every character outside `[A-Za-z0-9._]` with
   `-` and collapses repeated `-`. The time is the moment of archiving
-  in UTC, written `YYYY-MM-DDTHHMMSS`. A second archive of the same
+  in UTC, written `YYYY-MM-DDTHHMMSS`. A second version of the same
   path within the same second gets a counter suffix (`…T101500-2`).
 - `.tar.zst.sha256` holds the SHA-256 of the archive file in
   `shasum -c` format.
 - `.sha256.zst` is the listing (below), zstd-compressed.
 - There is no state file: everything antiq needs follows from the
-  folders, the archive files and the `.antiq-pin` files.
+  folders, the files of the versions, and the `.antiq-pin` and
+  `.antiq-unearthed` files.
 
 ## Listing format
 
@@ -102,20 +149,27 @@ talks to the target.
 ### `init`
 
 Makes a directory a collection: writes `.antiq/config.toml` with a new
-collection ID and the patterns given.
+collection ID and the patterns given. It does not look for the layout
+of `archive.sh`; its old archive files are brought in by hand with
+`import`.
+Afterwards it prints how many folders the next `archive` would archive,
+if that takes no more than a few lines on top of the code `status` and
+`archive -n` already run; otherwise it prints only that the collection
+was created.
 
-### `archive`
+### `archive [<piece>]`
 
-Archives every live piece that is due. **Proposal for the flow:**
+Without an argument, archives every live piece that is due. With a
+piece, archives that one now, however recently it changed; a pinned
+piece is refused until it is unpinned. **Proposal for the flow:**
 
 1. The pieces are the folders matched by `patterns` (default `*`, each
    folder directly under the collection), minus `exclude`.
-2. A piece is due when its newest mtime, not counting files matched by
-   the `ignore` lines (gitignore syntax, for example `node_modules/`),
-   is older than `idle_days`. Pinned pieces are never due.
+2. A piece is due when its newest mtime, not counting ignored and
+   timeless paths, is older than `idle_days`. Pinned pieces are never due.
 3. It is packed in `.antiq/tmp/`: the `.tar.zst`, the listing and the
    `.tar.zst.sha256`.
-4. It is verified: the whole archive is read back and compared with
+4. It is verified: the whole archive file is read back and compared with
    the listing and the folder. A folder that changes meanwhile is
    skipped.
 5. The three files are moved into `.antiq/pieces/<path>/` and flushed.
@@ -125,8 +179,8 @@ Archives every live piece that is due. **Proposal for the flow:**
 
 ### `unearth <piece> [--version <time>]`
 
-Brings an archived piece back as a folder and **removes that archive**
-once the folder is complete and verified. The folder is an ordinary
+Brings a version of a piece back as a folder and **removes that
+version** once the folder is complete and verified. The folder is an ordinary
 live folder again. Archiving it later creates a new version.
 
 - `<piece>` is a path, or a search word that matches exactly one
@@ -140,37 +194,37 @@ live folder again. Archiving it later creates a new version.
   at its top, holding the time of the unearth. The idle clock of that
   folder starts at the later of this time and its newest file time.
   The file does not count as a change and is not packed into a later
-  archive.
+  version.
 
 ### `fork <piece> [--version <time>] [--name <new path>]`
 
-Extracts a working copy while the archive stays unchanged. Without
+Extracts a working copy of a version, which stays unchanged. Without
 `--name` the copy goes to the original path. Archived later, the copy
 becomes a new version (same path) or a new piece (new path).
 
 ### `forget <piece> <version>`
 
-Deletes exactly one archived version (its three files). Deleting every
+Deletes exactly one version (its three files). Deleting every
 version of a piece takes `--all-versions --force`. The next `push`
 mirrors the deletion to the target.
 
 ### `import <folder> [--as <path>] [--time <time>]`
 
-Packs a folder from outside the collection directly as an archived
-version of `<path>` (default: the folder's name). The version time is
+Packs a folder from outside the collection directly as a version of
+`<path>` (default: the folder's name). The version time is
 the newest mtime in the folder, or `--time`. The source folder is left
-in place. This is also the way to bring in old archives: unpack them
+in place. This is also the way to bring in old archive files: unpack them
 with their original timestamps somewhere temporary, then import each
 folder.
 
 ### `list [query]`
 
-One row per archived version, newest first within a piece; the query
+One row per version, newest first within a piece; the query
 matches piece paths fuzzily.
 
 ```text
 $ antiq list scan
-PATH               ARCHIVED             SIZE    FILES
+PIECE              VERSION              SIZE    FILES
 projects/scanner   2026-11-04 09:02     1.2 GB  48 211
 projects/scanner   2026-09-03 10:15     1.1 GB  47 980
 tools/scan-old     2025-02-11 18:40    40 MB      812
@@ -210,7 +264,7 @@ state coloured in the first column: `due` (archived on the next run),
 folders are only counted in the header.
 
 ```text
-13 folders · 214 archived (38.2 GB) · archive after 30 days idle
+13 folders · 214 versions (38.2 GB) · archive after 30 days idle
 
 STATE  PIECE                                 IDLE  WHAT
 due    experiments/rust-gpu                   33d  archives next run
@@ -243,16 +297,18 @@ compares it with the sender's. antiq reads nothing back. This needs
 rsync 3.x; the `rsync` macOS ships is openrsync, which has no
 `--fsync`. Nothing records when the last push ran.
 
+`push` copies live folders whole, ignored paths such as
+`node_modules/` included; the ignore rules apply to versions only.
+
 `push` has no brake: whatever is deleted locally, by antiq or by hand,
 is deleted on the target by the next push. The target is a mirror, not
-a backup with history, and the user documentation says so.
+a backup with history, and the user documentation says so. That is why
+the command is called `push` and not `backup`.
 
 `--if-reachable` makes `push` exit 0 when the target cannot be reached,
 for scheduled runs. Scheduling runs the two commands one after the
 other, such as `antiq archive && antiq push --if-reachable`; there is
 no command that does both.
-
-The name is `push` and not `backup` for the same reason.
 
 ## Configuration
 
@@ -264,7 +320,8 @@ The configuration is per collection, in `.antiq/config.toml`.
 id = "01JBX…"                  # written at init, also in the target marker
 patterns = ["*"]
 exclude = []
-ignore = ["node_modules/", "target/"]
+ignore = [".DS_Store"]
+timeless = []
 idle_days = 30
 soon_days = 3
 
@@ -312,9 +369,10 @@ The modules named below exist on main today (`src/`). How each fares,
     use it, the remote abstraction and the own ssh layer as far as rsync
     replaces them, the picker (`cli/picker/`), and `find` with its
     member index.
-- **Paused branches** (i31 version conflicts, i33 tiers, i44 forget
-  draft) are not merged. The parts of i42 that still apply (removing
-  the unused error kind, the folder lookup fix) are carried over.
+- **Paused branches** (i31 version conflicts, i33 tiers, i42 decision
+  fixes, i44 forget draft) are deleted unmerged. The parts of i42 that
+  still apply (removing the unused error kind, the folder lookup fix)
+  are carried over.
 
 ## Documentation after agreement
 
@@ -322,12 +380,3 @@ Once the concept is agreed, it becomes the new `docs/specs/spec-v1.md`
 and this document goes. ADRs about parts that no longer exist are
 deleted, the others are rewritten to the new model; numbers stay, gaps
 are fine. The todos for removed parts are closed in the same step.
-
-## Open questions
-
-1. Which detail rules of the selection, the walk and the idle check
-   stay (patterns and the dot rule, exclude, symlinks, mount points and
-   nested collections, unreadable entries, `.antiqignore` files, the
-   junk list, future mtimes, empty pieces).
-2. The name of the `archive` command.
-3. Whether a single piece can be archived on request, before it is due.
