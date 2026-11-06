@@ -143,6 +143,16 @@ fn replace_stamps(text: &str, labels: &BTreeMap<String, String>) -> String {
     out
 }
 
+/// The piece folder a file belongs to: its directory, without the store
+/// prefix, so the store folder of a piece and the piece itself agree.
+fn stamp_group(name: &str) -> String {
+    let directory = name.rsplit_once('/').map_or("", |(directory, _)| directory);
+    directory
+        .strip_prefix(".antiq/pieces/")
+        .unwrap_or(directory)
+        .to_string()
+}
+
 /// The sort key of a stamp: its time, then its counter as a number.
 fn stamp_order(stamp: &str) -> (String, u64) {
     match stamp[17..].strip_prefix('-') {
@@ -255,25 +265,37 @@ impl State {
             decoded.insert(name, entry);
         }
 
-        let mut stamps = std::collections::BTreeSet::new();
+        // A stamp's label counts the stamps of its own piece folder only.
+        // Two pieces archived in one run share a stamp when they land in the
+        // same second and differ when a second boundary falls between, and
+        // numbering over the whole tree would label the two worlds apart.
+        let mut stamps: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         for (name, entry) in &decoded {
+            let group = stamp_group(name);
+            let found = stamps.entry(group.clone()).or_default();
             for (start, end) in stamps_in(name) {
-                stamps.insert(name[start..end].to_string());
+                found.insert(name[start..end].to_string());
             }
             if let Entry::File { content, .. } = entry
                 && let Ok(text) = std::str::from_utf8(content)
             {
                 for (start, end) in stamps_in(text) {
-                    stamps.insert(text[start..end].to_string());
+                    found.insert(text[start..end].to_string());
                 }
             }
         }
-        let mut ordered: Vec<String> = stamps.into_iter().collect();
-        ordered.sort_by_key(|stamp| stamp_order(stamp));
-        let labels: BTreeMap<String, String> = ordered
+        let labels: BTreeMap<String, BTreeMap<String, String>> = stamps
             .into_iter()
-            .enumerate()
-            .map(|(index, stamp)| (stamp, format!("<v{}>", index + 1)))
+            .map(|(group, found)| {
+                let mut ordered: Vec<String> = found.into_iter().collect();
+                ordered.sort_by_key(|stamp| stamp_order(stamp));
+                let numbered = ordered
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, stamp)| (stamp, format!("<v{}>", index + 1)))
+                    .collect();
+                (group, numbered)
+            })
             .collect();
 
         let entries = decoded
@@ -286,7 +308,8 @@ impl State {
                         content,
                     } => match String::from_utf8(content) {
                         Ok(text) => {
-                            let mut text = blank_times(&replace_stamps(&text, &labels));
+                            let mut text =
+                                blank_times(&replace_stamps(&text, &labels[&stamp_group(&name)]));
                             if name.ends_with(".sha256") {
                                 text = blank_digests(&text);
                             }
@@ -304,7 +327,7 @@ impl State {
                     },
                     other => other,
                 };
-                (replace_stamps(&name, &labels), entry)
+                (replace_stamps(&name, &labels[&stamp_group(&name)]), entry)
             })
             .collect();
         State { entries }

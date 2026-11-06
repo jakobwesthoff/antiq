@@ -123,8 +123,8 @@
 //!
 //! - the collection and target paths become `<root>` and `<target>` in
 //!   text content, config and link targets;
-//! - version stamps become `<v1>`, `<v2>`, ... by their order in the whole
-//!   tree (time, then counter as a number), in names and in text;
+//! - version stamps become `<v1>`, `<v2>`, ... by their order within their
+//!   piece folder (time, then counter as a number), in names and in text;
 //! - the values of the listing header keys `archived`, `imported` and
 //!   `rebuilt`, and the time in `.antiq-restored`, become `<time>`, and the
 //!   `id` of `.antiq/config.toml`, which `init` mints anew in every world,

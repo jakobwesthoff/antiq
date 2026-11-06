@@ -761,6 +761,31 @@ fn stamps_are_replaced_by_their_order_and_stay_distinct() {
 }
 
 #[test]
+fn stamps_of_two_pieces_get_the_same_labels_whether_or_not_a_second_lies_between() {
+    let clock = Clock::now();
+    let build = |for_a: &str, for_b: &str| {
+        let collection = Collection::build(&clock).finish();
+        for (piece, stamp) in [("a", for_a), ("b", for_b)] {
+            let dir = collection.path(&format!(".antiq/pieces/{piece}"));
+            fs::create_dir_all(&dir).expect("the store folder is made");
+            fs::write(
+                dir.join(format!("{piece}--{stamp}.tar.zst.sha256")),
+                format!("{stamp}\n"),
+            )
+            .expect("the file is written");
+        }
+        collection
+    };
+    let same_second = normalised_state(&build("2026-11-04T090211", "2026-11-04T090211"));
+    let across = normalised_state(&build("2026-11-04T090211", "2026-11-04T090212"));
+    assert!(
+        same_second.diff(&across).is_none(),
+        "{:?}",
+        same_second.diff(&across)
+    );
+}
+
+#[test]
 fn times_are_replaced_by_key_but_file_times_are_kept() {
     let clock = Clock::now();
     let build = |archived: &str, restored: &str| {
