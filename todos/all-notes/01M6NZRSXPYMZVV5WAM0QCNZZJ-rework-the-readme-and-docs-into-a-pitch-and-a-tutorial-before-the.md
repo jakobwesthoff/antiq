@@ -40,11 +40,21 @@ content stays; no information is lost. The order and the voice change.
   such rules exist in his private ntropy vault; look them up together
   when this starts.
 
+## Decided later
+
+- The project page gets marketing too, not only the README: good
+  documentation and, alongside it, colourful output that shows off the
+  console design (Jakob, chat, 2026-11-05). So the captures that sell
+  the tool are coloured images, on the project page and in the README.
+- This runs in the current conductor run, right after the code work,
+  followed by the final review with Jakob (Jakob, chat, 2026-11-05).
+
 ## Open points
 
 - Where the reference material goes once the README is a tutorial (a
   reference section at the end, or separate docs).
-- Which captures, and in which form (images or text transcripts).
+- Which captures, and where text transcripts still fit (for commands a
+  reader copies).
 - The exact wording of the pitch and the use cases.
 
 The GitHub topics already follow this planned README (2026-11-05):
