@@ -5,9 +5,7 @@
 //! Running the antiq binary the way a script would.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs;
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -214,26 +212,6 @@ pub fn hold_lock(root: &Path) -> antiq::lock::RunLock {
     .expect("the lock is free")
 }
 
-/// Every path below `root` with its content, directories as `None`, to
-/// compare before and after a command.
-pub fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
-    fn walk(base: &Path, dir: &Path, seen: &mut BTreeMap<String, Option<Vec<u8>>>) {
-        for item in fs::read_dir(dir).expect("lists") {
-            let path = item.expect("an item").path();
-            let name = path
-                .strip_prefix(base)
-                .expect("below")
-                .display()
-                .to_string();
-            if path.is_dir() {
-                seen.insert(name, None);
-                walk(base, &path, seen);
-            } else {
-                seen.insert(name, Some(fs::read(&path).expect("reads")));
-            }
-        }
-    }
-    let mut seen = BTreeMap::new();
-    walk(root, root, &mut seen);
-    seen
-}
+// Not every test crate that includes this file compares snapshots.
+#[allow(unused_imports)]
+pub use super::tree::snapshot;

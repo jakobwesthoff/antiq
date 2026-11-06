@@ -4,7 +4,11 @@
 
 //! The ordered actions a command intends to take.
 
-use serde::Serialize;
+use crate::lock::Holder;
+use crate::repair::Repair;
+use jiff::Timestamp;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 /// What a command is going to do, in order. `A` is the action type of the
 /// command.
@@ -79,9 +83,116 @@ impl<A: PlanAction> Plan<A> {
     }
 }
 
+// =========================================================
+// Repairs in front of a command's own actions
+// =========================================================
+
+/// One action of a dry run of a state-changing command: a repair of the
+/// start of the run, or an action of the command.
+#[derive(Debug)]
+pub enum Step<A> {
+    Repair(Repair),
+    Command(A),
+}
+
+impl<A: Serialize> Serialize for Step<A> {
+    /// A repair is `{"kind": "repair", "repair": ...}`; a command action
+    /// serialises as it is.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Tagged<'a> {
+            kind: &'static str,
+            #[serde(flatten)]
+            repair: &'a Repair,
+        }
+        match self {
+            Step::Repair(repair) => Tagged {
+                kind: "repair",
+                repair,
+            }
+            .serialize(serializer),
+            Step::Command(action) => action.serialize(serializer),
+        }
+    }
+}
+
+impl<A: PlanAction> PlanAction for Step<A> {
+    fn describe(&self) -> String {
+        match self {
+            Step::Repair(repair) => repair.describe(),
+            Step::Command(action) => action.describe(),
+        }
+    }
+}
+
+impl<A> Plan<Step<A>> {
+    /// A plan that starts with the repairs a run would do first.
+    pub fn after_repairs(repairs: Vec<Repair>) -> Self {
+        Plan {
+            actions: repairs.into_iter().map(Step::Repair).collect(),
+        }
+    }
+
+    /// Adds an action of the command behind the repairs and the actions
+    /// added so far.
+    pub fn push_command(&mut self, action: A) {
+        self.actions.push(Step::Command(action));
+    }
+}
+
+/// The dry run of a command whose run lock is held by another run: the
+/// repairs are not listed, since the other run is doing them.
+#[derive(Debug)]
+pub struct HeldDryRun {
+    pid: u32,
+    started: Timestamp,
+}
+
+impl HeldDryRun {
+    /// The dry run that names the holder of the lock instead of listing
+    /// anything.
+    pub fn new(holder: &Holder) -> HeldDryRun {
+        HeldDryRun {
+            pid: holder.pid,
+            started: holder.started,
+        }
+    }
+
+    /// The line the console prints.
+    pub fn lines(&self) -> Vec<String> {
+        vec![format!(
+            "The lock is held by pid {}, started {}. No repairs are listed.",
+            self.pid, self.started
+        )]
+    }
+}
+
+impl Serialize for HeldDryRun {
+    /// `{"dry_run": true, "lock_held": {"pid", "started"}, "actions": []}`.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Holding {
+            pid: u32,
+            started: Timestamp,
+        }
+        let mut state = serializer.serialize_struct("HeldDryRun", 3)?;
+        state.serialize_field("dry_run", &true)?;
+        state.serialize_field(
+            "lock_held",
+            &Holding {
+                pid: self.pid,
+                started: self.started,
+            },
+        )?;
+        state.serialize_field("actions", &Vec::<()>::new())?;
+        state.end()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relpath::RelPath;
     use serde_json::json;
 
     #[test]
@@ -105,9 +216,9 @@ mod tests {
 
     #[derive(Serialize)]
     #[serde(transparent)]
-    struct Step(&'static str);
+    struct Line(&'static str);
 
-    impl PlanAction for Step {
+    impl PlanAction for Line {
         fn describe(&self) -> String {
             self.0.to_string()
         }
@@ -116,8 +227,8 @@ mod tests {
     #[test]
     fn a_dry_run_in_json_says_so_before_the_actions() {
         let mut plan = Plan::new();
-        plan.push(Step("archive projects/a"));
-        plan.push(Step("archive projects/b"));
+        plan.push(Line("archive projects/a"));
+        plan.push(Line("archive projects/b"));
         let text = serde_json::to_string(&plan.dry_run()).expect("a dry run serialises");
         assert_eq!(
             text,
@@ -127,15 +238,15 @@ mod tests {
 
     #[test]
     fn an_empty_dry_run_in_json_has_no_actions() {
-        let free = serde_json::to_value(Plan::<Step>::new().dry_run()).expect("serialises");
+        let free = serde_json::to_value(Plan::<Line>::new().dry_run()).expect("serialises");
         assert_eq!(free, json!({"dry_run": true, "actions": []}));
     }
 
     #[test]
     fn each_action_is_a_would_line() {
         let mut plan = Plan::new();
-        plan.push(Step("archive projects/a"));
-        plan.push(Step("archive projects/b"));
+        plan.push(Line("archive projects/a"));
+        plan.push(Line("archive projects/b"));
         assert_eq!(
             plan.lines(),
             ["Would archive projects/a", "Would archive projects/b"]
@@ -144,6 +255,59 @@ mod tests {
 
     #[test]
     fn an_empty_plan_has_nothing_to_do() {
-        assert_eq!(Plan::<Step>::new().lines(), ["Nothing to do."]);
+        assert_eq!(Plan::<Line>::new().lines(), ["Nothing to do."]);
+    }
+
+    fn delete_sidecars() -> Repair {
+        Repair::DeleteSidecars {
+            piece: RelPath::parse("a/b").expect("a path"),
+            version: "2026-11-04T090211".parse().expect("a stamp"),
+        }
+    }
+
+    #[test]
+    fn repairs_come_first_in_json_with_their_kind() {
+        let mut plan = Plan::after_repairs(vec![delete_sidecars()]);
+        plan.push_command(Line("archive projects/a"));
+        let text = serde_json::to_string(&plan.dry_run()).expect("serialises");
+        assert_eq!(
+            text,
+            concat!(
+                r#"{"dry_run":true,"actions":["#,
+                r#"{"kind":"repair","repair":"delete_sidecars","piece":"a/b","version":"2026-11-04T090211"},"#,
+                r#""archive projects/a"]}"#
+            )
+        );
+    }
+
+    #[test]
+    fn repairs_are_would_lines_before_the_commands_own() {
+        let mut plan = Plan::after_repairs(vec![delete_sidecars()]);
+        plan.push_command(Line("archive projects/a"));
+        assert_eq!(
+            plan.lines(),
+            [
+                "Would delete the sidecars of 2026-11-04T090211 in .antiq/pieces/a/b (the archive is not there)",
+                "Would archive projects/a"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_with_a_held_lock_names_the_holder_and_lists_no_actions() {
+        let holder = Holder {
+            pid: 4711,
+            machine: "imperius".to_string(),
+            started: "2026-11-04T09:02:11Z".parse().expect("a time"),
+        };
+        let held = HeldDryRun::new(&holder);
+        assert_eq!(
+            serde_json::to_string(&held).expect("serialises"),
+            r#"{"dry_run":true,"lock_held":{"pid":4711,"started":"2026-11-04T09:02:11Z"},"actions":[]}"#
+        );
+        assert_eq!(
+            held.lines(),
+            ["The lock is held by pid 4711, started 2026-11-04T09:02:11Z. No repairs are listed."]
+        );
     }
 }

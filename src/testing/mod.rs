@@ -252,6 +252,65 @@ mod tests {
 }
 
 #[cfg(test)]
+mod snapshot_tests {
+    use super::tree::{Tree, snapshot};
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn a_snapshot_sees_a_mode_a_replaced_symlink_and_a_changed_file() {
+        let mut tree = Tree::new();
+        tree.dir("d");
+        tree.symlink("link", "one");
+        tree.file("d/f", "x");
+        let before = snapshot(tree.root());
+
+        fs::set_permissions(tree.path("d"), fs::Permissions::from_mode(0o700)).expect("chmod");
+        assert_ne!(snapshot(tree.root()), before, "a mode change goes unseen");
+        fs::set_permissions(tree.path("d"), fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(snapshot(tree.root()), before);
+
+        fs::remove_file(tree.path("link")).expect("removes");
+        symlink("two", tree.path("link")).expect("links");
+        assert_ne!(
+            snapshot(tree.root()),
+            before,
+            "a new link target goes unseen"
+        );
+        fs::remove_file(tree.path("link")).expect("removes");
+        symlink("one", tree.path("link")).expect("links");
+
+        fs::write(tree.path("d/f"), "y").expect("writes");
+        assert_ne!(snapshot(tree.root()), before, "new content goes unseen");
+    }
+
+    #[test]
+    fn a_snapshot_does_not_follow_a_symlink_to_a_directory() {
+        let mut tree = Tree::new();
+        let mut outside = Tree::new();
+        outside.file("secret", "x");
+        tree.symlink("link", outside.root());
+        let seen = snapshot(tree.root());
+        assert_eq!(seen.keys().collect::<Vec<_>>(), ["link"]);
+        assert_eq!(seen["link"].kind, "symlink");
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_recorded_by_its_mode_alone() {
+        let mut tree = Tree::new();
+        tree.file("d/f", "x");
+        let blocked = tree.unreadable_dir("locked");
+        assert!(
+            fs::read_dir(&blocked).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+        let seen = snapshot(tree.root());
+        assert_eq!(seen["locked"].mode, 0);
+        assert_eq!(seen.len(), 3, "{seen:?}");
+    }
+}
+
+#[cfg(test)]
 mod version_fixture_tests {
     use super::tree::Tree;
     use super::versions::Store;

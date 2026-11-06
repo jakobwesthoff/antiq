@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::lock::{self, Holder, LockError, RunLock};
 use crate::machine::{self, MachineError};
-use crate::repair::{self, RepairError};
+use crate::repair;
 use crate::report::Warning;
 
 /// Errors of the run guard.
@@ -23,8 +23,6 @@ pub enum RunError {
     Lock(#[from] LockError),
     #[error(transparent)]
     Machine(#[from] MachineError),
-    #[error(transparent)]
-    Repair(#[from] RepairError),
 }
 
 impl HasKind for RunError {
@@ -32,7 +30,6 @@ impl HasKind for RunError {
         match self {
             RunError::Lock(error) => error.kind(),
             RunError::Machine(error) => error.kind(),
-            RunError::Repair(error) => error.kind(),
         }
     }
 }
@@ -60,8 +57,11 @@ impl RunGuard {
         machine: Result<String, MachineError>,
     ) -> Result<RunGuard, RunError> {
         let lock = lock::acquire(&collection.lock_path(), &machine?, clock)?;
-        let warnings = repair::run(collection, &lock, clock)?;
-        Ok(RunGuard { lock, warnings })
+        let outcome = repair::run(collection, &lock, clock);
+        Ok(RunGuard {
+            lock,
+            warnings: outcome.warnings,
+        })
     }
 
     /// The lock, which code that changes the collection takes as its proof

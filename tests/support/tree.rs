@@ -9,6 +9,7 @@
 //! only the standard library and the dev dependencies.
 
 use filetime::FileTime;
+use std::collections::BTreeMap;
 use std::fs::{self, File, Permissions};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -218,4 +219,77 @@ pub fn days_ago(days: i64) -> i64 {
         .expect("the clock is after 1970")
         .as_secs() as i64;
     now - days * 86_400
+}
+
+/// What a [`snapshot`] records of one entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    /// `dir`, `file`, `symlink` or `other`.
+    pub kind: &'static str,
+    /// The permission bits.
+    pub mode: u32,
+    /// The content of a file, the target of a symlink.
+    pub detail: Option<Vec<u8>>,
+}
+
+/// Every path below `root` with its kind, mode and content, taken with
+/// `lstat` so that a symlink is recorded and never followed. A directory
+/// that cannot be read is recorded by its mode alone.
+pub fn snapshot(root: &Path) -> BTreeMap<String, Seen> {
+    fn walk(base: &Path, dir: &Path, seen: &mut BTreeMap<String, Seen>) {
+        let Ok(items) = fs::read_dir(dir) else { return };
+        for item in items {
+            let path = item.expect("an item").path();
+            let name = path
+                .strip_prefix(base)
+                .expect("below")
+                .display()
+                .to_string();
+            let meta = fs::symlink_metadata(&path).expect("the entry exists");
+            let mode = meta.permissions().mode() & 0o7777;
+            let kind = meta.file_type();
+            if kind.is_dir() {
+                seen.insert(
+                    name,
+                    Seen {
+                        kind: "dir",
+                        mode,
+                        detail: None,
+                    },
+                );
+                walk(base, &path, seen);
+            } else if kind.is_symlink() {
+                let target = fs::read_link(&path).expect("reads the link");
+                seen.insert(
+                    name,
+                    Seen {
+                        kind: "symlink",
+                        mode,
+                        detail: Some(target.as_os_str().as_encoded_bytes().to_vec()),
+                    },
+                );
+            } else if kind.is_file() {
+                seen.insert(
+                    name,
+                    Seen {
+                        kind: "file",
+                        mode,
+                        detail: Some(fs::read(&path).expect("reads")),
+                    },
+                );
+            } else {
+                seen.insert(
+                    name,
+                    Seen {
+                        kind: "other",
+                        mode,
+                        detail: None,
+                    },
+                );
+            }
+        }
+    }
+    let mut seen = BTreeMap::new();
+    walk(root, root, &mut seen);
+    seen
 }

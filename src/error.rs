@@ -37,7 +37,6 @@ use crate::pin::PinError;
 use crate::query::QueryError;
 use crate::reference::{Candidate, ReferenceError};
 use crate::relpath::RelPathError;
-use crate::repair::RepairError;
 use crate::rules::RulesError;
 use crate::run::RunError;
 use crate::select::SelectError;
@@ -156,8 +155,6 @@ pub enum Error {
     #[error(transparent)]
     RelPath(#[from] RelPathError),
     #[error(transparent)]
-    Repair(#[from] RepairError),
-    #[error(transparent)]
     Run(#[from] RunError),
     #[error(transparent)]
     Select(#[from] SelectError),
@@ -219,7 +216,6 @@ impl Error {
             Error::Pin(e) => e.kind(),
             Error::Reference(e) => e.kind(),
             Error::RelPath(e) => e.kind(),
-            Error::Repair(e) => e.kind(),
             Error::Run(e) => e.kind(),
             Error::Select(e) => e.kind(),
             Error::Sysmem(e) => e.kind(),
