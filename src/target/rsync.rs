@@ -1371,12 +1371,16 @@ mod tests {
         assert_eq!(outcome.stdout, b"one\ntwo\nthree\n");
         let lines: Vec<&[u8]> = arrivals.iter().map(|(line, _)| line.as_slice()).collect();
         assert_eq!(lines, [&b"one\n"[..], b"two\n", b"three\n"]);
+        // The time to start the script varies with the load of the machine,
+        // so the first line is judged by how long before the end it
+        // arrived: the script waits 0.2 s after each of its three lines.
+        let ended_at = started.elapsed();
         assert!(
-            arrivals[0].1 < std::time::Duration::from_millis(500),
-            "{:?}",
+            ended_at - arrivals[0].1 >= std::time::Duration::from_millis(400),
+            "first line at {:?}, end at {ended_at:?}",
             arrivals[0].1
         );
-        assert!(started.elapsed() >= std::time::Duration::from_millis(600));
+        assert!(ended_at >= std::time::Duration::from_millis(600));
     }
 
     #[test]

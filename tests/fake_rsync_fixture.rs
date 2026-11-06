@@ -95,14 +95,18 @@ fn a_paced_transfer_prints_a_line_and_waits_before_the_next() {
     child.wait().expect("it ends");
 
     assert_eq!((first.as_str(), rest.as_str()), ("one\n", "two\nthree\n"));
+    // The time to start the script varies with the load of the machine, so
+    // the first line is judged by how long before the end it arrived: the
+    // script waits 0.2 s after each of its three lines, and a script that
+    // held its output back would deliver the first line only at the end.
+    let ended_at = started.elapsed();
     assert!(
-        first_at < std::time::Duration::from_millis(500),
-        "{first_at:?}"
+        ended_at - first_at >= std::time::Duration::from_millis(400),
+        "first line at {first_at:?}, end at {ended_at:?}"
     );
     assert!(
-        started.elapsed() >= std::time::Duration::from_millis(600),
-        "{:?}",
-        started.elapsed()
+        ended_at >= std::time::Duration::from_millis(600),
+        "{ended_at:?}"
     );
 }
 
