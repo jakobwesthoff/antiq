@@ -185,6 +185,8 @@ pub struct Output {
     stdout_env: Env,
     stderr_env: Env,
     size: Size,
+    /// The footer of a dry run, which `notices` writes after the notices.
+    footer: Vec<String>,
 }
 
 /// Where the columns and rows of a terminal are read, each time `get` is
@@ -231,6 +233,7 @@ impl Output {
             stdout_env: Env::pipe(),
             stderr_env: Env::pipe(),
             size: Size::Given(None),
+            footer: Vec::new(),
         }
     }
 
@@ -402,6 +405,14 @@ impl Output {
     /// A terminal gets an empty line first and a block each; a pipe gets
     /// the `warning:` and `note:` lines.
     pub fn notices(&mut self, notices: &[Notice]) -> io::Result<()> {
+        self.notices_only(notices)?;
+        for line in std::mem::take(&mut self.footer) {
+            self.stdout.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    fn notices_only(&mut self, notices: &[Notice]) -> io::Result<()> {
         if notices.is_empty() {
             return Ok(());
         }
@@ -476,11 +487,12 @@ impl Output {
         Ok(())
     }
 
-    /// Writes the closing lines of a dry run to stdout, none to a pipe.
+    /// Sets the closing lines of a dry run, none for a pipe. They are the
+    /// last thing a run prints, so `notices` writes them to stdout after the
+    /// notices, and every command that ends a dry run with this footer calls
+    /// `notices` last, with no notices if it has none.
     pub fn dry_footer(&mut self, nothing_was: &str, rerun: &str) -> io::Result<()> {
-        for line in dryrun::footer(&self.stdout_env, nothing_was, rerun) {
-            self.stdout.write_line(&line)?;
-        }
+        self.footer = dryrun::footer(&self.stdout_env, nothing_was, rerun);
         Ok(())
     }
 }
@@ -746,6 +758,7 @@ mod tests {
             .expect("memory accepts writes");
         out.dry_footer("archived", "archive these pieces")
             .expect("memory accepts writes");
+        out.notices(&[]).expect("memory accepts writes");
         assert_eq!(
             capture.stdout(),
             "○ would archive  projects/scanner\n\n\x20○ DRY RUN  Nothing was archived. \
@@ -776,6 +789,7 @@ mod tests {
         ];
         out.dry_plan(&lines, "unearthed", "unearth the piece")
             .expect("memory accepts writes");
+        out.notices(&[]).expect("memory accepts writes");
         assert!(
             capture
                 .stdout()

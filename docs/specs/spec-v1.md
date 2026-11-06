@@ -2141,7 +2141,9 @@ A dry run writes each action line behind a magenta tag `○ would <verb>`,
 with the text behind the longest verb of the run lined up, and ends with an
 empty line and a one-line block like the hint: the badge `○ DRY RUN` in the
 colour of the tag, magenta, and beside it "Nothing was <verb>. Run again
-without `-n` to <what it would do>." A `Would skip` line is tagged like an action but is
+without `-n` to <what it would do>." The badge is the last line of the run, after the
+warnings and notes on stderr; it comes after a hint too, when a command
+prints both. A `Would skip` line is tagged like an action but is
 none: a dry run whose lines are all skips has no footer, and so has a dry
 run with no action.
 
