@@ -64,6 +64,9 @@ const FILES: Count = Count {
 pub(crate) struct Config {
     /// The count of the operations that do not read `N/M files`.
     pub counts: &'static [(Operation, Count)],
+    /// Printed before the name on the card of a running piece, not on the
+    /// line of a finished one.
+    pub name_prefix: &'static str,
     pub style: Style,
     /// The `-C` of the run, for the commands a card tells the reader to type.
     pub directory: Option<PathBuf>,
@@ -84,6 +87,12 @@ pub(crate) enum Msg {
     },
     Paused {
         name: String,
+    },
+    /// The bytes the piece has sent so far, which its card shows in place of
+    /// the size it started with.
+    Measured {
+        name: String,
+        bytes: Counter,
     },
     Finished {
         name: String,
@@ -138,6 +147,9 @@ enum Phase {
 struct Item {
     name: String,
     bytes: u64,
+    /// The bytes sent so far, when the piece reports them: its card shows
+    /// them in place of `bytes`.
+    measured: Option<Counter>,
     label: Option<String>,
     phase: Phase,
     /// The time of the segments that have closed.
@@ -255,6 +267,7 @@ impl Cards {
             self.items.push(Item {
                 name: name.to_string(),
                 bytes: 0,
+                measured: None,
                 label: None,
                 phase: Phase::Waiting,
                 elapsed: Duration::ZERO,
@@ -340,6 +353,11 @@ impl Cards {
                     outcome,
                     elapsed: Some(item.elapsed),
                 });
+            }
+            Msg::Measured { name, bytes } => {
+                if let Some(index) = self.position(&name) {
+                    self.items[index].measured = Some(bytes);
+                }
             }
             Msg::Dropped { name } => {
                 if let Some(index) = self.position(&name)
@@ -626,7 +644,15 @@ impl Cards {
     fn card(&self, item: &Item, now: Duration, layout: &Layout, cols: usize) -> [String; 2] {
         let symbols = self.symbols();
         let spinner = symbols.spinner[Self::frame(now) % symbols.spinner.len()];
-        let (cell, cell_width) = self.name_cell(&item.name, item.label.as_deref(), layout.name);
+        let prefix = self.config.name_prefix;
+        let (cell, cell_width) = self.name_cell(
+            &item.name,
+            item.label.as_deref(),
+            layout.name.saturating_sub(prefix.width()),
+        );
+        let cell = format!("{prefix}{cell}");
+        let cell_width = cell_width + prefix.width();
+        let bytes = item.measured.as_ref().map_or(item.bytes, Counter::done);
         let current = match &item.phase {
             Phase::Running(Some((operation, counter))) => Some((*operation, counter)),
             _ => None,
@@ -637,7 +663,7 @@ impl Cards {
             self.paint(theme::CYAN, spinner),
             cell,
             " ".repeat(layout.name.saturating_sub(cell_width)),
-            self.size_cell(Some(item.bytes), layout),
+            self.size_cell(Some(bytes), layout),
             self.paint(theme::CYAN, word)
         );
 

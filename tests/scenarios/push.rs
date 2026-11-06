@@ -83,7 +83,7 @@ fn expected_marker(world: &World) -> Vec<u8> {
 }
 
 #[test]
-fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
+fn a_terminal_gets_the_claim_of_the_target_after_the_table_of_the_pieces() {
     let clock = crate::support::scenario::collection::Clock::now();
     let world = World::new(
         pushing_setup(&clock),
@@ -122,21 +122,22 @@ fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
             }
         })
         .collect();
-    let (summary, rest) = (&lines[6], &lines[7..]);
+    let rows: Vec<Vec<&str>> = lines[..5]
+        .iter()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
     assert_eq!(
-        lines[..6],
+        rows,
         [
-            format!("Pushing to {shown}"),
-            String::new(),
-            "  ✔ notes/daily                                                  1 created"
-                .to_string(),
-            "  ✔ old/client-site                                              3 created"
-                .to_string(),
-            "  ✔ projects/scanner                                             4 created"
-                .to_string(),
-            String::new(),
+            vec!["PIECE", "CREATED", "UPDATED", "DELETED"],
+            vec!["notes/daily", "1", "0", "0"],
+            vec!["old/client-site", "3", "0", "0"],
+            vec!["projects/scanner", "4", "0", "0"],
+            vec!["other", "files", "2", "0", "0"],
         ]
     );
+    assert_eq!(lines[5], "");
+    let (summary, rest) = (&lines[6], &lines[7..]);
     assert!(
         summary.starts_with(&format!(
             "✔ Claimed {shown} · 3 pieces pushed · 10 files changed   took 0:0"

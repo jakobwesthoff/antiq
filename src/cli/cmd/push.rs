@@ -5,7 +5,7 @@
 //! The `push` command: mirrors the collection to the target.
 
 use super::progress::{self, Description};
-use crate::cli::console::cards::{Count, items};
+use crate::cli::console::cards::Count;
 use crate::cli::console::env::Env;
 use crate::cli::console::render::{available, flow, paint};
 use crate::cli::console::rich::Rich;
@@ -22,23 +22,34 @@ use antiq::progress::Operation;
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
 
-/// A piece is sent as the files it creates and then as the files it deletes.
+/// The whole mirror is one item. It counts the entries rsync lists, against
+/// the total rsync reports once it has one, and the entries it deletes.
 pub(super) const COUNTS: &[(Operation, Count)] = &[
     (
         Operation::Storing,
         Count {
-            text: |done, total| items(done, total, "created"),
-            percent: true,
+            text: entries,
+            percent: false,
         },
     ),
     (
         Operation::Removing,
         Count {
-            text: |done, total| items(done, total, "deleted"),
-            percent: true,
+            text: entries,
+            percent: false,
         },
     ),
 ];
+
+/// `2 of 3 entries` while rsync's total covers the count, `2 entries`
+/// otherwise.
+fn entries(done: u64, total: Option<u64>) -> String {
+    match (total, done) {
+        (Some(total), _) => format!("{done} of {total} entries"),
+        (None, 1) => "1 entry".to_string(),
+        (None, _) => format!("{done} entries"),
+    }
+}
 
 pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -50,14 +61,10 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };
-    // On a terminal the pieces show as cards while they are sent, and the
-    // lines they leave behind replace the table of the report.
-    let target = collection.config().target.url.clone().unwrap_or_default();
+    // On a terminal that moves the cursor the whole mirror shows as one
+    // card, and the table of the pieces replaces the report's lines.
     let mut description = Description::new(COUNTS);
-    description.header = Some(format!(
-        "Pushing to {}",
-        paint(&out.stdout_env(), theme::BOLD, &sanitize(&target))
-    ));
+    description.name_prefix = "Pushing to ";
     let cursor = out.stdout_env().cursor;
     let (result, shown) = progress::watch(
         ctx,
@@ -65,9 +72,8 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         args.dry_run,
         description,
         |observer| {
-            // The pre-pass that sizes the cards costs one more scan and
-            // one more connection. Without cursor movement nothing
-            // would draw them, so the pieces get their lines at the end.
+            // Without cursor movement nothing would draw the card, so the
+            // pieces get their lines at the end.
             if cursor {
                 push_observed(&collection, &request, &SystemClock, observer)
             } else {
@@ -76,7 +82,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         },
         || push(&collection, &request, &SystemClock),
         |result| match result {
-            Ok(PushOutcome::Report(report)) => progress::push_pieces(report),
+            Ok(PushOutcome::Report(report)) if !cursor => progress::push_pieces(report),
             _ => Vec::new(),
         },
     )?;
@@ -123,7 +129,14 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 let lines = if let Some(shown) = shown {
                     let target = report.initialized.then(|| sanitize(&report.target));
                     let summary = progress::push_summary(&report, target.as_deref(), shown.took());
-                    let mut lines = vec![String::new(), shown.summary_line(&summary)];
+                    // The card is gone. A terminal without cursor movement
+                    // has the lines of its pieces above already.
+                    let mut lines = if cursor {
+                        pieces_table(&change_rows(&report), &env)
+                    } else {
+                        Vec::new()
+                    };
+                    lines.extend([String::new(), shown.summary_line(&summary)]);
                     if report.initialized {
                         lines.extend(marker_sentence(&env));
                     }
@@ -156,9 +169,8 @@ fn marker_sentence(env: &Env) -> Vec<String> {
     flow(env, &why, anstyle::Style::new(), available(env, 0))
 }
 
-/// What a terminal gets after `push --init` has claimed the target: the
-/// totals, what the marker is for, and a table of what was sent per piece.
-fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
+/// The changes of a push per piece, then the paths outside every piece.
+fn change_rows(report: &PushReport) -> Vec<(String, [u64; 3])> {
     let counts = &report.changes;
     let mut rows: Vec<(String, [u64; 3])> = counts
         .pieces
@@ -179,22 +191,13 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
     if other != [0; 3] {
         rows.push(("other files".to_string(), other));
     }
-    let total = |column: usize| rows.iter().map(|(_, row)| row[column]).sum::<u64>();
-    let headline = format!(
-        "Claimed the push target {}: {} created, {} updated, {} deleted",
-        sanitize(&report.target),
-        total(0),
-        total(1),
-        total(2),
-    );
-    let done = paint(env, theme::GREEN, Symbols::for_env(env).done);
-    let mut lines = vec![format!("{done} {}", paint(env, theme::BOLD, &headline))];
+    rows
+}
 
-    lines.extend(marker_sentence(env));
-
-    if rows.is_empty() {
-        return lines;
-    }
+/// A table of what was sent per piece: the columns PIECE, CREATED, UPDATED
+/// and DELETED. A zero is dim, so the numbers that did something stand out.
+/// The callers have at least one row.
+fn pieces_table(rows: &[(String, [u64; 3])], env: &Env) -> Vec<String> {
     const GAP: &str = "   ";
     const NUMBER: usize = 7;
     let name_width = rows
@@ -203,7 +206,6 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
         .chain([5])
         .max()
         .expect("the header is a cell");
-    lines.push(String::new());
     let header = format!(
         "{}{GAP}{}{GAP}{}{GAP}{}",
         pad("PIECE", name_width),
@@ -211,8 +213,7 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
         pad_left("UPDATED", NUMBER),
         pad_left("DELETED", NUMBER)
     );
-    lines.push(paint(env, theme::DIM, &header));
-    // A zero is dim, so the numbers that did something stand out.
+    let mut lines = vec![paint(env, theme::DIM, &header)];
     let number = |count: u64| {
         let text = count.to_string();
         let fill = " ".repeat(NUMBER - text.len());
@@ -222,7 +223,7 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
             format!("{fill}{text}")
         }
     };
-    for (name, row) in &rows {
+    for (name, row) in rows {
         lines.push(format!(
             "{}{GAP}{}{GAP}{}{GAP}{}",
             pad(name, name_width),
@@ -234,19 +235,63 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
     lines
 }
 
+/// What a terminal gets after `push --init` has claimed the target: the
+/// totals, what the marker is for, and a table of what was sent per piece.
+fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
+    let rows = change_rows(report);
+    let total = |column: usize| rows.iter().map(|(_, row)| row[column]).sum::<u64>();
+    let headline = format!(
+        "Claimed the push target {}: {} created, {} updated, {} deleted",
+        sanitize(&report.target),
+        total(0),
+        total(1),
+        total(2),
+    );
+    let done = paint(env, theme::GREEN, Symbols::for_env(env).done);
+    let mut lines = vec![format!("{done} {}", paint(env, theme::BOLD, &headline))];
+    lines.extend(marker_sentence(env));
+    if !rows.is_empty() {
+        lines.push(String::new());
+        lines.extend(pieces_table(&rows, env));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn second_line(operation: Operation, done: u64, total: u64) -> String {
+        let [first, second] = progress::card_of(COUNTS, operation, done, total);
+        let word = if operation == Operation::Storing {
+            "storing"
+        } else {
+            "removing"
+        };
+        assert!(first.ends_with(&format!("  {word}")), "{first:?}");
+        second
+    }
+
     #[test]
-    fn the_cards_of_a_push_count_what_it_created_and_what_it_deleted() {
-        for (operation, word, count) in [
-            (Operation::Storing, "storing", "1/4 created"),
-            (Operation::Removing, "removing", "1/4 deleted"),
-        ] {
-            let [first, second] = progress::card_of(COUNTS, operation, 1, 4);
-            assert!(first.ends_with(&format!("  {word}")), "{first:?}");
-            assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
+    fn storing_counts_entries_against_the_total_of_rsync_without_a_percentage() {
+        let second = second_line(Operation::Storing, 2, 3);
+        assert!(second.ends_with("  2 of 3 entries"), "{second:?}");
+        assert!(!second.contains('%'), "{second:?}");
+        assert!(second.starts_with("    ━"), "{second:?}");
+    }
+
+    #[test]
+    fn a_total_that_is_unknown_or_behind_the_count_leaves_a_moving_bar_and_the_count() {
+        for (done, total, text) in [(2, 0, "2 entries"), (5, 3, "5 entries"), (1, 0, "1 entry")] {
+            let second = second_line(Operation::Storing, done, total);
+            assert!(second.ends_with(&format!("  {text}")), "{second:?}");
+            assert!(!second.contains('%'), "{second:?}");
         }
+    }
+
+    #[test]
+    fn removing_counts_the_entries_deleted() {
+        let second = second_line(Operation::Removing, 3, 0);
+        assert!(second.ends_with("  3 entries"), "{second:?}");
     }
 }

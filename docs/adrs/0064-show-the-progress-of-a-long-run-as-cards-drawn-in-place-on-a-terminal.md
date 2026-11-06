@@ -21,6 +21,11 @@ a refused, skipped or unfinished piece keeps its reasons under that line.
 The finished lines scroll away like any output. Below them stay the cards
 of the running pieces and one line `○ N waiting`.
 
+A `push` is one run of rsync over the whole collection, so it has one card
+instead of one for each piece. The card counts the entries rsync lists
+against the total rsync reports, shows no percentage, and is removed when
+rsync ends. The table of the pieces and the closing line follow it.
+
 One formatter writes the card and the finished line, so the lines on the
 screen during the run and the lines that remain after it look alike.
 

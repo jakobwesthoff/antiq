@@ -54,16 +54,14 @@ pub(crate) struct Driver<'o> {
     seen_since: Duration,
     /// The time of the last frame.
     last_frame: Duration,
-    /// The first message prints this above the cards.
-    header: Option<String>,
     /// A panic elsewhere cleared the region: finished lines go out plainly.
     halted: bool,
 }
 
 impl<'o> Driver<'o> {
-    pub(crate) fn new(cards: Cards, out: &'o mut Output, header: Option<String>) -> Driver<'o> {
+    pub(crate) fn new(cards: Cards, out: &'o mut Output) -> Driver<'o> {
         let sizes = out.stdout_size_source();
-        Driver::on_terminal(cards, out, header, sizes, Reflow::from_process())
+        Driver::on_terminal(cards, out, sizes, Reflow::from_process())
     }
 
     /// A driver for a terminal whose size is read from `sizes` and which
@@ -71,7 +69,6 @@ impl<'o> Driver<'o> {
     pub(crate) fn on_terminal(
         cards: Cards,
         out: &'o mut Output,
-        header: Option<String>,
         sizes: SizeSource,
         reflow: Reflow,
     ) -> Driver<'o> {
@@ -87,7 +84,6 @@ impl<'o> Driver<'o> {
             seen_size: (0, 0),
             seen_since: Duration::ZERO,
             last_frame: Duration::ZERO,
-            header,
             halted: false,
         }
     }
@@ -98,10 +94,6 @@ impl<'o> Driver<'o> {
     }
 
     pub(crate) fn message(&mut self, msg: Msg, now: Duration) -> io::Result<()> {
-        if let Some(header) = self.header.take() {
-            self.out.line(&header)?;
-            self.out.line("")?;
-        }
         self.cards.apply(msg, now);
         Ok(())
     }
@@ -295,8 +287,10 @@ impl Observer for Feed {
                 operation,
                 counter: counter.clone(),
             },
-            // No card shows the bytes of an item.
-            Event::Measured { .. } => return,
+            Event::Measured { name, bytes } => Msg::Measured {
+                name: name.to_string(),
+                bytes: bytes.clone(),
+            },
             Event::Finished {
                 name,
                 bytes,
@@ -362,8 +356,6 @@ pub(crate) type Label = Box<dyn Fn(&str, &[String]) -> String + Send + Sync>;
 /// What a command gives to [`observed`].
 pub(crate) struct Setup {
     pub config: Config,
-    /// Printed above the cards when the first event arrives.
-    pub header: Option<String>,
     pub label: Label,
     /// Install the panic hook that clears the region before the panic text
     /// is written. Tests that run in parallel leave it off, since a hook
@@ -442,7 +434,7 @@ pub(crate) fn observed<T>(
         start,
         label: setup.label,
     };
-    let driver = Driver::new(Cards::new(setup.config), out, setup.header);
+    let driver = Driver::new(Cards::new(setup.config), out);
     thread::scope(|scope| {
         let renderer = scope.spawn(move || render(driver, receiver, start));
         if setup.panic_hook {

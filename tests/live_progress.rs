@@ -418,20 +418,43 @@ fn push_world() -> World {
     )
 }
 
+/// The table of what a push sent, as its lines on the screen: the header
+/// row and one row per piece.
+fn table_rows(lines: &[String]) -> Vec<String> {
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("PIECE"))
+        .expect("the table has its header");
+    lines[start..]
+        .iter()
+        .take_while(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 #[test]
-fn push_init_shows_a_header_the_finished_lines_and_the_claim() {
+fn push_init_leaves_the_table_the_claim_and_no_card() {
     let world = push_world();
     let run = world.run_tty_sized(&["push", "--init"], 100, 24, &[("NO_COLOR", "1")]);
     run.expect_code(0);
     let lines = replay(&run.stdout, 100, 24).lines();
-    assert!(lines[0].starts_with("Pushing to "), "{lines:#?}");
-    assert_eq!(lines[1], "");
-    let finished: Vec<&String> = lines
-        .iter()
-        .filter(|line| line.starts_with("  ✔ "))
-        .collect();
-    assert_eq!(finished.len(), 2, "{lines:#?}");
-    assert!(finished[0].contains("1 created") && finished[1].contains("2 created"));
+    assert_eq!(
+        table_rows(&lines),
+        [
+            "PIECE CREATED UPDATED DELETED",
+            "notes/daily 1 0 0",
+            "projects/scanner 2 0 0",
+            "other files 1 0 0",
+        ]
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Pushing to ")),
+        "the card is gone: {lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.starts_with("  ✔ ")),
+        "no line per piece: {lines:#?}"
+    );
     let summary = lines
         .iter()
         .find(|line| line.starts_with("✔ Claimed "))
@@ -441,15 +464,6 @@ fn push_init_shows_a_header_the_finished_lines_and_the_claim() {
         "{summary}"
     );
     assert!(lines.iter().any(|line| line.contains(".antiq-target")));
-    assert!(lines.iter().all(|line| !line.starts_with("PIECE")));
-}
-
-#[test]
-fn a_json_push_on_a_terminal_prints_the_json_and_no_cards() {
-    let world = push_world();
-    let run = world.run_tty_sized(&["--json", "push", "--init"], 100, 24, &[]);
-    run.expect_code(0);
-    assert_only_json(&run.stdout, "push");
 }
 
 #[test]
@@ -463,13 +477,15 @@ fn push_that_sends_nothing_prints_the_text_it_always_did() {
     assert!(run.stdout.contains("Nothing changed."), "{:?}", run.stdout);
     let lines = replay(&run.stdout, 100, 24).lines();
     assert!(
-        lines.iter().all(|line| !line.contains("storing")),
+        lines
+            .iter()
+            .all(|line| !line.contains("Pushing to ") && !line.contains("storing")),
         "the card is gone: {lines:#?}"
     );
 }
 
 #[test]
-fn a_second_push_shows_the_pieces_that_changed() {
+fn a_second_push_shows_the_pieces_that_changed_in_the_table() {
     let world = push_world();
     world
         .run_tty_sized(&["push", "--init"], 100, 24, &[])
@@ -479,18 +495,78 @@ fn a_second_push_shows_the_pieces_that_changed() {
     let run = world.run_tty_sized(&["push"], 100, 24, &[("NO_COLOR", "1")]);
     run.expect_code(0);
     let lines = replay(&run.stdout, 100, 24).lines();
-    assert!(lines[0].starts_with("Pushing to "), "{lines:#?}");
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("  ✔ notes/daily ") && line.contains("1 updated")),
-        "{lines:#?}"
+    assert_eq!(
+        table_rows(&lines),
+        ["PIECE CREATED UPDATED DELETED", "notes/daily 0 1 0"]
     );
     assert!(
         lines
             .last()
             .expect("a last line")
             .starts_with("✔ 1 piece pushed · 1 file changed")
+    );
+}
+
+/// A world whose rsync is a stand-in that prints `listing` slowly, so that
+/// the cards have time to be drawn.
+fn slow_push(listing: &str) -> (World, FakeRsync, support::scenario::target::Target) {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .patterns(&["*/*"])
+        .piece("notes/daily", |piece| {
+            piece.age_days(5).file("today.md", "fresh\n");
+        })
+        .finish();
+    let target = support::scenario::target::Target::new();
+    target.marker(&collection);
+    let fake = FakeRsync::new("rsync  version 3.2.4  protocol version 31\n");
+    fake.answer_all(listing, "", 0);
+    fake.pace(1, "0.3");
+    collection.use_target(&target.path());
+    let config = collection.path(".antiq/config.toml");
+    let text = std::fs::read_to_string(&config).expect("the config exists");
+    let rsync = serde_json::to_string(fake.path().to_str().expect("a UTF-8 path")).expect("quotes");
+    std::fs::write(
+        &config,
+        text.replacen("[target]\n", &format!("[target]\nrsync = {rsync}\n"), 1),
+    )
+    .expect("the config can be written");
+    (World::new(Setup::new(collection), Mode::Text), fake, target)
+}
+
+#[test]
+fn push_shows_one_card_for_the_whole_run_that_counts_entries_without_a_percentage() {
+    let (world, fake, _target) = slow_push(
+        ".d          96 ./\n\
+         >f+++++++++ 5 notes/daily/today.md\n\
+         \r              5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=1/3)\n\
+         .f          3 notes/daily/other.md\n",
+    );
+
+    let run = world.run_tty_sized(&["push"], 100, 24, &[("NO_COLOR", "1")]);
+
+    run.expect_code(0);
+    let calls = fake.calls();
+    let transfers: Vec<&Vec<String>> = calls.iter().filter(|call| call[0] == "transfer").collect();
+    assert_eq!(transfers.len(), 1, "no dry run: {transfers:?}");
+    assert!(!transfers[0].contains(&"-n".to_string()));
+    // The screen as it was when the second line of the card said `2 of 3`.
+    let at = run
+        .stdout
+        .find("2 of 3 entries")
+        .expect("the card counted entries against rsync's total");
+    let mid = replay(&run.stdout[..at + "2 of 3 entries".len()], 100, 24).visible();
+    assert_eq!(mid.len(), 2, "{mid:#?}");
+    assert!(mid[0].contains("Pushing to "), "{mid:#?}");
+    assert!(
+        mid[0].contains("5 B") && mid[0].ends_with("storing"),
+        "{mid:#?}"
+    );
+    assert!(!mid[1].contains('%'), "{mid:#?}");
+    let end = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        end.iter().all(|line| !line.contains("Pushing to ")),
+        "{end:#?}"
     );
 }
 

@@ -27,6 +27,7 @@ fn env(cols: usize, cursor: bool) -> Env {
 fn config(cols: usize) -> Config {
     Config {
         counts: &[],
+        name_prefix: "",
         style: Style::from_env(&env(cols, true)),
         directory: None,
     }
@@ -94,7 +95,7 @@ fn done(name: &str, files: u64) -> Msg {
 }
 
 fn driver(out: &mut Output, cols: usize) -> Driver<'_> {
-    Driver::new(Cards::new(config(cols)), out, None)
+    Driver::new(Cards::new(config(cols)), out)
 }
 
 // =========================================================
@@ -188,26 +189,42 @@ fn a_line_printed_before_the_first_frame_survives_it() {
 }
 
 #[test]
-fn a_header_goes_above_the_cards_once() {
+fn the_bytes_of_a_measured_item_reach_its_card_through_the_feed() {
     let (capture, mut out) = terminal(100, 24, true);
     let mut watcher = Watcher::new(&capture, 100, 24);
-    let mut driver = Driver::new(
-        Cards::new(config(100)),
-        &mut out,
-        Some("Pushing to /Volumes/nas".to_string()),
-    );
-    driver.message(started("a", 10), secs(0)).unwrap();
-    driver.message(started("b", 10), secs(0)).unwrap();
+    let mut driver = driver(&mut out, 100);
+    let (sender, receiver) = mpsc::channel();
+    let feed = Feed {
+        sender,
+        start: Instant::now(),
+        label: Box::new(|stamp, _| stamp.to_string()),
+    };
+    let storing = Counter::new();
+    let sent = Counter::new();
+    feed.event(Event::Started {
+        name: "nas",
+        bytes: 0,
+        stamp: None,
+        siblings: &[],
+    });
+    feed.event(Event::Operation {
+        name: "nas",
+        operation: Operation::Storing,
+        counter: &storing,
+    });
+    feed.event(Event::Measured {
+        name: "nas",
+        bytes: &sent,
+    });
+    sent.add(3_100_000);
+    while let Ok(Packet::Msg(msg, at)) = receiver.try_recv() {
+        driver.message(msg, at).unwrap();
+    }
     driver.frame(secs(0), true).unwrap();
     let lines = watcher.sync().lines();
-    assert_eq!(lines[0], "Pushing to /Volumes/nas");
-    assert_eq!(lines[1], "");
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.starts_with("Pushing"))
-            .count(),
-        1
+    assert!(
+        lines[0].contains("nas") && lines[0].contains("3.1 MB"),
+        "{lines:?}"
     );
 }
 
@@ -355,7 +372,7 @@ fn resize_to(window: &Window, size: (usize, usize)) {
 fn driver_in<'o>(out: &'o mut Output, cols: usize, window: &Window, reflow: Reflow) -> Driver<'o> {
     let window = Arc::clone(window);
     let sizes = SizeSource::new(move || *window.lock().unwrap());
-    Driver::on_terminal(Cards::new(config(cols)), out, None, sizes, reflow)
+    Driver::on_terminal(Cards::new(config(cols)), out, sizes, reflow)
 }
 
 /// Three finished pieces, then `running` pieces with a card each. The
@@ -813,7 +830,6 @@ fn a_piece_that_never_sent_an_event_gets_its_line_after_the_others() {
 fn setup(cols: usize) -> Setup {
     Setup {
         config: config(cols),
-        header: None,
         label: Box::new(|stamp, _| stamp.to_string()),
         panic_hook: false,
     }

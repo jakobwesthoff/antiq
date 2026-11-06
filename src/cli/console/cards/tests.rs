@@ -47,6 +47,7 @@ fn cards(counts: Counts) -> Cards {
 fn with_style(counts: Counts, style: Style) -> Cards {
     Cards::new(Config {
         counts,
+        name_prefix: "",
         style,
         directory: None,
     })
@@ -633,6 +634,7 @@ fn a_piece_that_finishes_without_a_start_is_a_line_with_no_time() {
 fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
     let mut cards = Cards::new(Config {
         counts: ARCHIVE,
+        name_prefix: "",
         style: style(false, true),
         directory: Some(PathBuf::from("/data/my notes")),
     });
@@ -1033,4 +1035,86 @@ fn a_command_in_a_reason_that_is_cut_by_wrapping_is_not_bold() {
         lines[1..].iter().all(|line| !line.contains("\x1b[1m")),
         "{lines:?}"
     );
+}
+
+// =========================================================
+// A card named by a prefix, with a size that grows
+// =========================================================
+
+fn prefixed(counts: Counts, prefix: &'static str) -> Cards {
+    Cards::new(Config {
+        counts,
+        name_prefix: prefix,
+        style: style(false, true),
+        directory: None,
+    })
+}
+
+fn measured(name: &str, bytes: u64) -> (Msg, Counter) {
+    let counter = Counter::new();
+    counter.add(bytes);
+    let msg = Msg::Measured {
+        name: name.to_string(),
+        bytes: counter.clone(),
+    };
+    (msg, counter)
+}
+
+#[test]
+fn the_prefix_goes_before_the_name_of_a_running_card_and_not_before_a_finished_line() {
+    let mut cards = prefixed(UNEARTH, "Pushing to ");
+    cards.apply(started("/Volumes/nas", 0), secs(0));
+    let (storing, _k) = operation("/Volumes/nas", Operation::Storing, 1, 4);
+    cards.apply(storing, secs(0));
+    let region = cards.region(secs(0), MOCKUP, 24);
+    assert!(
+        region[0].starts_with("  ⠋ Pushing to /Volumes/nas "),
+        "{:?}",
+        region[0]
+    );
+    assert!(region[0].ends_with("storing"), "{:?}", region[0]);
+
+    cards.apply(finished("/Volumes/nas", 5, Outcome::Files(1)), secs(1));
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].starts_with("  ✔ /Volumes/nas "), "{lines:?}");
+}
+
+#[test]
+fn a_long_name_is_cut_behind_the_prefix() {
+    let mut cards = prefixed(UNEARTH, "Pushing to ");
+    let name = "backup@nas.local:/volume1/antiq/projects/collection";
+    cards.apply(started(name, 0), secs(0));
+    let (storing, _k) = operation(name, Operation::Storing, 1, 4);
+    cards.apply(storing, secs(0));
+    let region = cards.region(secs(0), MOCKUP, 24);
+    assert!(
+        region[0].starts_with("  ⠋ Pushing to backup@"),
+        "{:?}",
+        region[0]
+    );
+    assert!(region[0].contains('…'), "{:?}", region[0]);
+    assert!(region[0].ends_with("storing"), "{:?}", region[0]);
+    assert!(visible_width(&region[0]) <= MOCKUP, "{:?}", region[0]);
+}
+
+#[test]
+fn the_size_of_a_running_card_is_the_bytes_measured_and_grows() {
+    let mut cards = cards(UNEARTH);
+    cards.apply(started("a", 0), secs(0));
+    let (storing, _k) = operation("a", Operation::Storing, 1, 4);
+    cards.apply(storing, secs(0));
+    let (msg, bytes) = measured("a", 3_100_000);
+    cards.apply(msg, secs(0));
+    assert!(cards.region(secs(0), MOCKUP, 24)[0].contains("3.1 MB"));
+
+    bytes.add(45_200_000);
+    assert!(cards.region(secs(1), MOCKUP, 24)[0].contains("48 MB"));
+}
+
+#[test]
+fn a_size_measured_for_an_unknown_piece_opens_no_card() {
+    let mut cards = cards(UNEARTH);
+    let (msg, _bytes) = measured("ghost", 5);
+    cards.apply(msg, secs(0));
+    assert_eq!(cards.region(secs(0), MOCKUP, 24), Vec::<String>::new());
 }

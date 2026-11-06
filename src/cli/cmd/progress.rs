@@ -21,8 +21,8 @@ use std::time::Duration;
 pub(super) struct Description {
     /// The operations whose count does not read `N/M files`.
     pub counts: &'static [(Operation, Count)],
-    /// Printed above the cards when the first event arrives.
-    pub header: Option<String>,
+    /// Printed before the name on the card of a running piece.
+    pub name_prefix: &'static str,
     /// How the version of an unearth reads; the stamp for any other command.
     pub label: Label,
 }
@@ -31,7 +31,7 @@ impl Description {
     pub(super) fn new(counts: &'static [(Operation, Count)]) -> Description {
         Description {
             counts,
-            header: None,
+            name_prefix: "",
             label: Box::new(|stamp, _| stamp.to_string()),
         }
     }
@@ -84,10 +84,10 @@ pub(super) fn watch<T>(
     let setup = Setup {
         config: Config {
             counts: description.counts,
+            name_prefix: description.name_prefix,
             style: out.stdout_style(),
             directory: ctx.directory.clone(),
         },
-        header: description.header,
         label: description.label,
         panic_hook: true,
     };
@@ -257,6 +257,7 @@ pub(super) fn card_of(
 
     let mut cards = Cards::new(Config {
         counts,
+        name_prefix: "",
         style: Style {
             width: 96,
             color: false,
