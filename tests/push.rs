@@ -215,8 +215,7 @@ fn a_dry_run_changes_nothing_and_takes_no_lock() {
 
     let run = push(&collection, &["-n"]);
 
-    // The steps behind the pre-check are not built yet.
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     assert_eq!(snapshot(&collection.root()), before);
 }
 
@@ -229,7 +228,7 @@ fn a_real_run_repairs_before_it_goes_on() {
 
     let run = push(&collection, &[]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     assert!(!Path::new(&stale).exists(), "repair 2 removes the entry");
 }
 
@@ -342,7 +341,7 @@ fn a_sound_store_goes_on_to_the_next_step() {
 
     let run = push(&collection, &[]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
 }
 
 #[test]
@@ -424,7 +423,7 @@ fn a_version_of_a_newer_format_does_not_refuse() {
 
     let run = push(&collection, &[]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
 }
 
 #[test]
@@ -459,7 +458,7 @@ fn trash_that_holds_only_empty_folders_does_not_refuse() {
 
     let run = push(&collection, &[]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
 }
 
 #[test]
@@ -564,12 +563,7 @@ fn an_rsync_of_3_2_4_goes_on_to_the_next_step() {
 
         let run = push(&collection, args);
 
-        assert_eq!(
-            run.error_kind(),
-            "not_implemented",
-            "{args:?}: {}",
-            run.stdout
-        );
+        goes_on(&run);
     }
 }
 
@@ -597,12 +591,17 @@ fn unreachable_reason(run: &Run) -> String {
 /// Asserts that a push was refused with exit 1 and returns the message.
 fn refused_message(run: &Run) -> String {
     assert_eq!(run.code(), 1, "{}", run.stdout);
-    assert_ne!(run.error_kind(), "not_implemented", "{}", run.stdout);
     run.error_message()
 }
 
 fn passes_the_precheck(run: &Run) {
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(run);
+}
+
+/// Asserts that a push ran through and reports `pushed`.
+fn goes_on(run: &Run) {
+    assert_eq!(run.code(), 0, "{} {}", run.stdout, run.stderr);
+    assert_eq!(run.json()["result"], "pushed", "{}", run.stdout);
 }
 
 #[test]
@@ -641,6 +640,19 @@ fn if_reachable_turns_an_unreachable_target_into_exit_0_with_the_reason() {
     assert_eq!(text.code(), 0, "{}", text.stderr);
     assert_eq!(text.stdout, "");
     assert!(text.stderr.starts_with("note: "), "{}", text.stderr);
+    assert!(text.stderr.contains("not-there"), "{}", text.stderr);
+}
+
+#[test]
+fn an_unreachable_dry_run_under_if_reachable_prints_no_nothing_to_do() {
+    let collection = collection();
+    set_url(&collection, "/nonexistent/not-there");
+    let _fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+
+    let text = push_text(&collection, &["-n", "--if-reachable"]);
+
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert_eq!(text.stdout, "");
     assert!(text.stderr.contains("not-there"), "{}", text.stderr);
 }
 
@@ -1222,24 +1234,21 @@ fn tmp_entries(collection: &Collection) -> Vec<std::ffi::OsString> {
 }
 
 #[test]
-fn init_writes_the_marker_and_leaves_the_mode_of_the_target_root_as_it_was() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+fn init_writes_the_marker_byte_for_byte_with_mode_644() {
+    use std::os::unix::fs::MetadataExt;
     let target = Target::new();
     let root = target.path();
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).expect("mode");
     let collection = with_real_rsync(&root);
 
     let run = push_with_umask(&collection, 0o022, &["--init"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     let marker = root.join(".antiq-target");
     assert_eq!(
         fs::read(&marker).expect("written"),
         expected_marker(&collection)
     );
     assert_eq!(fs::metadata(&marker).expect("exists").mode() & 0o777, 0o644);
-    let meta = fs::metadata(&root).expect("exists");
-    assert_eq!(meta.mode() & 0o777, 0o750, "the root keeps its mode");
     assert_eq!(tmp_entries(&collection), Vec::<std::ffi::OsString>::new());
 }
 
@@ -1251,7 +1260,7 @@ fn the_marker_mode_is_masked_by_the_umask_of_the_receiving_side() {
 
     let run = push_with_umask(&collection, 0o027, &["--init"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     let meta = fs::metadata(target.path().join(".antiq-target")).expect("written");
     assert_eq!(meta.mode() & 0o777, 0o640);
 }
@@ -1264,7 +1273,7 @@ fn a_dry_run_with_init_writes_nothing() {
 
     let run = push(&collection, &["--init", "-n"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     assert_eq!(fs::read_dir(target.path()).expect("exists").count(), 0);
     assert_eq!(snapshot(&collection.root()), before);
 }
@@ -1279,8 +1288,11 @@ fn force_and_a_matching_marker_send_no_marker() {
     passes_the_precheck(&push(&collection, &[]));
 
     let calls = fake.calls();
-    assert_eq!(calls.len(), 2, "only the version probes: {calls:?}");
-    assert!(calls.iter().all(|call| call[0] == "version"));
+    let sends = calls
+        .iter()
+        .filter(|call| call.contains(&"--chmod=F644".to_string()));
+    assert_eq!(sends.count(), 0, "no marker was sent: {calls:?}");
+    assert_eq!(calls.len(), 4, "a probe and a mirror per push: {calls:?}");
 }
 
 #[test]
@@ -1291,9 +1303,13 @@ fn init_over_an_ssh_target_sends_the_marker_from_a_directory_of_its_own() {
 
     let run = push(&collection, &["--init"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    goes_on(&run);
     let calls = fake.calls();
-    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(
+        calls.len(),
+        4,
+        "a probe, the listing, the marker and the mirror"
+    );
     let send = &calls[2];
     assert!(send.contains(&"-r".to_string()), "{send:?}");
     assert!(send.contains(&"--chmod=F644".to_string()), "{send:?}");
@@ -1315,8 +1331,8 @@ fn init_creates_the_last_level_of_a_missing_ssh_directory() {
 
     let run = push(&collection, &["--init"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
-    assert_eq!(fake.calls().len(), 3);
+    goes_on(&run);
+    assert_eq!(fake.calls().len(), 4);
 }
 
 #[test]
@@ -1342,12 +1358,290 @@ fn a_marker_run_that_fails_is_exit_1_with_rsyncs_text() {
 }
 
 #[test]
-fn a_dry_run_with_init_over_ssh_runs_only_the_listing() {
+fn a_dry_run_with_init_over_ssh_sends_no_marker_and_mirrors_with_n() {
     let (collection, fake) = ssh_targeted();
     fake.answer_all(DOT, "", 0);
 
     let run = push(&collection, &["--init", "-n"]);
 
-    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
-    assert_eq!(fake.calls().len(), 2);
+    goes_on(&run);
+    let calls = fake.calls();
+    assert_eq!(
+        calls.len(),
+        3,
+        "a probe, the listing and the mirror: {calls:?}"
+    );
+    assert!(calls[2].contains(&"-n".to_string()), "{:?}", calls[2]);
+    assert!(
+        !calls[2].contains(&"--chmod=F644".to_string()),
+        "{:?}",
+        calls[2]
+    );
+    assert_eq!(run.json()["actions"][0]["action"], "write_marker");
+}
+
+// =========================================================
+// Steps 6 to 9: the mirror and its result
+// =========================================================
+
+/// The mirror call of a run: the last call the stand-in saw.
+fn mirror_call(fake: &FakeRsync) -> Vec<String> {
+    let calls = fake.calls();
+    let call = calls.last().expect("rsync was called").clone();
+    assert_eq!(call[0], "transfer");
+    call
+}
+
+/// What the stand-in prints for a mirror run that changed these paths.
+const ITEMIZED: &str = ">f+++++++++ projects/a/new.txt\n\
+    >f.st...... projects/a/old.txt\n\
+    *deleting   projects/a/gone.txt\n\
+    .d..t...... projects/a/\n\
+    >f+++++++++ loose.txt\n\
+    >f+++++++++ .antiq/pieces/projects/a/2024-06-30T081245--a.tar.zst\n";
+
+#[test]
+fn the_mirror_runs_with_the_collection_and_the_canonical_target() {
+    let target = Target::new();
+    let link_dir = Target::new();
+    let link = link_dir.path().join("spelling");
+    std::os::unix::fs::symlink(target.path(), &link).expect("link");
+    let (collection, fake) = targeted(&link);
+    target.marker(&collection);
+
+    let run = push(&collection, &[]);
+
+    goes_on(&run);
+    let call = mirror_call(&fake);
+    assert!(call.contains(&"--delete-delay".to_string()), "{call:?}");
+    assert!(!call.contains(&"-n".to_string()), "{call:?}");
+    assert_eq!(
+        call[call.len() - 2],
+        format!("{}/", collection.root().display())
+    );
+    assert_eq!(
+        call[call.len() - 1],
+        format!("{}/", target.path().display())
+    );
+}
+
+#[test]
+fn a_push_summarises_the_changes_per_piece_in_json_and_text() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.answer_all(ITEMIZED, "", 0);
+
+    let json = push(&collection, &[]).json();
+
+    assert_eq!(json["result"], "pushed");
+    assert_eq!(json["dry_run"], false);
+    assert_eq!(
+        json["pieces"],
+        serde_json::json!([{"piece": "projects", "created": 2, "updated": 1, "deleted": 1}])
+    );
+    assert_eq!(
+        json["other"],
+        serde_json::json!({"created": 1, "updated": 0, "deleted": 0})
+    );
+    assert_eq!(json["vanished"], serde_json::json!([]));
+    assert_eq!(json["second_pass"], false);
+
+    let text = push_text(&collection, &[]);
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert!(
+        text.stdout
+            .contains("projects: 2 created, 1 updated, 1 deleted"),
+        "{}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains("other files: 1 created"),
+        "{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn a_dry_run_lists_the_repairs_and_the_mirror_and_sends_no_marker() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.answer_all(ITEMIZED, "", 0);
+    let stale = collection.path(".antiq/tmp/stale-entry");
+    fs::create_dir_all(stale.parent().expect("has a parent")).expect("tmp exists");
+    fs::write(&stale, "left behind").expect("written");
+
+    let json = push(&collection, &["-n"]).json();
+
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["actions"][0]["kind"], "repair");
+    assert_eq!(json["actions"][0]["repair"], "delete_temporary");
+    let mirror = &json["actions"][1];
+    assert_eq!(mirror["action"], "mirror");
+    assert_eq!(mirror["pieces"][0]["piece"], "projects");
+    assert_eq!(mirror["other"]["created"], 1);
+    assert_eq!(json["actions"].as_array().expect("a list").len(), 2);
+    assert!(mirror_call(&fake).contains(&"-n".to_string()));
+    assert!(stale.exists(), "a dry run repairs nothing");
+
+    let text = push_text(&collection, &["-n"]);
+    assert!(text.stdout.contains("Would delete"), "{}", text.stdout);
+    assert!(
+        text.stdout.contains("Would mirror the collection"),
+        "{}",
+        text.stdout
+    );
+    assert!(text.stdout.contains("Would change on"), "{}", text.stdout);
+}
+
+#[test]
+fn files_that_vanished_are_a_success_with_a_note() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.answer_all(
+        "",
+        "file has vanished: \"/c/projects/a/tmp\"\nrsync warning: some files vanished (code 24)\n",
+        24,
+    );
+
+    let json = push(&collection, &[]).json();
+    assert_eq!(json["vanished"], serde_json::json!(["/c/projects/a/tmp"]));
+    assert_eq!(json["result"], "pushed");
+
+    let text = push_text(&collection, &[]);
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert!(text.stdout.contains("vanished"), "{}", text.stdout);
+}
+
+#[test]
+fn a_failed_mirror_is_exit_1_with_rsyncs_text_also_under_if_reachable() {
+    let cases: [(i32, &str, &str, &str); 5] = [
+        (23, "", "rsync: some files could not be read\n", "exit 23"),
+        (30, "", "Timeout in data send/receive\n", "exit 30"),
+        (
+            12,
+            "",
+            "openrsync: unrecognized option `--fsync'\n",
+            "fsync = false",
+        ),
+        (
+            12,
+            "",
+            "rsync: --fsync: unknown option\n",
+            "[target] rsync_path",
+        ),
+        (
+            23,
+            "IO error encountered -- skipping file deletion\n",
+            "rsync: [sender] opendir \"/c/locked\" failed: Permission denied (13)\n",
+            "no deletion reached the target",
+        ),
+    ];
+    for (code, stdout, stderr, expected) in cases {
+        for args in [&[][..], &["-n"][..]] {
+            let target = Target::new();
+            let (collection, fake) = targeted(&target.path());
+            target.marker(&collection);
+            fake.answer_all(stdout, stderr, code);
+
+            let message = refused_message(&push(&collection, args));
+
+            assert!(message.contains(expected), "{code} {args:?}: {message}");
+        }
+    }
+}
+
+#[test]
+fn a_mirror_ended_by_a_signal_is_exit_1() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.kill_on(1);
+
+    let message = refused_message(&push(&collection, &[]));
+
+    assert!(message.contains("signal"), "{message}");
+}
+
+#[test]
+fn a_forced_push_over_another_marker_says_so() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    target.marker_with(&collection.id(), "Some Other Mac", "/elsewhere");
+
+    let json = push(&collection, &["--force"]).json();
+
+    assert_eq!(json["forced"], true);
+    let note = json["notes"][0].as_str().expect("a note");
+    assert!(
+        note.contains("Some Other Mac") && note.contains("/elsewhere"),
+        "{note}"
+    );
+    assert_eq!(json["initialized"], false);
+}
+
+#[test]
+fn a_dry_run_judges_the_store_by_the_repairs_it_lists() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    target.marker(&collection);
+    // The tree can go back to its place, which repair 4 would do.
+    let tree = collection.path(&format!(".antiq/trash/{STAMP}/restored/dir"));
+    fs::create_dir_all(&tree).expect("made");
+    fs::write(tree.join("kept.txt"), "kept").expect("written");
+
+    let json = push(&collection, &["-n"]).json();
+
+    assert_eq!(json["result"], "pushed");
+    assert_eq!(json["actions"][0]["repair"], "give_back");
+    assert!(tree.join("kept.txt").exists(), "a dry run moves nothing");
+}
+
+/// A collection with one stored version of `projects/a` that pushes to
+/// `target`, whose marker it matches, with a stand-in rsync.
+fn versioned(target: &Target) -> (Collection, FakeRsync) {
+    let mut builder = Collection::build(&Clock::now());
+    builder.piece("projects/a", |piece| {
+        piece.age_days(3).file("a.txt", "a");
+    });
+    builder.version("projects/a", STAMP, &[("a.txt", "a")]);
+    let collection = builder.finish();
+    set_url(&collection, target.path().to_str().expect("UTF-8"));
+    let fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+    target.marker(&collection);
+    (collection, fake)
+}
+
+#[test]
+fn a_dry_run_refuses_what_no_listed_repair_mends() {
+    let target = Target::new();
+    let (collection, _fake) = versioned(&target);
+    collection.damage_truncate_archive("projects/a", STAMP);
+
+    let message = refused_message(&push(&collection, &["-n"]));
+
+    assert!(
+        message.contains(&format!("antiq forget projects/a {STAMP}")),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dry_run_does_not_refuse_a_version_whose_staging_a_repair_finishes() {
+    let target = Target::new();
+    let (collection, _fake) = versioned(&target);
+    // The archive is staged and not yet moved into the store, as after a
+    // run that died; repair 1 deletes the sidecars it left.
+    let archive = collection.version_files("projects/a", STAMP).archive;
+    let staged = collection.path(&format!(".antiq/tmp/pack/{STAMP}/projects/a"));
+    fs::create_dir_all(&staged).expect("made");
+    fs::copy(&archive, staged.join(archive.file_name().expect("a name"))).expect("copied");
+    fs::remove_file(&archive).expect("removed");
+
+    let json = push(&collection, &["-n"]).json();
+
+    assert_eq!(json["result"], "pushed", "{json}");
+    assert_eq!(json["actions"][0]["repair"], "delete_sidecars");
 }

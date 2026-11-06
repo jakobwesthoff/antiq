@@ -1500,7 +1500,9 @@ target. `--init` and `--force` are each refused together with
    itself; a listing without it is exit 1, never an empty directory.
 
    Unreachable means exit 0 under `--if-reachable`, otherwise exit 4, and
-   the reason is printed in text and `--json` every time. A missing
+   the reason is printed in text and `--json` every time. A dry run of an
+   unreachable target still lists its repairs in text, but never prints
+   `Nothing to do.` on stdout. A missing
    directory of a path target is never created by antiq: the user creates
    it on the mounted volume.
 5. **Marker.** `.antiq-target` sits at the target root, outside the
@@ -1527,7 +1529,8 @@ target. `--init` and `--force` are each refused together with
    marker arrives with mode 0644 masked by the receiving side's umask. For
    an ssh target that creates the last missing directory level, and a
    deeper missing path is exit 1 with rsync's mkdir line. A failing marker
-   run is exit 1 with rsync's text. Just before it, a path target's
+   run is exit 1 with rsync's text; where the target's rsync does not know
+   `--fsync` it carries the same advice as the mirror (step 8). Just before it, a path target's
    directory is checked to be the one that was inspected.
    `push -n` never writes it. (ADR 0031)
 6. **Mirror.** One rsync run, antiq's options first, then the options of
@@ -1566,15 +1569,24 @@ target. `--init` and `--force` are each refused together with
 8. **Result.** rsync exit 0 is success; 24 (files vanished during the run)
    is success with a note naming the paths of the `file has vanished`
    lines. Everything else, including any failure after the pre-check, is
-   exit 1 with rsync's message, also under `--if-reachable`. With exit 23
+   exit 1 with rsync's message (rsync ended by a signal included), also
+   under `--if-reachable`. With exit 23
    and the line `IO error encountered -- skipping file deletion`, push
    says that no deletion reached the target and names the directories
    rsync could not open. Exit 12 with ``unrecognized option `--fsync'``
    (openrsync) or `--fsync: unknown option` (older rsync) is reported as:
    the target's rsync (openrsync, or older than 3.2.4) lacks `--fsync`;
    set `[target] rsync_path` to a 3.2.4+ rsync there, or `fsync = false`.
-9. `-n` runs the checks and summarizes rsync's `--itemize-changes` per
-   piece.
+9. `-n` runs steps 1 to 4 and the mirror with `-n`. It lists the repairs
+   without running them, and judges step 2 as those repairs would leave
+   the store. It sends no marker and runs no second pass, since a dry run
+   cannot see the effect of the first deletions. rsync's
+   `--itemize-changes` output is summarized per piece: the files, links
+   and other non-directory entries `created`, `updated` and `deleted`;
+   changes to directories are not counted. A path belongs to the live
+   piece or store folder that is its longest prefix, `.antiq/pieces/<folder>/`
+   counts for `<folder>`, and every other path is `other`. A real run
+   prints the same summary.
 
 With `--fsync` the target flushes each file's content before it is renamed
 into place; a power loss can then at most lose the newest names, which the
@@ -1803,10 +1815,18 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `actions`, which hold the repairs, each as in `repairs`, and, per piece,
 `{"kind": "archive", "piece": ...}`.
 
-A `push` that finds the target unreachable under `--if-reachable` exits 0
-with `dry_run`, `result` (`"unreachable"`), `target` (the `[target] url` as
-written), `reason` and `warnings`; the console prints `note: <reason>` on
-stderr and nothing on stdout. Without `--if-reachable` it is the error kind
+`push` has `dry_run`, `result`, `target` (the `[target] url` as written)
+and `warnings`. In a real run `result` is `"pushed"`, and `initialized` (the
+marker was written), `forced`, `pieces` (each `{piece, created, updated,
+deleted}`, only pieces that changed, by path), `other` (the same counts for
+paths outside every piece), `vanished` (the paths of the `file has vanished`
+lines), `second_pass` and `notes` come between `target` and `warnings`. A
+dry run has `actions` after `dry_run`: the repairs, then `{"action":
+"write_marker"}` where `--init` would write it, then `{"action": "mirror",
+"pieces": ..., "other": ...}`. A target that cannot be reached under
+`--if-reachable` exits 0 with `result` `"unreachable"` and `reason` in place
+of the counts, and the console prints `note: <reason>` on stderr and
+nothing on stdout. Without `--if-reachable` it is the error kind
 `target_unreachable`.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the

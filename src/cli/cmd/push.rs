@@ -37,13 +37,21 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 }
             }
         }
-        PushOutcome::Unreachable(report) => {
+        PushOutcome::Report(report) => {
             if ctx.json {
-                out.json(Some("push"), &report)
+                out.json(Some("push"), &*report)
                     .context("print the result")?;
             } else {
-                out.note(&format!("note: {}", report.reason))
-                    .context("print the result")?;
+                // An unreachable target is not a failure under
+                // `--if-reachable`, so its reason is a message and stdout
+                // stays empty.
+                if let Some(reason) = &report.reason {
+                    out.note(&format!("note: {reason}"))
+                        .context("print the result")?;
+                }
+                for line in report.lines() {
+                    out.line(&line).context("print the result")?;
+                }
             }
         }
     }

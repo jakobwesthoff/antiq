@@ -63,8 +63,6 @@ pub(super) struct Proceed {
     /// The marker is to be sent before the mirror.
     pub write_marker: bool,
     /// What the output tells about the way the push was cleared.
-    // TODO: the report of the mirror (step 9) prints it.
-    #[allow(dead_code)]
     pub note: Option<String>,
 }
 

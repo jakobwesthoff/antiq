@@ -72,13 +72,13 @@ impl fmt::Display for Refusal {
 /// The version an rsync reports about itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RsyncVersion {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
+    major: u32,
+    minor: u32,
+    patch: u32,
     /// The release carried a suffix such as `pre1`: a build before the
     /// release of its number.
-    pub pre_release: bool,
-    pub protocol: u32,
+    pre_release: bool,
+    protocol: u32,
 }
 
 impl fmt::Display for RsyncVersion {
@@ -136,7 +136,7 @@ pub struct Rsync {
 impl Rsync {
     /// Runs `<path> --version` and accepts the executable when it reports
     /// rsync 3.2.4 or later. openrsync, the macOS default, is refused.
-    pub fn probe(path: &Path) -> Result<Rsync, RsyncError> {
+    pub(crate) fn probe(path: &Path) -> Result<Rsync, RsyncError> {
         let mut command = scrub_environment(Command::new(path), inherited_names());
         command.arg("--version").stdin(Stdio::null());
         let output = command.output().map_err(|cause| RsyncError::Spawn {
@@ -168,11 +168,13 @@ impl Rsync {
     }
 
     /// The absolute path of the rsync that passed the probe.
-    pub fn path(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub fn version(&self) -> RsyncVersion {
+    #[cfg(test)]
+    pub(crate) fn version(&self) -> RsyncVersion {
         self.version
     }
 
@@ -363,12 +365,13 @@ pub struct Outcome {
 
 impl Call {
     /// The arguments after the program.
-    pub fn args(&self) -> &[OsString] {
+    #[cfg(test)]
+    pub(crate) fn args(&self) -> &[OsString] {
         &self.args
     }
 
     /// The command to run, with the environment of [`scrub_environment`].
-    pub fn command(&self) -> Command {
+    fn command(&self) -> Command {
         let mut command = scrub_environment(Command::new(&self.program), inherited_names());
         command.args(&self.args);
         command

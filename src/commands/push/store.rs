@@ -10,22 +10,109 @@ use crate::archive::TargetRules;
 use crate::archive::names::fold_path;
 use crate::collection::Collection;
 use crate::filesystem::tree::TreeRoot;
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
+use crate::repair::{Area, Repair};
 use crate::report::Warning;
 use crate::select::{Rules, select};
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
-use crate::versions::store::{StoreVersion, scan};
+use crate::versions::stamp::Stamp;
+use crate::versions::store::{StoreVersion, lookup_exact, scan};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// What the repairs that a dry run only lists would have done by the time
+/// the checks run.
+#[derive(Debug, Default)]
+pub(super) struct Planned {
+    /// Versions of store folders that a repair deletes.
+    versions: Vec<(RelPath, Stamp)>,
+    /// Empty store folders that a repair removes.
+    folders: Vec<RelPath>,
+    /// Trees in `trash/` that a repair puts back or removes.
+    trash: Vec<PathBuf>,
+}
+
+impl Planned {
+    pub(super) fn from_repairs(collection: &Collection, repairs: &[Repair]) -> Planned {
+        let mut planned = Planned::default();
+        let trash = collection.trash_dir();
+        let stamped = |stamp: &Option<Name>, tree: &RelPath| {
+            let mut path = trash.clone();
+            if let Some(stamp) = stamp {
+                path.push(stamp.to_string());
+            }
+            path.join(tree.to_string())
+        };
+        // A repair names its piece in the live spelling, the store folder
+        // may be spelled otherwise where the volume folds names. Nothing is
+        // written by the lookup, so a dry run may ask. A failed lookup keeps
+        // the live spelling, which can only make the check stricter.
+        let pieces = TreeRoot::open(&collection.pieces_dir()).ok();
+        let store_spelling = |piece: &RelPath| {
+            pieces
+                .as_ref()
+                .and_then(|pieces| lookup_exact(pieces, piece).ok().flatten())
+                .unwrap_or_else(|| piece.clone())
+        };
+        for repair in repairs {
+            match repair {
+                Repair::DeleteSidecars { piece, version } => {
+                    planned.versions.push((store_spelling(piece), *version));
+                }
+                Repair::DeleteRestoredVersion { piece, version, .. } => {
+                    planned.versions.push((store_spelling(piece), *version));
+                }
+                Repair::RemoveEmptyFolder { folder } => planned.folders.push(folder.clone()),
+                Repair::GiveBack { stamp, tree, .. } => planned.trash.push(stamped(stamp, tree)),
+                Repair::RemoveEmptyChain {
+                    area: Area::Trash,
+                    stamp,
+                    path,
+                } => planned.trash.push(stamped(&Some(stamp.clone()), path)),
+                Repair::DeleteTemporary { .. }
+                | Repair::DeleteDoomed { .. }
+                | Repair::RemoveEmptyChain { .. } => {}
+            }
+        }
+        planned
+    }
+
+    fn covers_version(&self, piece: &RelPath, version: &StoreVersion) -> bool {
+        self.versions
+            .iter()
+            .any(|(path, stamp)| path == piece && *stamp == version.stamp)
+    }
+
+    fn covers_trash(&self, path: &Path) -> bool {
+        self.trash.iter().any(|tree| path.starts_with(tree))
+    }
+}
+
+/// When the checks run: after the repairs of a real run, or beside the
+/// plan of a dry run.
+pub(super) enum Mode<'a> {
+    /// `warnings` are those of the repairs that ran just before.
+    Real {
+        warnings: &'a [Warning],
+    },
+    DryRun(Planned),
+}
 
 /// Refuses while the store holds a damaged or incomplete version, while
 /// two live piece paths or two store folders would be one name on the
-/// target's volume, and while `trash/` holds a tree. `warnings` are those
-/// of the repairs that ran just before.
-pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(), PushError> {
+/// target's volume, and while `trash/` holds a tree. A dry run judges
+/// the store as the listed repairs would leave it, and does not count a
+/// staged archive as damage, since the repairs are what finish it.
+/// Returns the live pieces and the store folders, which group the changes
+/// of the mirror.
+pub(super) fn check(collection: &Collection, mode: &Mode) -> Result<Vec<RelPath>, PushError> {
+    let planned = match mode {
+        Mode::Real { .. } => None,
+        Mode::DryRun(planned) => Some(planned),
+    };
     let store = scan(&collection.pieces_dir()).map_err(PushError::Versions)?;
 
     let items: Vec<(RelPath, StoreVersion)> = store
@@ -38,6 +125,7 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
                 .iter()
                 .map(|version| (piece.path.clone(), version.clone()))
         })
+        .filter(|(path, version)| !planned.is_some_and(|p| p.covers_version(path, version)))
         .collect();
     let pieces_dir = collection.pieces_dir();
     let tmp_pack_dir = collection.tmp_dir().join("pack");
@@ -57,7 +145,9 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
     for ((piece, version), inspection) in items.iter().zip(inspections) {
         let inspection = inspection.map_err(PushError::Versions)?;
         if inspection.condition == Condition::BeingStored {
-            lines.push(being_stored(piece, version, warnings));
+            if let Mode::Real { warnings } = mode {
+                lines.push(being_stored(piece, version, warnings));
+            }
         } else if let Some(line) = refusal(piece, version, &inspection.condition) {
             lines.push(line);
         }
@@ -71,6 +161,7 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
         .iter()
         .chain(&store.sidecar_only)
         .map(|piece| piece.path.clone())
+        .filter(|path| !planned.is_some_and(|p| p.folders.contains(path)))
         .collect();
     if let Some((first, second)) = find_clash(&store_folders) {
         return Err(PushError::NameClash { first, second });
@@ -86,10 +177,13 @@ pub(super) fn check(collection: &Collection, warnings: &[Warning]) -> Result<(),
         return Err(PushError::NameClash { first, second });
     }
 
-    if let Some(path) = first_non_directory(&collection.trash_dir())? {
+    let skip = |path: &Path| planned.is_some_and(|p| p.covers_trash(path));
+    if let Some(path) = first_non_directory(&collection.trash_dir(), &skip)? {
         return Err(PushError::TrashNotEmpty { path });
     }
-    Ok(())
+    let mut folders = store_folders;
+    folders.extend(selection.pieces().iter().cloned());
+    Ok(folders)
 }
 
 /// The collection root opened for listing.
@@ -102,7 +196,10 @@ fn open_root(path: &Path) -> Result<TreeRoot, PushError> {
 
 /// The first entry below `dir` that is not a directory, the directories
 /// themselves being chains that hold nothing.
-fn first_non_directory(dir: &Path) -> Result<Option<std::path::PathBuf>, PushError> {
+fn first_non_directory(
+    dir: &Path,
+    skip: &dyn Fn(&Path) -> bool,
+) -> Result<Option<PathBuf>, PushError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -119,6 +216,9 @@ fn first_non_directory(dir: &Path) -> Result<Option<std::path::PathBuf>, PushErr
             source,
         })?;
         let path = entry.path();
+        if skip(&path) {
+            continue;
+        }
         let kind = entry.file_type().map_err(|source| PushError::Trash {
             path: path.clone(),
             source,
@@ -126,7 +226,7 @@ fn first_non_directory(dir: &Path) -> Result<Option<std::path::PathBuf>, PushErr
         if !kind.is_dir() {
             return Ok(Some(path));
         }
-        if let Some(found) = first_non_directory(&path)? {
+        if let Some(found) = first_non_directory(&path, skip)? {
             return Ok(Some(found));
         }
     }
@@ -483,6 +583,130 @@ mod tests {
         }
     }
 
+    mod planned {
+        use super::*;
+        use crate::repair::Destination;
+
+        fn name(text: &str) -> Name {
+            Name::from_bytes(text.as_bytes().to_vec()).expect("a name")
+        }
+
+        fn stamp() -> Stamp {
+            Stamp::parse(STAMP).expect("a stamp")
+        }
+
+        /// A collection in a temp dir whose store holds the folder `stored`,
+        /// and whether that volume treats `LOWER` and `lower` as one name.
+        fn collection_with_store_folder(
+            temp: &tempfile::TempDir,
+            stored: &str,
+        ) -> (Collection, bool) {
+            let root = fs::canonicalize(temp.path()).expect("the temp dir exists");
+            fs::write(root.join("antiq-probe-case"), "").expect("written");
+            let folds = root.join("ANTIQ-PROBE-CASE").exists();
+            fs::create_dir_all(root.join(".antiq/pieces").join(stored)).expect("made");
+            let id = crate::testing::tree::COLLECTION_ID
+                .parse()
+                .expect("the fixture ID is a ULID");
+            (Collection::new(root, crate::config::Config::new(id)), folds)
+        }
+
+        fn delete_restored(piece: &str) -> Repair {
+            Repair::DeleteRestoredVersion {
+                piece: path(piece),
+                version: stamp(),
+                delete: true,
+            }
+        }
+
+        #[test]
+        fn a_repair_in_the_live_spelling_covers_the_store_folder_where_the_volume_folds() {
+            let temp = tempfile::tempdir().expect("a temp dir");
+            let (collection, folds) = collection_with_store_folder(&temp, "Projects/A");
+            if !folds {
+                eprintln!("skipped: the volume of the temp dir is case-sensitive");
+                return;
+            }
+
+            let planned = Planned::from_repairs(&collection, &[delete_restored("projects/a")]);
+
+            assert!(planned.covers_version(&path("Projects/A"), &whole_version()));
+        }
+
+        #[test]
+        fn a_repair_in_another_case_covers_nothing_where_the_volume_keeps_case() {
+            let temp = tempfile::tempdir().expect("a temp dir");
+            let (collection, folds) = collection_with_store_folder(&temp, "Projects/A");
+            if folds {
+                eprintln!("skipped: the volume of the temp dir folds case");
+                return;
+            }
+
+            let planned = Planned::from_repairs(&collection, &[delete_restored("projects/a")]);
+
+            assert!(!planned.covers_version(&path("Projects/A"), &whole_version()));
+            assert!(planned.covers_version(&path("projects/a"), &whole_version()));
+        }
+
+        fn whole_version() -> StoreVersion {
+            version(&["a--s.tar.zst"], &[], &[])
+        }
+
+        #[test]
+        fn repairs_that_remove_versions_folders_and_trash_trees_are_collected() {
+            let collection = Collection::for_tests();
+            let repairs = [
+                Repair::DeleteSidecars {
+                    piece: path("projects/a"),
+                    version: stamp(),
+                },
+                Repair::DeleteRestoredVersion {
+                    piece: path("projects/b"),
+                    version: stamp(),
+                    delete: true,
+                },
+                Repair::RemoveEmptyFolder {
+                    folder: path("empty"),
+                },
+                Repair::GiveBack {
+                    stamp: Some(name("2024")),
+                    tree: path("t/one"),
+                    destination: Destination::Live,
+                },
+                Repair::GiveBack {
+                    stamp: None,
+                    tree: path("loose"),
+                    destination: Destination::Recovered,
+                },
+                Repair::RemoveEmptyChain {
+                    area: Area::Trash,
+                    stamp: name("2025"),
+                    path: path("chain"),
+                },
+                Repair::RemoveEmptyChain {
+                    area: Area::Doomed,
+                    stamp: name("2026"),
+                    path: path("other"),
+                },
+                Repair::DeleteTemporary { entry: name("x") },
+            ];
+
+            let planned = Planned::from_repairs(&collection, &repairs);
+
+            let whole = version(&["a--s.tar.zst"], &[], &[]);
+            assert!(planned.covers_version(&path("projects/a"), &whole));
+            assert!(planned.covers_version(&path("projects/b"), &whole));
+            assert!(!planned.covers_version(&path("projects/c"), &whole));
+            assert_eq!(planned.folders, [path("empty")]);
+            let trash = collection.trash_dir();
+            assert!(planned.covers_trash(&trash.join("2024/t/one/file.txt")));
+            assert!(planned.covers_trash(&trash.join("loose")));
+            assert!(planned.covers_trash(&trash.join("2025/chain")));
+            assert!(!planned.covers_trash(&trash.join("2024/t/two")));
+            assert!(!planned.covers_trash(&trash.join("2026/other")));
+        }
+    }
+
     mod trash {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
@@ -491,12 +715,15 @@ mod tests {
         fn a_missing_trash_and_a_chain_of_folders_hold_nothing() {
             let temp = tempfile::tempdir().expect("a temp dir");
             assert_eq!(
-                first_non_directory(&temp.path().join("none")).expect("reads"),
+                first_non_directory(&temp.path().join("none"), &|_| false).expect("reads"),
                 None
             );
 
             fs::create_dir_all(temp.path().join("a/b/c")).expect("made");
-            assert_eq!(first_non_directory(temp.path()).expect("reads"), None);
+            assert_eq!(
+                first_non_directory(temp.path(), &|_| false).expect("reads"),
+                None
+            );
         }
 
         #[test]
@@ -505,7 +732,7 @@ mod tests {
             fs::create_dir_all(temp.path().join("a/b")).expect("made");
             std::os::unix::fs::symlink("nowhere", temp.path().join("a/b/link")).expect("link");
 
-            let found = first_non_directory(temp.path()).expect("reads");
+            let found = first_non_directory(temp.path(), &|_| false).expect("reads");
 
             assert_eq!(found, Some(temp.path().join("a/b/link")));
         }
@@ -521,7 +748,7 @@ mod tests {
                 "the test runs as a user without access"
             );
 
-            let result = first_non_directory(temp.path());
+            let result = first_non_directory(temp.path(), &|_| false);
 
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlocked");
             assert!(matches!(result, Err(PushError::Trash { .. })), "{result:?}");

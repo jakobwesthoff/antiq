@@ -7,7 +7,7 @@
 use super::PushError;
 use super::precheck::{Runner, Scratch};
 use crate::target::marker::{self, Marker};
-use crate::target::rsync::{Options, Rsync};
+use crate::target::rsync::{Options, Outcome, Rsync};
 use crate::target::url::TargetUrl;
 use std::io;
 use std::path::Path;
@@ -44,13 +44,86 @@ pub(super) fn send_marker(sender: &Sender, marker: &Marker, run: Runner) -> Resu
     if outcome.code == Some(0) {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    if outcome.code == Some(12) && lacks_fsync(&stderr) {
+        return Err(PushError::MarkerRun {
+            detail: LACKS_FSYNC.to_string(),
+        });
+    }
     let how = match outcome.code {
         Some(code) => format!("rsync ended with exit {code}"),
         None => "rsync was ended by a signal".to_string(),
     };
     Err(PushError::MarkerRun {
-        detail: format!("{how}: {}", String::from_utf8_lossy(&outcome.stderr).trim()),
+        detail: format!("{how}: {}", stderr.trim()),
     })
+}
+
+/// What the user is told when the rsync of the target refuses `--fsync`,
+/// which the marker run and the mirror both pass.
+const LACKS_FSYNC: &str = "the target's rsync (openrsync, or older than 3.2.4) lacks `--fsync`; set \
+                           `[target] rsync_path` to a 3.2.4+ rsync there, or `fsync = false`";
+
+/// Whether the error text of an exit 12 says that the target's rsync does
+/// not know `--fsync`.
+fn lacks_fsync(stderr: &str) -> bool {
+    stderr.contains("unrecognized option `--fsync'") || stderr.contains("--fsync: unknown option")
+}
+
+const IO_ERROR_LINE: &str = "IO error encountered -- skipping file deletion";
+
+/// What a finished mirror run tells beyond its itemized changes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Finished {
+    /// The paths of the `file has vanished` lines of exit 24.
+    pub vanished: Vec<String>,
+}
+
+/// The first double-quoted text of `line`.
+fn quoted(line: &str) -> Option<&str> {
+    let start = line.find('"')? + 1;
+    let end = line[start..].find('"')? + start;
+    Some(&line[start..end])
+}
+
+/// Reads the exit status of a mirror run (step 8): 0 and 24 are success,
+/// everything else is an error that carries rsync's text.
+pub(super) fn classify(outcome: &Outcome) -> Result<Finished, PushError> {
+    let stdout = String::from_utf8_lossy(&outcome.stdout);
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    let said = stderr.trim();
+    let detail = match outcome.code {
+        Some(0) => {
+            return Ok(Finished {
+                vanished: Vec::new(),
+            });
+        }
+        Some(24) => {
+            let vanished = stderr
+                .lines()
+                .filter(|line| line.contains("file has vanished"))
+                .filter_map(|line| quoted(line).map(str::to_string))
+                .collect();
+            return Ok(Finished { vanished });
+        }
+        Some(12) if lacks_fsync(&stderr) => LACKS_FSYNC.to_string(),
+        // With a directory unreadable, rsync deletes nothing, since it
+        // cannot tell what the sender still has.
+        Some(23) if stdout.lines().any(|line| line.trim() == IO_ERROR_LINE) => {
+            let directories: Vec<&str> = stderr
+                .lines()
+                .filter(|line| line.contains("opendir") || line.contains("readdir"))
+                .filter_map(quoted)
+                .collect();
+            format!(
+                "rsync could not read parts of the collection (exit 23), so no deletion reached the target; it could not open {}: {said}",
+                directories.join(", ")
+            )
+        }
+        Some(code) => format!("rsync ended with exit {code}: {said}"),
+        None => format!("rsync was ended by a signal: {said}"),
+    };
+    Err(PushError::Mirror { detail })
 }
 
 #[cfg(test)]
@@ -192,6 +265,35 @@ mod tests {
     }
 
     #[test]
+    fn exit_12_over_fsync_names_the_two_ways_out_for_the_marker_run_too() {
+        for stderr in [
+            "openrsync: unrecognized option `--fsync'\n",
+            "rsync: --fsync: unknown option\n",
+        ] {
+            let result = fixture().send(&|path, bytes| fs::write(path, bytes), &|_| {
+                answer(Some(12), stderr)
+            });
+            match result {
+                Err(PushError::MarkerRun { detail }) => {
+                    assert!(detail.contains("[target] rsync_path"), "{detail}");
+                    assert!(detail.contains("fsync = false"), "{detail}");
+                }
+                other => panic!("expected a marker run error, got {other:?}"),
+            }
+        }
+        let result = fixture().send(&|path, bytes| fs::write(path, bytes), &|_| {
+            answer(Some(12), "rsync: protocol broke\n")
+        });
+        match result {
+            Err(PushError::MarkerRun { detail }) => {
+                assert!(!detail.contains("fsync"), "{detail}");
+                assert!(detail.contains("exit 12"), "{detail}");
+            }
+            other => panic!("expected a marker run error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn an_rsync_that_cannot_start_is_the_rsync_error() {
         let fixture = fixture();
         let result = fixture.send(&|path, bytes| fs::write(path, bytes), &|_| {
@@ -222,6 +324,79 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    fn outcome_of(code: Option<i32>, stdout: &str, stderr: &str) -> Outcome {
+        Outcome {
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn mirror_error(outcome: Outcome) -> String {
+        match classify(&outcome) {
+            Err(PushError::Mirror { detail }) => detail,
+            other => panic!("expected a mirror error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_0_is_success_and_exit_24_names_the_vanished_paths() {
+        let done = classify(&outcome_of(Some(0), ">f+++++++++ a\n", "")).expect("success");
+        assert_eq!(done.vanished, Vec::<String>::new());
+
+        let stderr = "file has vanished: \"/srv/coll/a/tmp.1\"\n\
+                      rsync warning: some files vanished before they could be transferred (code 24)\n\
+                      file has vanished: \"/srv/coll/b\"\n";
+        let done = classify(&outcome_of(Some(24), "", stderr)).expect("success");
+        assert_eq!(done.vanished, ["/srv/coll/a/tmp.1", "/srv/coll/b"]);
+    }
+
+    #[test]
+    fn exit_23_with_the_io_error_line_says_no_deletion_reached_the_target() {
+        let stdout = format!("{IO_ERROR_LINE}\n");
+        let stderr = "rsync: [sender] opendir \"/srv/coll/locked\" failed: Permission denied (13)\n\
+                      rsync: [sender] readdir(\"/srv/coll/odd\"): No such file (2)\n\
+                      rsync error: some files/attrs were not transferred (code 23) at main.c(1)\n";
+        let detail = mirror_error(outcome_of(Some(23), &stdout, stderr));
+        assert!(
+            detail.contains("no deletion reached the target"),
+            "{detail}"
+        );
+        assert!(detail.contains("/srv/coll/locked"), "{detail}");
+        assert!(detail.contains("/srv/coll/odd"), "{detail}");
+        assert!(detail.contains("exit 23"), "{detail}");
+    }
+
+    #[test]
+    fn another_exit_23_30_and_a_signal_are_errors_with_rsyncs_text() {
+        for (code, expected) in [
+            (Some(23), "exit 23"),
+            (Some(30), "exit 30"),
+            (Some(11), "exit 11"),
+            (None, "signal"),
+        ] {
+            let detail = mirror_error(outcome_of(code, "", "rsync: something broke\n"));
+            assert!(detail.contains(expected), "{detail}");
+            assert!(detail.contains("something broke"), "{detail}");
+            assert!(!detail.contains("no deletion"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn exit_12_over_fsync_names_the_two_ways_out() {
+        for stderr in [
+            "openrsync: unrecognized option `--fsync'\n",
+            "rsync: --fsync: unknown option\n",
+        ] {
+            let detail = mirror_error(outcome_of(Some(12), "", stderr));
+            assert!(detail.contains("[target] rsync_path"), "{detail}");
+            assert!(detail.contains("fsync = false"), "{detail}");
+        }
+        let detail = mirror_error(outcome_of(Some(12), "", "rsync: protocol broke\n"));
+        assert!(!detail.contains("fsync"), "{detail}");
+        assert!(detail.contains("exit 12"), "{detail}");
     }
 
     #[test]

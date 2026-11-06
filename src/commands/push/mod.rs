@@ -8,21 +8,24 @@ use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::machine::MachineError;
-use crate::plan::HeldDryRun;
+use crate::plan::{HeldDryRun, Plan};
 use crate::relpath::RelPath;
-use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
 use crate::target::marker::{self, Marker, MarkerError};
 use crate::target::rsync::{Options, Rsync, RsyncError, quiet_option};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+pub use outcome::{PushAction, PushOutcome, PushReport};
+use summary::Changes;
+
 mod mirror;
+mod outcome;
 mod precheck;
 mod store;
+mod summary;
 
 /// Why push failed.
 #[derive(Debug, thiserror::Error)]
@@ -96,13 +99,12 @@ pub enum PushError {
         #[source]
         source: std::io::Error,
     },
+    #[error("the mirror failed: {detail}")]
+    Mirror { detail: String },
     #[error("sending the marker to the target failed: {detail}")]
     MarkerRun { detail: String },
     #[error("cannot name this machine")]
     Machine(#[source] MachineError),
-    /// The steps after the ones built so far.
-    #[error("push is not implemented beyond its first checks")]
-    Unfinished,
 }
 
 impl HasKind for PushError {
@@ -114,7 +116,6 @@ impl HasKind for PushError {
             PushError::Unreachable { .. } => ErrorKind::TargetUnreachable,
             PushError::MarkerFormat(MarkerError::TooNew { .. }) => ErrorKind::FormatTooNew,
             PushError::Machine(error) => error.kind(),
-            PushError::Unfinished => ErrorKind::NotImplemented,
             PushError::Url(_)
             | PushError::RootNotUtf8 { .. }
             | PushError::QuietRsyncArgs { .. }
@@ -128,6 +129,7 @@ impl HasKind for PushError {
             | PushError::Target { .. }
             | PushError::Scratch { .. }
             | PushError::MarkerRun { .. }
+            | PushError::Mirror { .. }
             | PushError::MarkerMismatch { .. }
             | PushError::MarkerFormat(MarkerError::Invalid { .. }) => ErrorKind::Other,
         }
@@ -145,36 +147,6 @@ pub struct PushRequest {
     /// A target that cannot be reached is no failure.
     pub if_reachable: bool,
     pub dry_run: bool,
-}
-
-/// How a push ended, when it did not fail.
-#[derive(Debug)]
-pub enum PushOutcome {
-    /// A dry run that found another run holding the lock.
-    HeldDryRun(HeldDryRun),
-    /// The target cannot be reached and `--if-reachable` accepts that.
-    Unreachable(UnreachableReport),
-}
-
-/// The report of a push that stopped because the target cannot be reached.
-#[derive(Debug, Serialize)]
-pub struct UnreachableReport {
-    pub dry_run: bool,
-    pub result: &'static str,
-    /// The `[target] url` as written.
-    pub target: String,
-    pub reason: String,
-    pub warnings: Vec<Warning>,
-}
-
-impl CommandReport for UnreachableReport {
-    fn partial(&self) -> bool {
-        false
-    }
-
-    fn warnings(&self) -> &[Warning] {
-        &self.warnings
-    }
 }
 
 /// Pushes the collection to its target.
@@ -195,23 +167,33 @@ pub fn push(
 
     let started = run::start(collection, clock, request.dry_run).map_err(PushError::Run)?;
     // The guard, when there is one, holds the lock until push returns.
-    let guard = match started {
+    let (_guard, repairs, warnings, folders) = match started {
         Started::DryRun {
             holder: Some(holder),
             ..
         } => return Ok(PushOutcome::HeldDryRun(HeldDryRun::new(&holder))),
-        Started::DryRun { holder: None, .. } => None,
+        Started::DryRun {
+            holder: None,
+            repairs,
+            warnings,
+        } => {
+            let planned = store::Planned::from_repairs(collection, &repairs);
+            let folders = store::check(collection, &store::Mode::DryRun(planned))?;
+            (None, repairs, warnings, folders)
+        }
         Started::Guarded(guard) => {
-            store::check(collection, guard.warnings())?;
-            Some(guard)
+            let warnings = guard.warnings().to_vec();
+            let folders = store::check(
+                collection,
+                &store::Mode::Real {
+                    warnings: &warnings,
+                },
+            )?;
+            (Some(guard), Vec::new(), warnings, folders)
         }
     };
 
     let rsync = local_rsync(collection)?;
-
-    let warnings = guard
-        .as_ref()
-        .map_or_else(Vec::new, |guard| guard.warnings().to_vec());
     let identity = identity(collection, crate::machine::detect())?;
     let flags = precheck::Flags {
         init: request.init,
@@ -251,15 +233,23 @@ pub fn push(
         }
     };
     let ssh = matches!(url, TargetUrl::Ssh { .. });
+    let mut report = PushReport {
+        dry_run: request.dry_run,
+        reason: None,
+        target: shown.clone(),
+        initialized: false,
+        forced: request.force,
+        changes: Changes::default(),
+        vanished: Vec::new(),
+        second_pass: false,
+        notes: Vec::new(),
+        warnings,
+        plan: request.dry_run.then(|| Plan::after_repairs(repairs)),
+    };
     let proceed = match precheck::decide(probe, ssh, &identity, flags, &shown) {
         precheck::Decision::Unreachable(reason) if request.if_reachable => {
-            return Ok(PushOutcome::Unreachable(UnreachableReport {
-                dry_run: request.dry_run,
-                result: "unreachable",
-                target: shown,
-                reason,
-                warnings,
-            }));
+            report.reason = Some(reason);
+            return Ok(PushOutcome::Report(Box::new(report)));
         }
         precheck::Decision::Unreachable(reason) => {
             return Err(PushError::Unreachable { reason });
@@ -267,6 +257,8 @@ pub fn push(
         precheck::Decision::Refuse(error) => return Err(error),
         precheck::Decision::Proceed(proceed) => proceed,
     };
+    report.notes.extend(proceed.note);
+    report.initialized = proceed.write_marker;
 
     if proceed.write_marker && !request.dry_run {
         let marker = Marker::new(identity.id, identity.host, identity.path);
@@ -283,7 +275,23 @@ pub fn push(
             &|call| call.run(),
         )?;
     }
-    Err(PushError::Unfinished)
+
+    recheck_directory(&call_url, directory)?;
+    let call = rsync.mirror(&options, collection.root(), &call_url, request.dry_run);
+    let outcome = call.run().map_err(PushError::Rsync)?;
+    let finished = mirror::classify(&outcome)?;
+    report.vanished = finished.vanished;
+    report.changes = summary::group(&summary::parse_itemized(&outcome.stdout), &folders);
+
+    if let Some(plan) = report.plan.as_mut() {
+        if proceed.write_marker {
+            plan.push_command(PushAction::WriteMarker);
+        }
+        plan.push_command(PushAction::Mirror {
+            changes: report.changes.clone(),
+        });
+    }
+    Ok(PushOutcome::Report(Box::new(report)))
 }
 
 /// Before anything is sent to a path target, checks that its directory is
