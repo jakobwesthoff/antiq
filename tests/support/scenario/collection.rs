@@ -259,6 +259,7 @@ pub struct CollectionBuilder {
     pieces: Vec<(String, PieceBuilder)>,
     outside: Vec<(String, Vec<u8>)>,
     versions: Vec<(String, String, StoredFiles)>,
+    initialised: bool,
 }
 
 impl CollectionBuilder {
@@ -334,12 +335,21 @@ impl CollectionBuilder {
         self
     }
 
+    /// Leaves out `.antiq/` and the config: the folders of a directory
+    /// that `init` has not made a collection yet.
+    pub fn uninitialised(&mut self) -> &mut CollectionBuilder {
+        self.initialised = false;
+        self
+    }
+
     pub fn finish(&mut self) -> Collection {
         let mut tree = Tree::new();
-        for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
-            tree.dir(&format!(".antiq/{directory}"));
+        if self.initialised {
+            for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
+                tree.dir(&format!(".antiq/{directory}"));
+            }
+            tree.file(".antiq/config.toml", self.keys.render());
         }
-        tree.file(".antiq/config.toml", self.keys.render());
         for (path, piece) in &self.pieces {
             piece.write(&self.clock, &mut tree, path);
         }
@@ -371,6 +381,7 @@ impl Collection {
             pieces: Vec::new(),
             outside: Vec::new(),
             versions: Vec::new(),
+            initialised: true,
         }
     }
 

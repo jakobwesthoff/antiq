@@ -74,7 +74,9 @@
 //!   version each (truncated archive, removed listing, corrupt checksum
 //!   file, removed archive). `set_age(piece, days)` ages a piece's files
 //!   and rewrites its `.antiq-restored` marker. `Collection::bare` is an
-//!   empty directory for scenarios that start with `init`.
+//!   empty directory for scenarios that start with `init`; the builder's
+//!   `uninitialised` leaves out `.antiq/` and the config but writes the
+//!   pieces, for an `init` in a directory that holds folders.
 //! - [`versions::Source`] is a folder outside the collection, built like a
 //!   piece, for `import`.
 //!
@@ -105,7 +107,8 @@
 //!   its own, with a stand-in `ssh` in front of `PATH` that does not
 //!   resolve any host.
 //! - The [`world::Outcome`] has `code`, `stdout`, `stderr` and `mode`;
-//!   `expect_code`, `json_only`, `text_only`, `keys` (the ordered keys of
+//!   `plain` (stdout without colour sequences, `world::strip_colour` for any
+//!   other text); `expect_code`, `json_only`, `text_only`, `keys` (the ordered keys of
 //!   the JSON object, checked in JSON mode only) and `error_kind` (the
 //!   `kind` of the error object, `None` in text mode).
 //! - `world.assert_unchanged(|| ..)` fails when the closure changed the
@@ -123,7 +126,9 @@
 //! - version stamps become `<v1>`, `<v2>`, ... by their order in the whole
 //!   tree (time, then counter as a number), in names and in text;
 //! - the values of the listing header keys `archived`, `imported` and
-//!   `rebuilt`, and the time in `.antiq-restored`, become `<time>`;
+//!   `rebuilt`, and the time in `.antiq-restored`, become `<time>`, and the
+//!   `id` of `.antiq/config.toml`, which `init` mints anew in every world,
+//!   becomes `<id>`;
 //! - 64-digit hex digests in `*.sha256` files become `<sha256>`;
 //! - a `.tar.zst` is compared by its members (path, type, mode, size, time,
 //!   content digest) and a `.sha256.zst` by its decompressed text, so

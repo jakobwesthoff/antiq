@@ -299,12 +299,34 @@ impl Outcome {
         })
     }
 
+    /// Stdout without colour sequences, for terminal output asserted by
+    /// its text.
+    pub fn plain(&self) -> String {
+        strip_colour(&self.stdout)
+    }
+
     /// The `kind` of the error object; `None` in text mode and without an
     /// error.
     pub fn error_kind(&self) -> Option<String> {
         let value = self.value.as_ref()?;
         value["error"]["kind"].as_str().map(str::to_string)
     }
+}
+
+/// `text` without the `ESC [ ... m` sequences that colour it.
+pub fn strip_colour(text: &str) -> String {
+    let mut plain = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        plain.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        rest = match after.find('m') {
+            Some(end) => &after[end + 1..],
+            None => "",
+        };
+    }
+    plain.push_str(rest);
+    plain
 }
 
 /// Builds the scenario's world once per mode from one clock, runs `script`

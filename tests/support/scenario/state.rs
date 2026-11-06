@@ -150,7 +150,8 @@ fn stamp_order(stamp: &str) -> (String, u64) {
     }
 }
 
-/// The values of the keys that hold the real time of an action.
+/// The values of the keys that hold the real time of an action, and the
+/// collection ID, which `init` mints anew in every world.
 fn blank_times(text: &str) -> String {
     let mut out = String::new();
     for line in text.split_inclusive('\n') {
@@ -159,6 +160,8 @@ fn blank_times(text: &str) -> String {
             .find_map(|key| line.starts_with(key).then(|| format!("{key}<time>\n")));
         if let Some(kept) = kept {
             out.push_str(&kept);
+        } else if line.starts_with("id = \"") {
+            out.push_str("id = \"<id>\"\n");
         } else if let Some(rest) = line.strip_prefix("restored ") {
             let after = rest.split_once(' ').map_or("", |(_, tail)| tail);
             let tail = if after.is_empty() {

@@ -62,6 +62,20 @@ fn a_bare_directory_is_not_a_collection() {
 }
 
 #[test]
+fn an_uninitialised_collection_has_its_folders_and_no_antiq_directory() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .uninitialised()
+        .piece("projects", |piece| {
+            piece.age_days(40).file("src/main.rs", "fn main() {}\n");
+        })
+        .finish();
+    assert!(collection.path("projects/src/main.rs").is_file());
+    assert!(!collection.path(".antiq").exists());
+    assert!(Library::find(&collection.root()).is_err());
+}
+
+#[test]
 fn the_layout_directories_exist() {
     let clock = Clock::now();
     let collection = Collection::build(&clock).finish();
@@ -631,6 +645,26 @@ fn the_world_root_is_replaced_in_text_and_link_targets() {
         Some(&Entry::Link("<root>".to_string()))
     );
     assert!(state.diff(&normalised_state(&second)).is_none());
+}
+
+#[test]
+fn the_collection_id_of_the_config_is_replaced_and_other_keys_are_not() {
+    let clock = Clock::now();
+    let build = |id: &str, idle_days: u32| {
+        Collection::build(&clock)
+            .id(id)
+            .idle_days(idle_days)
+            .finish()
+    };
+    let one = normalised_state(&build("01JBX0000000000000000000AA", 30));
+    let other_id = normalised_state(&build("01JBX0000000000000000000BB", 30));
+    assert_eq!(
+        text_of(&one, ".antiq/config.toml").lines().nth(1),
+        Some("id = \"<id>\"")
+    );
+    assert!(one.diff(&other_id).is_none());
+    let other_days = normalised_state(&build("01JBX0000000000000000000AA", 45));
+    assert!(one.diff(&other_days).is_some());
 }
 
 fn write_store_file(collection: &Collection, name: &str, content: &str) {
@@ -1384,4 +1418,16 @@ fn a_piece_without_a_store_folder_has_no_versions() {
     let collection = Collection::build(&Clock::now()).finish();
     assert!(store_files(&collection, "nothing").is_empty());
     assert!(collection.versions("nothing").is_empty());
+}
+
+// =========================================================
+// Terminal output without colour
+// =========================================================
+
+#[test]
+fn colour_sequences_are_removed_and_text_is_kept() {
+    use crate::support::scenario::world::strip_colour;
+    assert_eq!(strip_colour("\x1b[1;31mred\x1b[0m text"), "red text");
+    assert_eq!(strip_colour("plain\n  indented\n"), "plain\n  indented\n");
+    assert_eq!(strip_colour("a\x1b[0mb\x1b[32mc"), "abc");
 }
