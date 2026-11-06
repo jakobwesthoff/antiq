@@ -558,12 +558,12 @@ mod tests {
 
     #[test]
     fn a_command_without_an_implementation_reports_not_implemented() {
-        let (code, stdout, stderr) = run_captured(&["--json", "sync"]);
+        let (code, stdout, stderr) = run_captured(&["--json", "resolve"]);
         assert_eq!(code, 1);
         assert_eq!(
             stdout,
-            "{\"format\":1,\"command\":\"sync\",\"error\":\
-             {\"kind\":\"not_implemented\",\"message\":\"sync is not implemented\"}}\n"
+            "{\"format\":1,\"command\":\"resolve\",\"error\":\
+             {\"kind\":\"not_implemented\",\"message\":\"resolve is not implemented\"}}\n"
         );
         assert_eq!(stderr, "");
     }
@@ -576,10 +576,10 @@ mod tests {
 
     #[test]
     fn a_plain_run_reports_on_stderr() {
-        let (code, stdout, stderr) = run_captured(&["sync"]);
+        let (code, stdout, stderr) = run_captured(&["resolve"]);
         assert_eq!(code, 1);
         assert_eq!(stdout, "");
-        assert_eq!(stderr, "error: sync is not implemented\n");
+        assert_eq!(stderr, "error: resolve is not implemented\n");
     }
 
     #[test]

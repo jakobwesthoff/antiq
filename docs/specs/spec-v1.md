@@ -1520,6 +1520,14 @@ uploads pending archives, commits recorded metadata changes, deletes a
 live package only after its archive's metadata is committed on the
 remote, and applies the tiers. (ADR 0018)
 
+The pull stores every metadata version the remote has beyond the local
+ones as the remote holds it. It then fetches each archive listing that
+the current metadata names and that is not stored here, and brings the
+member index up to date. A version whose number is stored here with other
+bytes, and a listing that does not parse, leave their object alone for
+the run and make it exit 3. A read of the remote's metadata that fails is
+repeated once; when it fails again the run warns and pulls nothing.
+
 `sync` gives new pieces their ID. With `backup_live = false` it still
 does, and commits their metadata without a live payload. After a fork,
 the old ID's live package is deleted once the fork's change is
@@ -2180,7 +2188,12 @@ with `from` (the ID the piece has now), `path` (where it will be) and
 the piece is pinned afterwards), `changed` (whether the command changed the
 pin file) and `warnings`.
 
-`sync` has no payload defined yet.
+`sync` adds `pulled` (a list of `{id, version}`), `listings` (the IDs of
+the objects whose listing was fetched), `skipped` (a list of `{id, path,
+reason, message}`, `path` null where the piece's metadata cannot be read,
+`reason` one of `pull`, `error`, `conflict`, `contested` and `refused`)
+and `warnings`. The plan of a `--dry-run` has `pull_metadata` actions
+(`id`, `version`) and `fetch_listing` actions (`id`, `file`).
 
 `resolve` has no payload defined yet. Without a piece and without a
 terminal, or with `--json`, it lists the pending decisions and exits 3

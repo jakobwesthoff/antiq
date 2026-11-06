@@ -203,7 +203,7 @@ accepts_and_needs_a_collection!(
     "unpin",
     ["unpin", "piece", "--dry-run"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     sync_takes_dry_run_and_if_reachable,
     "sync",
     ["sync", "--dry-run", "--if-reachable"]
@@ -288,24 +288,24 @@ accepts_and_needs_a_collection!(
 
 #[test]
 fn a_json_run_prints_one_not_implemented_envelope() {
-    let run = json_run(&["sync"]);
+    let run = json_run(&["resolve"]);
     assert_eq!(run.code(), 1);
     assert_eq!(run.stderr, "");
     let json = run.json();
     let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
     assert_eq!(keys, ["format", "command", "error"]);
     assert_eq!(json["format"], 1);
-    assert_eq!(json["command"], "sync");
+    assert_eq!(json["command"], "resolve");
     assert_eq!(json["error"]["kind"], "not_implemented");
-    assert_eq!(json["error"]["message"], "sync is not implemented");
+    assert_eq!(json["error"]["message"], "resolve is not implemented");
 }
 
 #[test]
 fn a_plain_run_prints_its_error_to_stderr() {
-    let run = Antiq::new().arg("sync").run();
+    let run = Antiq::new().arg("resolve").run();
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
-    assert_eq!(run.stderr, "error: sync is not implemented\n");
+    assert_eq!(run.stderr, "error: resolve is not implemented\n");
 }
 
 #[test]
@@ -380,10 +380,10 @@ fn a_closed_stdout_keeps_the_exit_code_and_does_not_panic() {
 }
 
 #[test]
-fn if_reachable_does_not_hide_an_unimplemented_command() {
+fn if_reachable_does_not_hide_an_error_that_is_not_an_away_remote() {
     let run = json_run(&["sync", "--if-reachable"]);
     assert_eq!(run.code(), 1);
-    assert_eq!(run.error_kind(), "not_implemented");
+    assert_eq!(run.error_kind(), "not_a_collection");
 }
 
 #[test]

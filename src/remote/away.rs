@@ -83,6 +83,24 @@ pub fn record_away(
     })
 }
 
+/// Key of the time a `sync` last reached its end.
+const LAST_SYNC: &str = "last_sync";
+
+/// Records that a `sync` reached its end, which `status` shows as
+/// `last_sync`.
+pub(crate) fn record_sync(
+    collection: &Collection,
+    _lock: &RunLock,
+    now: Timestamp,
+) -> Result<(), AwayError> {
+    update(collection, |object| {
+        object.insert(
+            LAST_SYNC.into(),
+            Value::from(whole_seconds(now).to_string()),
+        );
+    })
+}
+
 /// Reads the keys of the state file and writes them back with `change`
 /// applied. Keys it does not know stay, since `last_sync` and the keys of
 /// later versions belong to other writers. A file that is missing or damaged
@@ -309,6 +327,28 @@ mod tests {
             Value::from("2026-11-01T10:00:00Z")
         );
         assert_eq!(state["last_sync"], Value::from("2026-10-31T00:00:00Z"));
+        assert_eq!(state["later_key"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn recording_a_sync_keeps_the_other_keys() {
+        let fixture = Fixture::new();
+        fixture.write_state(
+            r#"{"last_reachable": "2026-11-01T09:30:15Z", "away_first_seen": "2026-11-01T10:00:00Z", "later_key": [1, 2]}"#,
+        );
+        record_sync(
+            &fixture.collection,
+            &fixture.lock,
+            time("2026-11-04T08:00:00.900Z"),
+        )
+        .expect("writable");
+        let state = fixture.state();
+        assert_eq!(state["last_sync"], Value::from("2026-11-04T08:00:00Z"));
+        assert_eq!(state["last_reachable"], Value::from("2026-11-01T09:30:15Z"));
+        assert_eq!(
+            state["away_first_seen"],
+            Value::from("2026-11-01T10:00:00Z")
+        );
         assert_eq!(state["later_key"], serde_json::json!([1, 2]));
     }
 
