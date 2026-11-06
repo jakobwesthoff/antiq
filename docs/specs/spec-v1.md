@@ -723,10 +723,19 @@ Cleanup:
   grace period makes it rare.
 - A collection removes its own temp names and partial files before the
   grace period only in object directories whose committed metadata
-  names it as owner, while its lock shows no other run. Its temp names
-  include `<temp name>.` followed by six characters of `[A-Za-z0-9]`,
-  the file rsync leaves when it is killed hard; such files of other
-  machines are removed only after the grace period.
+  names it as owner, while its lock shows no other run. A temp name is
+  `.<file>.<machine part>.part`, where the file is a payload, a listing
+  or `meta.<N>`, followed by `.` and six characters of `[A-Za-z0-9]` for
+  the file rsync leaves when it is killed hard. A name that splits into
+  file and machine part in more than one way counts as another
+  machine's, and a name that fits no split is never removed. The temp
+  name of an upload that is still pending on this machine is never
+  removed, in the object directory or in `.antiq-partial`, since the next
+  run resumes it. An own metadata temp name stays while the claim of its
+  version exists above the highest committed version, as it marks the
+  claim as this machine's. Every other temp name and partial file, own
+  or not, is removed once it is older than the grace period. A dry run
+  lists the early removals as removals.
 - Ages are measured on the remote's clock: over SSH against `date +%s`
   printed by the same command, on a path remote against the modification
   time of a probe file written there. A dry run writes no probe file;

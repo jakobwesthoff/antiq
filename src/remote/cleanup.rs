@@ -16,12 +16,13 @@
 //! payloads one run later; the caller never drops its local archive
 //! because of such a version.
 
-use super::commit::{claim_number, read_document, read_listed, version_name};
+use super::commit::{claim_name, claim_number, read_document, read_listed, version_name};
 use super::{Remote, RemoteError, RemoteFile};
 use crate::id::ObjectId;
 use crate::lock::RunLock;
 use crate::meta::{self, Metadata};
 use crate::plan::PlanAction;
+use crate::relpath::machine_part;
 use crate::store::version_number;
 use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
@@ -69,6 +70,8 @@ pub enum What {
     OldMetadata,
     Payload,
     Listing,
+    TempFile,
+    PartialFile,
 }
 
 impl fmt::Display for What {
@@ -78,6 +81,8 @@ impl fmt::Display for What {
             What::OldMetadata => "old metadata",
             What::Payload => "payload",
             What::Listing => "listing",
+            What::TempFile => "temp file",
+            What::PartialFile => "partial file",
         })
     }
 }
@@ -201,7 +206,10 @@ pub fn apply(
                     continue;
                 }
             }
-            remote.delete(id, name)?;
+            match what {
+                What::PartialFile => remote.delete_partial(id, name)?,
+                _ => remote.delete(id, name)?,
+            }
             applied.removed += 1;
         }
     }
@@ -219,6 +227,60 @@ fn appeared_since(
         .list_dir(id)?
         .iter()
         .any(|file| concerns_commits(&file.name) && !seen.contains(&file.name)))
+}
+
+/// A name that fits the temp name of an upload or of a metadata version.
+struct TempName {
+    /// The temp name was made by this machine and by nobody else's name.
+    own: bool,
+    /// The file the temp name stands for: a payload, a listing or
+    /// `meta.<N>`.
+    target: String,
+}
+
+/// Reads `.<target>.<machine part>.part`, optionally followed by `.` and
+/// six characters of `[A-Za-z0-9]`, the file rsync leaves when it is
+/// killed hard. A target may contain dots, and so may a machine part, so
+/// a name can split into target and machine part in more than one way. It
+/// is this machine's own only when it splits in exactly one way and that
+/// way names this machine; a name that splits two ways falls under the
+/// grace period like another machine's.
+fn classify_temp(name: &str, ours: &str) -> Option<TempName> {
+    let without_leftover = match name.len().checked_sub(7).and_then(|at| name.get(..at)) {
+        Some(head)
+            if name.as_bytes()[name.len() - 7] == b'.'
+                && name.as_bytes()[name.len() - 6..]
+                    .iter()
+                    .all(u8::is_ascii_alphanumeric) =>
+        {
+            head
+        }
+        _ => name,
+    };
+    let inner = without_leftover.strip_prefix('.')?.strip_suffix(".part")?;
+    let splits: Vec<(&str, &str)> = inner
+        .match_indices('.')
+        .map(|(at, _)| (&inner[..at], &inner[at + 1..]))
+        .filter(|(target, machine)| is_target(target) && is_machine_part(machine))
+        .collect();
+    let (target, machine) = *splits.first()?;
+    Some(TempName {
+        own: splits.len() == 1 && machine == ours,
+        target: target.to_string(),
+    })
+}
+
+fn is_target(name: &str) -> bool {
+    meta::is_payload_file_name(name)
+        || meta::is_listing_file_name(name)
+        || (version_number(name).is_some())
+}
+
+fn is_machine_part(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'%'))
 }
 
 /// Whether the name belongs to the commit protocol: a version, a claim, or
@@ -255,7 +317,7 @@ impl Examined {
 
 fn examine(
     remote: &dyn Remote,
-    settings: &Settings,
+    settings: &Settings<'_>,
     now: Option<Timestamp>,
     id: ObjectId,
 ) -> Result<Examined, RemoteError> {
@@ -279,9 +341,10 @@ fn examine(
                 let object = Object {
                     id,
                     files,
+                    partial: remote.list_partial(id)?,
                     versions,
                     now,
-                    grace: settings.grace,
+                    settings: *settings,
                 };
                 return Ok(object.decide());
             }
@@ -370,16 +433,18 @@ impl Tri {
 }
 
 /// An object directory whose versions are all readable.
-struct Object {
+struct Object<'a> {
     id: ObjectId,
     files: Vec<RemoteFile>,
+    /// The entries of the `.antiq-partial` directory.
+    partial: Vec<RemoteFile>,
     versions: BTreeMap<u32, Metadata>,
     /// The remote's time; none in a dry run.
     now: Option<Timestamp>,
-    grace: SignedDuration,
+    settings: Settings<'a>,
 }
 
-impl Object {
+impl Object<'_> {
     fn highest(&self) -> u32 {
         self.versions.keys().next_back().copied().unwrap_or(0)
     }
@@ -390,7 +455,7 @@ impl Object {
 
     fn older_than_grace(&self, file: &RemoteFile) -> Tri {
         match self.now {
-            Some(now) => Tri::from_bool(now.duration_since(file.modified) > self.grace),
+            Some(now) => Tri::from_bool(now.duration_since(file.modified) > self.settings.grace),
             None => Tri::Maybe,
         }
     }
@@ -429,6 +494,55 @@ impl Object {
             }
         }
         names
+    }
+
+    /// Whether the committed metadata names this collection as the owner.
+    fn owned(&self) -> bool {
+        self.versions
+            .get(&self.highest())
+            .is_some_and(|metadata| metadata.collection == self.settings.collection)
+    }
+
+    /// Whether the claim for a metadata temp name's version is still to be
+    /// decided: the temp name is the evidence that the claim is this
+    /// machine's own interrupted attempt.
+    fn proves_own_claim(&self, target: &str) -> bool {
+        version_number(target).is_some_and(|number| {
+            number > self.highest() && self.file(&claim_name(number)).is_some()
+        })
+    }
+
+    /// Temp names and partial files. This machine's own go at once in a
+    /// directory its collection owns, unless the upload is still pending
+    /// or the name proves a claim. Every other one goes once it is older
+    /// than the grace period. The early removal does not depend on an age,
+    /// so a dry run lists it as a removal.
+    fn push_leftovers(&self, push: &mut impl FnMut(Tri, &str, What)) {
+        let ours = machine_part(self.settings.machine);
+        let listings = [
+            (self.regular().collect::<Vec<_>>(), What::TempFile),
+            (
+                self.partial.iter().filter(|file| !file.is_dir).collect(),
+                What::PartialFile,
+            ),
+        ];
+        for (files, what) in listings {
+            for file in files {
+                let Some(temp) = classify_temp(&file.name, &ours) else {
+                    continue;
+                };
+                if self.settings.keep.contains(&(self.id, file.name.clone())) {
+                    continue;
+                }
+                let early = temp.own && self.owned() && !self.proves_own_claim(&temp.target);
+                let goes = if early {
+                    Tri::Yes
+                } else {
+                    self.older_than_grace(file)
+                };
+                push(goes, &file.name, what);
+            }
+        }
     }
 
     fn decide(&self) -> Examined {
@@ -497,6 +611,8 @@ impl Object {
             }
         }
 
+        self.push_leftovers(&mut push);
+
         Examined {
             steps,
             left_alone: None,
@@ -541,6 +657,8 @@ mod tests {
         remote: FaultRemote,
         lock: lock::RunLock,
         keep: BTreeSet<(ObjectId, String)>,
+        /// The machine name cleanup runs as.
+        machine: &'static str,
         _local: tempfile::TempDir,
     }
 
@@ -557,13 +675,14 @@ mod tests {
                 remote,
                 lock,
                 keep: BTreeSet::new(),
+                machine: "laptop",
                 _local: local,
             }
         }
 
         fn settings(&self) -> Settings<'_> {
             Settings {
-                machine: "laptop",
+                machine: self.machine,
                 collection: COLLECTION_ID.parse().expect("an ID"),
                 grace: SignedDuration::from_hours(24),
                 keep: &self.keep,
@@ -582,6 +701,16 @@ mod tests {
             std::fs::create_dir_all(self.dir(number)).expect("the object directory");
             std::fs::write(self.dir(number).join(name), bytes).expect("a remote file");
             self.age(number, name, hours * HOUR);
+        }
+
+        /// Writes a file in the `.antiq-partial` directory of object
+        /// `number` that is `hours` hours old.
+        fn partial(&self, number: u8, name: &str, hours: i64) {
+            let directory = self.dir(number).join(".antiq-partial");
+            std::fs::create_dir_all(&directory).expect("the partial directory");
+            std::fs::write(directory.join(name), b"half").expect("a partial file");
+            let time = filetime::FileTime::from_unix_time(now().as_second() - hours * HOUR, 0);
+            filetime::set_file_mtime(directory.join(name), time).expect("time is set");
         }
 
         fn age(&self, number: u8, name: &str, seconds: i64) {
@@ -1337,6 +1466,313 @@ mod tests {
     }
 
     // =====================================================
+    // Temp names and partial files
+    // =====================================================
+
+    const OWN_TEMP: &str = ".0123456789abcdef-a.tar.zst.laptop.part";
+    const FOREIGN_TEMP: &str = ".0123456789abcdef-a.tar.zst.studio.part";
+    const OTHER_COLLECTION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    /// A world whose object 1 is owned by this collection.
+    fn owned() -> World {
+        let world = World::new();
+        world.version(1, 1, &[], 100);
+        world
+    }
+
+    #[test]
+    fn an_own_temp_name_is_removed_early_in_an_owned_directory() {
+        let world = owned();
+        world.put(1, OWN_TEMP, b"half", 1);
+        let cleanup = world.plan();
+        assert_eq!(cleanup.steps, [remove(1, OWN_TEMP, What::TempFile)]);
+        world.apply(&cleanup);
+        assert_eq!(world.names(1), ["meta.1"]);
+    }
+
+    #[test]
+    fn an_own_rsync_leftover_is_removed_early() {
+        let world = owned();
+        let leftover = format!("{OWN_TEMP}.Ab12Cd");
+        world.put(1, &leftover, b"half", 1);
+        assert_eq!(world.plan().steps, [remove(1, &leftover, What::TempFile)]);
+    }
+
+    #[test]
+    fn another_machines_temp_name_younger_than_the_grace_period_stays() {
+        let world = owned();
+        world.put(1, FOREIGN_TEMP, b"half", 23);
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn another_machines_temp_name_is_removed_after_the_grace_period() {
+        let world = owned();
+        world.put(1, FOREIGN_TEMP, b"half", 25);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, FOREIGN_TEMP, What::TempFile)]
+        );
+    }
+
+    #[test]
+    fn another_machines_rsync_leftover_waits_for_the_grace_period() {
+        let world = owned();
+        let leftover = format!("{FOREIGN_TEMP}.Ab12Cd");
+        world.put(1, &leftover, b"half", 23);
+        assert_eq!(world.plan().steps, []);
+        world.age(1, &leftover, 25 * HOUR);
+        assert_eq!(world.plan().steps, [remove(1, &leftover, What::TempFile)]);
+    }
+
+    #[test]
+    fn an_own_temp_name_in_a_directory_of_another_collection_waits_for_the_grace_period() {
+        let world = World::new();
+        let foreign = metadata_bytes(id(1), OTHER_COLLECTION, "a", &[]);
+        world.put(1, "meta.1", &foreign, 100);
+        world.put(1, OWN_TEMP, b"half", 1);
+        assert_eq!(world.plan().steps, []);
+        world.age(1, OWN_TEMP, 25 * HOUR);
+        assert_eq!(world.plan().steps, [remove(1, OWN_TEMP, What::TempFile)]);
+    }
+
+    #[test]
+    fn an_own_temp_name_in_a_directory_without_metadata_waits_for_the_grace_period() {
+        let world = World::new();
+        world.put(1, OWN_TEMP, b"half", 1);
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn a_machine_name_that_ends_in_ours_is_not_ours() {
+        let world = owned();
+        world.put(1, ".0123456789abcdef-a.tar.zst.old.laptop.part", b"half", 1);
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn a_temp_name_that_also_splits_as_ours_is_not_ours() {
+        let world = owned();
+        world.put(
+            1,
+            ".0123456789abcdef-a.tar.zst.tar.zst.laptop.part",
+            b"half",
+            1,
+        );
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn a_temp_name_that_splits_two_ways_is_not_ours_even_when_the_first_split_is() {
+        let mut world = owned();
+        world.machine = "tar.zst.laptop";
+        world.put(
+            1,
+            ".0123456789abcdef-a.tar.zst.tar.zst.laptop.part",
+            b"half",
+            1,
+        );
+        assert_eq!(
+            world.plan().steps,
+            [],
+            "it is also the name of machine `laptop` for the payload `…tar.zst.tar.zst`"
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_no_temp_name_is_never_removed() {
+        let world = owned();
+        for name in [
+            "notes.txt",
+            ".hidden",
+            ".x.laptop.part",
+            ".0123456789abcdef-a.tar.zst.laptop.part.toolong1",
+            ".0123456789abcdef-a.tar.zst.laptop.part.Ab12C",
+            ".0123456789abcdef-a.tar.zst..part",
+            ".0123456789abcdef-a.tar.zst.laptop.part.Ab-2Cd",
+            ".0123456789abcdef-a.tar.zst.laptop.part_Ab12Cd",
+            ".0123456789abcdef-a.tar.zst.lap top.part",
+            "0123456789abcdef-a.tar.zst.laptop.part",
+            "meta.1.laptop.part",
+        ] {
+            world.put(1, name, b"x", 1000);
+        }
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn an_own_metadata_temp_name_is_removed_early() {
+        let world = owned();
+        world.put(1, ".meta.2.laptop.part", b"half", 1);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, ".meta.2.laptop.part", What::TempFile)]
+        );
+    }
+
+    #[test]
+    fn an_own_metadata_temp_name_beside_its_claim_stays() {
+        let world = owned();
+        world.put(1, ".meta.2.laptop.part", b"half", 1);
+        world.put(1, "meta.2.claim", b"", 1);
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn an_own_metadata_temp_name_beside_a_claim_below_the_highest_is_removed() {
+        let world = owned();
+        world.version(1, 3, &[], 1);
+        world.put(1, ".meta.2.laptop.part", b"half", 1);
+        world.put(1, "meta.2.claim", b"", 1);
+        assert_eq!(
+            world.plan().steps,
+            [
+                remove(1, "meta.1", What::OldMetadata),
+                remove(1, ".meta.2.laptop.part", What::TempFile)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_own_metadata_temp_name_beside_the_claim_of_the_highest_version_is_removed() {
+        let world = owned();
+        world.put(1, ".meta.1.laptop.part", b"half", 1);
+        world.put(1, "meta.1.claim", b"", 1);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, ".meta.1.laptop.part", What::TempFile)]
+        );
+    }
+
+    #[test]
+    fn a_metadata_temp_name_of_another_machine_waits_for_the_grace_period() {
+        let world = owned();
+        world.put(1, ".meta.2.studio.part", b"half", 1);
+        assert_eq!(world.plan().steps, []);
+        world.age(1, ".meta.2.studio.part", 25 * HOUR);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, ".meta.2.studio.part", What::TempFile)]
+        );
+    }
+
+    #[test]
+    fn an_own_temp_name_of_a_pending_upload_is_kept() {
+        let mut world = owned();
+        world.put(1, OWN_TEMP, b"half", 100);
+        world.keep.insert((id(1), OWN_TEMP.to_string()));
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn a_kept_name_of_another_object_protects_nothing_here() {
+        let mut world = owned();
+        world.put(1, OWN_TEMP, b"half", 1);
+        world.keep.insert((id(2), OWN_TEMP.to_string()));
+        assert_eq!(world.plan().steps, [remove(1, OWN_TEMP, What::TempFile)]);
+    }
+
+    #[test]
+    fn an_own_partial_of_a_pending_upload_is_kept() {
+        let mut world = owned();
+        world.partial(1, OWN_TEMP, 100);
+        world.keep.insert((id(1), OWN_TEMP.to_string()));
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn an_own_partial_file_is_removed_early() {
+        let world = owned();
+        world.partial(1, OWN_TEMP, 1);
+        let cleanup = world.plan();
+        assert_eq!(cleanup.steps, [remove(1, OWN_TEMP, What::PartialFile)]);
+        world.apply(&cleanup);
+        assert!(!world.dir(1).join(".antiq-partial").join(OWN_TEMP).exists());
+    }
+
+    #[test]
+    fn a_foreign_partial_file_is_removed_after_the_grace_period() {
+        let world = owned();
+        world.partial(1, FOREIGN_TEMP, 23);
+        assert_eq!(world.plan().steps, []);
+        world.partial(1, FOREIGN_TEMP, 25);
+        assert_eq!(
+            world.plan().steps,
+            [remove(1, FOREIGN_TEMP, What::PartialFile)]
+        );
+    }
+
+    #[test]
+    fn a_partial_name_that_is_no_temp_name_is_never_removed() {
+        let world = owned();
+        world.partial(1, "notes.txt", 1000);
+        std::fs::create_dir(world.dir(1).join(".antiq-partial").join(OWN_TEMP))
+            .expect("a directory");
+        assert_eq!(world.plan().steps, []);
+    }
+
+    #[test]
+    fn a_partial_file_is_removed_through_the_partial_directory() {
+        let world = owned();
+        world.partial(1, OWN_TEMP, 1);
+        let cleanup = world.plan();
+        world.apply(&cleanup);
+        let deletes: Vec<Call> = world
+            .remote
+            .calls()
+            .into_iter()
+            .filter(|call| matches!(call.op, Op::Delete | Op::DeletePartial))
+            .collect();
+        assert_eq!(deletes, [Call::new(Op::DeletePartial, OWN_TEMP)]);
+    }
+
+    #[test]
+    fn temp_files_and_partial_files_come_last_in_that_order() {
+        let world = owned();
+        world.put(1, PAYLOAD_A, b"x", 25);
+        world.put(1, LISTING_A, b"x", 25);
+        world.put(1, OWN_TEMP, b"half", 1);
+        world.partial(1, FOREIGN_TEMP, 25);
+        assert_eq!(
+            world.plan().steps,
+            [
+                remove(1, PAYLOAD_A, What::Payload),
+                remove(1, LISTING_A, What::Listing),
+                remove(1, OWN_TEMP, What::TempFile),
+                remove(1, FOREIGN_TEMP, What::PartialFile),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_early_removals() {
+        let world = owned();
+        world.put(1, OWN_TEMP, b"half", 1);
+        world.partial(1, OWN_TEMP, 1);
+        world.put(1, FOREIGN_TEMP, b"half", 1);
+        assert_eq!(
+            world.dry_plan().steps,
+            [
+                remove(1, OWN_TEMP, What::TempFile),
+                unknown(1, FOREIGN_TEMP, What::TempFile),
+                remove(1, OWN_TEMP, What::PartialFile),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_in_a_left_alone_directory_is_removed_not_even_temp_files() {
+        let world = World::new();
+        world.put(1, "meta.1", b"not json", 100);
+        world.put(1, OWN_TEMP, b"half", 100);
+        world.partial(1, OWN_TEMP, 100);
+        let cleanup = world.plan();
+        assert_eq!(cleanup.steps, []);
+        assert_eq!(cleanup.left_alone.len(), 1);
+        assert_eq!(world.remote.count(Op::ListPartial), 0);
+    }
+
+    // =====================================================
     // How steps read
     // =====================================================
 
@@ -1361,6 +1797,14 @@ mod tests {
             remove(1, LISTING_A, What::Listing).describe(),
             format!("remove listing {LISTING_A} of {}", id(1))
         );
+        assert_eq!(
+            remove(1, OWN_TEMP, What::TempFile).describe(),
+            format!("remove temp file {OWN_TEMP} of {}", id(1))
+        );
+        assert_eq!(
+            remove(1, OWN_TEMP, What::PartialFile).describe(),
+            format!("remove partial file {OWN_TEMP} of {}", id(1))
+        );
     }
 
     #[test]
@@ -1374,6 +1818,16 @@ mod tests {
             serde_json::to_value(unknown(1, PAYLOAD_A, What::Payload)).expect("serialises"),
             json!({"action": "age_unknown", "id": id(1).to_string(), "name": PAYLOAD_A,
                    "what": "payload"})
+        );
+        assert_eq!(
+            serde_json::to_value(remove(1, OWN_TEMP, What::PartialFile)).expect("serialises"),
+            json!({"action": "remove", "id": id(1).to_string(), "name": OWN_TEMP,
+                   "what": "partial_file"})
+        );
+        assert_eq!(
+            serde_json::to_value(remove(1, OWN_TEMP, What::TempFile)).expect("serialises"),
+            json!({"action": "remove", "id": id(1).to_string(), "name": OWN_TEMP,
+                   "what": "temp_file"})
         );
     }
 }
