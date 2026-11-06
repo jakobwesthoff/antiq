@@ -2411,6 +2411,13 @@ the same commit; the lead checks that at acceptance.
   (I13); a lock file that is not UTF-8 reads as an unknown holder; tests
   added for the EPERM holder, the Linux mount-root branch and the
   listing retry on macOS (T3 to T7).
+- 2026-11-04 (I03F plan): a piece whose top is itself a mount root is
+  reported by the walk as a mount point and refused by `remove_tree`;
+  a directory opened only after a grant is checked for a mount root
+  before anything inside it is removed, and on one its mode is put back
+  and the removal refused. The nested-collection problem is
+  `Problem::NestedCollection { root }`, naming the directory that holds
+  the marker. Selection is unchanged.
 
 ### I04
 
