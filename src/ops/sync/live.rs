@@ -16,8 +16,8 @@ use crate::fsx::device::{self, FsKind};
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::meta::{
-    self, Checksum, FORMAT, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload,
-    PayloadKind,
+    self, Checksum, CreatedSource, FORMAT, FileName, HistoryAction, HistoryEntry, Lifecycle,
+    Metadata, Payload, PayloadKind,
 };
 use crate::ops::archive::apparent_size;
 use crate::ops::archive::new::id_time_of;
@@ -957,6 +957,9 @@ fn capture(ctx: &SyncContext<'_>) -> Result<Captured, SyncError> {
 /// only for an object committed in this run. A conflict, a refused commit
 /// or a failed upload leaves the package where it is. A package that is
 /// replaced by a newer one stays for cleanup.
+///
+/// The package of an object that a fork archived is not deleted here but by
+/// [`delete_after_forks`], as it waits for the package of the new ID.
 pub(super) fn delete_committed(
     ctx: &SyncContext<'_>,
     report: &mut SyncReport,
@@ -964,39 +967,181 @@ pub(super) fn delete_committed(
 ) -> Result<(), SyncError> {
     let store = Store::new(ctx.collection);
     let committed: BTreeSet<ObjectId> = report.committed.iter().map(|c| c.id).collect();
-    for id in committed {
+    for id in &committed {
+        let id = *id;
         let Some((highest, files)) = captured.held.get(&id) else {
             continue;
         };
+        if forked_away(&store, id, ctx.machine).is_some() {
+            continue;
+        }
         if !names_no_live_above(&store, id, *highest)? {
             continue;
         }
-        let mut all_gone = true;
-        for file in files {
-            match ctx.remote.delete(id, file.as_str()) {
-                Ok(()) => {
-                    remove_quietly(&store.file_path(id, file));
-                    report.removed_live.push(RemovedLive {
-                        id,
-                        file: file.as_str().to_string(),
-                    });
-                }
-                Err(error) if ends_run(ctx.remote, &error) => return Err(error.into()),
-                Err(error) => {
-                    all_gone = false;
-                    report.warnings.push(Warning::new(format!(
-                        "the live package {} of {id} could not be deleted, cleanup will remove it: {error}",
-                        file.as_str()
-                    )));
-                }
-            }
-        }
-        if all_gone {
+        if delete_files(ctx, report, id, files)? {
             remove_quietly(&ctx.collection.manifest_path(id));
         }
     }
     drop_uploaded_packages(ctx, report);
+    delete_after_forks(ctx, report)
+}
+
+/// Deletes `files` of `id` on the remote and from the local object
+/// directory, and says whether all of them are gone. A delete that fails
+/// is a warning; cleanup removes the package later. One that finds the
+/// remote gone ends the run.
+fn delete_files(
+    ctx: &SyncContext<'_>,
+    report: &mut SyncReport,
+    id: ObjectId,
+    files: &[FileName],
+) -> Result<bool, SyncError> {
+    let store = Store::new(ctx.collection);
+    let mut all_gone = true;
+    for file in files {
+        match ctx.remote.delete(id, file.as_str()) {
+            Ok(()) => {
+                remove_quietly(&store.file_path(id, file));
+                report.removed_live.push(RemovedLive {
+                    id,
+                    file: file.as_str().to_string(),
+                });
+            }
+            Err(error) if ends_run(ctx.remote, &error) => return Err(error.into()),
+            Err(error) => {
+                all_gone = false;
+                report.warnings.push(Warning::new(format!(
+                    "the live package {} of {id} could not be deleted, cleanup will remove it: {error}",
+                    file.as_str()
+                )));
+            }
+        }
+    }
+    Ok(all_gone)
+}
+
+/// The fork entry that archived `id` when it is the newest committed
+/// version, and the fork was made by `machine`.
+fn forked_away(store: &Store<'_>, id: ObjectId, machine: &str) -> Option<HistoryEntry> {
+    let newest = *store.committed_versions(id).ok()?.last()?;
+    let metadata = read_version(store, id, newest)?;
+    let last = metadata.history.last()?;
+    (metadata.lifecycle == Lifecycle::Archived
+        && last.machine == machine
+        && last.action == HistoryAction::Fork.as_str())
+    .then(|| last.clone())
+}
+
+/// Deletes the live package of every object this machine forked away from,
+/// once the new ID has a live package of this machine in a committed
+/// version. Until then the old package is the only backup of the folder's
+/// content. The old object's manifest stays as the sign that its package is
+/// still to be deleted, so the run that finds the new package committed
+/// finishes the job, whether or not it made the fork's commit.
+///
+/// A new ID that never gets a package leaves the old one to the cleanup of
+/// the remote.
+fn delete_after_forks(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
+    let store = Store::new(ctx.collection);
+    for id in store.objects()? {
+        let Ok(Some(current)) = store.current(id) else {
+            continue;
+        };
+        let metadata = &current.metadata;
+        if metadata.collection != ctx.collection.id()
+            || current.source == Source::Pending
+            || names_live(metadata)
+            || !ctx.collection.manifest_path(id).exists()
+        {
+            continue;
+        }
+        let Some(fork) = forked_away(&store, id, ctx.machine) else {
+            continue;
+        };
+        let Some(heir) = heir_of(ctx, &store, metadata, &fork) else {
+            continue;
+        };
+        if !has_committed_package(&store, heir, ctx.machine) {
+            continue;
+        }
+        // The version before the fork is the one that names the package. If
+        // it cannot be read, nothing is known to delete.
+        let Ok(versions) = store.committed_versions(id) else {
+            continue;
+        };
+        let files = match versions.len().checked_sub(2).map(|before| versions[before]) {
+            None => Vec::new(),
+            Some(before) => match read_version(&store, id, before) {
+                Some(version) => live_files(&version, ctx.machine),
+                None => continue,
+            },
+        };
+        if delete_files(ctx, report, id, &files)? {
+            remove_quietly(&ctx.collection.manifest_path(id));
+        }
+    }
     Ok(())
+}
+
+/// The ID that `fork` gave the folder `old` was forked away from. It is the
+/// one own object of this collection whose history starts with a fork by
+/// the same machine at the time of the old ID's fork entry. A commit
+/// stamps both entries with the time of its own, so when the times differ
+/// the one such object at the old ID's path is taken. More than one
+/// candidate in either step means no heir is known.
+fn heir_of(
+    ctx: &SyncContext<'_>,
+    store: &Store<'_>,
+    old: &Metadata,
+    fork: &HistoryEntry,
+) -> Option<ObjectId> {
+    let mut same_time = Vec::new();
+    let mut same_path = Vec::new();
+    for id in store.objects().ok()? {
+        let Ok(Some(current)) = store.current(id) else {
+            continue;
+        };
+        let metadata = &current.metadata;
+        let Some(first) = metadata.history.first() else {
+            continue;
+        };
+        if id == old.id
+            || metadata.collection != ctx.collection.id()
+            || metadata.created_source != CreatedSource::Fork
+            || first.machine != fork.machine
+            || first.action != HistoryAction::Fork.as_str()
+        {
+            continue;
+        }
+        if first.time == fork.time {
+            same_time.push(id);
+        } else if tracking::read(ctx.collection, id)
+            .ok()
+            .flatten()
+            .is_some_and(|entry| entry.path == old.path)
+        {
+            same_path.push(id);
+        }
+    }
+    let found = if same_time.is_empty() {
+        same_path
+    } else {
+        same_time
+    };
+    match found.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Whether a committed version of `id` names a live package of `machine`.
+fn has_committed_package(store: &Store<'_>, id: ObjectId, machine: &str) -> bool {
+    store.committed_versions(id).is_ok_and(|versions| {
+        versions.into_iter().any(|number| {
+            read_version(store, id, number)
+                .is_some_and(|version| !live_files(&version, machine).is_empty())
+        })
+    })
 }
 
 /// Removes the live packages of this machine from the local object
@@ -1058,12 +1203,13 @@ mod tests {
     use super::super::{SyncAction, UnbackedReason};
     use super::unbacked_by;
     use crate::clock::Clock;
-    use crate::id::ObjectId;
+    use crate::id::{IdSource, ObjectId};
     use crate::meta::{HistoryAction, Lifecycle, Payload, PayloadKind};
     use crate::pack::manifest::Manifest;
     use crate::relpath::RelPath;
     use crate::remote::testing::{Fault, Op};
     use crate::tracking::{EntryState, VersionTakenOut};
+    use jiff::Timestamp;
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2651,6 +2797,248 @@ mod tests {
         shared
             .names(id)
             .contains(&payload.file.as_str().to_string())
+    }
+
+    // =====================================================
+    // Forks
+    // =====================================================
+
+    /// Records a fork of `old` as `fork` does, with the folder at `to`: the
+    /// old ID archived without its live payload and `gone`, the new ID live
+    /// without a payload. The folder moves when `to` is another name.
+    fn fork_by_hand(
+        machine: &Machine,
+        old: ObjectId,
+        to: &str,
+        new_time: Option<Timestamp>,
+    ) -> ObjectId {
+        let time = machine.clock.now();
+        let current = machine
+            .store()
+            .current(old)
+            .expect("reads")
+            .expect("exists");
+        let from = current.metadata.path.clone();
+        let new = machine.ids.mint(time);
+        if path(to) != from {
+            fs::rename(
+                machine.collection.root().join(from.to_string()),
+                machine.collection.root().join(to),
+            )
+            .expect("the folder is renamed");
+        }
+        let lock = crate::lock::acquire(
+            &machine.collection.lock_path(),
+            machine.name,
+            &machine.clock,
+        )
+        .expect("free");
+        let store = machine.store();
+        store
+            .write_pending(
+                &lock,
+                &crate::ops::fork::forked_old(&current.metadata, machine.name, time),
+            )
+            .expect("the old ID is recorded");
+        let mut gone = machine.entry(old);
+        gone.state = EntryState::Gone;
+        crate::tracking::write(&machine.collection, &lock, &machine.clock, &mut gone)
+            .expect("the old entry is written");
+        store
+            .write_pending(
+                &lock,
+                &crate::ops::fork::forked_new(
+                    new,
+                    machine.collection.id(),
+                    &path(to),
+                    machine.name,
+                    new_time.unwrap_or(time),
+                ),
+            )
+            .expect("the new ID is recorded");
+        let mut entry = crate::tracking::TrackingEntry::new(
+            new,
+            path(to),
+            EntryState::Live,
+            VersionTakenOut::Pending,
+            time,
+        );
+        crate::tracking::write(&machine.collection, &lock, &machine.clock, &mut entry)
+            .expect("the new entry is written");
+        new
+    }
+
+    /// A machine whose piece `proj` has a committed live package, and the
+    /// object and file of it.
+    fn backed_up(shared: &Shared) -> (Machine, ObjectId, String) {
+        let anna = Machine::new(shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let file = live_payloads(&anna, id).remove(0).file.as_str().to_string();
+        assert!(shared.names(id).contains(&file));
+        (anna, id, file)
+    }
+
+    #[test]
+    fn the_old_package_of_a_fork_is_deleted_once_the_new_id_has_its_package_committed() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let new = fork_by_hand(&anna, old, "proj", None);
+
+        let report = anna.sync();
+
+        assert_eq!(live_payloads(&anna, new).len(), 1, "{report:?}");
+        assert!(
+            !shared.names(old).contains(&file),
+            "{:?}",
+            shared.names(old)
+        );
+        assert_eq!(report.removed_live.len(), 1, "{report:?}");
+        assert!(!anna.collection.manifest_path(old).exists());
+    }
+
+    #[test]
+    fn the_old_package_of_a_fork_to_another_name_is_deleted_with_the_new_ids_package() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let new = fork_by_hand(&anna, old, "renamed", None);
+
+        anna.sync();
+
+        assert_eq!(live_payloads(&anna, new).len(), 1);
+        assert!(!shared.names(old).contains(&file));
+    }
+
+    #[test]
+    fn the_old_package_of_a_fork_stays_while_the_new_ids_first_package_fails() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let new = fork_by_hand(&anna, old, "proj", None);
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+
+        let first = anna.sync_with(&remote);
+
+        assert!(
+            first.committed.iter().any(|c| c.id == old),
+            "the fork's change is committed: {first:?}"
+        );
+        assert!(shared.names(old).contains(&file), "{:?}", shared.names(old));
+        assert!(anna.collection.manifest_path(old).exists());
+        assert!(first.removed_live.is_empty(), "{first:?}");
+
+        let second = anna.sync();
+
+        assert_eq!(live_payloads(&anna, new).len(), 1, "{second:?}");
+        assert!(
+            !shared.names(old).contains(&file),
+            "{:?}",
+            shared.names(old)
+        );
+        assert_eq!(second.removed_live.len(), 1, "{second:?}");
+        assert!(!anna.collection.manifest_path(old).exists());
+    }
+
+    #[test]
+    fn a_delete_after_a_fork_that_fails_keeps_the_marker_until_it_succeeds() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        fork_by_hand(&anna, old, "proj", None);
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&remote);
+        let remote = anna.remote();
+        remote.fail(Op::Delete, 1, Fault::Io);
+
+        let second = anna.sync_with(&remote);
+
+        assert!(second.removed_live.is_empty(), "{second:?}");
+        assert!(!second.warnings.is_empty(), "{second:?}");
+        assert!(shared.names(old).contains(&file));
+        assert!(anna.collection.manifest_path(old).exists());
+
+        let third = anna.sync();
+
+        assert_eq!(third.removed_live.len(), 1, "{third:?}");
+        assert!(!shared.names(old).contains(&file));
+        assert!(!anna.collection.manifest_path(old).exists());
+    }
+
+    #[test]
+    fn a_fork_whose_version_before_it_cannot_be_read_keeps_the_package_and_the_marker() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        fork_by_hand(&anna, old, "proj", None);
+        let remote = anna.remote();
+        remote.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&remote);
+        fs::write(anna.store().meta_path(old, 1), "not json").expect("damaged");
+
+        anna.sync();
+
+        assert!(shared.names(old).contains(&file));
+        assert!(anna.collection.manifest_path(old).exists());
+    }
+
+    #[test]
+    fn a_new_id_that_gets_no_package_leaves_the_old_one_to_the_cleanup() {
+        let shared = Shared::new();
+        let (mut anna, old, file) = backed_up(&shared);
+        anna.set_setting("backup_live = false");
+        let new = fork_by_hand(&anna, old, "proj", None);
+
+        let report = anna.sync();
+
+        assert!(live_payloads(&anna, new).is_empty());
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(shared.names(old).contains(&file));
+    }
+
+    #[test]
+    fn the_new_id_is_found_by_the_path_when_the_times_of_the_fork_entries_differ() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let later = anna.clock.now() + jiff::SignedDuration::from_secs(5);
+        let new = fork_by_hand(&anna, old, "proj", Some(later));
+
+        anna.sync();
+
+        assert_eq!(live_payloads(&anna, new).len(), 1);
+        assert!(!shared.names(old).contains(&file));
+    }
+
+    #[test]
+    fn two_forks_that_could_be_the_new_id_delete_nothing() {
+        let shared = Shared::new();
+        let (anna, old, file) = backed_up(&shared);
+        let later = anna.clock.now() + jiff::SignedDuration::from_secs(5);
+        fork_by_hand(&anna, old, "proj", Some(later));
+        // A second fork at the same path, made by the same machine.
+        let rival = crate::ops::fork::forked_new(
+            anna.ids.mint(later),
+            anna.collection.id(),
+            &path("proj"),
+            anna.name,
+            later + jiff::SignedDuration::from_secs(1),
+        );
+        let lock = crate::lock::acquire(&anna.collection.lock_path(), anna.name, &anna.clock)
+            .expect("free");
+        anna.store().write_pending(&lock, &rival).expect("recorded");
+        let mut entry = crate::tracking::TrackingEntry::new(
+            rival.id,
+            path("proj"),
+            EntryState::Gone,
+            VersionTakenOut::Pending,
+            anna.clock.now(),
+        );
+        crate::tracking::write(&anna.collection, &lock, &anna.clock, &mut entry).expect("written");
+        drop(lock);
+
+        let report = anna.sync();
+
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(shared.names(old).contains(&file));
     }
 
     #[test]

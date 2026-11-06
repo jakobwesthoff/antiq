@@ -1702,9 +1702,11 @@ replaces leave the package where it is; cleanup removes the replaced one
 after the grace period. A package of another machine is not deleted. A
 delete that fails is a warning and the cleanup removes the package later;
 a delete that finds the remote gone ends the run. After a fork,
-the old ID's live package is deleted once the fork's change is
-committed. A dry run reads the remote and writes nothing, locally or on
-the remote. It lists what the run would do against the versions it would
+the old ID's live package is deleted once the new ID's live package is
+committed, in the run that commits it or in a later one; a new ID that
+gets no live package leaves the old one to the cleanup of the remote. A
+dry run reads the remote and writes nothing, locally or on the remote. It
+lists what the run would do against the versions it would
 pull: the versions to pull, the listings to fetch, the changes to record
 as committed, the conflicts, the live packages to make and to delete,
 the files to upload, the commits and the removals of cleanup. The file of
@@ -1864,9 +1866,9 @@ The old ID becomes archived, and its entry `gone` keeps its local
 payloads. A diverged folder and a replacing-with-loss decision belong to
 the folder, so the new ID has neither and the old entry drops both; a
 version conflict and a superseded archive are about the old ID and stay
-on it. The old ID's live package is deleted. Without `--name`,
-unearthing the old ID afterwards needs `--to`, as its path belongs to the
-new ID. With `--name` the old path is empty, and `unearth` restores
+on it. The old ID's live package is deleted once the new ID's live
+package is committed (see "sync"). Without `--name`, unearthing the old
+ID afterwards needs `--to`, as its path belongs to the new ID. With `--name` the old path is empty, and `unearth` restores
 there.
 
 `--name` renames the folder within its parent before anything is
