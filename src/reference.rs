@@ -25,6 +25,8 @@ pub enum ReferenceError {
     },
     #[error("`{reference}` matches no piece")]
     Unknown { reference: String },
+    #[error("`{path}` is outside the collection at `{root}`")]
+    Outside { path: String, root: String },
 }
 
 impl HasKind for ReferenceError {
@@ -32,6 +34,7 @@ impl HasKind for ReferenceError {
         match self {
             ReferenceError::Ambiguous { .. } => ErrorKind::AmbiguousReference,
             ReferenceError::Unknown { .. } => ErrorKind::UnknownReference,
+            ReferenceError::Outside { .. } => ErrorKind::OutsideCollection,
         }
     }
 }

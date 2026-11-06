@@ -56,6 +56,8 @@ pub enum ErrorKind {
     NotACollection,
     AmbiguousReference,
     UnknownReference,
+    /// A path given as a piece, `--to` or `--path` lies outside the collection.
+    OutsideCollection,
     Brake,
     LockHeld,
     NoRemote,
@@ -69,12 +71,13 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 13] = [
+    pub const ALL: [ErrorKind; 14] = [
         ErrorKind::Usage,
         ErrorKind::NotImplemented,
         ErrorKind::NotACollection,
         ErrorKind::AmbiguousReference,
         ErrorKind::UnknownReference,
+        ErrorKind::OutsideCollection,
         ErrorKind::Brake,
         ErrorKind::LockHeld,
         ErrorKind::NoRemote,
@@ -93,6 +96,7 @@ impl ErrorKind {
             ErrorKind::NotACollection => "not_a_collection",
             ErrorKind::AmbiguousReference => "ambiguous_reference",
             ErrorKind::UnknownReference => "unknown_reference",
+            ErrorKind::OutsideCollection => "outside_collection",
             ErrorKind::Brake => "brake",
             ErrorKind::LockHeld => "lock_held",
             ErrorKind::NoRemote => "no_remote",
@@ -308,6 +312,7 @@ mod tests {
             (ErrorKind::NotACollection, "not_a_collection", 1),
             (ErrorKind::AmbiguousReference, "ambiguous_reference", 1),
             (ErrorKind::UnknownReference, "unknown_reference", 1),
+            (ErrorKind::OutsideCollection, "outside_collection", 1),
             (ErrorKind::Brake, "brake", 1),
             (ErrorKind::LockHeld, "lock_held", 1),
             (ErrorKind::NoRemote, "no_remote", 1),
@@ -359,6 +364,14 @@ mod tests {
                 }
                 .into(),
                 ErrorKind::UnknownReference,
+            ),
+            (
+                ReferenceError::Outside {
+                    path: "/elsewhere/proj".into(),
+                    root: "/collection".into(),
+                }
+                .into(),
+                ErrorKind::OutsideCollection,
             ),
             (
                 LockError::Held {
