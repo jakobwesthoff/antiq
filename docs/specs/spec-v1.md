@@ -713,11 +713,11 @@ never mixed:
 
 An exact match wins over prefix matches; several matches are an error
 naming each version's stamp. When two versions of one piece render alike
-in local time (the repeated hour when daylight saving time ends), text
-output adds the UTC offset. A local input matches the text with that
-offset where the output shows it (`2026-10-25 02:30:00 +02:00`) and also
-without it, in which case it matches both versions. An incomplete version
-matches only by stamp.
+in local time at different UTC offsets (the repeated hour when daylight
+saving time ends), text output adds the UTC offset. A local input matches
+the text with that offset where the output shows it
+(`2026-10-25 02:30:00 +02:00`) and also without it, in which case it
+matches both versions. An incomplete version matches only by stamp.
 (ADR 0060)
 
 ## Repairs at the start of a run

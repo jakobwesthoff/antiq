@@ -41,15 +41,21 @@ pub fn system_zone() -> TimeZone {
 }
 
 /// How text output names each of `stamps`: its local time, with the UTC
-/// offset added where another of `stamps` renders alike.
+/// offset added where another of `stamps` renders alike at another offset,
+/// as in the repeated hour when daylight saving time ends.
 pub fn local_labels(stamps: &[Stamp], zone: &TimeZone) -> Vec<String> {
-    let texts: Vec<String> = stamps.iter().map(|stamp| local_text(stamp, zone)).collect();
-    stamps
+    let rendered: Vec<(String, String)> = stamps
         .iter()
-        .zip(&texts)
-        .map(|(stamp, text)| {
-            if texts.iter().filter(|other| *other == text).count() > 1 {
-                format!("{text} {}", offset_text(stamp, zone))
+        .map(|stamp| (local_text(stamp, zone), offset_text(stamp, zone)))
+        .collect();
+    rendered
+        .iter()
+        .map(|(text, offset)| {
+            let told_apart = rendered
+                .iter()
+                .any(|(other, other_offset)| other == text && other_offset != offset);
+            if told_apart {
+                format!("{text} {offset}")
             } else {
                 text.clone()
             }
@@ -334,11 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn versions_of_one_second_are_both_marked_though_the_offset_is_the_same() {
+    fn versions_of_one_second_get_no_offset_as_it_would_not_tell_them_apart() {
         let stamps = [stamp("2026-11-04T090211"), stamp("2026-11-04T090211-2")];
         assert_eq!(
             local_labels(&stamps, &berlin()),
-            ["2026-11-04 10:02:11 +01:00", "2026-11-04 10:02:11 +01:00"]
+            ["2026-11-04 10:02:11", "2026-11-04 10:02:11"]
         );
     }
 
