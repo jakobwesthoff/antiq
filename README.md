@@ -75,31 +75,11 @@ real one, for example with `brew install rsync`. antiq takes the first
 <!-- docs:start -->
 ## A collection
 
-A collection is a folder that antiq looks after. Each folder inside it that
-you want archived is a piece. To try antiq without touching your own
-folders, paste this. It makes a collection of six pieces, with file times
-that put them 2 to 200 days in the past:
-
-```bash
-mkdir experiments && cd experiments
-age() { touch -t "$(date -d "$1 days ago" +%Y%m%d%H%M 2>/dev/null || date -v-"$1"d +%Y%m%d%H%M)" "${@:2}"; }
-for file in scanner/src/main.rs scanner/Cargo.toml scan-old/cli/main.rs \
-    recipe-api/server.py recipe-api/requirements.txt ledger-cli/src/lib.rs \
-    fresh-idea/notes.md keep-me/draft.txt; do
-  mkdir -p "$(dirname "$file")" && echo "contents of $file" > "$file"
-done
-age 90 scanner/src/main.rs scanner/Cargo.toml
-age 200 scan-old/cli/main.rs
-age 45 recipe-api/server.py recipe-api/requirements.txt
-age 28 ledger-cli/src/lib.rs
-age 2 fresh-idea/notes.md
-age 100 keep-me/draft.txt
-```
-
-The folders in the images hold a few hundred megabytes, so their sizes
-differ from the ones you see. Everything else is the same. The commands
-work on your own experiments folder too: run the dry run from "Archiving
-idle folders" first and read what it would archive.
+A collection is a folder that antiq looks after, such as the folder where
+your experiments pile up. Each folder inside it that you want archived is
+a piece. The images in these chapters show a folder `experiments` with six
+pieces. Before the first real run on your own folder, read what the dry
+run of "Archiving idle folders" would archive.
 
 Make the folder a collection. `--pattern` says which folders are pieces:
 `*` selects the folders directly inside it.
@@ -252,15 +232,12 @@ Everything in the collection, the live folders and the versions, can be
 mirrored to one target. Add a `[target]` block to `.antiq/config.toml`,
 create an empty folder for it, and let `push --init` claim it. The target
 is an absolute path, such as a mounted disk or share, or `[user@]host:path`
-reached over ssh. The path of the block below is the folder the images use:
-
-```bash
-mkdir -p /tmp/antiq-demo/target
-```
+reached over ssh. For a backup disk mounted at `/Volumes/Backup`, with an
+empty folder `antiq` on it:
 
 ```toml
 [target]
-url = "/tmp/antiq-demo/target"
+url = "/Volumes/Backup/antiq"
 ```
 
 ```bash
@@ -318,13 +295,8 @@ target was reached still exits 1. The exit codes are in the reference.
 
 A version is damaged when, among other causes, its archive lacks its
 listing or checksum file. Files deleted by hand and incomplete copies from
-the target cause this. Delete the listing of `scan-old` in the practice
-collection to see what that looks like:
-
-```bash
-rm .antiq/pieces/scan-old/*.sha256.zst
-antiq push
-```
+the target cause this. Here the listing of `scan-old` is missing, and
+`antiq push` refuses to run:
 
 ![antiq push is refused: the collection holds damaged versions, and the error names antiq rebuild with the version](docs/pages/assets/shots/error-damaged.png)
 
