@@ -237,6 +237,33 @@ fn colour_is_named_ansi_and_applies_to_badge_bar_title_and_markup() {
 }
 
 #[test]
+fn words_of_one_style_share_one_run_per_line() {
+    let env = Env::new(true, true, true, 42);
+    let block = Block::error(rich(
+        "alpha beta gamma `delta epsilon` zeta eta theta iota kappa",
+    ));
+    let bar = "\x1b[1m\x1b[31m▌\x1b[0m";
+    assert_eq!(
+        block.render(&env),
+        [
+            "\x1b[30m\x1b[41m ✖ ERROR \x1b[0m".to_string(),
+            format!("{bar} \x1b[1malpha beta gamma delta epsilon zeta eta\x1b[0m"),
+            format!("{bar} \x1b[1mtheta iota kappa\x1b[0m"),
+        ]
+    );
+}
+
+#[test]
+fn a_space_between_two_styles_stays_unstyled() {
+    let block = Block::warning(rich("Title")).text(rich("Run `a b` now, `c` or `d e`."));
+    let lines = block.render(&colored());
+    assert_eq!(
+        lines[1],
+        "\x1b[1m\x1b[33m▌\x1b[0m   Run \x1b[1ma b\x1b[0m now, \x1b[1mc\x1b[0m or \x1b[1md e\x1b[0m."
+    );
+}
+
+#[test]
 fn no_colour_means_no_escape_byte_anywhere() {
     let lines = push_error().render(&bare(80));
     assert!(lines.iter().all(|line| !line.contains('\x1b')));

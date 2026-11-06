@@ -1966,16 +1966,27 @@ to a command's result and the dry-run footer go to stdout and are dropped
 when stdout is not rich. One that belongs to a failure or a warning goes to
 stderr and is dropped when stderr is not rich.
 
-An error on a rich stderr is an error block. Its title is the error and its
-causes joined with `: `; the steps the run was in are listed innermost
-first under "What antiq was doing", and the candidates of an ambiguous
-reference under "Matches". A usage error of the command line parser is a
-block whose title is the parser's first paragraph, with the parser's tip
-and usage line under "How to fix it".
+An error on a rich stderr is an error block. Its title is the error and
+its causes joined with `: `, unless the error has an explanation of its own.
+These errors have one, with a title in the words of the console and the
+sections "Why it happened" and "How to fix it" where they have content:
+outside an antiq collection, `push` without a target, `push` refused for a
+damaged or incomplete store, a target marker that names another host or
+path, a held run lock, a listing of a newer format, and a path outside the
+antiq collection. The `message` of the JSON error is the text it was
+before. The steps the run was in are listed innermost first under "What
+antiq was doing", and the candidates of an ambiguous reference under
+"Matches". A usage error of the command line parser is a block too. An
+unknown argument, an unknown command, a missing argument and two arguments
+that exclude each other get a title of their own and the parser's usage line
+and a pointer to `--help` under "How to fix it"; every other usage error
+has the parser's first paragraph as its title and the parser's tip and
+usage line under "How to fix it".
 
-On a pipe the error is plain lines. An error line gives the error and
-its causes joined with `: `, prefixed `error:`; it is followed by one
-`    candidate: <path>` line per candidate of an ambiguous reference and one
+On a pipe the error is plain lines. An error line gives the title,
+prefixed `error:`; it is followed by a `  why:` and a `  fix:` line where
+the error has those sections, one `    candidate: <path>` line per
+candidate of an ambiguous reference and one
 `  while attempting to <action>` line per context, the innermost first. The
 reasons why one piece is refused are joined with `, ` by `archive` and with
 `; ` by `status`. A cause whose text the cause above it already

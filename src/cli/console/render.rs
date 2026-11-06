@@ -58,12 +58,6 @@ fn role_style(role: Role, base: Style) -> Style {
     }
 }
 
-fn paint_word(env: &Env, word: &Word, base: Style) -> String {
-    word.iter()
-        .map(|(role, text)| paint(env, role_style(*role, base), text))
-        .collect()
-}
-
 fn word_width(word: &Word) -> usize {
     word.iter().map(|(_, text)| text.width()).sum()
 }
@@ -93,12 +87,37 @@ fn wrap(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
 pub(super) fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
     wrap(&text.words(), width)
         .iter()
-        .map(|line| {
-            line.iter()
-                .map(|word| paint_word(env, word, base))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|line| paint_line(env, line, base))
+        .collect()
+}
+
+/// `words` joined by single spaces, with one escape sequence around each
+/// run of the same style. A space between two styles is not styled.
+fn paint_line(env: &Env, words: &[&Word], base: Style) -> String {
+    let mut runs: Vec<(Style, String)> = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        let mut gap = index > 0;
+        for (role, text) in word.iter() {
+            let style = role_style(*role, base);
+            match runs.last_mut() {
+                Some((last, run)) if *last == style => {
+                    if gap {
+                        run.push(' ');
+                    }
+                    run.push_str(text);
+                }
+                _ => {
+                    if gap {
+                        runs.push((Style::new(), " ".to_string()));
+                    }
+                    runs.push((style, text.clone()));
+                }
+            }
+            gap = false;
+        }
+    }
+    runs.iter()
+        .map(|(style, text)| paint(env, *style, text))
         .collect()
 }
 

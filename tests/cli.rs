@@ -443,7 +443,10 @@ fn a_plain_run_prints_its_error_to_stderr() {
     assert_eq!(
         run.stderr,
         format!(
-            "error: {} is not inside a collection\n  while attempting to find the collection\n",
+            "error: {} is not inside an antiq collection\n  \
+                 why: antiq works in a directory that holds an antiq collection, which has an .antiq/ folder. None of the parent directories has one.\n  \
+                 fix: Change into your collection, or create one here with antiq init.\n  \
+                 while attempting to find the antiq collection\n",
             fs::canonicalize(dir.path())
                 .expect("the dir exists")
                 .display()
@@ -594,6 +597,7 @@ fn forget_all_versions_without_force_gets_its_own_error_on_a_pipe() {
         run.stderr,
         "error: tools/backup-script: --all-versions needs --force\n  \
          why: --all-versions deletes every stored version of the piece, damaged and incomplete ones included, and that cannot be undone.\n  \
-         fix: Add --force to confirm: antiq forget tools/backup-script --all-versions --force. Check the effect first with -n.\n"
+         fix: Add --force to confirm: antiq forget tools/backup-script --all-versions --force. Check the effect first with -n.\n  \
+         while attempting to forget all versions of tools/backup-script\n"
     );
 }

@@ -139,8 +139,35 @@ fn no_target_is_named_on_the_console_too() {
     let run = push_text(&collection, &[]);
 
     assert_eq!(run.code(), 1);
-    assert!(run.stderr.contains("[target] url"), "{}", run.stderr);
-    assert!(run.stderr.contains("push --init"), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .starts_with("error: No push target is configured\n  why: "),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("fix: Add this to .antiq/config.toml:\n")
+    );
+    assert!(run.stderr.contains("[target]"), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .ends_with("  while attempting to push the antiq collection\n"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn the_json_message_of_no_target_is_the_library_text() {
+    let collection = collection();
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(
+        run.error_message(),
+        "no target is configured: set `[target] url` in the config, then run `antiq push --init` on an empty directory of the target"
+    );
 }
 
 #[test]

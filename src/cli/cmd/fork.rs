@@ -20,7 +20,7 @@ use jiff::tz::TimeZone;
 pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the antiq collection")?;
     let request = ForkRequest {
         cwd: ctx.start.clone(),
         piece: args.piece.clone(),

@@ -27,11 +27,11 @@ use unicode_width::UnicodeWidthStr;
 pub fn run(ctx: &Context, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the antiq collection")?;
     let now = SystemClock.now();
     let report = status(&collection, now)
         .map_err(antiq::Error::from)
-        .context("read the state of the collection")?;
+        .context("read the state of the antiq collection")?;
 
     if ctx.json {
         out.json(Some("status"), &payload(&report, now))

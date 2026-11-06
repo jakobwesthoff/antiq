@@ -246,9 +246,11 @@ the command:
 
 ```console
 $ antiq push
-error: the store holds versions that are damaged or incomplete:
-projects/scanner 2026-11-05T000948: the listing is missing. Run `antiq rebuild projects/scanner 2026-11-05T000948`.
-  while attempting to push the collection
+error: Push refused: the store holds versions that are damaged or incomplete
+  why: push copies the store as it is, so it only runs on a store without damage.
+  fix: Repair or remove these versions first:
+         projects/scanner 2026-11-05T000948: the listing is missing. Run `antiq rebuild projects/scanner 2026-11-05T000948`.
+  while attempting to push the antiq collection
 $ antiq rebuild projects/scanner 2026-11-05
 Rebuilt version 2026-11-05 01:09:48 of projects/scanner: wrote projects-scanner--2026-11-05T000948.sha256.zst
 note: the archive is the one checksummed when it was stored

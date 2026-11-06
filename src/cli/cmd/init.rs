@@ -27,7 +27,7 @@ pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u
             }
             error => error.into(),
         })
-        .context("make the directory a collection")?;
+        .context("make the directory an antiq collection")?;
 
     if ctx.json {
         out.json(Some("init"), &report)

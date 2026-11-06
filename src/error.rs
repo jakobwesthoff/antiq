@@ -233,13 +233,55 @@ impl Error {
         }
     }
 
+    /// The error this one wraps, or this error itself for `Usage`. Every
+    /// wrapper is `#[error(transparent)]`, which forwards `source()` past
+    /// the wrapped error, so a search for a typed cause has to start here
+    /// to see it.
+    pub fn wrapped(&self) -> &(dyn std::error::Error + 'static) {
+        match self {
+            Error::Usage(_) => self,
+            Error::Collection(inner) => inner,
+            Error::Config(inner) => inner,
+            Error::Filesystem(inner) => inner,
+            Error::Id(inner) => inner,
+            Error::Idle(inner) => inner,
+            Error::Init(inner) => inner,
+            Error::Listing(inner) => inner,
+            Error::Lock(inner) => inner,
+            Error::Machine(inner) => inner,
+            Error::Pack(inner) => inner,
+            Error::Pin(inner) => inner,
+            Error::Reference(inner) => inner,
+            Error::RelPath(inner) => inner,
+            Error::Run(inner) => inner,
+            Error::Select(inner) => inner,
+            Error::Sysmem(inner) => inner,
+            Error::Archive(inner) => inner,
+            Error::Forget(inner) => inner,
+            Error::Fork(inner) => inner,
+            Error::Grep(inner) => inner,
+            Error::Import(inner) => inner,
+            Error::List(inner) => inner,
+            Error::PinCommand(inner) => inner,
+            Error::Push(inner) => inner,
+            Error::Rebuild(inner) => inner,
+            Error::Restore(inner) => inner,
+            Error::Status(inner) => inner,
+            Error::Survey(inner) => inner,
+            Error::Unearth(inner) => inner,
+            Error::Marker(inner) => inner,
+            Error::Query(inner) => inner,
+            Error::Rules(inner) => inner,
+            Error::Versions(inner) => inner,
+            Error::Walk(inner) => inner,
+        }
+    }
+
     /// The error the walks for details start at. `Reference`, `Lock` and
     /// `Run` are transparent, so their walks start at what they wrap.
     fn walk_start(&self) -> &(dyn std::error::Error + 'static) {
         match self {
-            Error::Reference(inner) => inner,
-            Error::Lock(inner) => inner,
-            Error::Run(inner) => inner,
+            Error::Reference(_) | Error::Lock(_) | Error::Run(_) => self.wrapped(),
             other => other,
         }
     }
@@ -346,6 +388,7 @@ fn find_held_lock(error: &(dyn std::error::Error + 'static)) -> Option<(u32, Tim
 mod tests {
     use super::*;
     use crate::collection::CollectionError;
+    use crate::commands::restore::RestoreError;
     use crate::listing::ListingError;
     use crate::lock::LockError;
     use crate::run::RunError;
@@ -380,6 +423,24 @@ mod tests {
             assert_eq!(kind.as_str(), name);
             assert_eq!(kind.exit_code(), code, "exit code of {name}");
         }
+    }
+
+    #[test]
+    fn a_wrapper_hands_out_the_error_it_wraps() {
+        let collection: Error = CollectionError::NotACollection {
+            start: "/tmp/x".into(),
+        }
+        .into();
+        assert!(
+            collection
+                .wrapped()
+                .downcast_ref::<CollectionError>()
+                .is_some()
+        );
+        let restore: Error = RestoreError::from(ambiguous()).into();
+        assert!(restore.wrapped().downcast_ref::<RestoreError>().is_some());
+        let usage = Error::Usage("bad".into());
+        assert!(usage.wrapped().downcast_ref::<Error>().is_some());
     }
 
     #[test]

@@ -35,7 +35,7 @@ fn run(
     };
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the antiq collection")?;
     let request = PinRequest {
         collection: &collection,
         cwd: &ctx.start,

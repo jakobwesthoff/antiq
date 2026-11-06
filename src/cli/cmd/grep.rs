@@ -30,7 +30,7 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
         .context("compile the pattern")?;
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the antiq collection")?;
     let found = grep_collection(&collection, &pattern)
         .map_err(antiq::Error::from)
         .context("search the listings")?;

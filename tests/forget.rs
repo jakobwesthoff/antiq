@@ -687,6 +687,9 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
          ▌ How to fix it\n\
          ▌   Add --force to confirm: antiq forget projects/scanner --all-versions\n\
          ▌   --force. Check the effect first with -n.\n\
+         ▌\n\
+         ▌ What antiq was doing\n\
+         ▌   Attempting to forget all versions of projects/scanner.\n\
          \n \
          ℹ INFO  Nothing was deleted.\n"
     );

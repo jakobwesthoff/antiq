@@ -459,10 +459,14 @@ fn a_usage_error_on_a_stderr_terminal_is_an_error_block_with_the_usage_as_fix() 
     assert_eq!(
         run.stderr,
         " ✖ ERROR\n\
-         ▌ unexpected argument '--to' found\n\
+         ▌ Unexpected argument --to\n\
+         ▌\n\
+         ▌ Why it happened\n\
+         ▌   antiq unearth does not take this argument.\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   tip: to pass '--to' as a value, use '-- --to'\n\
-         ▌   Usage: antiq unearth <PIECE>\n"
+         ▌   To pass it as a value, write -- --to.\n\
+         ▌   Usage: antiq unearth <PIECE>\n\
+         ▌   Run antiq unearth --help to see what it takes.\n"
     );
 }

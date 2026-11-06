@@ -11,6 +11,7 @@ pub mod console;
 mod error_block;
 pub mod output;
 pub mod table;
+mod usage;
 
 use self::console::block::Block;
 use self::console::rich::Rich;
@@ -279,7 +280,8 @@ fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> 
                         .text(". Check the effect first with ")
                         .cmd("-n")
                         .text("."),
-                ),
+                )
+                .doing(&format!("forget all versions of {piece}")),
             Block::info(Rich::new().text("Nothing was deleted.")),
         ])
     };
@@ -380,7 +382,7 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     }
     if !asks_for_json(args) {
         if out.stderr_env().rich {
-            let _ = out.blocks(&[usage_block(&error.render().to_string())]);
+            let _ = out.blocks(&[usage::block_for(error, args)]);
         } else {
             let _ = error.print();
         }
@@ -390,20 +392,6 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     let command = guess_command(args);
     let _ = out.json_error(command.as_deref(), ErrorKind::Usage, &message, &Map::new());
     code
-}
-
-/// The error block of a clap error: its first paragraph is the title, and
-/// the tip and the usage line that follow are the way out.
-fn usage_block(rendered: &str) -> Block {
-    let mut block = Block::error(Rich::new().text(&first_paragraph(rendered)));
-    for paragraph in rendered.split("\n\n").skip(1) {
-        let paragraph = paragraph.trim();
-        if paragraph.starts_with("tip:") || paragraph.starts_with("Usage:") {
-            block = block
-                .how(Rich::new().text(&paragraph.split_whitespace().collect::<Vec<_>>().join(" ")));
-        }
-    }
-    block
 }
 
 /// Whether `--json` is among the arguments. Arguments cannot be trusted
@@ -429,6 +417,12 @@ fn first_paragraph(rendered: &str) -> String {
         .strip_prefix("error: ")
         .unwrap_or(&joined)
         .to_string()
+}
+
+/// `args` as the command line of a test.
+#[cfg(test)]
+fn os_args(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
 }
 
 /// The command a failed command line was meant for, as far as the
@@ -498,7 +492,10 @@ mod tests {
         assert_eq!(
             stderr,
             format!(
-                "error: {} is not inside a collection\n  while attempting to find the collection\n",
+                "error: {} is not inside an antiq collection\n  \
+                 why: antiq works in a directory that holds an antiq collection, which has an .antiq/ folder. None of the parent directories has one.\n  \
+                 fix: Change into your collection, or create one here with antiq init.\n  \
+                 while attempting to find the antiq collection\n",
                 canonical.display()
             )
         );

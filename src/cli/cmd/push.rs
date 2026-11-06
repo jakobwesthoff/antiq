@@ -14,7 +14,7 @@ use anyhow::Context as _;
 pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
-        .context("find the collection")?;
+        .context("find the antiq collection")?;
     let request = PushRequest {
         init: args.init,
         force: args.force,
@@ -23,7 +23,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
     };
     let outcome = push(&collection, &request, &SystemClock)
         .map_err(antiq::Error::from)
-        .context("push the collection")?;
+        .context("push the antiq collection")?;
 
     match outcome {
         PushOutcome::HeldDryRun(held) => {
