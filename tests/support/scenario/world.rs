@@ -19,11 +19,11 @@ use std::process::Stdio;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// The time zone every command runs in, so that output which depends on
-/// the local time reads the same on every machine.
 /// How long a command on a terminal may run.
 const TTY_DEADLINE: Duration = Duration::from_secs(20);
 
+/// The time zone every command runs in, so that output which depends on
+/// the local time reads the same on every machine.
 const TIME_ZONE: &str = "Pacific/Auckland";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
