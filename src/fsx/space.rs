@@ -7,6 +7,8 @@
 #![allow(dead_code, reason = "used again by C4 and C6")]
 
 use super::{FsxError, io_error};
+use std::error::Error;
+use std::io;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -85,6 +87,22 @@ impl SpaceLedger {
     }
 }
 
+/// Whether the error or one of its causes says the volume is full: the
+/// raw `ENOSPC` of the operating system, or the `StorageFull` kind that a
+/// failure built without an errno carries.
+pub(crate) fn is_out_of_space(error: &(dyn Error + 'static)) -> bool {
+    let mut current: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if error.downcast_ref::<io::Error>().is_some_and(|error| {
+            error.raw_os_error() == Some(libc::ENOSPC) || error.kind() == io::ErrorKind::StorageFull
+        }) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
 /// Free blocks an unprivileged process may use, counted in the
 /// fundamental block size.
 fn bytes_available(blocks_available: u64, fragment_size: u64) -> u64 {
@@ -95,6 +113,56 @@ fn bytes_available(blocks_available: u64, fragment_size: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::testing::tree::Tree;
+
+    /// An error that keeps its cause as the source, like a non-transparent
+    /// wrapper does.
+    #[derive(Debug, thiserror::Error)]
+    #[error("wrapped")]
+    struct Wrapper(#[source] Box<dyn Error + Send + Sync>);
+
+    /// An error that forwards to its cause, like `#[error(transparent)]`.
+    #[derive(Debug, thiserror::Error)]
+    #[error(transparent)]
+    struct Transparent(Box<dyn Error + Send + Sync>);
+
+    fn enospc() -> io::Error {
+        io::Error::from_raw_os_error(libc::ENOSPC)
+    }
+
+    #[test]
+    fn a_raw_enospc_is_out_of_space() {
+        assert!(is_out_of_space(&enospc()));
+    }
+
+    #[test]
+    fn the_storage_full_kind_is_out_of_space() {
+        assert!(is_out_of_space(&io::Error::from(
+            io::ErrorKind::StorageFull
+        )));
+    }
+
+    #[test]
+    fn enospc_below_a_wrapper_is_found() {
+        let error = Wrapper(Box::new(FsxError::Io {
+            action: "write",
+            path: "x".to_string(),
+            source: enospc(),
+        }));
+        assert!(is_out_of_space(&error));
+    }
+
+    #[test]
+    fn enospc_below_a_transparent_wrapper_is_found() {
+        let error = Transparent(Box::new(Wrapper(Box::new(enospc()))));
+        assert!(is_out_of_space(&error));
+    }
+
+    #[test]
+    fn other_errors_are_not_out_of_space() {
+        assert!(!is_out_of_space(&io::Error::from_raw_os_error(libc::EIO)));
+        assert!(!is_out_of_space(&io::Error::other("plain")));
+        assert!(!is_out_of_space(&Wrapper(Box::new(io::Error::other("x")))));
+    }
 
     #[test]
     fn the_free_space_of_the_temp_volume_is_positive() {
