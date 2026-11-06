@@ -1802,6 +1802,9 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   `#[error(transparent)]`, or the `candidates` of an ambiguous reference
   are lost. An empty search word matches every candidate; each C item
   refuses an empty piece argument as a usage error (exit 2).
+- For Z (found by C8): `init`'s dry-run action uses the key `action`
+  where every other command uses `kind`; Z unifies it to `kind` with a
+  test, and the spec's JSON output section with it.
 - For F7: sidecars without their `.tar.zst` are an incomplete version
   only when `versions::store::is_being_stored` finds no staged archive
   for them in `tmp/pack/`; otherwise they are repair 1's and not
