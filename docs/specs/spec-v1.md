@@ -1082,7 +1082,9 @@ target. `--init` and `--force` are each refused together with
    collection's marker is still exit 1, and with a matching marker it is a
    plain push, noted in the output.
 
-   rsync runs with `LC_ALL=C`. Over ssh, exit 255 counts as "cannot
+   rsync runs with `LC_ALL=C`. The listing carries the mirror's `-e`,
+   `--rsync-path`, `--timeout` and `rsync_args`, but not `--fsync`. Over
+   ssh, exit 255 counts as "cannot
    connect" only when ssh's line starts with `ssh: connect to host` or
    `ssh: Could not resolve hostname`, or contains `timed out`; any other
    255 (a changed host key, a refused key) is exit 1 with the line. Exit
@@ -1112,7 +1114,7 @@ target. `--init` and `--force` are each refused together with
    `.antiq/tmp/` holding only `.antiq-target`, sent to `<target>/` with
    `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so the
    target root keeps its mode and time) plus the same `-e`,
-   `--rsync-path`, fsync setting and `rsync_args` as the mirror; the
+   `--rsync-path`, `--timeout`, fsync setting and `rsync_args` as the mirror; the
    marker arrives with mode 0644 masked by the receiving side's umask. For
    an ssh target that creates the last missing directory level, and a
    deeper missing path is exit 1 with rsync's mkdir line. `push -n` never
@@ -1139,7 +1141,8 @@ target. `--init` and `--force` are each refused together with
    the collection root, so the same names inside a live piece are still
    copied; the exclude of the marker also protects the target's marker
    from `--delete`. The macOS volume-root directories and `.DS_Store` at
-   the root are left out. `--timeout` counts seconds without data; rsync's exit 30
+   the root are left out. `--timeout` counts seconds without data and every run of `push`
+   carries it, the listing and the marker runs too; rsync's exit 30
    (timeout) is exit 1 with its line. `-x` keeps rsync on the collection's
    device: a mount point to another device inside a live piece arrives as
    an empty directory with the mounted directory's attributes; a bind

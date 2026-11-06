@@ -8,9 +8,13 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use super::marker;
+use super::url::TargetUrl;
+use crate::config::TargetConfig;
 
 /// Errors of finding and running rsync.
 #[derive(Debug, thiserror::Error)]
@@ -23,26 +27,9 @@ pub enum RsyncError {
     Refused { path: PathBuf, reason: Refusal },
     #[error("no rsync 3.2.4 or later found{}; set `[target] rsync` to the path of one", refusals_text(.refusals))]
     NoneFound { refusals: Vec<(PathBuf, String)> },
-    /// rsync ran and ended with a non-zero status, or was killed by a
-    /// signal (`code` is `None`). `stderr` is what it printed, so that the
-    /// caller can tell an ssh failure (status 255) from a transfer problem.
-    #[error("{}", failure_text(*code, stderr))]
-    Failed { code: Option<i32>, stderr: String },
 }
 
 impl crate::error::HasKind for RsyncError {}
-
-fn failure_text(code: Option<i32>, stderr: &str) -> String {
-    let how = match code {
-        Some(code) => format!("rsync failed with exit code {code}"),
-        None => "rsync was killed by a signal".to_string(),
-    };
-    if stderr.is_empty() {
-        how
-    } else {
-        format!("{how}: {stderr}")
-    }
-}
 
 fn refusals_text(refusals: &[(PathBuf, String)]) -> String {
     refusals
@@ -106,6 +93,33 @@ impl fmt::Display for RsyncVersion {
 /// flag sorts a pre-release of a version below the version itself.
 const FLOOR: (u32, u32, u32, bool) = (3, 2, 4, true);
 
+/// What rsync is told to run as its remote shell: no prompt, and a
+/// connection that dies is noticed.
+const SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
+
+/// Seconds without data after which rsync gives up, so that a stalled
+/// connection cannot hold the lock for hours.
+const TIMEOUT: &str = "--timeout=300";
+
+/// What the mirror leaves out, anchored at the collection root: antiq's
+/// own scratch and lock files, the target's marker (which also keeps
+/// `--delete` away from it), and the files macOS puts at the root of a
+/// volume.
+const MIRROR_EXCLUDES: [&str; 11] = [
+    "/.antiq-target",
+    "/.antiq/tmp/",
+    "/.antiq/trash/",
+    "/.antiq/doomed/",
+    "/.antiq/lock",
+    "/.DS_Store",
+    "/.Spotlight-V100/",
+    "/.fseventsd/",
+    "/.DocumentRevisions-V100/",
+    "/.TemporaryItems/",
+    "/.Trashes/",
+];
+
 /// Directories searched after `PATH`, where Homebrew and a manual install
 /// put rsync on macOS.
 const FIXED_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
@@ -160,152 +174,180 @@ impl Rsync {
         self.version
     }
 
-    /// Prepares one rsync call from `source` to `destination`. Both are
-    /// passed as given, so the caller escapes a remote path (`host:path`).
-    pub fn transfer(
+    /// The call that mirrors the collection to the target. A dry run adds
+    /// `-n` and nothing else.
+    pub fn mirror(
         &self,
-        settings: &TransferSettings,
-        source: &OsStr,
-        destination: &OsStr,
-    ) -> Transfer {
-        let mut args: Vec<OsString> = [
-            "--stats",
-            "--no-human-readable",
-            "--no-whole-file",
-            "--ignore-times",
-            &format!("--timeout={}", settings.timeout_seconds),
-            "-e",
-        ]
-        .map(OsString::from)
-        .into();
-        args.push(join_rsh(&settings.ssh_command));
-        if let Some(remote_rsync) = &settings.remote_rsync {
-            args.push(format!("--rsync-path={remote_rsync}").into());
+        options: &Options,
+        collection: &Path,
+        target: &TargetUrl,
+        dry_run: bool,
+    ) -> Call {
+        let mut args: Vec<OsString> = Vec::new();
+        if dry_run {
+            args.push("-n".into());
         }
-        if settings.resumable {
-            args.push("--partial-dir=.antiq-partial".into());
+        args.extend(
+            [
+                "-a",
+                "-H",
+                "-x",
+                "--delete",
+                "--delete-delay",
+                "--itemize-changes",
+            ]
+            .map(OsString::from),
+        );
+        args.extend(MIRROR_EXCLUDES.map(|name| OsString::from(format!("--exclude={name}"))));
+        self.finish(
+            args,
+            options,
+            true,
+            [
+                with_trailing_slash(collection.as_os_str()),
+                target.dir_arg(),
+            ],
+        )
+    }
+
+    /// The call that lists the target directory.
+    pub fn list(&self, options: &Options, target: &TargetUrl) -> Call {
+        self.finish(
+            vec!["--list-only".into()],
+            options,
+            false,
+            [target.dir_arg()],
+        )
+    }
+
+    /// The call that copies the target's marker into the directory `into`.
+    pub fn fetch_marker(&self, options: &Options, target: &TargetUrl, into: &Path) -> Call {
+        let mut marker = target.dir_arg();
+        marker.push(marker::FILE_NAME);
+        self.finish(
+            Vec::new(),
+            options,
+            true,
+            [marker, with_trailing_slash(into.as_os_str())],
+        )
+    }
+
+    /// The call that sends the content of the directory `from`, which holds
+    /// only the marker, to the target. Without `-a`, `-p` and `-t` the
+    /// target's root keeps its mode and time.
+    pub fn send_marker(&self, options: &Options, from: &Path, target: &TargetUrl) -> Call {
+        self.finish(
+            vec!["-r".into(), "--chmod=F644".into()],
+            options,
+            true,
+            [with_trailing_slash(from.as_os_str()), target.dir_arg()],
+        )
+    }
+
+    /// Appends what every call shares, in the order of the mirror: the
+    /// timeout, `--fsync`, `--rsync-path` and the ssh command, then the
+    /// user's `rsync_args` so that they can override antiq's options, then
+    /// the paths.
+    fn finish(
+        &self,
+        mut args: Vec<OsString>,
+        options: &Options,
+        fsync: bool,
+        paths: impl IntoIterator<Item = OsString>,
+    ) -> Call {
+        args.push(TIMEOUT.into());
+        if fsync && options.fsync {
+            args.push("--fsync".into());
         }
-        args.extend([
-            "--".into(),
-            source.to_os_string(),
-            destination.to_os_string(),
-        ]);
-        Transfer {
+        if let Some(rsync_path) = &options.rsync_path {
+            args.push(format!("--rsync-path={rsync_path}").into());
+        }
+        args.push("-e".into());
+        args.push(SSH_COMMAND.into());
+        args.extend(options.rsync_args.iter().map(OsString::from));
+        args.extend(paths);
+        Call {
             program: self.path.clone(),
             args,
         }
     }
 }
 
-/// What a transfer needs besides the paths.
+/// `path` with one `/` at the end, so that rsync works on the content of
+/// the directory.
+fn with_trailing_slash(path: &OsStr) -> OsString {
+    let mut arg = path.to_os_string();
+    if !arg.as_encoded_bytes().ends_with(b"/") {
+        arg.push("/");
+    }
+    arg
+}
+
+/// The `[target]` keys that shape every rsync call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransferSettings {
-    /// The ssh command rsync runs as its remote shell, program first.
-    pub ssh_command: Vec<OsString>,
-    /// `--timeout`, the seconds without any data after which rsync gives up.
-    pub timeout_seconds: u32,
-    /// `--rsync-path`, the rsync to run on the remote.
-    pub remote_rsync: Option<String>,
-    /// Keep an interrupted file in `.antiq-partial` so that the next call
-    /// resumes it. Archive uploads set this.
-    pub resumable: bool,
+pub struct Options {
+    /// Pass `--fsync`.
+    pub fsync: bool,
+    /// `--rsync-path`, the rsync to run on the target.
+    pub rsync_path: Option<String>,
+    /// Options that follow antiq's own, verbatim.
+    pub rsync_args: Vec<String>,
+}
+
+impl Options {
+    pub fn from_config(target: &TargetConfig) -> Options {
+        Options {
+            fsync: target.fsync,
+            rsync_path: target.rsync_path.clone(),
+            rsync_args: target.rsync_args.clone(),
+        }
+    }
 }
 
 /// One prepared rsync call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Transfer {
+pub struct Call {
     program: PathBuf,
     args: Vec<OsString>,
 }
 
-impl Transfer {
-    /// The command to run, with the environment of
-    /// [`scrub_environment`].
-    pub fn command(&self) -> Command {
-        self.build(Command::new(&self.program), inherited_names())
+/// What a finished rsync call left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// The exit status; `None` when a signal ended rsync.
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Call {
+    /// The arguments after the program.
+    pub fn args(&self) -> &[OsString] {
+        &self.args
     }
 
-    fn build(&self, base: Command, inherited: impl IntoIterator<Item = OsString>) -> Command {
-        let mut command = scrub_environment(base, inherited);
+    /// The command to run, with the environment of [`scrub_environment`].
+    pub fn command(&self) -> Command {
+        let mut command = scrub_environment(Command::new(&self.program), inherited_names());
         command.args(&self.args);
         command
     }
 
-    /// Runs the call. Any status but zero is a failure, 23 (partial
-    /// transfer), 24 (files vanished) and 30 (timeout) included.
-    pub fn run(&self) -> Result<TransferStats, RsyncError> {
+    /// Runs the call and returns what it left, whatever the exit status:
+    /// the caller reads the status and the texts of 23, 24, 30 and 255.
+    pub fn run(&self) -> Result<Outcome, RsyncError> {
         let mut command = self.command();
         command.stdin(Stdio::null());
         let output = command.output().map_err(|source| RsyncError::Spawn {
             path: self.program.clone(),
             source,
         })?;
-        if !output.status.success() {
-            return Err(RsyncError::Failed {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-        Ok(parse_stats(&String::from_utf8_lossy(&output.stdout)))
-    }
-}
-
-/// The byte counts of rsync's `--stats` block. A count the output does not
-/// give in the expected form is `None`: unknown, not zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TransferStats {
-    pub literal_bytes: Option<u64>,
-    pub matched_bytes: Option<u64>,
-    pub bytes_sent: Option<u64>,
-    pub bytes_received: Option<u64>,
-}
-
-/// Reads the counts out of the `--stats` text under `LC_ALL=C` and
-/// `--no-human-readable`, where a count is plain digits. A line that is
-/// missing, or whose number has another form (a thousands separator, a
-/// decimal point), leaves its count unknown instead of guessing.
-fn parse_stats(output: &str) -> TransferStats {
-    let count = |label: &str| {
-        output.lines().find_map(|line| {
-            let number = line.strip_prefix(label)?.strip_prefix(": ")?;
-            let number = number.strip_suffix(" bytes").unwrap_or(number);
-            if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            number.parse().ok()
+        Ok(Outcome {
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
-    };
-    TransferStats {
-        literal_bytes: count("Literal data"),
-        matched_bytes: count("Matched data"),
-        bytes_sent: count("Total bytes sent"),
-        bytes_received: count("Total bytes received"),
     }
-}
-
-/// The value of rsync's `-e` option for an ssh command.
-///
-/// rsync splits that value itself: parts are separated by spaces, single
-/// and double quotes keep spaces in a part, backslashes mean nothing, and a
-/// quote doubled inside a part quoted with the same quote stands for that
-/// quote. Quoting every part in single quotes and doubling the single quotes
-/// inside it therefore carries any argument, an empty one included.
-fn join_rsh(args: &[OsString]) -> OsString {
-    let mut joined = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        if index > 0 {
-            joined.push(b' ');
-        }
-        joined.push(b'\'');
-        for &byte in arg.as_bytes() {
-            joined.push(byte);
-            if byte == b'\'' {
-                joined.push(b'\'');
-            }
-        }
-        joined.push(b'\'');
-    }
-    OsString::from_vec(joined)
 }
 
 /// `[target] rsync` is an absolute path so that a run does not
@@ -801,497 +843,475 @@ mod tests {
     }
 
     // =========================================================
-    // The command line
+    // The calls
     // =========================================================
 
-    fn names(values: &[&str]) -> Vec<OsString> {
-        values.iter().map(OsString::from).collect()
-    }
+    const SSH: &str = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
 
-    fn settings(ssh: &[&str]) -> TransferSettings {
-        TransferSettings {
-            ssh_command: names(ssh),
-            timeout_seconds: 13,
-            remote_rsync: None,
-            resumable: false,
+    fn options() -> Options {
+        Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: Vec::new(),
         }
     }
 
-    fn argv(transfer: &Transfer) -> Vec<String> {
-        transfer
-            .args
+    fn nas() -> TargetUrl {
+        TargetUrl::parse("nas.local:/volume1/antiq").expect("a target")
+    }
+
+    /// An rsync that passed the probe; the fake stays alive with it.
+    fn probed_fake() -> (Fake, Rsync) {
+        let fake = Fake::new(RSYNC_3_5_1);
+        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
+        (fake, rsync)
+    }
+
+    fn argv(call: &Call) -> Vec<String> {
+        call.args()
             .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
+            .map(|arg| arg.to_str().expect("text").to_string())
             .collect()
     }
 
-    fn prepared(settings: &TransferSettings) -> Transfer {
-        let fake = Fake::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
-        // Only the argv is inspected; the fake's directory is gone by then.
-        rsync.transfer(
-            settings,
-            OsStr::new("/src/a.tar"),
-            OsStr::new("host:/dest/a"),
-        )
+    /// The mirror argument list of the spec, up to the option group that
+    /// follows the excludes.
+    fn mirror_head() -> Vec<&'static str> {
+        vec![
+            "-a",
+            "-H",
+            "-x",
+            "--delete",
+            "--delete-delay",
+            "--itemize-changes",
+            "--exclude=/.antiq-target",
+            "--exclude=/.antiq/tmp/",
+            "--exclude=/.antiq/trash/",
+            "--exclude=/.antiq/doomed/",
+            "--exclude=/.antiq/lock",
+            "--exclude=/.DS_Store",
+            "--exclude=/.Spotlight-V100/",
+            "--exclude=/.fseventsd/",
+            "--exclude=/.DocumentRevisions-V100/",
+            "--exclude=/.TemporaryItems/",
+            "--exclude=/.Trashes/",
+            "--timeout=300",
+        ]
     }
 
     #[test]
-    fn argv_has_the_fixed_flags_in_order_and_none_that_overwrite_or_delete() {
-        let transfer = prepared(&settings(&["ssh", "-o", "BatchMode=yes"]));
-        assert_eq!(
-            argv(&transfer),
-            [
-                "--stats",
-                "--no-human-readable",
-                "--no-whole-file",
-                "--ignore-times",
-                "--timeout=13",
-                "-e",
-                "'ssh' '-o' 'BatchMode=yes'",
-                "--",
-                "/src/a.tar",
-                "host:/dest/a",
-            ]
+    fn the_mirror_argv_is_the_one_of_the_spec() {
+        let (_fake, rsync) = probed_fake();
+        let call = rsync.mirror(
+            &options(),
+            Path::new("/Users/jakob/projects"),
+            &nas(),
+            false,
         );
-    }
-
-    #[test]
-    fn the_command_runs_the_probed_path_with_the_argv() {
-        let fake = Fake::new(RSYNC_3_5_1);
-        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
-        let transfer = rsync.transfer(&settings(&["ssh"]), OsStr::new("a"), OsStr::new("b"));
-        let command = transfer.command();
-        assert_eq!(command.get_program(), fake.path().as_os_str());
-        let args: Vec<&OsStr> = command.get_args().collect();
-        let expected: Vec<&OsStr> = transfer.args.iter().map(OsString::as_os_str).collect();
-        assert_eq!(args, expected);
-    }
-
-    #[test]
-    fn argv_passes_rsync_path_when_configured_and_not_otherwise() {
-        let mut with = settings(&["ssh"]);
-        with.remote_rsync = Some("/opt/homebrew/bin/rsync".to_string());
-        let with = argv(&prepared(&with));
-        assert_eq!(with[0], "--stats");
-        assert_eq!(with[6], "'ssh'");
-        assert_eq!(with[7], "--rsync-path=/opt/homebrew/bin/rsync");
-        let without = argv(&prepared(&settings(&["ssh"])));
-        assert_eq!(without[0], "--stats");
-        assert!(
-            !without.iter().any(|arg| arg.starts_with("--rsync-path")),
-            "{without:?}"
-        );
-    }
-
-    #[test]
-    fn argv_has_the_partial_dir_when_resumable_and_not_otherwise() {
-        let mut resumable = settings(&["ssh"]);
-        resumable.resumable = true;
-        let resumable = argv(&prepared(&resumable));
-        assert_eq!(resumable[0], "--stats");
-        assert_eq!(resumable[7], "--partial-dir=.antiq-partial");
-        let plain = argv(&prepared(&settings(&["ssh"])));
-        assert_eq!(plain[0], "--stats");
-        assert!(
-            !plain.iter().any(|arg| arg.starts_with("--partial")),
-            "{plain:?}"
-        );
-    }
-
-    #[test]
-    fn both_optional_flags_come_after_the_remote_shell_and_before_the_paths() {
-        let mut both = settings(&["ssh"]);
-        both.resumable = true;
-        both.remote_rsync = Some("rsync".to_string());
-        let both = argv(&prepared(&both));
-        assert_eq!(
-            both[7..],
-            [
-                "--rsync-path=rsync",
-                "--partial-dir=.antiq-partial",
-                "--",
-                "/src/a.tar",
-                "host:/dest/a",
-            ]
-        );
-    }
-
-    // =========================================================
-    // The -e value
-    // =========================================================
-
-    #[test]
-    fn join_rsh_quotes_every_argument() {
-        let args = names(&[
-            "ssh",
-            "a b",
-            "it's",
-            "say \"hi\"",
-            "back\\slash",
-            "tab\there",
-            "new\nline",
-            "",
+        let mut expected = mirror_head();
+        expected.extend([
+            "--fsync",
+            "-e",
+            SSH,
+            "/Users/jakob/projects/",
+            "nas.local:/volume1/antiq/",
         ]);
+        assert_eq!(argv(&call), expected);
+    }
+
+    #[test]
+    fn the_mirror_drops_fsync_when_the_config_says_so() {
+        let (_fake, rsync) = probed_fake();
+        let options = Options {
+            fsync: false,
+            ..options()
+        };
+        let call = rsync.mirror(&options, Path::new("/c"), &nas(), false);
+        let mut expected = mirror_head();
+        expected.extend(["-e", SSH, "/c/", "nas.local:/volume1/antiq/"]);
+        assert_eq!(argv(&call), expected);
+    }
+
+    #[test]
+    fn rsync_path_sits_between_fsync_and_the_ssh_command() {
+        let (_fake, rsync) = probed_fake();
+        let options = Options {
+            rsync_path: Some("/usr/local/bin/rsync".into()),
+            ..options()
+        };
+        let call = rsync.mirror(&options, Path::new("/c"), &nas(), false);
+        let mut expected = mirror_head();
+        expected.extend([
+            "--fsync",
+            "--rsync-path=/usr/local/bin/rsync",
+            "-e",
+            SSH,
+            "/c/",
+            "nas.local:/volume1/antiq/",
+        ]);
+        assert_eq!(argv(&call), expected);
+    }
+
+    #[test]
+    fn rsync_args_follow_antiqs_options_and_precede_the_paths() {
+        let (_fake, rsync) = probed_fake();
+        let options = Options {
+            rsync_args: vec!["--no-perms".into(), "-e".into(), "ssh -p 2222".into()],
+            ..options()
+        };
+        let call = rsync.mirror(&options, Path::new("/c"), &nas(), false);
+        let mut expected = mirror_head();
+        expected.extend([
+            "--fsync",
+            "-e",
+            SSH,
+            "--no-perms",
+            "-e",
+            "ssh -p 2222",
+            "/c/",
+            "nas.local:/volume1/antiq/",
+        ]);
+        assert_eq!(argv(&call), expected);
+    }
+
+    #[test]
+    fn the_dry_run_is_the_mirror_with_a_leading_n() {
+        let (_fake, rsync) = probed_fake();
+        let real = rsync.mirror(&options(), Path::new("/c"), &nas(), false);
+        let dry = rsync.mirror(&options(), Path::new("/c"), &nas(), true);
+        let mut expected = vec!["-n".to_string()];
+        expected.extend(argv(&real));
+        assert_eq!(argv(&dry), expected);
+    }
+
+    #[test]
+    fn a_path_target_and_a_collection_with_a_slash_get_one_trailing_slash() {
+        let (_fake, rsync) = probed_fake();
+        let target = TargetUrl::parse("/Volumes/My Share/antiq").expect("a target");
+        let call = rsync.mirror(&options(), Path::new("/Users/jakob/p/"), &target, false);
+        let args = argv(&call);
+        assert_eq!(args[args.len() - 2], "/Users/jakob/p/");
+        assert_eq!(args[args.len() - 1], "/Volumes/My Share/antiq/");
+    }
+
+    #[test]
+    fn the_list_argv_has_no_fsync() {
+        let (_fake, rsync) = probed_fake();
+        let options = Options {
+            rsync_path: Some("/r".into()),
+            rsync_args: vec!["--bwlimit=5".into()],
+            ..options()
+        };
+        let call = rsync.list(&options, &nas());
         assert_eq!(
-            join_rsh(&args),
-            OsString::from(
-                "'ssh' 'a b' 'it''s' 'say \"hi\"' 'back\\slash' 'tab\there' 'new\nline' ''"
-            )
+            argv(&call),
+            [
+                "--list-only",
+                "--timeout=300",
+                "--rsync-path=/r",
+                "-e",
+                SSH,
+                "--bwlimit=5",
+                "nas.local:/volume1/antiq/"
+            ]
         );
     }
 
     #[test]
-    fn join_rsh_keeps_bytes_that_are_not_utf8() {
-        let args = vec![OsString::from_vec(vec![b'a', 0xff, b'\'', b'b'])];
+    fn the_marker_fetch_argv_names_the_marker_and_the_directory() {
+        let (_fake, rsync) = probed_fake();
+        let call = rsync.fetch_marker(&options(), &nas(), Path::new("/c/.antiq/tmp/x"));
         assert_eq!(
-            join_rsh(&args).as_bytes(),
-            [b'\'', b'a', 0xff, b'\'', b'\'', b'b', b'\'']
+            argv(&call),
+            [
+                "--timeout=300",
+                "--fsync",
+                "-e",
+                SSH,
+                "nas.local:/volume1/antiq/.antiq-target",
+                "/c/.antiq/tmp/x/"
+            ]
         );
     }
 
-    /// rsync is the authority on how it splits its `-e` value: the fixture
-    /// stands in for ssh, records the arguments rsync gives it and fails the
-    /// connection.
     #[test]
-    #[ignore = "needs rsync 3.1 or later at /opt/homebrew/bin/rsync"]
-    fn rsh_round_trips_through_real_rsync() {
-        let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
-            panic!("the round trip needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
-        });
-        let shell = Fake::new("");
-        let hard = [
-            "-o",
-            "ProxyCommand=nc -x 'proxy' %h %p",
-            "it's",
-            "say \"hi\"",
-            "''",
-            "back\\slash",
-            "tab\there",
-            "new\nline",
-            "",
-            "two  spaces",
-        ];
-        let mut ssh = vec![shell.path().into_os_string()];
-        ssh.extend(names(&hard));
-        let transfer = real.transfer(
-            &settings_with(ssh),
-            OsStr::new("/dev/null"),
-            OsStr::new("remote-host:/dest/a"),
+    fn the_marker_send_argv_is_recursive_without_archive_options() {
+        let (_fake, rsync) = probed_fake();
+        let call = rsync.send_marker(&options(), Path::new("/c/.antiq/tmp/x"), &nas());
+        let args = argv(&call);
+        assert_eq!(
+            args,
+            [
+                "-r",
+                "--chmod=F644",
+                "--timeout=300",
+                "--fsync",
+                "-e",
+                SSH,
+                "/c/.antiq/tmp/x/",
+                "nas.local:/volume1/antiq/"
+            ]
         );
-        let error = transfer.run().expect_err("the stand-in ssh fails");
-        assert!(matches!(error, RsyncError::Failed { .. }), "{error:?}");
-        let log = shell.read("calls.log");
-        let mut recorded: Vec<&[u8]> = log.split(|&byte| byte == 0).collect();
-        recorded.pop();
-        assert_eq!(recorded[0], b"transfer");
-        let expected: Vec<&[u8]> = hard.iter().map(|arg| arg.as_bytes()).collect();
-        assert_eq!(recorded[1..=hard.len()], expected[..]);
-    }
-
-    fn settings_with(ssh_command: Vec<OsString>) -> TransferSettings {
-        TransferSettings {
-            ssh_command,
-            timeout_seconds: 13,
-            remote_rsync: None,
-            resumable: false,
+        for forbidden in ["-a", "-p", "-t", "--delete"] {
+            assert!(!args.iter().any(|arg| arg == forbidden), "{forbidden}");
         }
     }
 
-    const REAL_RSYNC: &str = "/opt/homebrew/bin/rsync";
-
-    // =========================================================
-    // Statistics
-    // =========================================================
-
-    /// The block rsync 3.5.1 printed for a push of a 2,568 byte file under
-    /// `LC_ALL=C` with `--no-human-readable`.
-    const STATS_3_5_1: &str = "\nNumber of files: 1 (reg: 1)\n\
-Number of created files: 1 (reg: 1)\n\
-Number of deleted files: 0\n\
-Number of regular files transferred: 1\n\
-Total file size: 2568 bytes\n\
-Total transferred file size: 2568 bytes\n\
-Literal data: 2568 bytes\n\
-Number of 4 KiB logical blocks touched: 1\n\
-Matched data: 0 bytes\n\
-File list size: 0\n\
-File list generation time: 0.001 seconds\n\
-File list transfer time: 0.000 seconds\n\
-Total bytes sent: 2652\n\
-Total bytes received: 35\n\
-\n\
-sent 2652 bytes  received 35 bytes  5374.00 bytes/sec\n\
-total size is 2568  speedup is 0.96\n";
-
     #[test]
-    fn reads_literal_data_1408_bytes() {
-        let stats = parse_stats("Literal data: 1408 bytes\n");
-        assert_eq!(stats.literal_bytes, Some(1408));
-        assert_eq!(stats.matched_bytes, None);
-        assert_eq!(stats.bytes_sent, None);
-        assert_eq!(stats.bytes_received, None);
-    }
-
-    #[test]
-    fn reads_the_recorded_3_5_1_block() {
+    fn the_options_come_from_the_target_config() {
+        let config = TargetConfig {
+            fsync: false,
+            rsync_path: Some("/r".into()),
+            rsync_args: vec!["--x".into()],
+            ..TargetConfig::default()
+        };
         assert_eq!(
-            parse_stats(STATS_3_5_1),
-            TransferStats {
-                literal_bytes: Some(2568),
-                matched_bytes: Some(0),
-                bytes_sent: Some(2652),
-                bytes_received: Some(35),
+            Options::from_config(&config),
+            Options {
+                fsync: false,
+                rsync_path: Some("/r".into()),
+                rsync_args: vec!["--x".into()],
             }
         );
-    }
-
-    #[test]
-    fn a_missing_line_is_unknown_not_zero() {
-        let without_matched = STATS_3_5_1.replace("Matched data: 0 bytes\n", "");
-        let stats = parse_stats(&without_matched);
-        assert_eq!(stats.matched_bytes, None);
-        assert_eq!(stats.literal_bytes, Some(2568));
-    }
-
-    #[test]
-    fn no_output_is_all_unknown() {
-        assert_eq!(parse_stats(""), TransferStats::default());
-    }
-
-    #[test]
-    fn a_separator_in_a_number_is_unknown() {
-        for text in [
-            "Literal data: 1.408 bytes\n",
-            "Literal data: 1,408 bytes\n",
-            "Literal data: bytes\n",
-            "Literal data: 99999999999999999999999 bytes\n",
-        ] {
-            assert_eq!(parse_stats(text).literal_bytes, None, "{text}");
-        }
-    }
-
-    #[test]
-    fn a_label_must_match_the_whole_line_start() {
-        let stats = parse_stats("Total literal data: 5 bytes\nTotal bytes sent : 5\n");
-        assert_eq!(stats, TransferStats::default());
     }
 
     // =========================================================
     // Running
     // =========================================================
 
-    fn run_fake(configure: impl FnOnce(&Fake)) -> (Fake, Result<TransferStats, RsyncError>) {
-        let fake = Fake::new(RSYNC_3_5_1);
-        configure(&fake);
-        let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
-        let mut settings = settings(&["ssh", "-p", "2222"]);
-        settings.resumable = true;
-        let result = rsync
-            .transfer(
-                &settings,
-                OsStr::new("/src/a.tar"),
-                OsStr::new("host:/dest/a"),
-            )
-            .run();
-        (fake, result)
-    }
-
-    fn write(fake: &Fake, name: &str, text: &str) {
-        fs::write(fake.dir().join(name), text).expect("the directory is writable");
+    fn run_with(fake: &Fake, rsync: &Rsync) -> Outcome {
+        rsync
+            .list(&options(), &nas())
+            .run()
+            .unwrap_or_else(|error| panic!("{error} ({})", fake.path().display()))
     }
 
     #[test]
-    fn a_successful_transfer_returns_the_stats() {
-        let (_, result) = run_fake(|fake| write(fake, "stdout", STATS_3_5_1));
+    fn exit_0_returns_the_output() {
+        let (fake, rsync) = probed_fake();
+        fake.answer_all("listing\n", "", 0);
+        let outcome = run_with(&fake, &rsync);
+        assert_eq!(outcome.code, Some(0));
+        assert_eq!(outcome.stdout, b"listing\n");
+    }
+
+    #[test]
+    fn exit_23_returns_stdout_and_stderr() {
+        let (fake, rsync) = probed_fake();
+        fake.answer_all(
+            ">f+++++++++ a\n",
+            "IO error encountered -- skipping file deletion\n",
+            23,
+        );
+        let outcome = run_with(&fake, &rsync);
+        assert_eq!(outcome.code, Some(23));
+        assert_eq!(outcome.stdout, b">f+++++++++ a\n");
         assert_eq!(
-            result.expect("exit 0 succeeds"),
-            TransferStats {
-                literal_bytes: Some(2568),
-                matched_bytes: Some(0),
-                bytes_sent: Some(2652),
-                bytes_received: Some(35),
-            }
+            outcome.stderr,
+            b"IO error encountered -- skipping file deletion\n"
         );
     }
 
     #[test]
-    fn exit_0_without_stats_is_ok_with_unknown_stats() {
-        let (_, result) = run_fake(|_| ());
-        assert_eq!(result.expect("exit 0 succeeds"), TransferStats::default());
+    fn exit_24_returns_what_rsync_printed() {
+        let (fake, rsync) = probed_fake();
+        fake.answer_all("", "file has vanished: \"/c/a\"\n", 24);
+        let outcome = run_with(&fake, &rsync);
+        assert_eq!(outcome.code, Some(24));
+        assert_eq!(outcome.stderr, b"file has vanished: \"/c/a\"\n");
     }
 
     #[test]
-    fn the_fake_receives_the_argv_and_lc_all_c() {
-        let (fake, result) = run_fake(|_| ());
-        result.expect("exit 0 succeeds");
-        let calls = fake.calls().concat();
-        let recorded: Vec<&str> = calls.iter().map(String::as_str).collect();
-        assert_eq!(
-            recorded,
-            [
-                "version",
-                "--version",
-                "transfer",
-                "--stats",
-                "--no-human-readable",
-                "--no-whole-file",
-                "--ignore-times",
-                "--timeout=13",
-                "-e",
-                "'ssh' '-p' '2222'",
-                "--partial-dir=.antiq-partial",
-                "--",
-                "/src/a.tar",
-                "host:/dest/a",
-            ]
-        );
+    fn exit_255_returns_the_ssh_line() {
+        let (fake, rsync) = probed_fake();
+        fake.answer_all("", "ssh: Could not resolve hostname nas\n", 255);
+        let outcome = run_with(&fake, &rsync);
+        assert_eq!(outcome.code, Some(255));
+        assert_eq!(outcome.stderr, b"ssh: Could not resolve hostname nas\n");
+    }
+
+    #[test]
+    fn a_signal_gives_no_exit_code() {
+        let (fake, rsync) = probed_fake();
+        fake.kill_on(1);
+        assert_eq!(run_with(&fake, &rsync).code, None);
+    }
+
+    #[test]
+    fn each_call_of_a_run_gets_its_own_answer() {
+        let (fake, rsync) = probed_fake();
+        fake.answer(1, "", "rsync: change_dir failed (2)\n", 23);
+        fake.answer(2, "", "", 0);
+        assert_eq!(run_with(&fake, &rsync).code, Some(23));
+        assert_eq!(run_with(&fake, &rsync).code, Some(0));
+    }
+
+    #[test]
+    fn a_program_that_cannot_start_is_a_spawn_error() {
+        let call = Call {
+            program: "/nonexistent/rsync".into(),
+            args: Vec::new(),
+        };
+        assert!(matches!(call.run(), Err(RsyncError::Spawn { .. })));
+    }
+
+    #[test]
+    fn a_call_runs_the_probed_program_with_its_argv_and_lc_all_c() {
+        let (fake, rsync) = probed_fake();
+        let call = rsync.list(&options(), &nas());
+        call.run().expect("the fake runs");
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2, "the probe and the call");
+        assert_eq!(calls[1][0], "transfer");
+        assert_eq!(calls[1][1..], argv(&call)[..]);
         let env = String::from_utf8(fake.read("env.log")).expect("text");
         assert_eq!(env, "LC_ALL=C\nLC_ALL=C\n");
     }
 
-    fn failure(code: &str, message: &str) -> RsyncError {
-        let (_, result) = run_fake(|fake| {
-            write(fake, "exit", code);
-            write(fake, "stderr", message);
-            write(fake, "stdout", STATS_3_5_1);
-        });
-        result.expect_err("a non-zero exit fails")
+    // =========================================================
+    // Real rsync
+    // =========================================================
+
+    fn real_rsync() -> Rsync {
+        Rsync::resolve(None, &env::var_os("PATH").expect("PATH is set")).expect(
+            "these tests need rsync 3.2.4 or newer on PATH, /opt/homebrew/bin or /usr/local/bin",
+        )
     }
 
-    #[test]
-    fn exit_23_fails_the_transfer() {
-        match failure("23", "some files could not be transferred\n") {
-            RsyncError::Failed { code, stderr } => {
-                assert_eq!(code, Some(23));
-                assert_eq!(stderr, "some files could not be transferred");
-            }
-            other => panic!("expected a failed transfer, got {other:?}"),
-        }
+    fn put(root: &Path, relative: &str, content: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("a parent")).expect("the directory is writable");
+        fs::write(path, content).expect("the directory is writable");
     }
 
-    #[test]
-    fn exit_24_fails_the_transfer() {
-        match failure("24", "some files vanished\n") {
-            RsyncError::Failed { code, stderr } => {
-                assert_eq!(code, Some(24));
-                assert_eq!(stderr, "some files vanished");
-            }
-            other => panic!("expected a failed transfer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn exit_30_fails_the_transfer() {
-        match failure("30", "io timeout\n") {
-            RsyncError::Failed { code, stderr } => {
-                assert_eq!(code, Some(30));
-                assert_eq!(stderr, "io timeout");
-            }
-            other => panic!("expected a failed transfer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_failure_message_names_the_code_and_what_rsync_said() {
-        let error = failure("30", "io timeout\n");
+    fn run_ok(call: &Call) -> Outcome {
+        let outcome = call.run().expect("rsync starts");
         assert_eq!(
-            error.to_string(),
-            "rsync failed with exit code 30: io timeout"
+            outcome.code,
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
         );
+        outcome
     }
 
     #[test]
-    fn a_failure_without_output_names_only_the_code() {
-        let error = RsyncError::Failed {
-            code: Some(23),
-            stderr: String::new(),
-        };
-        assert_eq!(error.to_string(), "rsync failed with exit code 23");
-    }
-
-    #[test]
-    fn a_signal_death_fails_the_transfer() {
-        let (_, result) = run_fake(|fake| write(fake, "signal", ""));
-        match result.expect_err("a killed rsync fails") {
-            error @ RsyncError::Failed { code: None, .. } => {
-                assert_eq!(error.to_string(), "rsync was killed by a signal");
-            }
-            other => panic!("expected a failed transfer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_vanished_program_fails_with_spawn() {
-        let (fake, _) = run_fake(|_| ());
-        let rsync = Rsync::probe(&fake.path()).expect("it is still there");
-        fs::remove_file(fake.path()).expect("the link is ours");
-        let result = rsync
-            .transfer(&settings(&["ssh"]), OsStr::new("a"), OsStr::new("b"))
-            .run();
-        assert!(
-            matches!(result, Err(RsyncError::Spawn { .. })),
-            "{result:?}"
-        );
-    }
-
-    /// A copy on this machine with the real rsync: the flags are accepted
-    /// and the stats come out in the form the parser reads.
-    #[test]
-    #[ignore = "needs rsync 3.1 or later at /opt/homebrew/bin/rsync"]
-    fn real_rsync_copies_a_file_and_reports_its_stats() {
-        let real = Rsync::probe(Path::new(REAL_RSYNC)).unwrap_or_else(|error| {
-            panic!("this test needs rsync 3.1 or later at {REAL_RSYNC}: {error}")
-        });
+    fn real_rsync_mirrors_with_hard_links_and_the_excludes() {
+        use std::os::unix::fs::MetadataExt;
+        let rsync = real_rsync();
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let source = dir.path().join("a.tar");
-        fs::write(&source, vec![b'x'; 5000]).expect("the directory is writable");
-        let destination = dir.path().join("b.tar");
-        let mut settings = settings(&["ssh"]);
-        settings.resumable = true;
-        settings.remote_rsync = Some(REAL_RSYNC.to_string());
-        let stats = real
-            .transfer(&settings, source.as_os_str(), destination.as_os_str())
-            .run()
-            .expect("a local copy succeeds");
-        assert_eq!(stats.literal_bytes, Some(5000));
-        assert_eq!(stats.matched_bytes, Some(0));
-        assert!(
-            stats.bytes_sent.is_some_and(|sent| sent >= 5000),
-            "{stats:?}"
+        let collection = dir.path().join("collection");
+        let target = dir.path().join("target");
+        put(&collection, "piece/file", "content");
+        fs::hard_link(collection.join("piece/file"), collection.join("piece/twin"))
+            .expect("hard links work here");
+        put(&collection, "piece/.DS_Store", "inside");
+        put(&collection, ".DS_Store", "root");
+        put(&collection, ".antiq/tmp/scratch", "x");
+        put(&collection, ".antiq/trash/old", "x");
+        put(&collection, ".antiq/lock", "");
+        put(&collection, ".antiq/pieces/p/1.tar.zst", "tar");
+        put(&target, ".antiq-target", "marker");
+        put(&target, "stale", "gone soon");
+        let url = TargetUrl::Path {
+            root: target.clone(),
+        };
+
+        let outcome = run_ok(&rsync.mirror(&options(), &collection, &url, false));
+
+        let listing = String::from_utf8_lossy(&outcome.stdout);
+        assert!(listing.contains("*deleting"), "{listing}");
+        assert_eq!(
+            fs::metadata(target.join("piece/file"))
+                .expect("copied")
+                .ino(),
+            fs::metadata(target.join("piece/twin"))
+                .expect("copied")
+                .ino(),
+            "-H keeps the hard link"
         );
-        assert!(stats.bytes_received.is_some(), "{stats:?}");
-        assert_eq!(fs::read(&destination).expect("copied"), vec![b'x'; 5000]);
+        assert!(target.join("piece/.DS_Store").exists());
+        assert!(target.join(".antiq/pieces/p/1.tar.zst").exists());
+        for left_out in [
+            ".DS_Store",
+            ".antiq/tmp",
+            ".antiq/trash",
+            ".antiq/lock",
+            "stale",
+        ] {
+            assert!(!target.join(left_out).exists(), "{left_out}");
+        }
+        assert_eq!(
+            fs::read_to_string(target.join(".antiq-target")).expect("kept"),
+            "marker"
+        );
     }
 
     #[test]
-    fn a_source_with_the_size_and_time_of_the_destination_still_replaces_it() {
-        let rsync = Rsync::resolve(None, &std::env::var_os("PATH").expect("PATH"))
-            .expect("these tests need an rsync 3.1 or later");
-        let dir = tempfile::tempdir().expect("temp dir");
-        let source = dir.path().join("source");
-        let destination = dir.path().join("destination");
-        fs::write(&source, "new bytes").expect("source");
-        fs::write(&destination, "old bytes").expect("destination");
-        let same_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        for path in [&source, &destination] {
-            fs::File::options()
-                .write(true)
-                .open(path)
-                .expect("open")
-                .set_modified(same_time)
-                .expect("mtime");
-        }
-        let settings = TransferSettings {
-            ssh_command: vec!["ssh".into()],
-            timeout_seconds: 30,
-            remote_rsync: None,
-            resumable: false,
+    fn real_rsync_changes_nothing_in_a_dry_run_and_itemizes() {
+        let rsync = real_rsync();
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let collection = dir.path().join("collection");
+        let target = dir.path().join("target");
+        put(&collection, "new", "content");
+        put(&target, "stale", "x");
+        let url = TargetUrl::Path {
+            root: target.clone(),
         };
-        rsync
-            .transfer(&settings, source.as_os_str(), destination.as_os_str())
-            .run()
-            .expect("rsync runs");
-        assert_eq!(fs::read(&destination).expect("destination"), b"new bytes");
+
+        let outcome = run_ok(&rsync.mirror(&options(), &collection, &url, true));
+
+        let listing = String::from_utf8_lossy(&outcome.stdout);
+        assert!(listing.contains("new"), "{listing}");
+        assert!(listing.contains("*deleting"), "{listing}");
+        assert!(!target.join("new").exists());
+        assert!(target.join("stale").exists());
+    }
+
+    #[test]
+    fn real_rsync_sends_lists_and_fetches_the_marker() {
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let rsync = real_rsync();
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let target = dir.path().join("target");
+        fs::create_dir(&target).expect("the directory is new");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o750)).expect("ours");
+        let outgoing = dir.path().join("outgoing");
+        let incoming = dir.path().join("incoming");
+        put(&outgoing, ".antiq-target", "{\"format\":1}\n");
+        fs::create_dir(&incoming).expect("the directory is new");
+        let long_ago = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+        filetime::set_file_mtime(outgoing.join(".antiq-target"), long_ago).expect("ours");
+        let url = TargetUrl::Path {
+            root: target.clone(),
+        };
+
+        run_ok(&rsync.send_marker(&options(), &outgoing, &url));
+
+        let sent = fs::metadata(target.join(".antiq-target")).expect("sent");
+        assert_eq!(sent.mode() & !0o644 & 0o777, 0, "{:o}", sent.mode());
+        assert_ne!(sent.mode() & 0o400, 0);
+        assert_ne!(sent.mtime(), 1_000_000_000, "-t is not passed");
+        assert_eq!(
+            fs::metadata(&target).expect("kept").mode() & 0o777,
+            0o750,
+            "the root keeps its mode"
+        );
+        let listing = run_ok(&rsync.list(&options(), &url));
+        assert!(
+            String::from_utf8_lossy(&listing.stdout).contains(".antiq-target"),
+            "{}",
+            String::from_utf8_lossy(&listing.stdout)
+        );
+        run_ok(&rsync.fetch_marker(&options(), &url, &incoming));
+        assert_eq!(
+            fs::read(incoming.join(".antiq-target")).expect("fetched"),
+            b"{\"format\":1}\n"
+        );
     }
 }
