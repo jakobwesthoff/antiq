@@ -1935,8 +1935,8 @@ would write).
 `repairs` and `warnings`. A dry run has `actions` and `warnings`: the repair
 actions first, then `{"kind": "import", "source", "piece", "stamp",
 "version", "left_out"}` with `left_out` the list of paths the version leaves
-out, and, when the import would not fit, `skipped` as above in place of that
-action.
+out, and, when the import would not fit, `skipped` as above, which the
+action carries as a key.
 
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
 collection root), `patterns`, `due` (the number of folders the next `archive`

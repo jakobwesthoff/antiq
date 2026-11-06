@@ -132,6 +132,10 @@ pub enum ImportAction {
         /// What the version leaves out: ignored entries (a folder counts
         /// once, with a trailing `/`) and the `.antiq-restored` marker.
         left_out: Vec<String>,
+        /// Set when the import would not fit; the action then stands for
+        /// the import that is skipped.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skipped: Option<SkippedImport>,
     },
 }
 
@@ -142,20 +146,23 @@ impl PlanAction for ImportAction {
                 source,
                 piece,
                 stamp,
+                skipped: None,
                 ..
             } => format!("import {source} as {piece}, version {stamp}"),
+            ImportAction::Import {
+                skipped: Some(skipped),
+                ..
+            } => format!("skip {}: {}", skipped.piece, skipped.message),
         }
     }
 }
 
-/// What a dry run would do: the repairs, then the import, or the reason it
-/// would be skipped.
+/// What a dry run would do: the repairs, then the import, which says so when
+/// it would be skipped.
 #[derive(Debug, Serialize)]
 pub struct ImportPlan {
     dry_run: bool,
     pub actions: Vec<Step<ImportAction>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skipped: Option<SkippedImport>,
     pub warnings: Vec<Warning>,
 }
 
@@ -167,7 +174,12 @@ impl ImportPlan {
         let mut lines = Vec::new();
         for action in &self.actions {
             lines.push(format!("Would {}", action.describe()));
-            if let Step::Command(ImportAction::Import { left_out, .. }) = action {
+            if let Step::Command(ImportAction::Import {
+                left_out,
+                skipped: None,
+                ..
+            }) = action
+            {
                 lines.extend(
                     left_out
                         .iter()
@@ -175,15 +187,21 @@ impl ImportPlan {
                 );
             }
         }
-        if let Some(skipped) = &self.skipped {
-            lines.push(format!("Would skip {}: {}", skipped.piece, skipped.message));
-        }
         lines
     }
 
     /// 3 when the import would be skipped, as the real run would exit.
     pub fn exit_code(&self) -> u8 {
-        if self.skipped.is_some() { 3 } else { 0 }
+        let skipped = self.actions.iter().any(|action| {
+            matches!(
+                action,
+                Step::Command(ImportAction::Import {
+                    skipped: Some(_),
+                    ..
+                })
+            )
+        });
+        if skipped { 3 } else { 0 }
     }
 }
 
@@ -318,49 +336,49 @@ pub(crate) fn plan(
     let prepared = prepare(collection, clock, request, given, seams.walk_hooks())?;
     let stored = stored_spelling_of(collection, &prepared.piece)?;
     let mut actions: Vec<Step<ImportAction>> = repairs.into_iter().map(Step::Repair).collect();
-    let mut skipped = None;
 
     // The room is measured as the real run measures it, so a dry run ends
     // with the exit code of the run it predicts.
     let antiq = collection.antiq_dir();
-    match SpaceLedger::new().try_reserve(apparent_size(&prepared.packed), || seams.free(&antiq)) {
-        Ok(_reservation) => {
-            let stamp = fresh_stamp(
-                &collection.pieces_dir(),
-                &collection.tmp_dir().join("pack"),
-                &stored,
-                prepared.version,
-            )
-            .map_err(|source| ImportError::Stamp(Box::new(source)))?;
-            actions.push(Step::Command(ImportAction::Import {
-                source: prepared.source.clone(),
-                piece: stored.to_string(),
-                stamp: stamp.to_string(),
-                version: prepared.version,
-                left_out: prepared.left_out.clone(),
-            }));
-        }
+    let skipped = match SpaceLedger::new()
+        .try_reserve(apparent_size(&prepared.packed), || seams.free(&antiq))
+    {
+        Ok(_reservation) => None,
         Err(ReserveError::Short { needed, available }) => {
             let error = ArchiveError::NoRoom {
                 piece: stored.to_string(),
                 needed,
                 available,
             };
-            skipped = Some(SkippedImport {
+            Some(SkippedImport {
                 piece: stored.to_string(),
                 reason: SkipReason::NoRoom,
                 message: chain_text(&error),
-            });
+            })
         }
         Err(ReserveError::Free(source)) => return Err(ArchiveError::Space(source).into()),
-    }
+    };
+    let stamp = fresh_stamp(
+        &collection.pieces_dir(),
+        &collection.tmp_dir().join("pack"),
+        &stored,
+        prepared.version,
+    )
+    .map_err(|source| ImportError::Stamp(Box::new(source)))?;
+    actions.push(Step::Command(ImportAction::Import {
+        source: prepared.source.clone(),
+        piece: stored.to_string(),
+        stamp: stamp.to_string(),
+        version: prepared.version,
+        left_out: prepared.left_out.clone(),
+        skipped,
+    }));
 
     let mut notes = setting_notes(collection);
     notes.extend(warnings);
     Ok(ImportPlan {
         dry_run: true,
         actions,
-        skipped,
         warnings: notes,
     })
 }
@@ -1057,7 +1075,26 @@ mod tests {
             "{:?}",
             plan.lines()
         );
-        assert!(plan.actions.is_empty());
+        assert!(
+            !plan
+                .lines()
+                .iter()
+                .any(|line| line.starts_with("Would import")),
+            "{:?}",
+            plan.lines()
+        );
+        let json = serde_json::to_value(&plan).expect("the plan serialises");
+        assert!(json.get("skipped").is_none(), "{json}");
+        let action = json["actions"]
+            .as_array()
+            .and_then(|actions| actions.last())
+            .expect("the import action is listed");
+        assert_eq!(action["kind"], "import", "{action}");
+        assert_eq!(action["skipped"]["reason"], "no_room", "{action}");
+        assert!(
+            action["skipped"]["message"].is_string() && action["stamp"].is_string(),
+            "{action}"
+        );
     }
 
     #[test]
