@@ -330,15 +330,12 @@ fn read_stream(
     // read ends here, before the hash is compared. The decoder may have
     // turned the failure into a damaged stream, which is why the reader
     // kept it.
-    let unreadable = |source| PackError::ReadFile {
-        path: package.to_path_buf(),
-        source,
-    };
-    if let Some(source) = failure.take() {
-        return Err(unreadable(source));
-    }
-    if let Err(source) = drained {
-        return Err(unreadable(source));
+    // A failed drain left its error in `failure` as well.
+    if let Some(source) = failure.take().or(drained.err()) {
+        return Err(PackError::ReadFile {
+            path: package.to_path_buf(),
+            source,
+        });
     }
     let actual = hashed.sha256();
     if actual != archive.sha256 {
@@ -1570,15 +1567,17 @@ mod tests {
         assert!(matches!(&error, PackError::TreeHasProblems(_)), "{error:?}");
     }
 
-    /// Reads `data` and then fails, as a disk does that goes bad.
+    /// Reads `data` and then fails with `error`, as a disk does that goes
+    /// bad.
     struct FailsAfter<'a> {
         data: &'a [u8],
+        error: fn() -> io::Error,
     }
 
     impl io::Read for FailsAfter<'_> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.data.is_empty() {
-                return Err(io::Error::other("the disk failed"));
+                return Err((self.error)());
             }
             io::Read::read(&mut self.data, buf)
         }
@@ -1594,6 +1593,7 @@ mod tests {
         };
         let source = FailsAfter {
             data: &package.bytes[..cut],
+            error: || io::Error::other("the disk failed"),
         };
 
         let error = read_stream(&archive, source, Some(&expected), None, &mut |_| Ok(()))
@@ -1602,6 +1602,47 @@ mod tests {
         assert!(
             matches!(&error, PackError::ReadFile { path, source }
                 if path == &archive && source.to_string() == "the disk failed"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_operating_system_error_of_the_archive_file_keeps_its_code() {
+        let (_dir, archive, package, _tree) = archived();
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+        let source = FailsAfter {
+            data: &package.bytes[..package.bytes.len() / 2],
+            error: || io::Error::from_raw_os_error(Errno::IO.raw_os_error()),
+        };
+
+        let error = read_stream(&archive, source, Some(&expected), None, &mut |_| Ok(()))
+            .expect_err("the file cannot be read to its end");
+
+        assert!(
+            matches!(&error, PackError::ReadFile { source, .. }
+                if source.raw_os_error() == Some(Errno::IO.raw_os_error())),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_of_the_folder_the_owner_cannot_read_fails_the_verify_naming_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, archive, package, tree) = archived();
+        let file = tree.path("proj/src/main.rs");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let unreadable = std::fs::File::open(&file).is_err();
+
+        let result = verify_against(&archive, &tree, &package.packed.sha256);
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(unreadable, "the test needs a user that mode 000 locks out");
+        let error = result.expect_err("the file cannot be read");
+        assert!(
+            matches!(&error, PackError::Read { path, .. } if path.to_string() == "src/main.rs"),
             "{error:?}"
         );
     }
