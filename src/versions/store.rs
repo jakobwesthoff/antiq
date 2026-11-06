@@ -527,6 +527,62 @@ pub(crate) fn move_in_with(
     Ok(())
 }
 
+/// Moves the sidecars named in `files`, in that order, from `staging` into
+/// the existing store folder `folder` of `pieces`.
+///
+/// For a version that has its `.tar.zst` and lacks a sidecar, which is what
+/// `rebuild` repairs. Every name is looked at before the first file moves,
+/// and nothing is replaced: a destination that exists is
+/// [`VersionsError::Taken`]. Each file is flushed where it lies, renamed,
+/// and the folder flushed, before the next one moves. A failure after the
+/// first file has moved leaves that file in the store: a sidecar of the
+/// version is valid on its own.
+pub fn move_sidecars_in(
+    staging: &TreeRoot,
+    pieces: &TreeRoot,
+    folder: &RelPath,
+    files: &[&str],
+) -> Result<(), VersionsError> {
+    move_sidecars_in_with(&RealDurable, staging, pieces, folder, files)
+}
+
+pub(crate) fn move_sidecars_in_with(
+    durable: &dyn Durable,
+    staging: &TreeRoot,
+    pieces: &TreeRoot,
+    folder: &RelPath,
+    files: &[&str],
+) -> Result<(), VersionsError> {
+    for name in files {
+        let target = file_in(folder, name)?;
+        match pieces.lstat(&target) {
+            Ok(_) => {
+                return Err(VersionsError::Taken {
+                    path: shown(&target),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error("look at", shown(&target), source)),
+        }
+    }
+
+    let from = Place {
+        root: staging,
+        dir: &RelPath::root(),
+    };
+    let to = Place {
+        root: pieces,
+        dir: folder,
+    };
+    for name in files {
+        transfer(durable, &from, &to, name, false).map_err(|failure| match failure {
+            Failure::Before(error) => error,
+            Failure::After(source) => source.into(),
+        })?;
+    }
+    Ok(())
+}
+
 /// Moves the files of a version back from the store folder `folder` of
 /// `pieces` into `staging`, the `.tar.zst` first, then the checksum file,
 /// then the listing. A file that is not in the store is skipped, so the
@@ -1427,6 +1483,125 @@ mod tests {
             .file("pieces/p/p--2025-01-01T000000.tar.zst", b"old");
         env.move_in(&Recording::new(), "p").expect("moved");
         assert_eq!(env.stored("p").len(), 4);
+    }
+
+    impl Env {
+        /// The store folder `p` holds the archive of the version, as it does
+        /// when a sidecar is to be added.
+        fn with_stored_archive(mut self) -> Env {
+            self.tree.file(&format!("pieces/p/{ARCHIVE}"), b"archive");
+            self
+        }
+
+        fn move_sidecars(
+            &self,
+            durable: &dyn Durable,
+            files: &[&str],
+        ) -> Result<(), VersionsError> {
+            move_sidecars_in_with(durable, &self.staging(), &self.pieces(), &path("p"), files)
+        }
+    }
+
+    #[test]
+    fn move_sidecars_in_moves_the_named_files_in_order_flushing_each() {
+        let env = Env::new().with_stored_archive();
+        let recording = Recording::new();
+        env.move_sidecars(&recording, &[LISTING, CHECKSUM])
+            .expect("moved");
+
+        assert_eq!(
+            flushed(&recording),
+            [
+                format!("file {LISTING}"),
+                "dir p".to_string(),
+                format!("file {CHECKSUM}"),
+                "dir p".to_string(),
+            ]
+        );
+        assert_eq!(env.stored("p"), all_three());
+        assert_eq!(env.staged(), [ARCHIVE]);
+    }
+
+    #[test]
+    fn move_sidecars_in_moves_one_file_and_leaves_the_others_staged() {
+        let env = Env::new().with_stored_archive();
+        env.move_sidecars(&Recording::new(), &[CHECKSUM])
+            .expect("moved");
+        assert_eq!(env.stored("p"), [ARCHIVE, CHECKSUM]);
+        assert_eq!(env.staged(), [LISTING, ARCHIVE]);
+    }
+
+    #[test]
+    fn move_sidecars_in_looks_at_every_name_before_it_moves_the_first() {
+        for taken in [LISTING, CHECKSUM] {
+            let mut env = Env::new().with_stored_archive();
+            env.tree.file(&format!("pieces/p/{taken}"), b"already");
+            let recording = Recording::new();
+            let error = env
+                .move_sidecars(&recording, &[LISTING, CHECKSUM])
+                .expect_err("taken");
+            assert!(
+                matches!(&error, VersionsError::Taken { path } if path == &format!("p/{taken}")),
+                "{error:?}"
+            );
+            assert_eq!(
+                env.stored("p"),
+                [ARCHIVE.to_string(), taken.to_string()]
+                    .map(String::from)
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(env.staged(), all_three());
+            assert!(flushed(&recording).is_empty());
+        }
+    }
+
+    #[test]
+    fn move_sidecars_in_keeps_what_moved_when_a_later_file_fails_before_its_rename() {
+        let env = Env::new().with_stored_archive();
+        let error = env
+            .move_sidecars(&Recording::new(), &[LISTING, "p--missing"])
+            .expect_err("the second file is not staged");
+        assert!(
+            matches!(&error, VersionsError::Io { action: "open", .. }),
+            "{error:?}"
+        );
+        assert_eq!(env.stored("p"), [LISTING, ARCHIVE]);
+    }
+
+    #[test]
+    fn move_sidecars_in_reports_a_flush_that_fails_after_the_rename() {
+        let env = Env::new().with_stored_archive();
+        let recording = Recording::new();
+        recording.fail_dirs_from(0);
+        let error = env
+            .move_sidecars(&recording, &[LISTING, CHECKSUM])
+            .expect_err("the folder flush fails");
+        assert!(matches!(error, VersionsError::Filesystem(_)), "{error:?}");
+        assert_eq!(env.stored("p"), [LISTING, ARCHIVE]);
+        assert_eq!(env.staged(), [ARCHIVE, CHECKSUM]);
+    }
+
+    #[test]
+    fn move_sidecars_in_into_a_folder_that_is_a_file_fails_before_it_moves_anything() {
+        let mut env = Env::new();
+        env.tree.file("pieces/p", b"not a folder");
+        let error = env
+            .move_sidecars(&Recording::new(), &[LISTING])
+            .expect_err("p is no folder");
+        assert!(
+            matches!(
+                &error,
+                VersionsError::Io {
+                    action: "look at",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(env.staged(), all_three());
     }
 
     fn taken(slot: &str) {
