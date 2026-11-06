@@ -8,3 +8,4 @@
 mod support;
 
 mod harness;
+mod init;
