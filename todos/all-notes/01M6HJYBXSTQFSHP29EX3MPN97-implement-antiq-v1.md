@@ -2742,6 +2742,11 @@ the same commit; the lead checks that at acceptance.
   accepted, a non-zero dictionary ID refuses. The duplicate check
   completes a missing tracking entry after a crash between metadata and
   entry. `read::{read_package, Package, Container}` become `pub(crate)`.
+  Plan review: `read_package` requires the tar end marker for every
+  caller (a cut multi-frame input decodes cleanly otherwise); a start-of-
+  run repair writes the missing entry of an own `import` object with a
+  matching local payload; I23 maps ENOTCONN, EHOSTDOWN, EHOSTUNREACH,
+  ENETUNREACH and ETIMEDOUT on a path remote's root to away.
 
 ### I23
 
@@ -2750,6 +2755,14 @@ the same commit; the lead checks that at acceptance.
   remote layout. A configured ssh remote probes as broken until I28;
   I23 writes no `remote-state.json` (I29 owns the format); the metadata
   copy runs after the config entry, and `sync` finishes a failed copy.
+  Plan review (21 agreed): the marker is written by temp file, flush and
+  a no-replace rename; every refusal of `remote add` is decided before
+  the first write; the trait gains `list_partial` and `delete_partial`
+  for I27's cleanup; the clock probe file has a unique name and is
+  removed only when this run created it; a mount point without marker
+  at `remote add` is `remote_broken`. For I39: check on a real SMB
+  mount that the read-back bypasses the client cache and that the probe
+  file's time is the server clock; I23 claims neither for SMB.
 
 ### I24
 
@@ -2794,8 +2807,9 @@ the same commit; the lead checks that at acceptance.
 ### I12
 
 - 2026-11-04, I12 plan review (ledger `i12-ledger.md`, 8 findings
-  agreed): a staged verify skips only the top's mode (the caller sets it
-  after the rename, I20); `compare_with_listing` also returns the lstat
+  agreed): a staged verify skips only the top's mode (I20 sets it on the
+  staging root after the verify and `move_dir` carries it; lead, 2026-11-04,
+  I20 finding O5: setting it after the rename left a crash window); `compare_with_listing` also returns the lstat
   record, so reclaiming feeds archive step 4 with it; `Verified` holds
   the package's entries (`Verified::listing`), which I19 stores as the
   listing; negative base-256 tar times list as 0. For I19: the top
