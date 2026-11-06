@@ -6,9 +6,9 @@
 //! archive against its checksum file and the size its listing records,
 //! and the members of the archive against the listing.
 
+use super::PackError;
 use super::hashing::HashingReader;
 use super::verify::{Difference, Hashed, compare, read_hashed};
-use super::{PackError, read};
 use crate::listing::{ListingEntry, is_sha256_hex};
 use crate::progress::Counter;
 use std::fs::File;
@@ -131,80 +131,10 @@ fn differs(archive: &Path, what: String) -> PackError {
     }
 }
 
-/// Whether the archive has the size its listing records, by its metadata
-/// alone.
-pub fn check_archive_size(archive: &Path, expected: u64) -> Result<(), PackError> {
-    let found = std::fs::metadata(archive)
-        .map_err(|source| PackError::ReadFile {
-            path: archive.to_path_buf(),
-            source,
-        })?
-        .len();
-    if found != expected {
-        return Err(differs(
-            archive,
-            format!("it has {found} bytes, the listing says {expected}"),
-        ));
-    }
-    Ok(())
-}
-
-/// What an archive is checked against. `rebuild` meets a version with one
-/// of the two missing, so each can stand alone; having neither is not a
-/// value.
-#[derive(Debug, Clone, Copy)]
-pub enum ArchiveCheck<'a> {
-    /// The size its listing records (`archive-bytes`).
-    Size(u64),
-    /// The hash its checksum file holds.
-    Checksum(&'a ChecksumFile),
-    /// Both.
-    Both {
-        bytes: u64,
-        checksum: &'a ChecksumFile,
-    },
-}
-
-/// Whether the archive is the file that was stored. The size is checked
-/// first, from the metadata, so a file of the wrong size is not read.
-pub fn check_archive(archive: &Path, expected: ArchiveCheck<'_>) -> Result<(), PackError> {
-    let (bytes, checksum) = match expected {
-        ArchiveCheck::Size(bytes) => (Some(bytes), None),
-        ArchiveCheck::Checksum(checksum) => (None, Some(checksum)),
-        ArchiveCheck::Both { bytes, checksum } => (Some(bytes), Some(checksum)),
-    };
-    if let Some(expected) = bytes {
-        check_archive_size(archive, expected)?;
-    }
-    if let Some(checksum) = checksum {
-        let found = file_digest(archive)?.sha256;
-        if found != checksum.sha256 {
-            return Err(differs(
-                archive,
-                format!(
-                    "its SHA-256 is {found}, the checksum file says {}",
-                    checksum.sha256
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Reads the archive to its end and compares every member with `listing`:
-/// path, type, size, modification time, mode, link target and content
-/// hash, directory times included. No folder is involved, so the members
-/// and the listing are compared as they stand.
-pub fn check_members_against_listing(
-    archive: &Path,
-    listing: &[ListingEntry],
-) -> Result<(), PackError> {
-    let members = read::list(archive)?;
-    check_entries_against_listing(&members, listing)
-}
-
-/// Compares the `members` an archive was read to with `listing`, as
-/// [`check_members_against_listing`] does.
+/// Compares the `members` an archive was read to with `listing`: path, type,
+/// size, modification time, mode, link target and content hash, directory
+/// times included. No folder is involved, so the members and the listing are
+/// compared as they stand.
 pub fn check_entries_against_listing(
     members: &[ListingEntry],
     listing: &[ListingEntry],
@@ -263,6 +193,7 @@ pub fn read_archive_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::read;
     use crate::archive::verify::Field;
     use crate::listing::{LinkTarget, ListingType};
     use crate::relpath::RelPath;
@@ -445,92 +376,8 @@ mod tests {
         ChecksumFile::new(file_sha256(file).expect("hashes"), "a.tar.zst".into())
     }
 
-    fn differs_with(result: Result<(), PackError>) -> String {
-        match result {
-            Err(PackError::ArchiveDiffers { what, .. }) => what,
-            other => panic!("expected ArchiveDiffers, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn the_archive_that_was_stored_passes_both_checks() {
-        let (_dir, file) = file_with(b"abc");
-        let checksum = checksum_of(&file);
-        check_archive(
-            &file,
-            ArchiveCheck::Both {
-                bytes: 3,
-                checksum: &checksum,
-            },
-        )
-        .expect("the same file");
-    }
-
-    #[test]
-    fn a_hash_alone_passes_and_fails_on_another_hash() {
-        let (_dir, file) = file_with(b"abc");
-        check_archive(&file, ArchiveCheck::Checksum(&checksum_of(&file))).expect("the same hash");
-        let other = ChecksumFile::new(sha_of_other(), "a.tar.zst".into());
-        let what = differs_with(check_archive(&file, ArchiveCheck::Checksum(&other)));
-        assert!(
-            what.contains(ABC) && what.contains(&sha_of_other()),
-            "{what}"
-        );
-    }
-
     fn sha_of_other() -> String {
         "0".repeat(64)
-    }
-
-    #[test]
-    fn a_size_alone_fails_on_another_size_without_reading_the_file() {
-        let (_dir, file) = file_with(b"abc");
-        check_archive(&file, ArchiveCheck::Size(3)).expect("the same size");
-        let what = differs_with(check_archive(&file, ArchiveCheck::Size(4)));
-        assert!(what.contains("3 bytes") && what.contains('4'), "{what}");
-    }
-
-    #[test]
-    fn a_size_check_does_not_open_the_file() {
-        use std::os::unix::fs::PermissionsExt;
-        assert!(
-            !rustix::process::geteuid().is_root(),
-            "the test needs a user that the file mode keeps out"
-        );
-        let (_dir, file) = file_with(b"abc");
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("mode");
-        let outcome = check_archive_size(&file, 3);
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("mode");
-        outcome.expect("the metadata is enough");
-    }
-
-    #[test]
-    fn the_size_is_checked_before_the_hash() {
-        let (_dir, file) = file_with(b"abc");
-        let other = ChecksumFile::new(sha_of_other(), "a.tar.zst".into());
-        let what = differs_with(check_archive(
-            &file,
-            ArchiveCheck::Both {
-                bytes: 4,
-                checksum: &other,
-            },
-        ));
-        assert!(what.contains("bytes"), "{what}");
-    }
-
-    #[test]
-    fn an_archive_that_cannot_be_read_is_a_read_error() {
-        let (dir, _) = file_with(b"abc");
-        let missing = dir.path().join("missing.tar.zst");
-        assert!(matches!(
-            check_archive_size(&missing, 3),
-            Err(PackError::ReadFile { .. })
-        ));
-        let checksum = ChecksumFile::new(ABC.into(), "a.tar.zst".into());
-        assert!(matches!(
-            check_archive(&missing, ArchiveCheck::Checksum(&checksum)),
-            Err(PackError::ReadFile { .. })
-        ));
     }
 
     // =========================================================
@@ -555,7 +402,8 @@ mod tests {
     }
 
     fn differences_of(listing: &[ListingEntry], archive: &Path) -> Vec<Difference> {
-        match check_members_against_listing(archive, listing) {
+        let members = read::list(archive).expect("the archive reads");
+        match check_entries_against_listing(&members, listing) {
             Err(PackError::ListingDiffers(differences)) => differences,
             other => panic!("expected ListingDiffers, got {other:?}"),
         }
@@ -571,7 +419,8 @@ mod tests {
     #[test]
     fn the_listing_an_archive_was_packed_to_matches_its_members() {
         let (_dir, file, listing) = packed();
-        check_members_against_listing(&file, &listing).expect("equal");
+        let members = read::list(&file).expect("the archive reads");
+        check_entries_against_listing(&members, &listing).expect("equal");
     }
 
     #[test]
@@ -669,17 +518,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_damaged_archive_is_damaged_rather_than_different() {
-        let packaged = pack_piece(&mixed(), "proj");
-        let cut = &packaged.bytes[..packaged.bytes.len() / 2];
-        let (_dir, file) = crate::testing::package::on_disk(cut);
-        assert!(matches!(
-            check_members_against_listing(&file, &packaged.packed.listing),
-            Err(PackError::Damaged(_))
-        ));
-    }
-
     // =========================================================
     // Reading an archive once
     // =========================================================
@@ -733,5 +571,18 @@ mod tests {
             read_archive_once(&dir.path().join("missing"), None, None),
             Err(PackError::OpenPackage(_))
         ));
+    }
+
+    #[test]
+    fn an_archive_that_fails_to_read_is_a_read_error_with_and_without_a_checksum() {
+        // A directory opens, and the first read of it fails.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let checksum = ChecksumFile::new(ABC.into(), "a.tar.zst".into());
+        for checksum in [None, Some(&checksum)] {
+            match read_archive_once(dir.path(), checksum, None) {
+                Err(PackError::ReadFile { path, .. }) => assert_eq!(path, dir.path()),
+                other => panic!("expected ReadFile, got {other:?}"),
+            }
+        }
     }
 }

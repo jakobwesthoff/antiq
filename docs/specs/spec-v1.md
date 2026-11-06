@@ -1287,6 +1287,8 @@ only on the user's request, never as a repair. (ADR 0062)
 - Both missing: read the archive in full, write the listing (with
   `# rebuilt`) and the checksum file, and say that this shows only that
   the archive reads without error, not that it is unchanged.
+- An archive that cannot be read, because of an I/O error, is an error of
+  the read (`cannot read the archive`) and not a refusal.
 - An archive file whose size differs from its listing's `archive-bytes`
   cannot be repaired by `rebuild`, since the hash against the surviving
   checksum file can only fail; `rebuild` refuses and says so.
