@@ -6,10 +6,6 @@
 //!
 //! Callers hold the run lock; see the module docs of [`crate::fsx`].
 
-// TODO: the stores (I08), tracking (I09) and the config edits (I04) are
-// the callers of these functions; until they land the library has none.
-#![allow(dead_code)]
-
 use super::{FsxError, io_error};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
