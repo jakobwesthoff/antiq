@@ -164,7 +164,6 @@ command_line!(
     "fork",
     ["fork", "piece", "--version", "v", "--name", "copy", "-n"]
 );
-command_line!(rebuild, "rebuild", ["rebuild", "piece", "v", "-n"]);
 command_line!(
     import,
     "import",
@@ -200,6 +199,30 @@ fn forget_needs_a_collection() {
         );
         assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
         assert_eq!(run.json()["command"], "forget");
+    }
+}
+
+#[test]
+fn rebuild_needs_a_collection() {
+    for args in [
+        &["rebuild", "piece", "v"][..],
+        &["rebuild", "piece", "v", "-n"],
+    ] {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args(args)
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
+        assert_eq!(run.json()["command"], "rebuild");
     }
 }
 

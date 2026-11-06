@@ -1064,7 +1064,8 @@ only on the user's request, never as a repair. (ADR 0062)
   members: mode and whole-second time from the header, size and hash from
   reading each member, `hard` for tar link members with the first path as
   target, no line for the top-level directory; `files`, `bytes` and
-  `archive-bytes` come from the same read.
+  `archive-bytes` come from the same read. The `imported` line of a
+  version made by `import` is not restored.
 - Listing missing, checksum file present: hash the archive file and
   compare it with the checksum file. On a mismatch refuse (exit 1, naming
   both hashes); otherwise write the listing, with a `rebuilt` line,
@@ -1081,9 +1082,27 @@ only on the user's request, never as a repair. (ADR 0062)
 - A sidecar that is present but corrupt (see "Damage") is not
   overwritten: `rebuild` refuses and names deleting that file (after which
   it is missing and can be rebuilt) or copying it back from the target.
-- Every refusal names `forget` and copying back from the target as the
-  ways out. A version that is not damaged is refused. It takes the lock
-  and has `-n`, which says what it would check and write.
+- Every refusal of a damaged version names `forget` and copying back from
+  the target as the ways out. A version that is not damaged is refused. So
+  is an incomplete version, which has no archive; the refusal names
+  `forget`. A listing of a newer format is refused with the error kind
+  `format_too_new`, also when the checksum file is missing or corrupt. An
+  empty piece or version is a usage error. It takes the lock and has `-n`,
+  which says what it would check and write.
+
+On the console `rebuild` prints `Rebuilt version <version> of <piece>: wrote
+<file>, ...` on stdout, the version named by its local time on a terminal
+and by its stamp otherwise. The statement of the case (the archive is the
+one checksummed when it was stored; every member of the archive matches the
+listing; the archive reads without error, which does not show that it is
+unchanged), the repairs that were done and the warnings go to stderr as
+notes. `-n` lists the repairs as `Would ...` lines, then one of `Would check
+<archive> against <checksum file> and write <listing>`, `Would check every
+member of <archive> against <listing> and write <checksum file>` and `Would
+read <archive> to its end and write <listing>, <checksum file>`. A dry run
+applies the refusals that follow from the sidecars and the size of the
+archive. It neither hashes nor reads the archive, so it can succeed where
+the real run refuses a mismatch.
 
 ### import
 
@@ -1667,7 +1686,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `pin`, `unpin` or `forget`, or the version of `forget`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `pin`, `unpin`, `forget` or `rebuild`, or the version of `forget` or `rebuild`, is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
@@ -1717,6 +1736,16 @@ each as `{"kind": "repair", "repair": ...}`. A dry run has `actions` and
 `warnings`: the repair actions first, then one action
 `{"kind": "forget_version", ...}` for each version, with the keys of a
 forgotten version.
+
+`rebuild` adds `piece`, `stamp` (the version stamp), `version` (its time as
+RFC 3339 in UTC), `basis` (what the archive was checked against:
+`checksum_file`, `listing` or `readable_only`), `written` (the bare names
+of the files written, in order), `repairs` and `warnings`, as for `forget`.
+A dry run has `actions` and `warnings`: the repair actions first, then
+`{"kind": "rebuild_version", ...}` with `piece`, `stamp`, `version`,
+`basis`, `archive`, `against` (the surviving file the archive is checked
+against; null for `readable_only`) and `write` (the names of the files it
+would write).
 
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
 collection root), `patterns`, `due` (the number of folders the next `archive`
