@@ -236,7 +236,7 @@ struct Run<'a> {
 
 /// Whether a repair of the start of a run concerns the piece the person
 /// named, by its path.
-fn concerns(repair: &Repair, piece: &str) -> bool {
+pub(crate) fn concerns(repair: &Repair, piece: &str) -> bool {
     match repair {
         Repair::DeleteSidecars { piece: at, .. }
         | Repair::DeleteRestoredVersion { piece: at, .. }
@@ -246,11 +246,30 @@ fn concerns(repair: &Repair, piece: &str) -> bool {
 }
 
 /// Whether `repair` gives a tree back to the live path `piece`.
-fn gives_back_to(repair: &Repair, piece: &RelPath) -> bool {
+pub(crate) fn gives_back_to(repair: &Repair, piece: &RelPath) -> bool {
     matches!(
         repair,
         Repair::GiveBack { tree, destination: Destination::Live, .. } if tree == piece
     )
+}
+
+/// The stamps of the complete versions of `piece`; none when the store
+/// cannot be read, which only costs the console its disambiguation.
+pub(crate) fn complete_stamps(places: &Places, piece: &RelPath) -> Vec<Stamp> {
+    store::scan(places.pieces_dir)
+        .ok()
+        .and_then(|scan| scan.pieces.into_iter().find(|stored| &stored.path == piece))
+        .map(|stored| {
+            let mut stamps: Vec<Stamp> = stored
+                .versions
+                .iter()
+                .filter(|version| !version.is_incomplete())
+                .map(|version| version.stamp)
+                .collect();
+            stamps.sort();
+            stamps
+        })
+        .unwrap_or_default()
 }
 
 impl Run<'_> {
@@ -265,23 +284,8 @@ impl Run<'_> {
         )
     }
 
-    /// The stamps of the complete versions of `piece`; none when the store
-    /// cannot be read, which only costs the console its disambiguation.
     fn siblings(&self, piece: &RelPath) -> Vec<Stamp> {
-        store::scan(self.places.pieces_dir)
-            .ok()
-            .and_then(|scan| scan.pieces.into_iter().find(|stored| &stored.path == piece))
-            .map(|stored| {
-                let mut stamps: Vec<Stamp> = stored
-                    .versions
-                    .iter()
-                    .filter(|version| !version.is_incomplete())
-                    .map(|version| version.stamp)
-                    .collect();
-                stamps.sort();
-                stamps
-            })
-            .unwrap_or_default()
+        complete_stamps(self.places, piece)
     }
 
     /// What a run would start with and do, without changing anything. A

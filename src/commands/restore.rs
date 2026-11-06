@@ -156,7 +156,6 @@ pub(crate) struct Picked {
     /// The listing, when the version has one that reads to its end.
     pub listing: Option<Listing>,
     /// What is wrong with the version; empty for a sound one.
-    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
     pub damage: Vec<String>,
 }
 
@@ -166,7 +165,6 @@ enum Policy {
     /// Sound versions only.
     Sound,
     /// Also a damaged version, unless it has a doubled slot.
-    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
     Damaged,
 }
 
@@ -199,7 +197,6 @@ pub(crate) fn choose_version(
 /// one of a newer format, one with two files in a slot, and one whose
 /// top holds a marker's name as anything but a file where the listing
 /// shows it.
-#[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
 pub(crate) fn choose_version_to_fork(
     collection: &Collection,
     places: &Places,
@@ -1020,7 +1017,6 @@ impl<'a> Source<'a> {
         }
     }
 
-    #[allow(dead_code, reason = "the fork operation uses it; it removes this line")]
     pub(crate) fn picked(picked: &'a Picked) -> Source<'a> {
         Source {
             piece: &picked.piece,
