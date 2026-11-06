@@ -1226,7 +1226,8 @@ For each idle, unpinned piece:
 5. Delete it and set the entry to `gone`, keeping its local payloads.
 
 When a rename fails, the folder is walked and compared in place and then
-deleted there, with the entry `removing`. A process that still holds a
+deleted there, with the entry `removing`. A folder that differs from the
+record of the verify stays and is unearthed. A process that still holds a
 file open can write after the walk; that write is lost. Uploading is
 left to the next `sync`. (ADR 0032)
 
@@ -1238,6 +1239,19 @@ mount point, an excluded path or a nested collection is skipped with that
 reason. After packing, the package file is hashed again from the disk and
 must give the hash computed while writing it, and the listing of the
 packing must equal the members the strict verify reads from the package.
+
+The walk of step 4 compares every entry's type, size, modification time,
+inode and change time with the record of the verify, directories
+included. The top directory is compared by type, inode and modification
+time only, as renaming it changes its change time. A path found on one
+side only is a difference, and so is a walk that fails or finds an
+unreadable entry, a mount point, an excluded path or a nested collection.
+A different tree goes back to its path and the entry becomes `live`,
+unearthed at the version of the new payload. The report lists the piece
+as kept. When the path is taken or the move back is refused, the tree goes
+to `.antiq/recovered/<ulid>-<time>/` and the entry becomes `gone`. When
+neither move works, the tree stays in the trash and the entry stays
+`removing`; the repairs of the next run judge the tree again.
 
 A new piece first looks for the object of an earlier run that died after
 it wrote the metadata and before it wrote the tracking entry: an object at

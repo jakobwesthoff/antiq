@@ -16,10 +16,18 @@
 //! 4. store payload and listing;
 //! 5. record the metadata change as `meta.pending`;
 //! 6. write the tracking entry `live`, taken out at `pending`;
-//! 7. set the entry to `removing`, naming the payload.
+//! 7. set the entry to `removing`, naming the payload;
+//! 8. rename the folder into the trash;
+//! 9. walk the trashed tree again and compare it with the verified folder;
+//! 10. delete the tree and set the entry to `gone`, or give a different tree
+//!     back (see `finish`).
 
+mod finish;
+
+use super::durable::{self, Matched};
 use super::{
-    ArchiveError, Archived, Candidate, Seams, SkipReason, Skipped, Step, apparent_size, size_text,
+    ArchiveError, Archived, Candidate, Kept, Seams, SkipReason, Skipped, Step, apparent_size,
+    size_text,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -119,6 +127,7 @@ pub(super) enum PieceOutcome {
     Dropped,
     Skipped(Skipped),
     Archived(Archived),
+    Kept(Kept),
 }
 
 pub(super) struct PieceResult {
@@ -218,7 +227,7 @@ pub(super) fn archive_piece(
         listing_stored: false,
     };
     let outcome = match piece.run() {
-        Ok(archived) => PieceOutcome::Archived(archived),
+        Ok(outcome) => outcome,
         Err(Stop::Dropped) => PieceOutcome::Dropped,
         Err(Stop::Skip { reason, message }) => PieceOutcome::Skipped(Skipped {
             id: candidate.id,
@@ -241,6 +250,8 @@ struct Stored {
     id: ObjectId,
     payload: Payload,
     source: Source,
+    /// The verify of the stored package against the folder.
+    matched: Matched,
 }
 
 struct Piece<'a, 'c> {
@@ -264,7 +275,7 @@ impl Piece<'_, '_> {
         Store::new(self.cx.collection)
     }
 
-    fn run(&mut self) -> Flow<Archived> {
+    fn run(&mut self) -> Flow<PieceOutcome> {
         let tree = self.walk_and_judge()?;
         let size = apparent_size(&tree);
         let sub = self
@@ -279,12 +290,17 @@ impl Piece<'_, '_> {
         };
         let mut entry = self.write_entry(&stored)?;
         self.mark_removing(&mut entry, &stored)?;
-        Ok(Archived {
-            id: stored.id,
-            path: self.path.clone(),
-            size,
-            archive_size: stored.payload.size,
-            payload_version: stored.payload.version,
+        let durable = durable::seal(self.cx.lock, stored.matched, &stored.payload, &entry)
+            .expect("the entry was just marked removing for this payload");
+        Ok(match self.remove_folder(&durable, entry)? {
+            finish::Finished::Removed => PieceOutcome::Archived(Archived {
+                id: durable.id(),
+                path: self.path.clone(),
+                size,
+                archive_size: stored.payload.size,
+                payload_version: durable.payload_version(),
+            }),
+            finish::Finished::Kept(kept) => PieceOutcome::Kept(kept),
         })
     }
 
@@ -385,50 +401,47 @@ impl Piece<'_, '_> {
             else {
                 continue;
             };
-            if self.matches_folder(orphan.id, payload, sub) {
+            if let Some(matched) = self.matches_folder(orphan.id, payload, sub) {
                 self.listing_stored = true;
                 return Ok(Some(Stored {
                     id: orphan.id,
                     payload: payload.clone(),
                     source: orphan.source,
+                    matched,
                 }));
             }
         }
         Ok(None)
     }
 
-    /// Whether the stored payload is the one the metadata describes, its
-    /// listing is what the payload holds, and the folder equals it.
-    fn matches_folder(&self, id: ObjectId, payload: &Payload, sub: &TreeRoot) -> bool {
+    /// The verify of the stored payload against the folder, when the
+    /// payload is the one the metadata describes, its listing is what the
+    /// payload holds, and the folder equals it.
+    fn matches_folder(&self, id: ObjectId, payload: &Payload, sub: &TreeRoot) -> Option<Matched> {
         let store = self.store();
         let payload_path = store.file_path(id, &payload.file);
         let Some(listing_name) = &payload.listing else {
-            return false;
+            return None;
         };
         if payload.checksum.algorithm != "sha256"
             || file_sha256(&payload_path).ok().as_deref() != Some(payload.checksum.value.as_str())
         {
-            return false;
+            return None;
         }
-        let Some(stored) = File::open(store.file_path(id, listing_name))
+        let stored = File::open(store.file_path(id, listing_name))
             .ok()
-            .and_then(|file| listing::read_all(file).ok())
-        else {
-            return false;
-        };
+            .and_then(|file| listing::read_all(file).ok())?;
         let rules = WalkRules {
             junk: self.cx.junk.clone(),
             staged: false,
         };
-        match self
+        let verified = self
             .cx
             .seams
             .packager()
             .verify_strict(&payload_path, sub, &rules)
-        {
-            Ok(verified) => verified.listing() == stored.as_slice(),
-            Err(_) => false,
-        }
+            .ok()?;
+        Matched::of_stored(verified, &stored).ok()
     }
 
     // =====================================================
@@ -469,7 +482,7 @@ impl Piece<'_, '_> {
         if outcome.is_err() {
             remove_quietly(&tmp);
         }
-        let (payload_name, listing_name, placed) = outcome?;
+        let (payload_name, listing_name, placed, matched) = outcome?;
 
         let name = piece_name(self.path)?;
         let basis = match (&created, self.store().current(id)) {
@@ -511,6 +524,7 @@ impl Piece<'_, '_> {
             id,
             payload,
             source: Source::Pending,
+            matched,
         })
     }
 
@@ -570,7 +584,7 @@ impl Piece<'_, '_> {
         tmp: &Path,
         packed: &Packed,
         sub: &TreeRoot,
-    ) -> Flow<(FileName, FileName, Vec<PathBuf>)> {
+    ) -> Flow<(FileName, FileName, Vec<PathBuf>, Matched)> {
         let cx = self.cx;
         self.at(Step::Verify)?;
         let rules = WalkRules {
@@ -582,11 +596,8 @@ impl Piece<'_, '_> {
             .packager()
             .verify_strict(tmp, sub, &rules)
             .map_err(Stop::from_pack)?;
-        if verified.listing() != packed.listing.as_slice() {
-            return Err(Stop::error(
-                "the listing of the verified package differs from the one made while packing",
-            ));
-        }
+        let matched = Matched::of_packing(verified, packed)
+            .map_err(|error| Stop::error(error.to_string()))?;
 
         let payload_name = FileName::new(format!(
             "{}-{}.tar.zst",
@@ -606,12 +617,12 @@ impl Piece<'_, '_> {
             Err(error) => return Err(Stop::from_error(&error)),
         }
 
-        let stored = self.store_listing(id, &listing_name, verified.listing(), &mut placed);
+        let stored = self.store_listing(id, &listing_name, matched.listing(), &mut placed);
         if let Err(stop) = stored {
             discard(&placed);
             return Err(stop);
         }
-        Ok((payload_name, listing_name, placed))
+        Ok((payload_name, listing_name, placed, matched))
     }
 
     fn store_listing(
@@ -920,9 +931,11 @@ mod tests {
     use crate::listing::{self, ListingType};
     use crate::meta::{CreatedSource, Lifecycle, PayloadKind};
     use crate::ops::archive::tests::{NOW, World, clock, days_ago, live_piece, world};
-    use crate::ops::archive::{ArchiveReport, ArchiveRequest, Step, archive_with};
+    use crate::ops::archive::{ArchiveReport, ArchiveRequest, KeptHow, Step, archive_with};
+    use crate::pack::verify::LstatRecord;
     use crate::pack::{PackError, PackSettings, Packager, Packed, TarZstd};
     use crate::relpath::RelPath;
+    use crate::repair::{Effects, RealEffects};
     use crate::store::{Source, Store};
     use crate::testing::shared_pool;
     use crate::tracking::{self, EntryState, LocalPayload, TrackingEntry, VersionTakenOut};
@@ -932,9 +945,9 @@ mod tests {
     use std::io::{self, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // =========================================================
     // Seams and helpers
@@ -965,6 +978,7 @@ mod tests {
         on: Hook,
         free: Option<u64>,
         packager: Option<Box<dyn Packager + Sync>>,
+        effects: Option<Box<dyn Effects + Sync>>,
         mount: ArmedMount,
     }
 
@@ -978,6 +992,7 @@ mod tests {
                 on: Box::new(hook),
                 free: None,
                 packager: None,
+                effects: None,
                 mount: ArmedMount(
                     Arc::new(AtomicBool::new(false)),
                     Arc::new(AtomicBool::new(false)),
@@ -993,6 +1008,36 @@ mod tests {
                 }
                 Ok(())
             })
+        }
+
+        /// Calls `hook` with the collection root before each step and uses
+        /// `effects` for the changes to the trash and the folder.
+        fn with_effects(
+            hook: impl Fn(Step, &Path) + Send + Sync + 'static,
+            root: &Path,
+            effects: impl Effects + Sync + 'static,
+        ) -> Scripted {
+            let root = root.to_path_buf();
+            let mut seams = Scripted::on(move |step, _| {
+                hook(step, &root);
+                Ok(())
+            });
+            seams.effects = Some(Box::new(effects));
+            seams
+        }
+
+        /// Also fails `step` with the OS error `errno`.
+        fn failing_at(mut self, step: Step, errno: i32) -> Scripted {
+            let before = self.on;
+            self.on = Box::new(move |at, piece| {
+                before(at, piece)?;
+                if at == step {
+                    Err(io::Error::from_raw_os_error(errno))
+                } else {
+                    Ok(())
+                }
+            });
+            self
         }
 
         /// Fails `step` with the OS error `errno`.
@@ -1027,6 +1072,13 @@ mod tests {
             match &self.packager {
                 Some(packager) => packager.as_ref(),
                 None => &TarZstd,
+            }
+        }
+
+        fn effects(&self) -> &dyn Effects {
+            match &self.effects {
+                Some(effects) => effects.as_ref(),
+                None => &RealEffects,
             }
         }
 
@@ -1317,8 +1369,8 @@ mod tests {
         assert_eq!(stored[0].kind, ListingType::File);
 
         let tracked = entry(&world, done.id).expect("an entry");
-        assert_eq!(tracked.state, EntryState::Removing);
-        assert_eq!(tracked.removing_payload.as_ref(), Some(&payload.file));
+        assert_eq!(tracked.state, EntryState::Gone);
+        assert_eq!(tracked.removing_payload, None);
         assert_eq!(tracked.version_taken_out, VersionTakenOut::Pending);
         assert_eq!(
             tracked.local_payloads,
@@ -1328,7 +1380,7 @@ mod tests {
                 file: payload.file.clone()
             }]
         );
-        assert!(piece_path(&world, "a/note.txt").exists());
+        assert!(!piece_path(&world, "a").exists());
         assert_eq!(tmp_files(&world), Vec::<String>::new());
     }
 
@@ -1374,7 +1426,7 @@ mod tests {
         assert_eq!(current.metadata.payloads[1].version, 1);
         assert_eq!(current.metadata.history.len(), 1);
         let tracked = entry(&world, id).expect("an entry");
-        assert_eq!(tracked.state, EntryState::Removing);
+        assert_eq!(tracked.state, EntryState::Gone);
         assert_eq!(tracked.version_taken_out, VersionTakenOut::Pending);
         assert_eq!(tracked.local_payloads.len(), 1);
     }
@@ -1903,7 +1955,7 @@ mod tests {
         assert_eq!(objects(&world), [first], "no second object");
         assert_eq!(
             entry(&world, first).expect("an entry").state,
-            EntryState::Removing
+            EntryState::Gone
         );
     }
 
@@ -1921,7 +1973,7 @@ mod tests {
         assert_eq!(objects(&world).len(), 2);
         assert_eq!(
             entry(&world, done.id).expect("an entry").state,
-            EntryState::Removing
+            EntryState::Gone
         );
     }
 
@@ -2503,5 +2555,1047 @@ mod tests {
         let (world, report, _dir) = placing_fails_at(Step::StoreListing);
         assert_eq!(skipped(&report)[0].reason, SkipReason::Error);
         assert_eq!(tmp_files(&world), Vec::<String>::new());
+    }
+
+    // =========================================================
+    // Removing the folder
+    // =========================================================
+
+    /// Real effects that fail on request.
+    #[derive(Default)]
+    struct Failing {
+        /// Every flush from the n-th on fails.
+        flush_from: Option<usize>,
+        flushes: AtomicUsize,
+        remove_tree: bool,
+        remove_tree_at: bool,
+    }
+
+    impl Effects for Failing {
+        fn remove_tree_at(&self, path: &Path) -> Result<(), crate::fsx::FsxError> {
+            if self.remove_tree_at {
+                return Err(crate::fsx::FsxError::Io {
+                    action: "remove",
+                    path: path.display().to_string(),
+                    source: io::Error::from_raw_os_error(libc::EIO),
+                });
+            }
+            RealEffects.remove_tree_at(path)
+        }
+
+        fn remove_tree(&self, root: &TreeRoot, path: &RelPath) -> Result<(), crate::fsx::FsxError> {
+            if self.remove_tree {
+                return Err(crate::fsx::FsxError::Io {
+                    action: "remove",
+                    path: path.to_string(),
+                    source: io::Error::from_raw_os_error(libc::EIO),
+                });
+            }
+            RealEffects.remove_tree(root, path)
+        }
+
+        fn move_dir(
+            &self,
+            from_root: &TreeRoot,
+            from: &RelPath,
+            to_root: &TreeRoot,
+            to: &RelPath,
+        ) -> Result<crate::fsx::moves::Moved, crate::fsx::FsxError> {
+            RealEffects.move_dir(from_root, from, to_root, to)
+        }
+
+        fn flush_dir(&self, dir: &Path) -> Result<(), crate::fsx::FsxError> {
+            let number = self.flushes.fetch_add(1, Ordering::SeqCst);
+            if self.flush_from.is_some_and(|from| number >= from) {
+                return Err(crate::fsx::FsxError::Io {
+                    action: "flush directory",
+                    path: dir.display().to_string(),
+                    source: io::Error::from_raw_os_error(libc::EIO),
+                });
+            }
+            RealEffects.flush_dir(dir)
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            RealEffects.remove_file(path)
+        }
+
+        fn write_entry(
+            &self,
+            collection: &Collection,
+            lock: &RunLock,
+            clock: &dyn Clock,
+            entry: &mut TrackingEntry,
+        ) -> Result<(), crate::tracking::TrackingError> {
+            RealEffects.write_entry(collection, lock, clock, entry)
+        }
+
+        fn remove_entry(
+            &self,
+            collection: &Collection,
+            lock: &RunLock,
+            id: ObjectId,
+        ) -> Result<(), crate::tracking::TrackingError> {
+            RealEffects.remove_entry(collection, lock, id)
+        }
+
+        fn record_metadata(
+            &self,
+            collection: &Collection,
+            lock: &RunLock,
+            metadata: &crate::meta::Metadata,
+        ) -> Result<(), crate::store::StoreError> {
+            RealEffects.record_metadata(collection, lock, metadata)
+        }
+    }
+
+    /// The piece `a` with a subdirectory, as the tests of the removal want
+    /// it.
+    fn piece_with_subdirectory() -> World {
+        let mut world = world();
+        world.file("a/top.txt", 30);
+        world.file("a/sub/note.txt", 30);
+        world
+    }
+
+    fn names_in(dir: PathBuf) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("the directory lists")
+            .map(|item| {
+                item.expect("an item")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn trash_names(world: &World) -> Vec<String> {
+        names_in(world.collection.trash_dir())
+    }
+
+    fn recovered_names(world: &World) -> Vec<String> {
+        names_in(world.collection.recovered_dir())
+    }
+
+    fn mode_of(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("a mode");
+    }
+
+    fn set_mtime(path: &Path, seconds: i64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(seconds, 0))
+            .expect("the time is set");
+    }
+
+    fn state_of(world: &World, path: &str) -> crate::ops::status::PieceKind {
+        crate::ops::status::status(&world.collection, &clock())
+            .expect("status runs")
+            .pieces
+            .iter()
+            .find(|piece| piece.path.to_string() == path)
+            .unwrap_or_else(|| panic!("status lists {path}"))
+            .state
+    }
+
+    /// Runs with `edit` applied to the collection root right before the
+    /// folder is moved: a change after the verify.
+    fn changed_after_verify(
+        world: &World,
+        edit: impl Fn(&Path) + Send + Sync + 'static,
+    ) -> ArchiveReport {
+        let root = world.temp.root().to_path_buf();
+        run(
+            world,
+            &Scripted::before(Step::MoveToTrash, move || edit(&root)),
+        )
+    }
+
+    /// The folder is back at its path, the entry says unearthed, and the
+    /// report keeps the piece.
+    fn assert_given_back(world: &World, report: &ArchiveReport, path: &str) {
+        let kept = report.kept.as_deref().expect("a real run lists kept");
+        let [row] = kept else {
+            panic!("one piece is kept: {report:?}");
+        };
+        assert_eq!(row.path.to_string(), path);
+        assert_eq!(row.how, KeptHow::Unearthed);
+        assert_eq!(row.recovered_as, None);
+        assert!(archived(report).is_empty(), "{report:?}");
+        assert!(skipped(report).is_empty(), "{report:?}");
+        assert!(report.warnings.iter().any(|w| w.message.contains(path)));
+        assert!(piece_path(world, path).is_dir());
+        assert_eq!(trash_names(world), Vec::<String>::new());
+        let tracked = entry(world, row.id).expect("an entry");
+        assert_eq!(tracked.state, EntryState::Live);
+        assert_eq!(tracked.unearthed_payload_version, Some(1));
+        assert_eq!(tracked.unearthed, Some(NOW.parse().expect("a time")));
+        assert_eq!(tracked.removing_payload, None);
+        assert_eq!(
+            state_of(world, path),
+            crate::ops::status::PieceKind::Unearthed
+        );
+    }
+
+    #[test]
+    fn an_archived_piece_is_gone_and_its_entry_is_gone_with_the_payload() {
+        let world = lone_piece("a");
+        let report = run(&world, &Scripted::real());
+        let [done] = archived(&report) else {
+            panic!("one piece is archived: {report:?}");
+        };
+        assert!(skipped(&report).is_empty());
+        assert_eq!(report.kept.as_deref(), Some(&[][..]));
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+        let tracked = entry(&world, done.id).expect("an entry");
+        assert_eq!(tracked.state, EntryState::Gone);
+        assert_eq!(tracked.removing_payload, None);
+        assert_eq!(tracked.local_payloads.len(), 1, "the payload is kept");
+        assert_eq!(
+            state_of(&world, "a"),
+            crate::ops::status::PieceKind::Archived
+        );
+        let status = crate::ops::status::status(&world.collection, &clock()).expect("status");
+        let piece = status
+            .pieces
+            .iter()
+            .find(|piece| piece.path.to_string() == "a")
+            .expect("listed");
+        assert!(
+            piece
+                .flags
+                .contains(&crate::ops::status::Flag::PendingUpload)
+        );
+    }
+
+    macro_rules! given_back {
+        ($name:ident, $edit:expr) => {
+            #[test]
+            fn $name() {
+                let world = piece_with_subdirectory();
+                let report = changed_after_verify(&world, $edit);
+                assert_given_back(&world, &report, "a");
+            }
+        };
+    }
+
+    given_back!(a_changed_file_is_given_back, |root| {
+        fs::write(root.join("a/top.txt"), "changed content").expect("written");
+    });
+    given_back!(an_added_file_is_given_back, |root| {
+        fs::write(root.join("a/sub/added.txt"), "x").expect("written");
+    });
+    given_back!(a_removed_file_is_given_back, |root| {
+        fs::remove_file(root.join("a/top.txt")).expect("removed");
+    });
+    given_back!(a_file_with_only_its_time_changed_is_given_back, |root| {
+        set_mtime(&root.join("a/top.txt"), 1_700_000_000);
+    });
+    given_back!(
+        a_replaced_file_with_the_same_size_and_time_is_given_back,
+        |root| {
+            let file = root.join("a/top.txt");
+            let before = fs::metadata(&file).expect("exists");
+            let directory = fs::metadata(root.join("a")).expect("exists");
+            fs::write(root.join("a/other"), "x").expect("written");
+            fs::rename(root.join("a/other"), &file).expect("replaced");
+            filetime::set_file_mtime(
+                &file,
+                filetime::FileTime::from_last_modification_time(&before),
+            )
+            .expect("the time is set");
+            filetime::set_file_mtime(
+                root.join("a"),
+                filetime::FileTime::from_last_modification_time(&directory),
+            )
+            .expect("the time is set");
+        }
+    );
+    given_back!(a_touched_directory_is_given_back, |root| {
+        set_mtime(&root.join("a/sub"), 1_700_000_000);
+    });
+    given_back!(a_replaced_top_directory_is_given_back, |root| {
+        fs::rename(root.join("a"), root.join("a.old")).expect("moved aside");
+        fs::create_dir_all(root.join("a/sub")).expect("made");
+        fs::write(root.join("a/top.txt"), "x").expect("written");
+        fs::write(root.join("a/sub/note.txt"), "x").expect("written");
+    });
+    given_back!(a_touched_top_directory_is_given_back, |root| {
+        set_mtime(&root.join("a"), 1_700_000_000);
+    });
+    given_back!(a_nested_collection_that_appeared_is_given_back, |root| {
+        fs::create_dir_all(root.join("a/sub/.antiq")).expect("made");
+    });
+
+    #[test]
+    fn a_directory_that_became_unreadable_is_given_back() {
+        let world = piece_with_subdirectory();
+        let sub = world.temp.root().join("a/sub");
+        let report = changed_after_verify(&world, |root| mode_of(&root.join("a/sub"), 0o000));
+        mode_of(&sub, 0o755);
+        assert_given_back(&world, &report, "a");
+    }
+
+    #[test]
+    fn a_mount_point_that_appeared_is_given_back() {
+        let world = piece_with_subdirectory();
+        fs::create_dir(world.temp.root().join("a/mnt")).expect("made");
+        let mut seams = Scripted::real();
+        let armed = Arc::clone(&seams.mount.0);
+        seams.on = Box::new(move |step, _| {
+            if step == Step::MoveToTrash {
+                armed.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let report = run(&world, &seams);
+        assert_given_back(&world, &report, "a");
+    }
+
+    fn lstat_of(path: &str, kind: EntryKind, mtime_ns: i128, ctime_ns: i128) -> LstatRecord {
+        LstatRecord {
+            path: RelPath::parse(path).expect("valid path"),
+            kind,
+            size: 0,
+            mtime_ns,
+            ctime_ns,
+            inode: 1,
+        }
+    }
+
+    fn timed_entry(path: &str, kind: EntryKind, mtime_ns: i128, ctime_ns: i128) -> TreeEntry {
+        TreeEntry {
+            mtime_ns,
+            ctime_ns,
+            ..tree_entry(path, kind)
+        }
+    }
+
+    #[test]
+    fn the_moves_own_ctime_change_is_no_difference() {
+        let record = [
+            lstat_of("", EntryKind::Directory, 5, 10),
+            lstat_of("f", EntryKind::File, 5, 10),
+        ];
+        let moved = tree_of(vec![
+            timed_entry("", EntryKind::Directory, 5, 99),
+            timed_entry("f", EntryKind::File, 5, 10),
+        ]);
+        assert_eq!(finish::differs(&record, &moved), None);
+    }
+
+    #[test]
+    fn the_ctime_of_an_entry_below_the_top_is_a_difference() {
+        let record = [
+            lstat_of("", EntryKind::Directory, 5, 10),
+            lstat_of("f", EntryKind::File, 5, 10),
+        ];
+        let touched = tree_of(vec![
+            timed_entry("", EntryKind::Directory, 5, 10),
+            timed_entry("f", EntryKind::File, 5, 11),
+        ]);
+        assert!(finish::differs(&record, &touched).is_some_and(|text| text.contains("`f`")));
+    }
+
+    #[test]
+    fn the_top_changing_its_modification_time_is_a_difference() {
+        let record = [lstat_of("", EntryKind::Directory, 5, 10)];
+        let touched = tree_of(vec![timed_entry("", EntryKind::Directory, 6, 10)]);
+        assert!(finish::differs(&record, &touched).is_some());
+    }
+
+    #[test]
+    fn a_path_in_one_side_only_is_a_difference() {
+        let record = [
+            lstat_of("", EntryKind::Directory, 5, 10),
+            lstat_of("gone", EntryKind::File, 5, 10),
+        ];
+        let tree = tree_of(vec![
+            timed_entry("", EntryKind::Directory, 5, 10),
+            timed_entry("new", EntryKind::File, 5, 10),
+        ]);
+        let text = finish::differs(&record, &tree).expect("the first difference");
+        assert!(text.contains("`gone`") || text.contains("`new`"), "{text}");
+        let only_new = tree_of(vec![
+            timed_entry("", EntryKind::Directory, 5, 10),
+            timed_entry("gone", EntryKind::File, 5, 10),
+            timed_entry("new", EntryKind::File, 5, 10),
+        ]);
+        assert!(finish::differs(&record, &only_new).is_some_and(|text| text.contains("`new`")));
+    }
+
+    // ---- Where a different tree goes ----
+
+    /// A change after the verify, then `then` right before the tree goes
+    /// back to its path.
+    fn different_then(
+        world: &World,
+        then_at: Step,
+        then: impl Fn(&Path) + Send + Sync + 'static,
+    ) -> ArchiveReport {
+        let root = world.temp.root().to_path_buf();
+        run(
+            world,
+            &Scripted::on(move |step, _| {
+                if step == Step::MoveToTrash {
+                    fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                }
+                if step == then_at {
+                    then(&root);
+                }
+                Ok(())
+            }),
+        )
+    }
+
+    fn assert_recovered(world: &World, report: &ArchiveReport) -> String {
+        let [row] = report.kept.as_deref().expect("a real run lists kept") else {
+            panic!("one piece is kept: {report:?}");
+        };
+        assert_eq!(row.how, KeptHow::Recovered);
+        let name = row.recovered_as.clone().expect("the recovered name");
+        assert_eq!(name, format!("{}-20261101T120000Z", row.id));
+        assert_eq!(recovered_names(world), std::slice::from_ref(&name));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains(&format!(".antiq/recovered/{name}"))),
+            "{report:?}"
+        );
+        assert_eq!(trash_names(world), Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(world.collection.recovered_dir().join(&name).join("top.txt"))
+                .expect("the tree is kept"),
+            "changed content"
+        );
+        let tracked = entry(world, row.id).expect("an entry");
+        assert_eq!(tracked.state, EntryState::Gone);
+        assert_eq!(tracked.removing_payload, None);
+        name
+    }
+
+    #[test]
+    fn a_different_tree_whose_path_was_taken_goes_to_recovered() {
+        let world = piece_with_subdirectory();
+        let report = different_then(&world, Step::GiveBackMove, |root| {
+            fs::create_dir_all(root.join("a")).expect("a stranger's folder");
+            fs::write(root.join("a/stranger.txt"), "s").expect("written");
+        });
+        assert_recovered(&world, &report);
+        assert_eq!(
+            fs::read_to_string(piece_path(&world, "a/stranger.txt")).expect("untouched"),
+            "s"
+        );
+    }
+
+    #[test]
+    fn a_move_back_the_filesystem_refuses_goes_to_recovered() {
+        let world = piece_with_subdirectory();
+        let report = different_then(&world, Step::GiveBackMove, |root| mode_of(root, 0o555));
+        mode_of(world.temp.root(), 0o755);
+        assert_recovered(&world, &report);
+    }
+
+    #[test]
+    fn two_refused_moves_keep_the_tree_in_the_trash() {
+        let world = piece_with_subdirectory();
+        let recovered = world.collection.recovered_dir();
+        let locked = recovered.clone();
+        let report = different_then(&world, Step::GiveBackMove, move |root| {
+            mode_of(root, 0o555);
+            mode_of(&locked, 0o555);
+        });
+        mode_of(world.temp.root(), 0o755);
+        mode_of(&recovered, 0o755);
+
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert!(report.kept.as_deref().is_some_and(<[Kept]>::is_empty));
+        assert_eq!(trash_names(&world).len(), 1, "the tree stays in the trash");
+        assert!(report.warnings.iter().any(|w| w.message.contains("trash")));
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Live);
+        assert!(piece_path(&world, "a/top.txt").exists(), "back at its path");
+    }
+
+    #[test]
+    fn a_flush_failure_after_the_move_back_leaves_the_entry_for_the_repair() {
+        let world = piece_with_subdirectory();
+        let seams = Scripted::with_effects(
+            |step, root| {
+                if step == Step::MoveToTrash {
+                    fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                }
+            },
+            world.temp.root(),
+            Failing {
+                // Two flushes for the rename to the trash, then the move back.
+                flush_from: Some(2),
+                ..Failing::default()
+            },
+        );
+        let report = run(&world, &seams);
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert!(piece_path(&world, "a/top.txt").exists());
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        let after = entry(&world, id).expect("an entry");
+        assert_eq!(after.state, EntryState::Live);
+        assert_eq!(after.unearthed_payload_version, Some(1));
+    }
+
+    #[test]
+    fn a_failing_entry_write_after_the_move_back_skips_the_piece() {
+        let world = piece_with_subdirectory();
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                match step {
+                    Step::MoveToTrash => {
+                        fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                    }
+                    Step::GiveBackEntry => return Err(io::Error::from_raw_os_error(libc::EIO)),
+                    _ => {}
+                }
+                Ok(())
+            }),
+        );
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert!(piece_path(&world, "a/top.txt").exists());
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(
+            state_of(&world, "a"),
+            crate::ops::status::PieceKind::Unearthed
+        );
+    }
+
+    #[test]
+    fn a_failing_entry_write_after_the_move_to_recovered_skips_the_piece() {
+        let world = piece_with_subdirectory();
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                match step {
+                    Step::MoveToTrash => {
+                        fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                    }
+                    Step::GiveBackMove => {
+                        fs::create_dir(root.join("a")).expect("a stranger's folder");
+                    }
+                    Step::RecoveredEntry => return Err(io::Error::from_raw_os_error(libc::EIO)),
+                    _ => {}
+                }
+                Ok(())
+            }),
+        );
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert_eq!(recovered_names(&world).len(), 1);
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+        assert!(piece_path(&world, "a").is_dir(), "the stranger's folder");
+    }
+
+    #[test]
+    fn a_failing_gone_write_still_reports_the_piece_as_archived() {
+        let world = lone_piece("a");
+        let report = run(&world, &Scripted::failing(Step::MarkGone, libc::EIO));
+        let [done] = archived(&report) else {
+            panic!("the piece is archived: {report:?}");
+        };
+        assert!(skipped(&report).is_empty());
+        assert!(!piece_path(&world, "a").exists());
+        assert!(report.warnings.iter().any(|w| w.message.contains("gone")));
+        assert_eq!(
+            entry(&world, done.id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(
+            entry(&world, done.id).expect("an entry").state,
+            EntryState::Gone
+        );
+    }
+
+    // ---- The rename is refused ----
+
+    #[test]
+    fn a_refused_rename_deletes_the_unchanged_folder_in_place() {
+        let world = lone_piece("a");
+        let report = run(&world, &Scripted::failing(Step::MoveToTrash, libc::EXDEV));
+        let [done] = archived(&report) else {
+            panic!("the piece is archived: {report:?}");
+        };
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(
+            entry(&world, done.id).expect("an entry").state,
+            EntryState::Gone
+        );
+    }
+
+    #[test]
+    fn a_refused_rename_and_a_changed_folder_keeps_the_folder() {
+        let world = lone_piece("a");
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                if step == Step::MoveToTrash {
+                    fs::write(root.join("a/note.txt"), "changed content").expect("written");
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
+                }
+                Ok(())
+            }),
+        );
+        assert_given_back(&world, &report, "a");
+    }
+
+    #[test]
+    fn a_rename_and_a_delete_the_filesystem_refuses_leave_the_entry_removing() {
+        let world = lone_piece("a");
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::before(Step::MoveToTrash, move || mode_of(&root, 0o555)),
+        );
+        mode_of(world.temp.root(), 0o755);
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert!(
+            piece_path(&world, "a").is_dir(),
+            "the delete got as far as emptying the folder"
+        );
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_failing_delete_in_place_leaves_the_entry_for_the_repair() {
+        let world = lone_piece("a");
+        let seams = Scripted::with_effects(
+            |step, _| {
+                let _ = step;
+            },
+            world.temp.root(),
+            Failing {
+                remove_tree: true,
+                ..Failing::default()
+            },
+        )
+        .failing_at(Step::MoveToTrash, libc::EXDEV);
+        let report = run(&world, &seams);
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_failing_delete_in_the_trash_leaves_the_entry_for_the_repair() {
+        let world = lone_piece("a");
+        let seams = Scripted::with_effects(
+            |_, _| {},
+            world.temp.root(),
+            Failing {
+                remove_tree_at: true,
+                ..Failing::default()
+            },
+        );
+        let report = run(&world, &seams);
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert_eq!(trash_names(&world).len(), 1);
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_flush_failure_after_the_rename_does_not_stop_the_archive() {
+        let world = lone_piece("a");
+        let seams = Scripted::with_effects(
+            |_, _| {},
+            world.temp.root(),
+            Failing {
+                flush_from: Some(0),
+                ..Failing::default()
+            },
+        );
+        let report = run(&world, &seams);
+        let [done] = archived(&report) else {
+            panic!("the piece is archived: {report:?}");
+        };
+        for expected in [
+            "is in the trash but the move cannot be flushed",
+            "is deleted but the trash cannot be flushed",
+        ] {
+            assert!(
+                report.warnings.iter().any(|w| w.message.contains(expected)),
+                "{expected}: {report:?}"
+            );
+        }
+        assert_eq!(
+            entry(&world, done.id).expect("an entry").state,
+            EntryState::Gone
+        );
+    }
+
+    // ---- A process that dies in the removal ----
+
+    /// Dies before `step`, after the folder was changed so that it differs
+    /// from its archive when `differs`, and after a stranger took its path
+    /// when `taken`.
+    fn crash_in_removal(step: Step, differs: bool, taken: bool) -> World {
+        let world = piece_with_subdirectory();
+        let root = world.temp.root().to_path_buf();
+        let seams = Scripted::on(move |at, _| {
+            if at == Step::MoveToTrash && differs {
+                fs::write(root.join("a/top.txt"), "changed content").expect("written");
+            }
+            if at == Step::GiveBackMove && taken {
+                fs::create_dir(root.join("a")).expect("a stranger's folder");
+            }
+            if at == step {
+                panic!("the process dies before {at:?}");
+            }
+            Ok(())
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| run(&world, &seams)));
+        assert!(result.is_err(), "the run was cut short before {step:?}");
+        world
+    }
+
+    fn only_object(world: &World) -> ObjectId {
+        let [id] = objects(world)[..] else {
+            panic!("one object");
+        };
+        id
+    }
+
+    #[test]
+    fn a_crash_before_the_move_to_the_trash_leaves_the_folder_for_the_repair_to_delete() {
+        let world = crash_in_removal(Step::MoveToTrash, false, false);
+        let id = only_object(&world);
+        assert!(piece_path(&world, "a/top.txt").exists());
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    macro_rules! crash_with_the_tree_in_the_trash {
+        ($name:ident, $step:expr) => {
+            #[test]
+            fn $name() {
+                let world = crash_in_removal($step, false, false);
+                let id = only_object(&world);
+                assert!(!piece_path(&world, "a").exists());
+                assert_eq!(trash_names(&world).len(), 1);
+                assert_eq!(
+                    entry(&world, id).expect("an entry").state,
+                    EntryState::Removing
+                );
+                repaired(&world);
+                assert_eq!(trash_names(&world), Vec::<String>::new());
+                assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+            }
+        };
+    }
+
+    crash_with_the_tree_in_the_trash!(
+        a_crash_before_the_rewalk_leaves_the_trash_to_the_repair,
+        Step::Rewalk
+    );
+    crash_with_the_tree_in_the_trash!(
+        a_crash_before_the_delete_leaves_the_trash_to_the_repair,
+        Step::DeleteInTrash
+    );
+
+    #[test]
+    fn a_crash_before_the_gone_entry_leaves_the_entry_for_the_repair() {
+        let world = crash_in_removal(Step::MarkGone, false, false);
+        let id = only_object(&world);
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_crash_before_the_move_back_leaves_the_different_tree_in_the_trash() {
+        let world = crash_in_removal(Step::GiveBackMove, true, false);
+        let id = only_object(&world);
+        assert_eq!(trash_names(&world).len(), 1);
+        repaired(&world);
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+        assert_eq!(
+            fs::read_to_string(piece_path(&world, "a/top.txt")).expect("back"),
+            "changed content"
+        );
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Live);
+    }
+
+    #[test]
+    fn a_crash_before_the_unearthed_entry_leaves_the_tree_at_its_path() {
+        let world = crash_in_removal(Step::GiveBackEntry, true, false);
+        let id = only_object(&world);
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        let after = entry(&world, id).expect("an entry");
+        assert_eq!(after.state, EntryState::Live);
+        assert_eq!(after.unearthed_payload_version, Some(1));
+        assert_eq!(
+            fs::read_to_string(piece_path(&world, "a/top.txt")).expect("kept"),
+            "changed content"
+        );
+    }
+
+    #[test]
+    fn a_crash_before_the_move_to_recovered_leaves_the_tree_in_the_trash() {
+        let world = crash_in_removal(Step::MoveRecovered, true, true);
+        let id = only_object(&world);
+        assert_eq!(trash_names(&world).len(), 1);
+        repaired(&world);
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+        assert_eq!(recovered_names(&world).len(), 1);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_crash_before_the_recovered_entry_leaves_a_stranger_alone() {
+        let world = crash_in_removal(Step::RecoveredEntry, true, true);
+        let id = only_object(&world);
+        assert_eq!(recovered_names(&world).len(), 1);
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
+        assert!(piece_path(&world, "a").is_dir(), "the stranger's folder");
+        assert_eq!(recovered_names(&world).len(), 1);
+    }
+
+    // ---- Deep trees ----
+
+    #[test]
+    fn a_piece_with_a_path_past_1024_bytes_archives() {
+        use crate::testing::deep_path;
+        let world = world();
+        let collection = TreeRoot::open(world.temp.root()).expect("opens");
+        let top = RelPath::parse("a").expect("valid");
+        collection
+            .create_dir(&top, 0o755)
+            .expect("the piece is made");
+        let piece = collection.sub(&top).expect("opens");
+        let deep = deep_path(6);
+        let old = i128::from(days_ago(30)) * 1_000_000_000;
+        let mut at = RelPath::root();
+        let mut directories = Vec::new();
+        for component in deep.components() {
+            at = at.join(&crate::relpath::Name::from_bytes(component.to_vec()).expect("a name"));
+            piece.create_dir(&at, 0o755).expect("the directory is made");
+            directories.push(at.clone());
+        }
+        let file = deep.concat(&RelPath::parse("data.txt").expect("valid"));
+        piece
+            .create_file(&file, 0o644)
+            .expect("the file is made")
+            .write_all(b"deep")
+            .expect("written");
+        piece.set_times(&file, old).expect("the time is set");
+        for directory in directories.iter().rev() {
+            piece.set_times(directory, old).expect("the time is set");
+        }
+        let report = run(&world, &Scripted::real());
+        assert_eq!(archived(&report).len(), 1, "{report:?}");
+        assert!(!piece_path(&world, "a").exists());
+        assert_eq!(trash_names(&world), Vec::<String>::new());
+    }
+
+    // ---- Coverage of the refusals in the removal ----
+
+    #[test]
+    fn an_excluded_entry_that_appeared_before_an_in_place_delete_keeps_the_folder() {
+        let mut world = world();
+        world.configure("exclude = [\"a/skip\"]");
+        world.file("a/note.txt", 30);
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                if step == Step::MoveToTrash {
+                    fs::create_dir(root.join("a/skip")).expect("a directory");
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
+                }
+                Ok(())
+            }),
+        );
+        assert_given_back(&world, &report, "a");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("exclude list")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_walk_that_fails_after_the_move_counts_as_a_difference() {
+        let world = lone_piece("a");
+        let mut seams = Scripted::real();
+        let out_of_descriptors = Arc::clone(&seams.mount.1);
+        seams.on = Box::new(move |step, _| {
+            if step == Step::Rewalk {
+                out_of_descriptors.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let report = run(&world, &seams);
+        assert_given_back(&world, &report, "a");
+    }
+
+    #[test]
+    fn a_failing_seam_before_the_move_back_sends_the_tree_to_recovered() {
+        let world = piece_with_subdirectory();
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                match step {
+                    Step::MoveToTrash => {
+                        fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                    }
+                    Step::GiveBackMove => return Err(io::Error::from_raw_os_error(libc::EIO)),
+                    _ => {}
+                }
+                Ok(())
+            }),
+        );
+        assert_recovered(&world, &report);
+    }
+
+    #[test]
+    fn two_failing_seams_keep_the_tree_in_the_trash() {
+        let world = piece_with_subdirectory();
+        let root = world.temp.root().to_path_buf();
+        let report = run(
+            &world,
+            &Scripted::on(move |step, _| {
+                match step {
+                    Step::MoveToTrash => {
+                        fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                    }
+                    Step::GiveBackMove | Step::MoveRecovered => {
+                        return Err(io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }),
+        );
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert_eq!(trash_names(&world).len(), 1);
+    }
+
+    #[test]
+    fn a_flush_failure_after_the_move_to_recovered_leaves_the_entry_for_the_repair() {
+        let world = piece_with_subdirectory();
+        let seams = Scripted::with_effects(
+            |step, root| match step {
+                Step::MoveToTrash => {
+                    fs::write(root.join("a/top.txt"), "changed content").expect("written");
+                }
+                Step::GiveBackMove => fs::create_dir(root.join("a")).expect("a stranger's folder"),
+                _ => {}
+            },
+            world.temp.root(),
+            Failing {
+                // Two flushes for the rename to the trash; the move back is
+                // refused before it flushes anything.
+                flush_from: Some(2),
+                ..Failing::default()
+            },
+        );
+        let report = run(&world, &seams);
+        let [row] = skipped(&report) else {
+            panic!("the piece is skipped: {report:?}");
+        };
+        assert_eq!(row.reason, SkipReason::Error);
+        assert_eq!(recovered_names(&world).len(), 1);
+        let id = objects(&world)[0];
+        assert_eq!(
+            entry(&world, id).expect("an entry").state,
+            EntryState::Removing
+        );
+        repaired(&world);
+        assert_eq!(entry(&world, id).expect("an entry").state, EntryState::Gone);
     }
 }

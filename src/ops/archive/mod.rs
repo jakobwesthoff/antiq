@@ -8,6 +8,7 @@
 //! live, so the command and `status` share one definition of what the next
 //! `archive` takes.
 
+pub mod durable;
 pub mod new;
 pub mod unearthed;
 
@@ -27,6 +28,7 @@ use crate::pack::{PackError, Packager, TarZstd};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
 use crate::remote::RemoteState;
+use crate::repair::{Effects, RealEffects};
 use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
@@ -100,6 +102,19 @@ pub(crate) enum Step {
     WriteMetadata,
     WriteEntry,
     MarkRemoving,
+    MoveToTrash,
+    Rewalk,
+    DeleteInTrash,
+    MarkGone,
+    /// The rename to the trash was refused and the folder is deleted where
+    /// it stands.
+    DeleteInPlace,
+    /// The trashed tree differs from the archive and goes back to its path.
+    GiveBackMove,
+    GiveBackEntry,
+    /// The trashed tree differs and its path is not free.
+    MoveRecovered,
+    RecoveredEntry,
 }
 
 /// The calls of a run that a test can answer for. The defaults are the
@@ -117,6 +132,11 @@ pub(crate) trait Seams: Sync {
 
     fn packager(&self) -> &(dyn Packager + Sync) {
         &TarZstd
+    }
+
+    /// The changes to the trash, the folder and its parent.
+    fn effects(&self) -> &dyn Effects {
+        &RealEffects
     }
 
     /// Called before `step` works on `piece`.
@@ -222,6 +242,28 @@ pub struct Skipped {
     pub message: String,
 }
 
+/// How a piece that was stored stays on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptHow {
+    /// The folder is back at its path and counts as unearthed.
+    Unearthed,
+    /// The folder is below `.antiq/recovered/`.
+    Recovered,
+}
+
+/// A piece that was archived but whose folder was not deleted, because it
+/// differs from what the archive holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Kept {
+    pub id: ObjectId,
+    pub path: RelPath,
+    pub how: KeptHow,
+    /// The name below `.antiq/recovered/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovered_as: Option<String>,
+}
+
 /// What `archive` did, or with `--dry-run` would do.
 #[derive(Debug, Serialize)]
 pub struct ArchiveReport {
@@ -235,6 +277,9 @@ pub struct ArchiveReport {
     /// Real runs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<Vec<Skipped>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept: Option<Vec<Kept>>,
     pub warnings: Vec<Warning>,
 }
 
@@ -354,6 +399,7 @@ pub(crate) fn plan_with(
         plan: Some(plan),
         archived: None,
         skipped: None,
+        kept: None,
         warnings,
     })
 }
@@ -391,6 +437,7 @@ pub(crate) fn archive_with(
     warnings.extend(found);
     let mut archived = Vec::new();
     let mut skipped = Vec::new();
+    let mut kept = Vec::new();
     if !candidates.is_empty() {
         let config = &collection.config().collection;
         let root = open_root(collection)?;
@@ -424,6 +471,7 @@ pub(crate) fn archive_with(
                 new::PieceOutcome::Dropped => {}
                 new::PieceOutcome::Skipped(row) => skipped.push(row),
                 new::PieceOutcome::Archived(row) => archived.push(row),
+                new::PieceOutcome::Kept(row) => kept.push(row),
             }
         }
         if listing_stored && let Err(error) = index::update(collection, guard.lock()) {
@@ -435,6 +483,7 @@ pub(crate) fn archive_with(
         plan: None,
         archived: Some(archived),
         skipped: Some(skipped),
+        kept: Some(kept),
         warnings,
     })
 }

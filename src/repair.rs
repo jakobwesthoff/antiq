@@ -262,6 +262,64 @@ fn stamp(time: Timestamp) -> String {
     time.strftime("%Y%m%dT%H%M%SZ").to_string()
 }
 
+/// The name of the tree of `id` in `recovered/`.
+pub(crate) fn recovered_name(id: ObjectId, time: Timestamp) -> String {
+    format!("{id}-{}", stamp(time))
+}
+
+/// How moving a trashed tree went.
+pub(crate) enum Outcome {
+    Done,
+    /// The tree moved but the move could not be made durable. It is
+    /// reported and the entry stays as it is.
+    Stuck,
+    /// The tree stayed in the trash.
+    Refused(String),
+}
+
+/// Moves the trashed tree of `id` to `to` below `to_dir` and makes the
+/// move durable before the caller writes the entry that depends on it:
+/// if the entry reached the disk and the move did not, the next run
+/// would find a tree in the trash with no `removing` entry.
+///
+/// `flush` is the directory that gains the tree. The warnings are for the
+/// caller to report; a `Stuck` tree is for the caller to protect.
+pub(crate) fn move_trashed(
+    effects: &dyn Effects,
+    collection: &Collection,
+    id: ObjectId,
+    to_dir: &Path,
+    to: &RelPath,
+    flush: &Path,
+) -> (Outcome, Vec<Warning>) {
+    let trash_dir = collection.trash_dir();
+    let name = RelPath::parse(&id.to_string()).expect("an ID is a plain name");
+    let roots = TreeRoot::open(&trash_dir).and_then(|from| Ok((from, TreeRoot::open(to_dir)?)));
+    let (from_root, to_root) = match roots {
+        Ok(roots) => roots,
+        Err(error) => return (Outcome::Refused(error.to_string()), Vec::new()),
+    };
+    let moved = match effects.move_dir(&from_root, &name, &to_root, to) {
+        Ok(moved) => moved,
+        Err(error) => return (Outcome::Refused(error.to_string()), Vec::new()),
+    };
+    for dir in [flush, trash_dir.as_path()] {
+        if let Err(error) = effects.flush_dir(dir) {
+            let warning = Warning::new(format!(
+                "the tree of {id} was moved but cannot be flushed: {error}"
+            ));
+            return (Outcome::Stuck, vec![warning]);
+        }
+    }
+    let mut warnings = Vec::new();
+    if let Some(error) = moved.mode_restore_error {
+        warnings.push(Warning::new(format!(
+            "cannot restore the mode of a moved tree: {error}"
+        )));
+    }
+    (Outcome::Done, warnings)
+}
+
 /// Where the tree of a `removing` entry is.
 enum Located {
     /// Archive step 3's rename happened.
@@ -275,16 +333,6 @@ enum Located {
     /// entry stays as it is.
     Unknown(String),
     Nothing,
-}
-
-/// How moving a trashed tree went.
-enum Outcome {
-    Done,
-    /// The tree moved but the move could not be made durable. It is
-    /// reported and the entry stays as it is.
-    Stuck,
-    /// The tree stayed in the trash.
-    Refused(String),
 }
 
 /// Whether a tree may be deleted.
@@ -487,7 +535,7 @@ impl Repairs<'_> {
             }
         }
 
-        let name = format!("{id}-{}", stamp(self.now()));
+        let name = recovered_name(id, self.now());
         let recovered = self.collection.recovered_dir();
         let to = RelPath::parse(&name).expect("an ID and a time make a plain name");
         match self.move_durably(id, &recovered, &to, &recovered) {
@@ -508,35 +556,16 @@ impl Repairs<'_> {
         }
     }
 
-    /// Moves the trashed tree of `id` to `to` below `to_dir` and makes the
-    /// move durable before the caller writes the entry that depends on it:
-    /// if the entry reached the disk and the move did not, the next run
-    /// would find a tree in the trash with no `removing` entry.
+    /// Moves the trashed tree of `id` with [`move_trashed`]. A move that
+    /// could not be made durable protects the tree from the emptying.
     fn move_durably(&mut self, id: ObjectId, to_dir: &Path, to: &RelPath, flush: &Path) -> Outcome {
-        let trash_dir = self.collection.trash_dir();
-        let name = RelPath::parse(&id.to_string()).expect("an ID is a plain name");
-        let roots = TreeRoot::open(&trash_dir).and_then(|from| Ok((from, TreeRoot::open(to_dir)?)));
-        let (from_root, to_root) = match roots {
-            Ok(roots) => roots,
-            Err(error) => return Outcome::Refused(error.to_string()),
-        };
-        let moved = match self.effects.move_dir(&from_root, &name, &to_root, to) {
-            Ok(moved) => moved,
-            Err(error) => return Outcome::Refused(error.to_string()),
-        };
-        for dir in [flush, trash_dir.as_path()] {
-            if let Err(error) = self.effects.flush_dir(dir) {
-                self.protected.insert(id);
-                self.warn(format!(
-                    "the tree of {id} was moved but cannot be flushed: {error}"
-                ));
-                return Outcome::Stuck;
-            }
+        let (outcome, warnings) =
+            move_trashed(self.effects, self.collection, id, to_dir, to, flush);
+        if matches!(outcome, Outcome::Stuck) {
+            self.protected.insert(id);
         }
-        if let Some(error) = moved.mode_restore_error {
-            self.warn(format!("cannot restore the mode of a moved tree: {error}"));
-        }
-        Outcome::Done
+        self.warnings.extend(warnings);
+        outcome
     }
 
     fn locate(&self, entry: &TrackingEntry) -> Located {
@@ -3862,5 +3891,62 @@ mod tests {
         let warnings = world.run();
 
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    // =========================================================
+    // The move other callers share
+    // =========================================================
+
+    #[test]
+    fn a_recovered_tree_is_named_by_its_id_and_the_time() {
+        let name = recovered_name(
+            id("01HZZZZZZZZZZZZZZZZZZZZZZZ"),
+            time("2026-11-01T12:00:00Z"),
+        );
+        assert_eq!(name, "01HZZZZZZZZZZZZZZZZZZZZZZZ-20261101T120000Z");
+    }
+
+    #[test]
+    fn a_trashed_tree_moves_to_its_target_and_the_move_is_flushed() {
+        let temp = crate::testing::tree::TempCollection::minimal();
+        let collection = Collection::find(temp.root()).expect("a collection");
+        let object = id("01HZZZZZZZZZZZZZZZZZZZZZZZ");
+        fs::create_dir_all(collection.trash_path(object)).expect("a trashed tree");
+        fs::write(collection.trash_path(object).join("f"), "x").expect("a file");
+
+        let (outcome, warnings) = move_trashed(
+            &RealEffects,
+            &collection,
+            object,
+            collection.root(),
+            &path("back"),
+            collection.root(),
+        );
+
+        assert!(matches!(outcome, Outcome::Done));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(collection.root().join("back/f").exists());
+        assert!(!collection.trash_path(object).exists());
+    }
+
+    #[test]
+    fn a_taken_target_refuses_the_move_and_leaves_the_tree_in_the_trash() {
+        let temp = crate::testing::tree::TempCollection::minimal();
+        let collection = Collection::find(temp.root()).expect("a collection");
+        let object = id("01HZZZZZZZZZZZZZZZZZZZZZZZ");
+        fs::create_dir_all(collection.trash_path(object)).expect("a trashed tree");
+        fs::create_dir_all(collection.root().join("back")).expect("a stranger's folder");
+
+        let (outcome, _) = move_trashed(
+            &RealEffects,
+            &collection,
+            object,
+            collection.root(),
+            &path("back"),
+            collection.root(),
+        );
+
+        assert!(matches!(outcome, Outcome::Refused(_)));
+        assert!(collection.trash_path(object).exists());
     }
 }

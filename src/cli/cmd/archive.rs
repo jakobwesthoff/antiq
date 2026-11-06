@@ -88,6 +88,7 @@ mod tests {
             plan: Some(plan),
             archived: None,
             skipped: None,
+            kept: None,
             warnings: vec![Warning::new("the collection is on an NFS mount")],
         };
         let lines = render(&report);
@@ -111,6 +112,7 @@ mod tests {
             plan: Some(Plan::new()),
             archived: None,
             skipped: None,
+            kept: None,
             warnings: Vec::new(),
         };
         assert_eq!(render(&report).stdout, ["Nothing to do."]);
