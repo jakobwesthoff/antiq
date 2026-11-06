@@ -4,9 +4,6 @@ Research on why the contents search of the `find` picker is slow with
 300 pieces of 50 000 members each (15 million paths), and what a faster
 search could look like. It records measurements, not decisions.
 
-Sections marked "not yet measured" are filled in as the measurements
-finish.
-
 ## Machine and build
 
 All numbers come from one MacBook Pro Mac16,8 (Apple M4 Pro, 10
@@ -231,10 +228,117 @@ The machine was loaded by other work during this series (load average
 The speed-up of B over its single-thread time at `ct` is 2.1 times with
 2 threads, 4.2 with 4, 8.2 with 8, 8.7 with 10 and 7.4 with 14.
 
+The same variants with the rarer letters, `w`, `wo`, `wof`, `wof2`,
+`qxz`, in a second series (load average 11 at its start, 17.5 at its
+end). Best of 3, milliseconds. Spawning and joining empty threads took
+0.032 ms for 1 thread, 0.053 for 4, 0.116 for 10 and 0.175 for 14 in
+this series.
+
+| Variant, threads | `w` | `wo` | `wof` | `wof2` | `qxz` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| B, 1 | 763.7 | 1073.4 | 526.9 | 211.3 | 676.4 |
+| B, 2 | 361.6 | 541.7 | 270.9 | 110.6 | 338.1 |
+| B, 4 | 185.1 | 276.0 | 139.9 | 57.0 | 175.3 |
+| B, 8 | 110.9 | 165.4 | 81.7 | 36.9 | 103.2 |
+| B, 10 | 94.6 | 140.4 | 69.6 | 31.6 | 89.0 |
+| B, 14 | 93.4 | 152.3 | 63.5 | 27.0 | 78.8 |
+| C truncate join, 10 | 89.4 | 141.3 | 68.9 | 30.7 | 82.7 |
+| C truncate join, 14 | 74.3 | 160.4 | 57.8 | 29.2 | 82.2 |
+| D member only, 10 | 61.5 | 90.5 | 44.2 | 19.4 | 57.7 |
+| D member only, 14 | 57.9 | 94.9 | 38.5 | 15.4 | 50.9 |
+| E member mask, 10 | 40.4 | 151.6 | 52.8 | 29.6 | 2.0 |
+| E member mask, 14 | 40.0 | 158.2 | 47.3 | 26.6 | 2.2 |
+| F member and piece mask, 10 | 40.1 | 143.3 | 55.4 | 30.9 | 0.2 |
+| F member and piece mask, 14 | 35.6 | 160.1 | 52.0 | 26.6 | 0.3 |
+| G first hit, 10 | 0.2 | 0.1 | 0.1 | 0.1 | 86.8 |
+| G first hit, 14 | 0.3 | 0.2 | 0.2 | 0.2 | 94.8 |
+| H C and E, 10 | 40.1 | 135.4 | 51.1 | 28.5 | 1.2 |
+| H C and E, 14 | 34.6 | 157.0 | 50.3 | 28.5 | 2.3 |
+| J C, E and first hit, 10 | 0.1 | 0.1 | 0.1 | 0.1 | 1.1 |
+| J C, E and first hit, 14 | 0.3 | 0.2 | 0.2 | 0.2 | 2.1 |
+
 ## Two-stage search with a cancellable background scan
 
-_Not yet measured._
+Stage one is scoring the row texts of the 300 pieces
+(`"<prefix> 2019-03-14 1.2G archived"`) with the query `ctrl`: 9.2 us,
+best of 200 runs.
+
+Stage two is the member scan of variant B on a worker, with a shared
+counter that holds the number of the current key. Each worker checks the
+counter every 4096 members and gives up when it differs.
+
+- Latency from a new key to the stop of the running scan (the key is
+  pressed 30 ms into a scan, 10 rounds, median and maximum): 0.856 ms
+  and 1.237 ms with 1 scan thread, 2.320 ms and 3.926 ms with 10 scan
+  threads. The time includes joining the worker threads.
+- Time to the first piece with a hit for `ctrl` on 1 thread, scanning
+  the pieces in order: 14.9 ms (piece 0, which has to be scanned in full);
+  all pieces took 5854.0 ms.
+- Typing burst `c`, `ct`, `ctr`, `ctrl` with each key cancelling the scan of
+  the key before it, one run:
+
+| Scan threads | Gap between keys | Scans of `c`, `ct`, `ctr` | `ctrl` complete after it was typed |
+| ---: | ---: | --- | ---: |
+| 1 | 100 ms | cancelled | 6485.6 ms |
+| 10 | 100 ms | cancelled | 609.2 ms |
+| 10 | 40 ms | cancelled | 608.4 ms |
+
+The last key narrowed from no earlier result in these runs, as no scan
+finished before the next key.
+
+Machine load was 8 to 11 (load average) at the time.
 
 ## Memory for 15 million members
 
-_Not yet measured._
+Peak resident set size of a fresh process (`getrusage` `ru_maxrss`) after
+building the 300 pieces (15 000 000 members, 734 312 755 bytes of paths)
+and running one scan over them; the process had 6 MB at its start. The
+generator holds one piece of temporary data at a time.
+
+| Layout | Peak RSS |
+| --- | ---: |
+| `Vec<String>` per piece, the form of `Members::paths` | 1221 MB |
+| One `String` buffer and `u32` offsets per piece, plus a `u64` mask per member | 929 MB |
+
+The compact layout without the masks is 120 MB less (15 000 000 times 8
+bytes), 809 MB. The buffers and offsets alone are 794.3 MB; the average
+path is 49.0 bytes. The `Vec<String>` layout takes 81 bytes per member
+(1221 MB over 15 000 000 members), the compact layout 54 bytes without
+the mask.
+
+## Summary of the figures
+
+All from the tables above.
+
+- A full scan of 15 000 000 candidates takes about 1.1 s for a one
+  character query (75 ns per member) and 5.0 to 5.8 s for two to four
+  characters (340 ns per member and more), on one thread.
+- Reading the 260 unretained pieces adds 5.1 s per key from cache files
+  and 9.3 s from listings. `to_string` and `sanitize` are 9.45 of the
+  19.72 ms per piece on the cache path.
+- The compact layout scores as fast as `Vec<String>` (1125.1 against
+  1120.6 ms for `c`, 5081.9 against 5131.4 ms for `ct`), and writing
+  the prefix once changes nothing measurable. Building the joined
+  string and wrapping it in `Utf32Str` costs 446.1 ms of the 1.1 s of
+  the one character scan.
+- Scoring the member without the prefix takes 0.66 of the time for `c`
+  and 0.45 for `ct`.
+- The masks cut time only when a query character is missing from most
+  members: `qxz` 681.0 to 10.9 ms (member mask) and 0.0 ms (piece mask),
+  `w` 726.3 to 322.2 ms. For `c`, `ct`, `ctrl` and `ctr` they change
+  nothing within the noise.
+- Ten threads give 8.7 times the single-thread speed on `ct`, 14
+  threads 7.4 times (load average above 13 during that series). Variant B
+  with 10 threads took 129.2 ms for `c`, 609.5 ms for `ct`, 94.6 ms for
+  `w` and 31.6 ms for `wof2`.
+- For queries that have hits, complete scoring over all 15 000 000
+  members stayed above 25 ms in every measured variant that keeps the
+  scores (A to C, E, F, H), and above 100 ms for `c` in those. Times
+  below 5 ms came only from queries with a
+  character in no member (masks, 0.2 to 2.3 ms) and from stopping at the
+  first hit of a piece (0.1 to 0.3 ms), which drops the best-member
+  score from the ranking.
+- A scan is stopped 0.9 ms (1 thread) to 2.3 ms (10 threads) after a new
+  key; scoring the 300 rows takes 9.2 us.
+- 15 000 000 members take 1221 MB as `Vec<String>`, 809 MB as one buffer
+  with offsets per piece, and 929 MB with a 64-bit mask per member.
