@@ -180,54 +180,25 @@ impl Screen {
     }
 
     /// The window changes size. With `rewrap` the visible lines are laid out
-    /// again for the new width, as terminals that reflow do; without it
-    /// each row is cut or kept as it is.
+    /// again for the new width, as terminals that reflow do: a character goes
+    /// on the row it fits on, a wide one that does not fit on the next. Without
+    /// it each row is cut or kept as it is.
     pub fn resize(&mut self, cols: usize, rows: usize, rewrap: bool) {
-        let mut logical: Vec<String> = Vec::new();
-        let mut cursor = (0, 0);
+        let cols = cols.max(1);
         if rewrap {
-            for (index, row) in self.grid.iter().enumerate() {
-                if !(self.continued[index] && !logical.is_empty()) {
-                    logical.push(String::new());
-                }
-                if index == self.row {
-                    let end = logical.last().expect("a line was pushed").chars().count();
-                    cursor = (logical.len() - 1, end + self.col);
-                }
-                logical
-                    .last_mut()
-                    .expect("a line was pushed")
-                    .push_str(&text_of(row));
-            }
-            self.cols = cols;
-            self.rows = rows;
-            self.grid.clear();
-            self.continued.clear();
-            let mut cursor_row = 0;
-            for (index, line) in logical.iter().enumerate() {
-                let characters: Vec<char> = line.chars().collect();
-                let chunks = characters.chunks(cols.max(1)).count().max(1);
-                for chunk in 0..chunks {
-                    if index == cursor.0 && cursor.1 / cols.max(1) == chunk {
-                        cursor_row = self.grid.len();
-                    }
-                    let start = chunk * cols;
-                    let end = (start + cols).min(characters.len());
-                    self.grid
-                        .push(characters.get(start..end).unwrap_or(&[]).to_vec());
-                    self.continued.push(chunk > 0);
-                }
-            }
-            self.row = cursor_row;
-            self.col = cursor.1 % cols.max(1);
+            self.rewrap(cols);
         } else {
-            self.cols = cols;
-            self.rows = rows;
             for row in &mut self.grid {
                 row.truncate(cols);
+                // A wide character cut in half leaves nothing of it.
+                if row.last().is_some_and(|cell| cell.width() == Some(2)) {
+                    *row.last_mut().expect("checked non-empty") = ' ';
+                }
             }
             self.col = self.col.min(cols);
         }
+        self.cols = cols;
+        self.rows = rows;
         while self.grid.len() < rows {
             self.grid.push(Vec::new());
             self.continued.push(false);
@@ -239,6 +210,67 @@ impl Screen {
             self.row = self.row.saturating_sub(1);
         }
         self.row = self.row.min(rows - 1);
+    }
+
+    /// Lays the visible lines out again for `cols` columns and moves the
+    /// cursor with the character it stands on.
+    fn rewrap(&mut self, cols: usize) {
+        // Each logical line is the characters of its rows, written spaces
+        // included. The cursor is remembered as a position in that line.
+        let mut logical: Vec<Vec<char>> = Vec::new();
+        let mut cursor = (0, 0);
+        for (index, row) in self.grid.iter().enumerate() {
+            if !(self.continued[index] && !logical.is_empty()) {
+                logical.push(Vec::new());
+            }
+            let number = logical.len() - 1;
+            let line = logical.last_mut().expect("a line was pushed");
+            if index == self.row {
+                let before: Vec<char> = row.iter().copied().take(self.col).collect();
+                let before = before.iter().filter(|cell| **cell != '\0').count();
+                cursor = (number, line.len() + before);
+            }
+            line.extend(row.iter().copied().filter(|cell| *cell != '\0'));
+        }
+        // Blank rows below the cursor and the last text are not lines of
+        // their own, so they do not grow with the layout.
+        let last = logical
+            .iter()
+            .rposition(|line| !line.is_empty())
+            .map_or(cursor.0, |last| last.max(cursor.0));
+        logical.truncate(last + 1);
+        self.grid.clear();
+        self.continued.clear();
+        let (mut cursor_row, mut cursor_col) = (0, 0);
+        for (number, line) in logical.iter().enumerate() {
+            let mut row: Vec<char> = Vec::new();
+            let mut used = 0;
+            let mut first = true;
+            for (offset, character) in line.iter().enumerate() {
+                let width = character.width().unwrap_or(0);
+                if used + width > cols {
+                    self.grid.push(std::mem::take(&mut row));
+                    self.continued.push(!first);
+                    first = false;
+                    used = 0;
+                }
+                if (number, offset) == cursor {
+                    (cursor_row, cursor_col) = (self.grid.len(), used);
+                }
+                row.push(*character);
+                if width == 2 {
+                    row.push('\0');
+                }
+                used += width;
+            }
+            if (number, line.len()) == cursor {
+                (cursor_row, cursor_col) = (self.grid.len(), used);
+            }
+            self.grid.push(row);
+            self.continued.push(!first);
+        }
+        self.row = cursor_row;
+        self.col = cursor_col;
     }
 }
 

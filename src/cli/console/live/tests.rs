@@ -267,6 +267,55 @@ fn a_finished_line_is_written_apart_from_the_region() {
 }
 
 // =========================================================
+// The emulator's resize
+// =========================================================
+
+/// A screen of `cols` columns that was fed `text`.
+fn fed(cols: usize, text: &str) -> Screen {
+    let mut screen = Screen::new(cols, 10);
+    screen.feed(text.as_bytes());
+    screen
+}
+
+#[test]
+fn a_rewrapped_line_takes_as_many_rows_as_it_needs() {
+    let mut screen = fed(10, "abcdefghij\n");
+    screen.resize(4, 10, true);
+    assert_eq!(screen.visible(), ["abcd", "efgh", "ij"]);
+    screen.feed(b"Z");
+    assert_eq!(screen.visible(), ["abcd", "efgh", "ij", "Z"]);
+}
+
+#[test]
+fn a_wide_character_that_does_not_fit_moves_to_the_next_row_on_a_rewrap() {
+    let mut screen = fed(10, "ab世cd\n");
+    screen.resize(3, 10, true);
+    assert_eq!(screen.visible(), ["ab", "世c", "d"]);
+}
+
+#[test]
+fn a_line_as_wide_as_the_window_takes_one_row_on_a_rewrap() {
+    let mut screen = fed(10, "abcd\n");
+    screen.resize(4, 10, true);
+    assert_eq!(screen.visible(), ["abcd"]);
+}
+
+#[test]
+fn spaces_at_the_end_of_a_row_are_kept_when_the_rows_join_again() {
+    let mut screen = fed(10, "abc  defg\n");
+    screen.resize(5, 10, true);
+    screen.resize(10, 10, true);
+    assert_eq!(screen.lines(), ["abc  defg"]);
+}
+
+#[test]
+fn a_wide_character_cut_by_a_narrowing_without_rewrap_is_dropped() {
+    let mut screen = fed(10, "ab世\n");
+    screen.resize(3, 10, false);
+    assert_eq!(screen.visible(), ["ab"]);
+}
+
+// =========================================================
 // Resize
 // =========================================================
 
