@@ -437,7 +437,10 @@ them is deleted or rewritten automatically. (ADR 0062)
   format than antiq knows is neither incomplete nor damaged. `list` and
   `status` mark it "newer format", `grep` skips it with a warning,
   `unearth`, `fork` and `rebuild` refuse it with the error kind
-  `format_too_new`, and `forget` takes it by its stamp. `push` neither
+  `format_too_new`, and `forget` takes it by its stamp. Damage beside it
+  (a missing or damaged checksum file) is decided first: `list` and
+  `status` show the version as damaged, and the three commands still
+  refuse it as `format_too_new`. `push` neither
   refuses nor counts it.
 - `push` refuses while either kind exists, naming the exact `forget` or
   `rebuild` command. It decodes every listing in full for that, in
@@ -523,7 +526,7 @@ tools read it as part of the file name.
 
 ## Packaging
 
-A Packager trait packs, verifies, lists and unpacks. Archives are tar
+A Packager trait packs, lists and unpacks; the strict verify is a function of its own (see "Verifying"). Archives are tar
 compressed with zstd, with zstd's content checksum. (ADR 0019)
 
 Tar is written in-process with hand-built GNU headers: mode masked to
@@ -598,33 +601,36 @@ for the records, once for the members and once to extract. (ADR 0050)
 
 ### Verifying
 
-A strict verify gates archiving and unearthing. It reads the stream to its
+A strict verify gates archiving. It reads the stream to its
 end and checks its integrity. A cut or corrupt stream, a tar stream
 without its end marker (two zero blocks after the last member), nonzero
 data after the end of the archive, an empty archive, a first member that
 is not a directory, a member outside the top-level directory, a member
 path that is not a plain relative path, a path that occurs twice, a hard
 link that does not name a file listed before it, a member that is neither
-file, directory, symlink nor hard link and a modification time beyond 64
+file, directory, symlink nor hard link and a modification time beyond 63
 bits make the package damaged.
 
 Then it compares every member with the tree on disk (type, size, content
 hash, modification time in whole seconds with the same clamp, mode, link
 target) and requires equal path sets under the same walk rules. The walk
 is the one packing uses, so a tree with an unreadable entry or a mount
-point is refused. A file with several names must be stored as packing
+point is refused; a locked entry does not refuse. A file with several names must be stored as packing
 stores it: the first path in byte order is the file and the others link to
 it. Ignored paths are left out on both sides. Special files are not
 archived and are not compared. Symlink modes are not compared, since Linux
 cannot set them.
 
+`unearth` and `fork` do not run this verify. Their extraction reads the
+stream to its end, and the extracted tree is compared with the listing in
+the same fields; the top-level directory has no line in the listing and is
+not compared.
+
 On a user's folder, directory modification times are not compared, the
 top-level directory's included. The top-level directory's mode is compared
 with the mode of the first member. On antiq's staging, directory
 modification times are compared, since the final pass of the extraction
-sets them from the package, and the top-level directory's modification
-time is compared but not its mode: the staging root keeps the mode its
-maker gave it until the piece is moved into place. A staging directory
+sets them from the package. A staging directory
 whose mode keeps its owner out gets owner access for the read, and its
 mode is put back afterwards. A user's folder is never changed.
 
@@ -1480,16 +1486,26 @@ fails with `EXDEV` in the real run cannot be foreseen.
 target. `--init` and `--force` are each refused together with
 `--if-reachable`. The steps run in this order.
 
+0. **Before the lock.** A missing target url, an invalid url, a collection
+   root that is not UTF-8 and `rsync_args` that make rsync quiet (`-q`,
+   `--quiet`) are refused first, also while another run holds the lock.
 1. **Repairs** run first, under the lock (see "Operations").
 2. **Check the store.** While a damaged or incomplete version exists,
    `push` refuses with exit 1 and prints the exact `forget` or `rebuild`
-   command for each. It also refuses, naming both, when two piece paths
+   command for each; a version whose archive is still staged in
+   `.antiq/tmp/pack/` after a failed repair counts, in a real run, and a
+   listing of a newer format does not. It also refuses, naming both, when two piece paths
    or two store folders of the collection differ only in case or Unicode
    normalization. (The same clash between file names inside one live
    folder is not checked.) And it refuses while `.antiq/trash/` still
    holds a tree after the repairs.
 3. **Check rsync.** The local rsync's `--version` must name rsync 3.2.4 or
-   newer, the release that added `--fsync`. openrsync, which macOS ships
+   newer, the release that added `--fsync`; a pre-release of 3.2.4 is
+   refused. Without `[target] rsync`, the local rsync is the first `rsync`
+   that passes this check in the absolute entries of `PATH`, then
+   `/opt/homebrew/bin` and `/usr/local/bin`; one that fails it is passed
+   over, and the refusals are named when none passes. A configured path
+   must be absolute and is never replaced by another rsync. openrsync, which macOS ships
    as `/usr/bin/rsync`, and older versions are refused with a message
    naming the binary and the config key `[target] rsync`. A target whose
    own rsync is openrsync (any macOS machine) works with `fsync = false`.
@@ -1532,7 +1548,8 @@ target. `--init` and `--force` are each refused together with
    collection's marker is still exit 1, and with a matching marker it is a
    plain push, noted in the output.
 
-   rsync runs with `LC_ALL=C`. The listing carries the mirror's `-e`,
+   rsync runs with `LC_ALL=C` and without any `RSYNC_*` variable or
+   `CVSIGNORE` of the environment. The listing carries the mirror's `-e`,
    `--rsync-path`, `--timeout` and `rsync_args`, but not `--fsync`. Over
    ssh, exit 255 counts as "cannot connect" only when ssh's line starts
    with `ssh: connect to host` or `ssh: Could not resolve hostname`, or
@@ -1548,8 +1565,9 @@ target. `--init` and `--force` are each refused together with
 
    Unreachable means exit 0 under `--if-reachable`, otherwise exit 4, and
    the reason is printed in text and `--json` every time. A dry run of an
-   unreachable target still lists its repairs in text, but never prints
-   `Nothing to do.` on stdout. A missing
+   unreachable target under `--if-reachable` still lists its repairs in
+   text, but never prints `Nothing to do.` on stdout; without
+   `--if-reachable` the error is all it prints. A missing
    directory of a path target is never created by antiq: the user creates
    it on the mounted volume.
 5. **Marker.** `.antiq-target` sits at the target root, outside the
@@ -1639,7 +1657,13 @@ target. `--init` and `--force` are each refused together with
    changes to directories are not counted. A path belongs to the live
    piece or store folder that is its longest prefix, `.antiq/pieces/<folder>/`
    counts for `<folder>`, and every other path is `other`. A real run
-   prints the same summary.
+   prints the same summary. In text it is `Changed on <target>:` (`Would
+   change on <target>:` in a dry run), one `  <piece>: N created, N
+   updated, N deleted` line per piece that changed and `  other files:
+   ...` where other paths changed; where nothing changed it is `Pushed to
+   <target>. Nothing changed.` (`The target <target> is up to date.` in a
+   dry run). A written marker adds `Wrote the marker .antiq-target.` before
+   it.
 
 With `--fsync` the target flushes each file's content before it is renamed
 into place; a power loss can then at most lose the newest names, which the
@@ -1700,7 +1724,7 @@ rsync_args = []                     # extra rsync options, e.g. for SMB shares
 | `collection.idle_days` | 30 | days a piece must be idle before it is due |
 | `collection.soon_days` | 3 | days before due that `status` shows `soon` |
 | `target.url` | none | an absolute path or `[user@]host:path` |
-| `target.rsync` | rsync from `PATH` | path of the local rsync |
+| `target.rsync` | the first suitable `rsync` on `PATH`, then in `/opt/homebrew/bin` and `/usr/local/bin` | absolute path of the local rsync |
 | `target.rsync_path` | none | the target's rsync, passed as `--rsync-path` |
 | `target.fsync` | `true` | pass `--fsync` |
 | `target.rsync_args` | `[]` | extra rsync options |
@@ -1799,7 +1823,11 @@ the middle, keeping its start and its end. Without a terminal the width is
 variable `NO_COLOR` is set to a non-empty value. (ADR 0056)
 
 Data goes to stdout, messages to stderr. An error line gives the error and
-its causes joined with `: `. A cause whose text the cause above it already
+its causes joined with `: `, prefixed `error:`; it is followed by one
+`    candidate: <path>` line per candidate of an ambiguous reference and one
+`  while attempting to <action>` line per context, the innermost first. The
+reasons why one piece is refused are joined with `, ` by `archive` and with
+`; ` by `status`. A cause whose text the cause above it already
 contains is not repeated, on the console and in the JSON `message`. Under
 `--json` an error is data: its JSON goes to stdout, like any other JSON
 output, and a usage error too prints the JSON envelope (kind `usage`) and
@@ -1873,15 +1901,19 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `{"kind": "archive", "piece": ...}`.
 
 `push` has `result`, `target` (the `[target] url` as written) and
-`warnings`; `dry_run` comes first in a dry run only. In a real run `result` is `"pushed"`, and `initialized` (the
+`warnings`; `dry_run` comes first in a dry run only. `result` is `"pushed"` in a real run and in a dry run, `"unreachable"` for an unreachable target. In a real run `initialized` (the
 marker was written), `forced`, `pieces` (each `{piece, created, updated,
 deleted}`, only pieces that changed, by path), `other` (the same counts for
 paths outside every piece), `vanished` (the paths of the `file has vanished`
-lines), `second_pass` and `notes` come between `target` and `warnings`,
+lines, as rsync prints them: with the collection root in front and not
+escaped), `second_pass` and `notes` come between `target` and `warnings`,
 followed by `repairs` (the repairs of the start of the run, each as
 `{"kind": "repair", "repair": ...}`) before `warnings`. A dry run has `actions` after `dry_run`: the repairs, then `{"kind":
 "write_marker"}` where `--init` would write it, then `{"kind": "mirror",
-"pieces": ..., "other": ...}`. A target that cannot be reached under
+"pieces": ..., "other": ...}`, and has none of `initialized`, `forced`,
+`pieces`, `other`, `vanished`, `second_pass`, `notes` and `repairs`. A dry
+run that finds the lock held has `dry_run`, `lock_held` (`pid`, `started`)
+and an empty `actions`. A target that cannot be reached under
 `--if-reachable` exits 0 with `result` `"unreachable"` and `reason` in place
 of the counts, with `repairs` and `warnings` after them, and the console
 prints `note: <reason>` on stderr and nothing on stdout. Without `--if-reachable` it is the error kind
@@ -1892,13 +1924,15 @@ warnings hold the notes on the settings of the collection (an unknown key
 under `[target]` among them) besides those of the repairs.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
-collection, as `{message}` objects) and, while a run holds the lock, `note`
+collection and the messages about files that could not be read, as
+`{message}` objects) and, while a run holds the lock, `note`
 (a text). Each version is `piece`, `stamp` (the version stamp, which has the
 counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
 "list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
 null where the head of the listing lacks them) and `damage` (a list of texts).
 
-`grep` adds `pattern`, `pieces`, `skipped` and `warnings` (as for `list`),
+`grep` adds `pattern`, `pieces`, `skipped` and `warnings` (the notes on the
+settings of the collection and on the lock file, as `{message}` objects),
 and a `note` field while the lock is held. Each element of `pieces` has
 `piece`, `name_match`, `versions` and `files`. `versions` lists the searched
 versions of the piece, newest first, each with `stamp` (the version stamp)
@@ -2000,5 +2034,3 @@ lists one action `{"kind": "fork", "piece", "stamp", "version", "path",
 section "fork" says so, and `damage` (a list of texts) for a damaged
 version. Without room for the version the action has `skipped` as above and
 the exit status is 3.
-
-The keys that the other commands add are not yet established.
