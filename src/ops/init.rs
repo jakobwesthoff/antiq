@@ -2,10 +2,1153 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `init` command.
+//! The `init` command: making a directory a collection.
+
+use crate::clock::Clock;
+use crate::collection::Collection;
+use crate::config::{ConfigDoc, ConfigError};
+use crate::fsx::atomic::{flush_dir, write_atomic};
+use crate::fsx::tree::TreeRoot;
+use crate::fsx::{FsxError, io_error};
+use crate::id::{IdSource, ObjectId};
+use crate::interact::{Choice, Interaction, Question};
+use crate::relpath::{Name, RelPath};
+use crate::report::{CommandReport, Warning};
+use crate::select::{Rules, SelectError, select};
+use crate::tree::EntryKind;
+use serde::Serialize;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 /// Errors of the `init` command.
 #[derive(Debug, thiserror::Error)]
-pub enum InitError {}
+pub enum InitError {
+    #[error("{} is already a collection", root.display())]
+    AlreadyACollection { root: PathBuf },
+    #[error("{} lies inside the collection at {}", directory.display(), root.display())]
+    InsideACollection { directory: PathBuf, root: PathBuf },
+    #[error("{} exists and is not a directory", path.display())]
+    AntiqIsNotADirectory { path: PathBuf },
+    #[error(
+        "these folders would be pieces and hold a collection of their own: {}",
+        list(roots)
+    )]
+    NestedCollections { roots: Vec<PathBuf> },
+    #[error(transparent)]
+    Select(#[from] SelectError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Fsx(#[from] FsxError),
+}
+
+fn list(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 impl crate::error::HasKind for InitError {}
+
+/// What `init` is going to do, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum InitAction {
+    CreateCollection { path: String },
+}
+
+/// Everything `init` decided before it creates anything.
+#[derive(Debug, Clone)]
+pub struct InitPlan {
+    root: PathBuf,
+    machine: String,
+    patterns: Vec<String>,
+    exclude: Vec<RelPath>,
+    /// The `archive/` folder `archive.sh` left, whether or not the exclude
+    /// list takes it.
+    proposal: Option<RelPath>,
+    pieces: Vec<RelPath>,
+    warnings: Vec<Warning>,
+}
+
+/// What a run of `init` did or would do.
+#[derive(Debug, Serialize)]
+pub struct InitReport {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    pub created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub path: String,
+    pub machine: String,
+    pub patterns: Vec<String>,
+    pub exclude: Vec<RelPath>,
+    pub pieces: Vec<RelPath>,
+    pub actions: Vec<InitAction>,
+    pub warnings: Vec<Warning>,
+    /// Whether the user answered a question. The console says different
+    /// things after an answer than after none.
+    #[serde(skip)]
+    pub answered: bool,
+}
+
+impl CommandReport for InitReport {
+    fn partial(&self) -> bool {
+        !self.created && !self.dry_run
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+}
+
+/// What the caller asks `init` to do.
+#[derive(Debug)]
+pub struct InitRequest<'a> {
+    pub directory: &'a Path,
+    /// Empty selects with the default pattern.
+    pub patterns: &'a [String],
+    pub machine: &'a str,
+    pub yes: bool,
+    pub dry_run: bool,
+}
+
+/// The directories of the local storage layout that exist from the start.
+/// `lock` and `remote-state.json` are made by the first run that needs
+/// them.
+const LAYOUT: [&str; 7] = [
+    "objects",
+    "tracking",
+    "index",
+    "tmp",
+    "staging",
+    "trash",
+    "recovered",
+];
+
+/// How many `.antiq-init-<pid>-<n>` names are tried before giving up.
+const STAGING_ATTEMPTS: u32 = 100;
+
+fn path(text: &str) -> RelPath {
+    RelPath::parse(text).expect("a fixed name is a valid path")
+}
+
+/// Works out what `init` would do in `directory`, and refuses where it
+/// cannot do it. Nothing is written. With `accept_proposal` unset the
+/// `archive/` folder of `archive.sh` stays a piece.
+pub fn plan(
+    directory: &Path,
+    patterns: &[String],
+    machine: &str,
+    accept_proposal: bool,
+) -> Result<InitPlan, InitError> {
+    let root = fs::canonicalize(directory).map_err(io_error("resolve", directory))?;
+
+    // `find_root` can only fail here with "not a collection": the path was
+    // resolved just above.
+    if let Ok(found) = Collection::find_root(&root) {
+        return Err(if found == root {
+            InitError::AlreadyACollection { root: found }
+        } else {
+            InitError::InsideACollection {
+                directory: root,
+                root: found,
+            }
+        });
+    }
+    let tree = TreeRoot::open(&root).map_err(io_error("open", &root))?;
+
+    // `find_root` ignores a `.antiq` that is not a directory, so this is
+    // the only place that refuses it before the user is asked anything.
+    if tree.lstat(&path(".antiq")).is_ok() {
+        return Err(InitError::AntiqIsNotADirectory {
+            path: root.join(".antiq"),
+        });
+    }
+
+    let patterns = if patterns.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        patterns.to_vec()
+    };
+    let archive = path("archive");
+    let proposal = (Rules::new(&patterns, &[])?.matches(&archive) && has_archive_sh_layout(&tree))
+        .then_some(archive);
+    let exclude: Vec<RelPath> = proposal
+        .iter()
+        .filter(|_| accept_proposal)
+        .cloned()
+        .collect();
+
+    let rules = Rules::new(&patterns, &exclude)?.bind(&tree)?;
+    let pieces = select(&tree, &rules)?.pieces().to_vec();
+    refuse_nested_collections(&tree, &root, &pieces)?;
+
+    let warnings = patterns
+        .iter()
+        .filter(|pattern| pattern.contains("**"))
+        .map(|pattern| {
+            Warning::new(format!(
+                "pattern {pattern} contains `**`, which matches any number of directories; \
+                 where matches nest, the shallowest match is the piece"
+            ))
+        })
+        .collect();
+    Ok(InitPlan {
+        root,
+        machine: machine.to_string(),
+        patterns,
+        exclude,
+        proposal,
+        pieces,
+        warnings,
+    })
+}
+
+/// Whether `archive/` holds what `archive.sh` leaves: archives as
+/// `*.tar.xz` files and their listings as `*.lst` files in `index/`.
+fn has_archive_sh_layout(tree: &TreeRoot) -> bool {
+    let holds_file_ending = |directory: &RelPath, suffix: &[u8]| {
+        let is_directory = tree
+            .lstat(directory)
+            .is_ok_and(|entry| entry.kind == EntryKind::Directory);
+        is_directory
+            && tree.read_dir(directory).is_ok_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.name.as_bytes().ends_with(suffix)
+                        && tree
+                            .lstat(&entry.path)
+                            .is_ok_and(|found| found.kind == EntryKind::File)
+                })
+            })
+    };
+    holds_file_ending(&path("archive"), b".tar.xz")
+        && holds_file_ending(&path("archive/index"), b".lst")
+}
+
+/// A piece is archived whole, so a piece that is a collection itself
+/// would take that collection's objects, tracking and config with it.
+fn refuse_nested_collections(
+    tree: &TreeRoot,
+    root: &Path,
+    pieces: &[RelPath],
+) -> Result<(), InitError> {
+    let marker = Name::from_bytes(b".antiq".to_vec()).expect("a fixed name is valid");
+    let roots: Vec<PathBuf> = pieces
+        .iter()
+        .filter(|piece| {
+            tree.lstat(&piece.join(&marker))
+                .is_ok_and(|entry| entry.kind == EntryKind::Directory)
+        })
+        .map(|piece| root.join(OsStr::from_bytes(piece.as_bytes())))
+        .collect();
+    if roots.is_empty() {
+        Ok(())
+    } else {
+        Err(InitError::NestedCollections { roots })
+    }
+}
+
+/// Creates the collection the plan describes. The `.antiq/` directory is
+/// built next to its final place and renamed into it, so it exists
+/// complete or not at all.
+pub fn apply(
+    plan: &InitPlan,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+) -> Result<InitReport, InitError> {
+    let id = ids.mint(clock.now());
+    let config = ConfigDoc::new(id, Some(&plan.patterns), &plan.exclude, &plan.machine).render()?;
+
+    let staged = create_staging_directory(&plan.root)?;
+    let published = fill_and_publish(&plan.root, &staged, &config);
+    if published.is_err() {
+        // Best effort: the failure being reported matters more than a
+        // leftover that cannot be removed either.
+        let _ = fs::remove_dir_all(&staged);
+    }
+    published?;
+    Ok(plan.report(Some(id), false))
+}
+
+/// Makes `.antiq-init-<pid>-<n>` in `root` with the first `n` that is
+/// free, so a directory left by a run that was killed never blocks the
+/// next one.
+fn create_staging_directory(root: &Path) -> Result<PathBuf, InitError> {
+    let pid = std::process::id();
+    for attempt in 0..STAGING_ATTEMPTS {
+        let staged = root.join(format!(".antiq-init-{pid}-{attempt}"));
+        match fs::create_dir(&staged) {
+            Ok(()) => return Ok(staged),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error("create", &staged)(error).into()),
+        }
+    }
+    let error = io::Error::from(io::ErrorKind::AlreadyExists);
+    Err(io_error("create", &root.join(format!(".antiq-init-{pid}-*")))(error).into())
+}
+
+fn fill_and_publish(root: &Path, staged: &Path, config: &str) -> Result<(), InitError> {
+    for directory in LAYOUT {
+        let made = staged.join(directory);
+        fs::create_dir(&made).map_err(io_error("create", &made))?;
+    }
+    // Written last: the write ends by flushing `staged`, which makes the
+    // entries made above durable as well.
+    write_atomic(&staged.join("config.toml"), config.as_bytes())?;
+
+    let tree = TreeRoot::open(root).map_err(io_error("open", root))?;
+    let name = staged
+        .file_name()
+        .expect("the staging directory has a name");
+    let from = RelPath::from_bytes(name.as_bytes().to_vec()).expect("its name is a valid path");
+    tree.rename(&from, &tree, &path(".antiq"))
+        .map_err(io_error("create", &root.join(".antiq")))?;
+    flush_dir(root)?;
+    Ok(())
+}
+
+/// Makes the directory a collection, or says what it would do.
+///
+/// A dry run creates nothing and asks nothing. With `yes` the plan is
+/// carried out as it stands, the proposed exclude included. Otherwise the
+/// user is asked; no answer, as without a terminal, creates nothing.
+pub fn init(
+    request: &InitRequest<'_>,
+    interaction: &mut dyn Interaction,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+) -> Result<InitReport, InitError> {
+    let plan = plan(request.directory, request.patterns, request.machine, true)?;
+    if request.dry_run {
+        return Ok(plan.report(None, true));
+    }
+    if request.yes {
+        return apply(&plan, clock, ids);
+    }
+
+    let answer = interaction.choose(&plan.question());
+    let mut report = match answer.as_ref().map(|choice| choice.id.as_str()) {
+        Some("create") => apply(&plan, clock, ids)?,
+        Some("create_keep") => {
+            let keeping = self::plan(request.directory, request.patterns, request.machine, false)?;
+            apply(&keeping, clock, ids)?
+        }
+        _ => plan.report(None, false),
+    };
+    report.answered = answer.is_some();
+    Ok(report)
+}
+
+impl InitPlan {
+    fn report(&self, id: Option<ObjectId>, dry_run: bool) -> InitReport {
+        let path = self.root.display().to_string();
+        InitReport {
+            dry_run,
+            created: id.is_some(),
+            id,
+            machine: self.machine.clone(),
+            patterns: self.patterns.clone(),
+            exclude: self.exclude.clone(),
+            pieces: self.pieces.clone(),
+            actions: vec![InitAction::CreateCollection { path: path.clone() }],
+            path,
+            warnings: self.warnings.clone(),
+            answered: false,
+        }
+    }
+
+    /// What the user is asked. The details carry everything that is
+    /// decided, so the terminal alone shows it even when the output of the
+    /// command is redirected.
+    fn question(&self) -> Question {
+        let mut details = vec![
+            format!("patterns: {}", self.patterns.join(", ")),
+            format!("machine: {}", self.machine),
+        ];
+        if let Some(proposal) = &self.proposal {
+            details.push(format!("exclude: {proposal} (proposed: archive.sh layout)"));
+        }
+        details.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("note: {}", warning.message)),
+        );
+        details.push(format!("pieces ({}):", self.pieces.len()));
+        details.extend(self.pieces.iter().map(|piece| format!("  {piece}")));
+
+        let mut choices = Vec::new();
+        match &self.proposal {
+            Some(proposal) => {
+                choices.push(Choice::new(
+                    "create",
+                    format!("Create the collection, excluding {proposal}"),
+                ));
+                choices.push(Choice::new(
+                    "create_keep",
+                    format!("Create the collection, keeping {proposal} as a piece"),
+                ));
+            }
+            None => choices.push(Choice::new("create", "Create the collection")),
+        }
+        choices.push(Choice::new("decline", "Do not create it"));
+        Question {
+            title: format!("Create a collection in {}?", self.root.display()),
+            details,
+            default: choices.len() - 1,
+            choices,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::FixedClock;
+    use crate::config::Config;
+    use crate::id::SeqIds;
+    use crate::interact::{Choice, NonInteractive, ScriptedInteraction};
+    use crate::testing::tree::{TempCollection, Tree};
+    use std::fs;
+
+    const MACHINE: &str = "laptop";
+
+    fn clock() -> FixedClock {
+        FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a valid time"))
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        fs::canonicalize(path).expect("the path exists")
+    }
+
+    fn patterns(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    fn names(pieces: &[RelPath]) -> Vec<String> {
+        pieces.iter().map(ToString::to_string).collect()
+    }
+
+    fn plan_of(tree: &Tree, list: &[&str]) -> InitPlan {
+        plan(tree.root(), &patterns(list), MACHINE, true).expect("the directory can be planned")
+    }
+
+    /// A tree with the layout `archive.sh` leaves, next to a piece `p`.
+    fn archive_sh_tree() -> Tree {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("archive/one.tar.xz", "x");
+        tree.file("archive/index/one.tar.xz.lst", "x");
+        tree
+    }
+
+    fn apply_plan(plan: &InitPlan) -> InitReport {
+        apply(plan, &clock(), &SeqIds::new(1)).expect("the collection can be created")
+    }
+
+    // =========================================================
+    // What the patterns select
+    // =========================================================
+
+    #[test]
+    fn a_plan_lists_the_pieces_the_patterns_select() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        tree.dir("b");
+        tree.file("f", "x");
+        tree.dir(".hidden");
+        let plan = plan_of(&tree, &[]);
+        assert_eq!(names(&plan.pieces), ["a", "b"]);
+    }
+
+    #[test]
+    fn given_patterns_replace_the_default() {
+        let mut tree = Tree::new();
+        tree.dir("a1");
+        tree.dir("b1");
+        let plan = plan_of(&tree, &["a*"]);
+        assert_eq!(names(&plan.pieces), ["a1"]);
+        assert_eq!(plan.patterns, ["a*"]);
+    }
+
+    #[test]
+    fn without_patterns_the_default_is_the_plan() {
+        let tree = Tree::new();
+        assert_eq!(plan_of(&tree, &[]).patterns, ["*"]);
+    }
+
+    #[test]
+    fn an_invalid_pattern_is_refused() {
+        let tree = Tree::new();
+        let error = plan(tree.root(), &patterns(&["a//b"]), MACHINE, true)
+            .expect_err("an empty component is invalid");
+        assert!(matches!(
+            error,
+            InitError::Select(SelectError::InvalidPattern { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pattern_with_double_star_gets_a_note() {
+        let mut tree = Tree::new();
+        tree.dir("a/b");
+        let plan = plan_of(&tree, &["a/**"]);
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].message.contains("a/**"),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_pattern_without_double_star_gets_no_note() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        let plan = plan_of(&tree, &["a*"]);
+        assert_eq!(names(&plan.pieces), ["a"]);
+        assert!(plan.warnings.is_empty());
+    }
+
+    // =========================================================
+    // The archive.sh layout
+    // =========================================================
+
+    #[test]
+    fn archive_sh_layout_is_proposed_for_exclusion() {
+        let tree = archive_sh_tree();
+        let plan = plan_of(&tree, &[]);
+        assert_eq!(
+            plan.proposal,
+            Some(RelPath::parse("archive").expect("a valid path"))
+        );
+        assert_eq!(names(&plan.exclude), ["archive"]);
+        assert_eq!(names(&plan.pieces), ["p"]);
+    }
+
+    #[test]
+    fn a_declined_proposal_keeps_archive_as_a_piece() {
+        let tree = archive_sh_tree();
+        let plan = plan(tree.root(), &[], MACHINE, false).expect("plannable");
+        assert!(plan.proposal.is_some());
+        assert!(plan.exclude.is_empty());
+        assert_eq!(names(&plan.pieces), ["archive", "p"]);
+    }
+
+    fn assert_no_proposal(tree: &Tree) {
+        let plan = plan_of(tree, &[]);
+        assert_eq!(plan.proposal, None);
+        assert!(plan.exclude.is_empty());
+        assert_eq!(names(&plan.pieces), ["archive", "p"]);
+    }
+
+    #[test]
+    fn no_proposal_without_the_listings() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("archive/one.tar.xz", "x");
+        assert_no_proposal(&tree);
+    }
+
+    #[test]
+    fn no_proposal_without_the_archives() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("archive/index/one.tar.xz.lst", "x");
+        assert_no_proposal(&tree);
+    }
+
+    #[test]
+    fn no_proposal_when_archive_is_a_symlink() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("elsewhere/one.tar.xz", "x");
+        tree.file("elsewhere/index/one.tar.xz.lst", "x");
+        tree.symlink("archive", "elsewhere");
+        let plan = plan_of(&tree, &[]);
+        assert_eq!(plan.proposal, None);
+        assert_eq!(names(&plan.pieces), ["elsewhere", "p"]);
+    }
+
+    #[test]
+    fn no_proposal_when_no_pattern_selects_archive() {
+        let tree = archive_sh_tree();
+        let plan = plan_of(&tree, &["p*"]);
+        assert_eq!(plan.proposal, None);
+        assert!(plan.exclude.is_empty());
+        assert_eq!(names(&plan.pieces), ["p"]);
+    }
+
+    #[test]
+    fn no_proposal_when_the_listing_directory_is_a_file() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("archive/one.tar.xz", "x");
+        tree.file("archive/index", "x");
+        assert_no_proposal(&tree);
+    }
+
+    #[test]
+    fn no_proposal_when_a_tar_xz_is_a_directory() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.dir("archive/one.tar.xz");
+        tree.file("archive/index/one.tar.xz.lst", "x");
+        assert_no_proposal(&tree);
+    }
+
+    #[test]
+    fn no_proposal_when_a_lst_is_a_symlink() {
+        let mut tree = Tree::new();
+        tree.dir("p");
+        tree.file("archive/one.tar.xz", "x");
+        tree.dir("archive/index");
+        tree.symlink("archive/index/one.tar.xz.lst", "../one.tar.xz");
+        assert_no_proposal(&tree);
+    }
+
+    // =========================================================
+    // Where a collection cannot be made
+    // =========================================================
+
+    #[test]
+    fn a_directory_with_antiq_is_refused_naming_itself() {
+        let collection = TempCollection::minimal();
+        let error =
+            plan(collection.root(), &[], MACHINE, true).expect_err("the directory is a collection");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is already a collection",
+                canonical(collection.root()).display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_directory_below_a_collection_is_refused_naming_the_root() {
+        let mut collection = TempCollection::minimal();
+        let below = collection.tree().dir("projects/web");
+        let error = plan(&below, &[], MACHINE, true).expect_err("inside a collection");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} lies inside the collection at {}",
+                canonical(&below).display(),
+                canonical(collection.root()).display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_is_an_error() {
+        let tree = Tree::new();
+        let error = plan(&tree.path("missing"), &[], MACHINE, true)
+            .expect_err("the directory does not exist");
+        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+    }
+
+    #[test]
+    fn a_file_outside_a_collection_is_an_open_error() {
+        let mut tree = Tree::new();
+        let file = tree.file("f", "x");
+        let error = plan(&file, &[], MACHINE, true).expect_err("a file is no directory");
+        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+    }
+
+    #[test]
+    fn a_file_inside_a_collection_is_refused_naming_the_root() {
+        let mut collection = TempCollection::minimal();
+        let file = collection.tree().file("f", "x");
+        let error = plan(&file, &[], MACHINE, true).expect_err("inside a collection");
+        assert!(
+            matches!(error, InitError::InsideACollection { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn plan_refuses_a_file_named_antiq() {
+        let mut tree = Tree::new();
+        tree.file(".antiq", "x");
+        let error = plan(tree.root(), &[], MACHINE, true).expect_err("the name is taken");
+        assert!(
+            matches!(error, InitError::AntiqIsNotADirectory { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn plan_refuses_a_symlink_named_antiq() {
+        let mut tree = Tree::new();
+        tree.dir("elsewhere");
+        tree.symlink(".antiq", "elsewhere");
+        let error = plan(tree.root(), &[], MACHINE, true).expect_err("the name is taken");
+        assert!(
+            matches!(error, InitError::AntiqIsNotADirectory { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_piece_holding_a_collection_is_refused_naming_each_root() {
+        let mut tree = Tree::new();
+        tree.dir("one/.antiq");
+        tree.dir("two/.antiq");
+        tree.dir("plain");
+        let error = plan(tree.root(), &[], MACHINE, true).expect_err("nested collections");
+        let root = canonical(tree.root());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "these folders would be pieces and hold a collection of their own: {}, {}",
+                root.join("one").display(),
+                root.join("two").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_nested_collection_outside_the_pieces_is_no_problem() {
+        let mut tree = Tree::new();
+        tree.dir("one/.antiq");
+        tree.dir("plain");
+        let plan = plan_of(&tree, &["plain"]);
+        assert_eq!(names(&plan.pieces), ["plain"]);
+    }
+
+    // =========================================================
+    // Creating the collection
+    // =========================================================
+
+    #[test]
+    fn apply_creates_the_layout_of_the_local_storage() {
+        let tree = Tree::new();
+        apply_plan(&plan_of(&tree, &[]));
+        for directory in [
+            "objects",
+            "tracking",
+            "index",
+            "tmp",
+            "staging",
+            "trash",
+            "recovered",
+        ] {
+            assert!(
+                tree.path(".antiq").join(directory).is_dir(),
+                "{directory} is missing"
+            );
+        }
+        assert!(
+            !tree.path(".antiq/lock").exists(),
+            "the first run that needs the lock makes it"
+        );
+    }
+
+    #[test]
+    fn apply_writes_the_settings_into_the_config() {
+        let tree = archive_sh_tree();
+        let report = apply_plan(&plan_of(&tree, &["p*", "archive"]));
+        let config = Config::read(&tree.path(".antiq/config.toml")).expect("a readable config");
+        assert_eq!(Some(config.collection.id), report.id);
+        assert_eq!(config.collection.patterns, ["p*", "archive"]);
+        assert_eq!(config.machine.name.as_deref(), Some(MACHINE));
+        assert_eq!(
+            config
+                .collection
+                .exclude
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["archive"]
+        );
+    }
+
+    #[test]
+    fn the_collection_id_carries_the_time_of_creation() {
+        let tree = Tree::new();
+        let report = apply_plan(&plan_of(&tree, &[]));
+        let id = report.id.expect("a created collection has an id");
+        let now = clock().now();
+        assert_eq!(
+            id.timestamp_ms(),
+            u64::try_from(now.as_millisecond()).expect("after 1970")
+        );
+    }
+
+    #[test]
+    fn apply_leaves_no_temporary_directory_behind() {
+        let mut tree = Tree::new();
+        tree.dir("a");
+        apply_plan(&plan_of(&tree, &[]));
+        let mut entries: Vec<String> = fs::read_dir(tree.root())
+            .expect("the root can be listed")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into()
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".antiq", "a"]);
+    }
+
+    #[test]
+    fn a_created_collection_is_found_and_read() {
+        let tree = Tree::new();
+        let report = apply_plan(&plan_of(&tree, &[]));
+        let collection = crate::collection::Collection::find(tree.root()).expect("a collection");
+        assert_eq!(Some(collection.id()), report.id);
+        assert_eq!(collection.root(), canonical(tree.root()));
+    }
+
+    #[test]
+    fn a_file_named_antiq_blocks_creation_and_stays() {
+        let mut tree = Tree::new();
+        let plan = plan_of(&tree, &[]);
+        // The plan found no marker; the file appears afterwards, as it
+        // would in a race.
+        let file = tree.file(".antiq", "mine");
+        let error = apply(&plan, &clock(), &SeqIds::new(1)).expect_err("the name is taken");
+        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert_eq!(fs::read_to_string(file).expect("still there"), "mine");
+        let leftovers: Vec<_> = fs::read_dir(tree.root())
+            .expect("the root can be listed")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(leftovers, [std::ffi::OsString::from(".antiq")]);
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_written_is_an_error() {
+        let mut tree = Tree::new();
+        let directory = tree.dir("readonly");
+        let _guard = crate::fsx::RestoreModes(vec![directory.clone()]);
+        fs::set_permissions(
+            &directory,
+            std::os::unix::fs::PermissionsExt::from_mode(0o500),
+        )
+        .expect("the mode can be set");
+        assert!(
+            fs::create_dir(directory.join("probe")).is_err(),
+            "the test needs a user that mode 500 locks out"
+        );
+        let plan = plan(&directory, &[], MACHINE, true).expect("planning only reads");
+        let error = apply(&plan, &clock(), &SeqIds::new(1)).expect_err("nothing can be created");
+        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert_eq!(
+            fs::read_dir(&directory).expect("listable").count(),
+            0,
+            "nothing is left behind"
+        );
+    }
+
+    #[test]
+    fn the_default_pattern_is_the_one_of_the_config() {
+        let tree = Tree::new();
+        let defaults = Config::new(SeqIds::new(1).mint(clock().now()));
+        assert_eq!(plan_of(&tree, &[]).patterns, defaults.collection.patterns);
+    }
+
+    #[test]
+    fn a_stale_temporary_directory_does_not_block_init() {
+        let mut tree = Tree::new();
+        let stale = tree.dir(&format!(".antiq-init-{}-0", std::process::id()));
+        apply_plan(&plan_of(&tree, &[]));
+        assert!(stale.is_dir(), "an entry that is not ours stays");
+        assert!(tree.path(".antiq/config.toml").is_file());
+    }
+
+    #[test]
+    fn too_many_stale_temporary_directories_fail_without_a_trace() {
+        let mut tree = Tree::new();
+        for number in 0..100 {
+            tree.dir(&format!(".antiq-init-{}-{number}", std::process::id()));
+        }
+        let error = apply(&plan_of(&tree, &[]), &clock(), &SeqIds::new(1))
+            .expect_err("no free temporary name");
+        assert!(matches!(error, InitError::Fsx(_)), "{error}");
+        assert!(!tree.path(".antiq").exists());
+    }
+
+    #[test]
+    fn init_and_the_minimal_fixture_make_the_same_collection() {
+        let tree = Tree::new();
+        apply_plan(&plan_of(&tree, &[]));
+        let minimal = TempCollection::minimal();
+        let entries = |root: &Path| {
+            let mut names: Vec<String> = fs::read_dir(root.join(".antiq"))
+                .expect("the marker can be listed")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into()
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(entries(tree.root()), entries(minimal.root()));
+        let mut made = Config::read(&tree.path(".antiq/config.toml")).expect("readable");
+        let fixture = Config::read(&minimal.root().join(".antiq/config.toml")).expect("readable");
+        made.collection.id = fixture.collection.id;
+        made.machine.name = None;
+        assert_eq!(made, fixture);
+    }
+
+    // =========================================================
+    // Deciding
+    // =========================================================
+
+    fn request<'a>(
+        tree: &'a Tree,
+        patterns: &'a [String],
+        yes: bool,
+        dry_run: bool,
+    ) -> InitRequest<'a> {
+        InitRequest {
+            directory: tree.root(),
+            patterns,
+            machine: MACHINE,
+            yes,
+            dry_run,
+        }
+    }
+
+    fn run(request: &InitRequest<'_>, interaction: &mut dyn Interaction) -> InitReport {
+        init(request, interaction, &clock(), &SeqIds::new(1)).expect("init succeeds")
+    }
+
+    #[test]
+    fn yes_creates_with_the_proposal() {
+        let tree = archive_sh_tree();
+        let report = run(&request(&tree, &[], true, false), &mut NonInteractive);
+        assert!(report.created);
+        assert!(!report.answered);
+        assert_eq!(names(&report.exclude), ["archive"]);
+        assert!(tree.path(".antiq/config.toml").is_file());
+    }
+
+    #[test]
+    fn a_scripted_create_creates_with_the_proposal() {
+        let tree = archive_sh_tree();
+        let mut interaction = ScriptedInteraction::new();
+        interaction.expect(
+            &format!(
+                "Create a collection in {}?",
+                canonical(tree.root()).display()
+            ),
+            "create",
+        );
+        let report = run(&request(&tree, &[], false, false), &mut interaction);
+        assert!(report.created);
+        assert!(report.answered);
+        assert_eq!(names(&report.exclude), ["archive"]);
+        assert_eq!(names(&report.pieces), ["p"]);
+    }
+
+    #[test]
+    fn a_scripted_create_keep_creates_without_the_exclude() {
+        let tree = archive_sh_tree();
+        let mut interaction = ScriptedInteraction::new();
+        interaction.expect(
+            &format!(
+                "Create a collection in {}?",
+                canonical(tree.root()).display()
+            ),
+            "create_keep",
+        );
+        let report = run(&request(&tree, &[], false, false), &mut interaction);
+        assert!(report.created);
+        assert!(report.exclude.is_empty());
+        assert_eq!(names(&report.pieces), ["archive", "p"]);
+        let config = Config::read(&tree.path(".antiq/config.toml")).expect("readable");
+        assert!(config.collection.exclude.is_empty());
+    }
+
+    #[test]
+    fn a_scripted_decline_creates_nothing() {
+        let tree = archive_sh_tree();
+        let mut interaction = ScriptedInteraction::new();
+        interaction.expect(
+            &format!(
+                "Create a collection in {}?",
+                canonical(tree.root()).display()
+            ),
+            "decline",
+        );
+        let report = run(&request(&tree, &[], false, false), &mut interaction);
+        assert!(!report.created);
+        assert!(report.answered);
+        assert!(!tree.path(".antiq").exists());
+    }
+
+    #[test]
+    fn no_answer_creates_nothing() {
+        let tree = archive_sh_tree();
+        let report = run(&request(&tree, &[], false, false), &mut NonInteractive);
+        assert!(!report.created);
+        assert!(!report.answered);
+        assert_eq!(names(&report.exclude), ["archive"]);
+        assert!(!tree.path(".antiq").exists());
+    }
+
+    #[test]
+    fn a_dry_run_creates_nothing_and_asks_nothing() {
+        let tree = archive_sh_tree();
+        // An empty script panics on any question.
+        let mut interaction = ScriptedInteraction::new();
+        let report = run(&request(&tree, &[], true, true), &mut interaction);
+        assert!(!report.created);
+        assert!(report.dry_run);
+        assert!(!tree.path(".antiq").exists());
+    }
+
+    #[test]
+    fn a_dry_run_in_a_collection_is_refused() {
+        let collection = TempCollection::minimal();
+        let error = init(
+            &InitRequest {
+                directory: collection.root(),
+                patterns: &[],
+                machine: MACHINE,
+                yes: false,
+                dry_run: true,
+            },
+            &mut NonInteractive,
+            &clock(),
+            &SeqIds::new(1),
+        )
+        .expect_err("the directory is a collection");
+        assert!(matches!(error, InitError::AlreadyACollection { .. }));
+    }
+
+    #[test]
+    fn a_declined_run_is_partial_and_a_dry_run_is_not() {
+        let tree = Tree::new();
+        let declined = run(&request(&tree, &[], false, false), &mut NonInteractive);
+        assert!(declined.partial());
+        let dry = run(&request(&tree, &[], false, true), &mut NonInteractive);
+        assert!(!dry.partial());
+        let created = run(&request(&tree, &[], true, false), &mut NonInteractive);
+        assert!(!created.partial());
+    }
+
+    /// Remembers what it was asked and gives no answer.
+    #[derive(Default)]
+    struct Recording {
+        questions: Vec<Question>,
+    }
+
+    impl Interaction for Recording {
+        fn choose(&mut self, question: &Question) -> Option<Choice> {
+            self.questions.push(question.clone());
+            None
+        }
+    }
+
+    #[test]
+    fn the_question_shows_what_is_decided() {
+        let mut tree = archive_sh_tree();
+        tree.dir("q");
+        let mut interaction = Recording::default();
+        run(
+            &request(&tree, &patterns(&["**"]), false, false),
+            &mut interaction,
+        );
+        let question = interaction.questions.pop().expect("one question");
+        assert_eq!(
+            question.title,
+            format!(
+                "Create a collection in {}?",
+                canonical(tree.root()).display()
+            )
+        );
+        let ids: Vec<&str> = question.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["create", "create_keep", "decline"]);
+        assert_eq!(question.default_choice().id, "decline");
+        let details = question.details.join("\n");
+        for expected in [
+            "patterns: **",
+            "machine: laptop",
+            "exclude: archive (proposed: archive.sh layout)",
+            "pieces (2):",
+            "p\n",
+            "contains `**`",
+        ] {
+            assert!(
+                details.contains(expected),
+                "{expected:?} missing in:\n{details}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_proposal_the_question_offers_two_choices() {
+        let tree = Tree::new();
+        let mut interaction = Recording::default();
+        run(&request(&tree, &[], false, false), &mut interaction);
+        let question = interaction.questions.pop().expect("one question");
+        let ids: Vec<&str> = question.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["create", "decline"]);
+        assert_eq!(question.default_choice().id, "decline");
+    }
+
+    // =========================================================
+    // The report
+    // =========================================================
+
+    #[test]
+    fn a_created_report_serialises_in_the_documented_order() {
+        let tree = Tree::new();
+        let report = apply_plan(&plan_of(&tree, &["a*"]));
+        let root = canonical(tree.root()).display().to_string();
+        let id = SeqIds::new(1).mint(clock().now());
+        assert_eq!(
+            serde_json::to_string(&report).expect("serialises"),
+            format!(
+                "{{\"created\":true,\"id\":\"{id}\",\"path\":\"{root}\",\"machine\":\"laptop\",\
+                 \"patterns\":[\"a*\"],\"exclude\":[],\"pieces\":[],\
+                 \"actions\":[{{\"action\":\"create_collection\",\"path\":\"{root}\"}}],\
+                 \"warnings\":[]}}"
+            )
+        );
+    }
+
+    #[test]
+    fn a_dry_run_report_says_so_and_has_no_id() {
+        let tree = Tree::new();
+        let report = run(&request(&tree, &[], false, true), &mut NonInteractive);
+        let json = serde_json::to_value(&report).expect("serialises");
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["created"], false);
+        assert!(json.get("id").is_none());
+    }
+
+    #[test]
+    fn a_report_without_the_flag_has_no_dry_run_key() {
+        let tree = Tree::new();
+        let report = run(&request(&tree, &[], false, false), &mut NonInteractive);
+        let json = serde_json::to_value(&report).expect("serialises");
+        assert!(json.get("dry_run").is_none());
+    }
+
+    #[test]
+    fn the_report_keeps_the_notes() {
+        let tree = Tree::new();
+        let report = run(
+            &request(&tree, &patterns(&["**"]), true, false),
+            &mut NonInteractive,
+        );
+        assert_eq!(CommandReport::warnings(&report).len(), 1);
+    }
+}

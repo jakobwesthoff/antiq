@@ -54,17 +54,26 @@ searching upwards from the current directory, or from the path given
 with `-C`, and fail outside a collection. `.antiq/` holds the
 collection's config, metadata, index and local archives. (ADR 0011)
 
-`init` mints the collection's ULID and stores it in the config. It
-lists what the patterns select and asks before creating the collection.
-It detects the layout `archive.sh` leaves (`archive/` with `*.tar.xz`
-and `index/*.lst`) and proposes excluding it. It notes when a pattern
-contains `**`. Without a terminal, or with `--json`, it creates nothing
-and prints the plan unless `--yes` is given, and exits 3. `--yes`
-accepts the plan, the proposed exclude included. `--pattern`
-(repeatable) sets the patterns; every other setting starts at its
-default and is changed in the config file. `init` refuses where
-`.antiq/` already exists and inside a collection, naming the existing
-collection's root.
+`init` mints the collection's ULID and stores it in the config together
+with the machine name. It lists what the patterns select and asks before
+creating the collection. It detects the layout `archive.sh` leaves
+(`archive/`, a real directory, holding a `*.tar.xz` file, and
+`archive/index/` holding a `*.lst` file) and, when a pattern selects
+`archive`, proposes excluding it; the listing is made with the proposed
+exclude applied. It notes when a pattern contains `**`. Without a
+terminal, or with `--json`, it creates nothing and prints the plan
+unless `--yes` is given, and exits 3. Declining the question, or not
+answering it, ends the same way. `--yes` accepts the plan, the proposed
+exclude included. `--dry-run` prints the plan, asks nothing, creates
+nothing and exits 0. `--pattern` (repeatable) sets the patterns; every
+other setting starts at its default and is changed in the config file.
+`init` creates `.antiq/` with the directories of the local layout and
+the config in one step, so it exists complete or not at all. It refuses,
+also under `--dry-run`, where `.antiq/` already exists and inside a
+collection, naming the existing collection's root, where a `.antiq` is a
+file or a symlink, and where a folder that would be a piece holds a
+`.antiq/` directory of its own, naming each such folder. Every refusal
+creates nothing and exits 1.
 
 ### Selection
 
