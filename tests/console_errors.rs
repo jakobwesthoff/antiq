@@ -51,9 +51,9 @@ fn times(text: &str, needle: &str) -> usize {
 fn assert_listed_once(run: &Outcome) {
     run.expect_code(1);
     let stderr = &run.stderr;
-    assert_eq!(times(stderr, "matches 2 pieces"), 1, "{stderr}");
-    assert_eq!(times(stderr, "projects/scanner"), 1, "{stderr}");
-    assert_eq!(times(stderr, "tools/scan-old"), 1, "{stderr}");
+    assert_eq!(times(stderr, "fits the paths of 2 pieces"), 1, "{stderr}");
+    assert_eq!(times(stderr, "candidate: projects/scanner"), 1, "{stderr}");
+    assert_eq!(times(stderr, "candidate: tools/scan-old"), 1, "{stderr}");
     let mut lines: Vec<&str> = stderr.lines().collect();
     lines.sort_unstable();
     let count = lines.len();
@@ -106,7 +106,8 @@ fn the_candidates_come_before_the_lines_naming_what_the_run_was_doing() {
     assert_eq!(
         lines,
         [
-            "error: `scan` matches 2 pieces",
+            "error: no unique piece matches `scan`, as it fits the paths of 2 pieces",
+            "  fix: Name the piece by more of its path, for example projects/scanner.",
             "    candidate: projects/scanner",
             "    candidate: tools/scan-old",
             "  while attempting to unearth the version",
@@ -122,7 +123,7 @@ fn the_json_message_of_an_ambiguous_unearth_says_it_once() {
     let json: Value = serde_json::from_str(&run.stdout).expect("a JSON envelope");
     assert_eq!(
         json["error"]["message"],
-        "cannot find the piece: `scan` matches 2 pieces"
+        "cannot find the piece: no unique piece matches `scan`, as it fits the paths of 2 pieces"
     );
     assert_eq!(
         json["error"]["candidates"],
@@ -149,7 +150,8 @@ fn an_ambiguous_version_lists_one_candidate_line_per_stamp_on_a_pipe() {
     run.expect_code(1);
     assert_eq!(
         run.stderr,
-        "error: `2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\n    \
+        "error: `2026-11-04` names no single version of projects/scanner, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\n  \
+         fix: Name one version by more of its stamp, for example 2026-11-04T100000.\n    \
          candidate: 2026-11-04T100000\n    \
          candidate: 2026-11-04T090211\n  \
          while attempting to unearth the version\n"
@@ -163,7 +165,7 @@ fn the_json_of_an_unknown_piece_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"code\":\"antiq::reference::unknown\",\"message\":\"cannot find the piece: `scnaer` matches no piece\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"code\":\"antiq::reference::unknown\",\"message\":\"cannot find the piece: no piece matches `scnaer`, as none of the pieces has a path that fits it\",\"fix\":\"Check the spelling, or look for the piece with `antiq list`.\"}}\n"
     );
 }
 
@@ -174,7 +176,7 @@ fn the_json_of_an_ambiguous_version_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"code\":\"antiq::version::ambiguous\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"code\":\"antiq::version::ambiguous\",\"message\":\"`2026-11-04` names no single version of projects/scanner, as 2 versions match it: 2026-11-04T100000, 2026-11-04T090211\",\"fix\":\"Name one version by more of its stamp, for example `2026-11-04T100000`.\"}}\n"
     );
 }
 

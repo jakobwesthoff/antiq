@@ -17,10 +17,12 @@ use super::output::Style;
 use super::table::{WIDE_FROM, mid, pad, pad_left, painted, sanitize, spaces};
 use super::{Cli, Command, Description, error_block};
 use antiq::commands::list::{Row, list};
+use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
 use antiq::versions::naming::{VersionLookupError, system_zone};
 use jiff::tz::TimeZone;
+use miette::Diagnostic;
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
@@ -31,7 +33,6 @@ enum Failure<'a> {
         candidates: &'a [Candidate],
     },
     Unknown {
-        reference: &'a str,
         closest: &'a [Candidate],
     },
     Version {
@@ -86,6 +87,7 @@ pub(super) fn group(cli: &Cli, description: &Description, env: &Env) -> Option<V
     let action = action(&cli.command)?;
     let reference = error_block::find::<ReferenceError>(error);
     let version = error_block::find::<VersionLookupError>(error);
+    let explained = explanation(error)?;
     let failure = match (reference, version) {
         (
             Some(ReferenceError::Ambiguous {
@@ -97,9 +99,7 @@ pub(super) fn group(cli: &Cli, description: &Description, env: &Env) -> Option<V
             reference,
             candidates,
         },
-        (Some(ReferenceError::Unknown { reference, closest }), _) => {
-            Failure::Unknown { reference, closest }
-        }
+        (Some(ReferenceError::Unknown { closest, .. }), _) => Failure::Unknown { closest },
         (
             _,
             Some(VersionLookupError::Ambiguous {
@@ -120,6 +120,7 @@ pub(super) fn group(cli: &Cli, description: &Description, env: &Env) -> Option<V
     let command = |piece: Option<&str>, version: Option<&str>| command_line(cli, piece, version);
     Some(build(
         &failure,
+        explained,
         action,
         rows.as_deref(),
         &command,
@@ -134,10 +135,12 @@ fn all_rows(start: &Path) -> Option<Vec<Row>> {
     Some(list(&collection, None).ok()?.versions)
 }
 
-/// The parts of the report: the error, the table when there are `rows` to
-/// build it from, the info, and the hint that suggests a command.
+/// The parts of the report: the error as `explained` words it, the table
+/// when there are `rows` to build it from, the info, and the hint that
+/// suggests a command.
 fn build(
     failure: &Failure,
+    explained: &dyn Diagnostic,
     action: Action,
     rows: Option<&[Row]>,
     command: &dyn Fn(Option<&str>, Option<&str>) -> String,
@@ -168,9 +171,9 @@ fn build(
                 shown.extend(lines);
                 shown
             });
-            block = ambiguous_piece(reference, candidates, action, table_lines.is_some());
+            block = ambiguous_piece(explained, candidates, action, table_lines.is_some());
         }
-        Failure::Unknown { reference, closest } => {
+        Failure::Unknown { closest } => {
             table_lines = if closest.is_empty() {
                 None
             } else {
@@ -180,7 +183,7 @@ fn build(
                     shown
                 })
             };
-            block = unknown_piece(reference, action);
+            block = unknown_piece(explained, action);
             hint = closest.first().map(|nearest| {
                 Block::hint(
                     Rich::new()
@@ -203,7 +206,6 @@ fn build(
                 .filter(|row| row.piece.to_string() == *piece)
                 .cloned()
                 .collect();
-            let known = (!versions.is_empty()).then_some(versions.len());
             table_lines = (!versions.is_empty()).then(|| {
                 let mut shown = vec![bold(
                     &format!(
@@ -217,15 +219,7 @@ fn build(
                 shown
             });
             let example = stamps.first().map(|stamp| command(None, Some(stamp)));
-            block = ambiguous_version(
-                piece,
-                input,
-                stamps,
-                known,
-                example,
-                action,
-                table_lines.is_some(),
-            );
+            block = ambiguous_version(explained, example, action);
         }
     }
     parts.push(Part::Block(block));
@@ -247,106 +241,42 @@ fn bold(text: &str, style: Style) -> String {
 // The error blocks
 // =========================================================
 
-/// The number as a word up to nine, as digits above, for the sentences
-/// that begin with it.
-fn count_word(count: usize) -> String {
-    const WORDS: [&str; 9] = [
-        "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
-    ];
-    match count {
-        1..=9 => WORDS[count - 1].to_string(),
-        _ => count.to_string(),
-    }
-}
-
 fn ambiguous_piece(
-    reference: &str,
+    explained: &dyn Diagnostic,
     candidates: &[Candidate],
     action: Action,
     listed_below: bool,
 ) -> Block {
-    let count = candidates.len();
-    let mut block = Block::error(Rich::new().text(&format!(
-        "No unique piece matches `{reference}`: it matches {count} pieces"
-    )));
-    let why = Rich::new().text(&format!(
-        "The search word `{reference}` fits the paths of {} pieces{}",
-        count_word(count).to_lowercase(),
-        if listed_below { ", listed below." } else { ":" }
-    ));
-    block = block.why(why);
+    let mut block = error_block::explained_block(explained);
+    // Without a table the matches would not be shown at all on a terminal.
     if !listed_below {
+        block = block
+            .how(Para::Blank)
+            .how(Rich::new().text("These pieces match:"));
         for candidate in candidates {
-            block = block.why(Para::pre(&format!("  {}", candidate.path)));
+            block = block.how(Para::pre(&format!("  {}", candidate.path)));
         }
     }
-    let mut how = Rich::new().text("Name the piece by more of its path");
-    if let Some(first) = candidates.first() {
-        how = how.text(", for example ").path(&first.path);
-    }
-    block
-        .how(how.text("."))
-        .doing(&format!("find the piece to {}", action.verb))
+    block.doing(&format!("find the piece to {}", action.verb))
 }
 
-fn unknown_piece(reference: &str, action: Action) -> Block {
-    let (place, how) = match action.source {
-        Source::Live => (
-            "the antiq collection",
-            Rich::new().text("Check the spelling, or name the piece by its path."),
-        ),
-        Source::Store => (
-            "the store",
-            Rich::parse("Check the spelling, or look for the piece with `antiq list`."),
-        ),
-    };
-    Block::error(Rich::new().text(&format!("No piece matches `{reference}`")))
-        .why(Rich::new().text(&format!(
-            "antiq compared the word with the path of every piece in {place}, and none fits."
-        )))
-        .how(how)
-        .doing(&format!("find the piece to {}", action.verb))
+fn unknown_piece(explained: &dyn Diagnostic, action: Action) -> Block {
+    error_block::explained_block(explained).doing(&format!("find the piece to {}", action.verb))
 }
 
-fn ambiguous_version(
-    piece: &str,
-    input: &str,
-    stamps: &[String],
-    total: Option<usize>,
-    example: Option<String>,
-    action: Action,
-    listed_below: bool,
-) -> Block {
-    let matches = stamps.len();
-    let title = match total {
-        Some(total) => {
-            format!(
-                "`{input}` matches {matches} of the {total} versions of {}",
-                sanitize(piece)
-            )
-        }
-        None => format!(
-            "`{input}` matches {matches} versions of {}",
-            sanitize(piece)
-        ),
-    };
-    let mut block = Block::error(Rich::new().text(&title)).why(Rich::new().text(&format!(
-        "{} versions start with `{input}`{}",
-        count_word(matches),
-        if listed_below { ", marked below." } else { ":" }
-    )));
-    if !listed_below {
-        for stamp in stamps {
-            block = block.why(Para::pre(&format!("  {stamp}")));
-        }
-    }
-    let mut how = Rich::new().text("Name one version by more of its stamp");
+/// The command to copy is built from the invocation, which the library
+/// does not know, so it follows the plain help of the error.
+fn ambiguous_version(explained: &dyn Diagnostic, example: Option<String>, action: Action) -> Block {
+    let mut block = error_block::explained_block(explained);
     if let Some(example) = example {
-        how = how.text(", for example ").cmd(&example);
+        block = block.how(
+            Rich::new()
+                .text("Run ")
+                .cmd(&example)
+                .text(" to name the newest match."),
+        );
     }
-    block
-        .how(how.text("."))
-        .doing(&format!("find the version to {}", action.verb))
+    block.doing(&format!("find the version to {}", action.verb))
 }
 
 // =========================================================
@@ -652,8 +582,13 @@ mod tests {
             candidates: &pieces,
         };
         let action = action(&cli(&["pin", "scan"]).command).expect("pin is an action");
+        let error = ReferenceError::Ambiguous {
+            reference: "scan".into(),
+            candidates: pieces.clone(),
+        };
         let parts = build(
             &failure,
+            &error,
             action,
             None,
             &no_command,
@@ -664,15 +599,14 @@ mod tests {
             render_parts(&parts, &plain_env()),
             [
                 " ✖ ERROR",
-                "▌ No unique piece matches `scan`: it matches 2 pieces",
-                "▌",
-                "▌ Why it happened",
-                "▌   The search word `scan` fits the paths of two pieces:",
-                "▌     projects/scanner",
-                "▌     tools/scan-old",
+                "▌ No unique piece matches scan, as it fits the paths of 2 pieces",
                 "▌",
                 "▌ How to fix it",
                 "▌   Name the piece by more of its path, for example projects/scanner.",
+                "▌",
+                "▌   These pieces match:",
+                "▌     projects/scanner",
+                "▌     tools/scan-old",
                 "▌",
                 "▌ What antiq was doing",
                 "▌   Attempting to find the piece to pin.",
@@ -771,8 +705,14 @@ mod tests {
             stamps: &stamps,
         };
         let action = action(&cli(&["fork", "scanner"]).command).expect("fork is an action");
+        let error = VersionLookupError::Ambiguous {
+            piece: "projects/scanner".into(),
+            input: "2025-06".into(),
+            stamps: stamps.clone(),
+        };
         let parts = build(
             &failure,
+            &error,
             action,
             None,
             &no_command,
@@ -780,17 +720,20 @@ mod tests {
             &TimeZone::UTC,
         );
         let lines = render_parts(&parts, &plain_env());
-        assert_eq!(
-            lines[..5],
-            [
-                " ✖ ERROR",
-                "▌ `2025-06` matches 11 versions of projects/scanner",
-                "▌",
-                "▌ Why it happened",
-                "▌   11 versions start with `2025-06`:",
-            ]
+        assert_eq!(lines[0], " ✖ ERROR");
+        assert!(
+            lines[1].starts_with(
+                "▌ 2025-06 names no single version of projects/scanner, as 11 versions match it:"
+            ),
+            "{lines:?}"
         );
-        assert_eq!(lines[5], "▌     2025-06-10T101500");
+        assert!(
+            lines.contains(
+                &"▌   Name one version by more of its stamp, for example 2025-06-10T101500."
+                    .to_string()
+            ),
+            "{lines:?}"
+        );
         assert_eq!(lines[lines.len() - 1], " ℹ INFO  Nothing was forked.");
     }
 

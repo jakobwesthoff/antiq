@@ -9,6 +9,7 @@ use super::console::block::{Block, Para};
 use super::console::rich::Rich;
 use antiq::error::explanation;
 use antiq::versions::naming::VersionLookupError;
+use miette::Diagnostic;
 
 /// The error block for `description`: the message of the diagnostic that
 /// explains the error as the title, its help as the fix, the candidates
@@ -20,17 +21,9 @@ pub fn block_for(description: &Description) -> Block {
         .library_error
         .and_then(|error| explanation(error));
     let mut block = match explained {
-        Some(explained) => {
-            let message = explained.to_string();
-            Block::error(Rich::parse(&message)).message(&message)
-        }
+        Some(explained) => explained_block(explained),
         None => Block::error(Rich::new().text(&description.root)),
     };
-    if let Some(help) = explained.and_then(|explained| explained.help()) {
-        for paragraph in help_paragraphs(&help.to_string()) {
-            block = block.how(paragraph);
-        }
-    }
     let candidates = description
         .library_error
         .and_then(antiq::Error::candidates)
@@ -50,6 +43,19 @@ pub fn block_for(description: &Description) -> Block {
     }
     for step in &description.contexts {
         block = block.doing(step);
+    }
+    block
+}
+
+/// The error block for a diagnostic: its message as the title and its
+/// help as the fix.
+pub(super) fn explained_block(explained: &dyn Diagnostic) -> Block {
+    let message = explained.to_string();
+    let mut block = Block::error(Rich::parse(&message)).message(&message);
+    if let Some(help) = explained.help() {
+        for paragraph in help_paragraphs(&help.to_string()) {
+            block = block.how(paragraph);
+        }
     }
     block
 }

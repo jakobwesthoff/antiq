@@ -739,8 +739,8 @@ never mixed:
   date can differ from the UTC date of the stamp.
 
 An exact match wins over prefix matches. Several matches are an error of
-the kind `other` that reads `` `<input>` matches several versions of
-<piece>: <stamps> ``, the stamps newest first. An input that matches no
+the kind `other` that reads `` `<input>` names no single version of
+<piece>, as <n> versions match it: <stamps> ``, the stamps newest first. An input that matches no
 version is an error of the kind `other` that reads `` `<input>` matches no
 version of <piece>; there are <stamps> ``, listing the stamps of all the
 versions of the piece, incomplete ones included, newest first for every
@@ -1961,8 +1961,9 @@ candidate, in the order and the escaped form of `error.candidates`. On a
 terminal the report is one group on stderr: the error block, a bold caption
 and a table, the info "Nothing was <done>." and, for a word that matches no
 piece, a hint. `<done>` is `archived`, `pinned`, `unpinned`, `unearthed`,
-`forked`, `deleted` or `rebuilt`, after the command. The error block says
-that the matches are listed below, and its "What antiq was doing" names
+`forked`, `deleted` or `rebuilt`, after the command. The error block takes
+its title and its "How to fix it" from the error (the message and the help
+of the diagnostic), and its "What antiq was doing" names
 the step "find the piece to <command>" (for a version, "find the version
 to <command>").
 
@@ -1974,9 +1975,8 @@ to <command>").
   versions, which is 0 for a live piece without any. `forget` uses that
   table too when a candidate is a folder that holds sidecars only.
 - No piece matches a word. The block says so; its "How to fix it" tells to
-  check the spelling and then to look for the piece with `antiq list`
-  (`unearth`, `fork`, `rebuild`, `forget`) or to name it by its path
-  (`archive`, `pin`, `unpin`). Pieces whose path or last
+  check the spelling and then to look for the piece with `antiq list`.
+  Pieces whose path or last
   name is within two edits of the word, or within a third of its length
   when that is more, are the closest pieces; a swapped pair of letters
   counts as one edit. Up to three of them, nearest first and by path among
@@ -1990,13 +1990,17 @@ to <command>").
   of `antiq list` with all versions of the piece. A `▸` stands in front of
   each matching row, a row that does not match is dim in every column, and
   for an input without a `T` the part of the time that the input spelled
-  is bold red. The "How to fix it" gives the command with the stamp of
-  the newest matching version.
+  is bold red. The "How to fix it" names the newest matching stamp and
+  adds the command that ran with that stamp, "Run <command> to name the
+  newest match.".
 
-When the listing cannot be read, the table is left out and the matches are
-listed in the "Why it happened" section instead. The JSON error does not
-change: `error.candidates` lists the candidates, and the closest pieces
-and the matching versions are not part of it.
+When the listing cannot be read, the table is left out and the matching
+pieces are listed under the help of the block as "These pieces match:";
+the matching stamps of a version are in the message of the error anyway.
+The JSON error carries `code` and `fix` besides `kind` and `message`
+(`antiq::reference::ambiguous` and `antiq::reference::unknown`, or
+`antiq::version::ambiguous`), and `error.candidates` lists the candidate
+pieces. The closest pieces and the matching versions are not part of it.
 
 ### Console output
 

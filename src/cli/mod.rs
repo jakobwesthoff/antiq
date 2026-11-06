@@ -669,7 +669,8 @@ mod tests {
         assert_eq!(code, 1);
         assert_eq!(
             stderr,
-            "error: `scan` matches 2 pieces\n    \
+            "error: no unique piece matches `scan`, as it fits the paths of 2 pieces\n  \
+             fix: Name the piece by more of its path, for example projects/scanner.\n    \
              candidate: projects/scanner\n    \
              candidate: tools/scan-old\n  \
              while attempting to unearth the version\n"
@@ -686,7 +687,8 @@ mod tests {
             stdout.ends_with(
                 "\"error\":{\"kind\":\"ambiguous_reference\",\
                  \"code\":\"antiq::reference::ambiguous\",\
-                 \"message\":\"cannot find the piece: `scan` matches 2 pieces\",\
+                 \"message\":\"cannot find the piece: no unique piece matches `scan`, as it fits the paths of 2 pieces\",\
+                 \"fix\":\"Name the piece by more of its path, for example `projects/scanner`.\",\
                  \"candidates\":[{\"path\":\"projects/scanner\"},{\"path\":\"tools/scan-old\"}]}}\n"
             ),
             "{stdout}"

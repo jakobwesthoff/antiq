@@ -5,6 +5,7 @@
 //! Matching a `--version` argument against the versions of a piece.
 
 use super::stamp::Stamp;
+use crate::code_span::CodeSpan;
 use crate::error::HasKind;
 use jiff::tz::TimeZone;
 
@@ -26,18 +27,38 @@ pub enum Lookup {
     Several(Vec<Stamp>),
 }
 
+/// The newest of the stamps an ambiguous input matches, as the example of
+/// a longer input. An ambiguous input always matches stamps.
+fn example_stamp(stamps: &[String]) -> CodeSpan<&str> {
+    CodeSpan(stamps.first().map_or("", String::as_str))
+}
+
 /// Why an input names no single version of a piece.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum VersionLookupError {
-    #[diagnostic(code(antiq::version::no_such))]
+    #[diagnostic(
+        code(antiq::version::no_such),
+        help("Name one of these versions by its stamp, or by the start of it.")
+    )]
     #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
     NoSuch {
         piece: String,
         input: String,
         stamps: Vec<String>,
     },
-    #[diagnostic(code(antiq::version::ambiguous))]
-    #[error("`{input}` matches several versions of {piece}: {}", stamps.join(", "))]
+    #[diagnostic(
+        code(antiq::version::ambiguous),
+        help(
+            "Name one version by more of its stamp, for example {}.",
+            example_stamp(.stamps)
+        )
+    )]
+    #[error(
+        "{} names no single version of {piece}, as {} versions match it: {}",
+        CodeSpan(.input),
+        stamps.len(),
+        stamps.join(", ")
+    )]
     Ambiguous {
         piece: String,
         input: String,
@@ -519,7 +540,7 @@ mod tests {
         assert!(matches!(error, VersionLookupError::Ambiguous { .. }));
         assert_eq!(
             error.to_string(),
-            "`2026-11-04` matches several versions of tools/scan: 2026-11-04T090212, 2026-11-04T090211"
+            "`2026-11-04` names no single version of tools/scan, as 2 versions match it: 2026-11-04T090212, 2026-11-04T090211"
         );
     }
 

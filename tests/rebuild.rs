@@ -111,16 +111,20 @@ fn state(world: &World) -> std::collections::BTreeMap<String, support::tree::See
     seen
 }
 
-/// The text of the error: stderr in text mode, the message in JSON mode.
+/// The text of the error: stderr in text mode, the message and the fix in
+/// JSON mode.
 fn error_text(run: &Outcome) -> String {
     match run.mode {
         Mode::Text => run.stderr.clone(),
         Mode::Json => {
             let json: Value = serde_json::from_str(&run.stdout).expect("a JSON envelope");
-            json["error"]["message"]
+            let message = json["error"]["message"]
                 .as_str()
-                .expect("the error has a message")
-                .to_string()
+                .expect("the error has a message");
+            match json["error"]["fix"].as_str() {
+                Some(fix) => format!("{message}\n{fix}"),
+                None => message.to_string(),
+            }
         }
     }
 }
@@ -616,7 +620,7 @@ fn an_unknown_and_an_ambiguous_version_and_an_unknown_piece_are_refused() {
         let run = assert_refused(world, &["rebuild", PIECE, "2026"]);
         assert_all_in(
             &error_text(&run),
-            &["matches several versions", &format!("{STAMP}, {OLD_STAMP}")],
+            &["names no single version", &format!("{STAMP}, {OLD_STAMP}")],
         );
 
         let run = assert_refused(world, &["rebuild", "zzzzzz", STAMP]);

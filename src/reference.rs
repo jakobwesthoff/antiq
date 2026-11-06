@@ -25,26 +25,53 @@ pub struct Candidate {
     pub path: String,
 }
 
+/// The first of the pieces an ambiguous reference matches, as the example
+/// of a longer reference. An ambiguous reference always has candidates.
+fn example_path(candidates: &[Candidate]) -> CodeSpan<&str> {
+    CodeSpan(candidates.first().map_or("", |first| first.path.as_str()))
+}
+
 /// Errors of resolving a piece reference.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ReferenceError {
-    #[diagnostic(code(antiq::reference::ambiguous))]
-    #[error("`{reference}` matches {} pieces", candidates.len())]
+    #[diagnostic(
+        code(antiq::reference::ambiguous),
+        help(
+            "Name the piece by more of its path, for example {}.",
+            example_path(.candidates)
+        )
+    )]
+    #[error(
+        "no unique piece matches {}, as it fits the paths of {} pieces",
+        CodeSpan(.reference),
+        candidates.len()
+    )]
     Ambiguous {
         reference: String,
         candidates: Vec<Candidate>,
     },
-    #[diagnostic(code(antiq::reference::unknown))]
-    #[error("`{reference}` matches no piece")]
+    #[diagnostic(
+        code(antiq::reference::unknown),
+        help("Check the spelling, or look for the piece with `antiq list`.")
+    )]
+    #[error(
+        "no piece matches {}, as none of the pieces has a path that fits it",
+        CodeSpan(.reference)
+    )]
     Unknown {
         reference: String,
         /// The pieces nearest to the reference by spelling, nearest first.
         /// The console offers them; they are not part of the JSON error.
         closest: Vec<Candidate>,
     },
-    #[diagnostic(code(antiq::reference::only_incomplete))]
+    #[diagnostic(
+        code(antiq::reference::only_incomplete),
+        help("`antiq forget` removes what is left of them.")
+    )]
     #[error(
-        "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
+        "{} matches no piece with an archive, as {} holds only incomplete versions",
+        CodeSpan(.reference),
+        CodeSpan(.piece)
     )]
     OnlyIncomplete { reference: String, piece: String },
     #[diagnostic(
@@ -848,7 +875,10 @@ mod tests {
         let set = set_of(&fx, &["projects/alpha"]);
         let error = resolve_in(&fx, &set, "zzz").expect_err("unknown");
         assert_eq!(kind(&error), ErrorKind::UnknownReference);
-        assert_eq!(error.to_string(), "`zzz` matches no piece");
+        assert_eq!(
+            error.to_string(),
+            "no piece matches `zzz`, as none of the pieces has a path that fits it"
+        );
     }
 
     fn closest_of(set: &CandidateSet, given: &str) -> Vec<String> {

@@ -87,10 +87,7 @@ fn an_ambiguous_word_lists_the_list_table_of_the_store_pieces() {
     assert_eq!(
         plain(&world, &["unearth", "scan"]),
         "\x20✖ ERROR\n\
-         ▌ No unique piece matches `scan`: it matches 2 pieces\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   The search word `scan` fits the paths of two pieces, listed below.\n\
+         ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
          ▌   Name the piece by more of its path, for example projects/scanner.\n\
@@ -114,10 +111,7 @@ fn an_ambiguous_word_for_a_live_piece_counts_the_versions() {
     assert_eq!(
         plain(&world, &["pin", "scan"]),
         "\x20✖ ERROR\n\
-         ▌ No unique piece matches `scan`: it matches 2 pieces\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   The search word `scan` fits the paths of two pieces, listed below.\n\
+         ▌ No unique piece matches scan, as it fits the paths of 2 pieces\n\
          ▌\n\
          ▌ How to fix it\n\
          ▌   Name the piece by more of its path, for example projects/scanner.\n\
@@ -149,14 +143,13 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
             &["unearth", "projects/scanner", "--version", "2025-06"]
         ),
         "\x20✖ ERROR\n\
-         ▌ `2025-06` matches 2 of the 4 versions of projects/scanner\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   Two versions start with `2025-06`, marked below.\n\
+         ▌ 2025-06 names no single version of projects/scanner, as 2 versions match it:\n\
+         ▌ 2025-06-18T154509, 2025-06-01T103000\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Name one version by more of its stamp, for example\n\
-         ▌   antiq unearth projects/scanner --version 2025-06-18T154509.\n\
+         ▌   Name one version by more of its stamp, for example 2025-06-18T154509.\n\
+         ▌   Run antiq unearth projects/scanner --version 2025-06-18T154509 to name the\n\
+         ▌   newest match.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the version to unearth.\n\
@@ -178,11 +171,7 @@ fn an_unknown_word_offers_the_closest_pieces_and_a_command_to_copy() {
     assert_eq!(
         plain(&world, &["unearth", "scnaer"]),
         "\x20✖ ERROR\n\
-         ▌ No piece matches `scnaer`\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   antiq compared the word with the path of every piece in the store, and none\n\
-         ▌   fits.\n\
+         ▌ No piece matches scnaer, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
          ▌   Check the spelling, or look for the piece with antiq list.\n\
@@ -207,11 +196,7 @@ fn an_unknown_word_with_nothing_near_offers_no_piece() {
     assert_eq!(
         plain(&world, &["unearth", "zzzzzzzz"]),
         "\x20✖ ERROR\n\
-         ▌ No piece matches `zzzzzzzz`\n\
-         ▌\n\
-         ▌ Why it happened\n\
-         ▌   antiq compared the word with the path of every piece in the store, and none\n\
-         ▌   fits.\n\
+         ▌ No piece matches zzzzzzzz, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
          ▌   Check the spelling, or look for the piece with antiq list.\n\
@@ -264,4 +249,39 @@ fn a_version_that_does_not_exist_is_an_error_without_a_table_or_an_info() {
     assert!(text.starts_with("\x20✖ ERROR\n"), "{text}");
     assert!(!text.contains("Nothing was"), "{text}");
     assert!(!text.contains("VERSION  "), "{text}");
+}
+
+#[test]
+fn the_json_error_of_an_unresolved_reference_carries_its_code_message_and_fix() {
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["projects/*", "tools/*"]);
+    stored_pieces(&mut builder);
+    let world = World::new(Setup::new(builder.finish()), Mode::Json);
+
+    let unknown = world.run(&["unearth", "zzzzzzzz"]);
+    unknown.expect_code(1).json_only(|value| {
+        let error = &value["error"];
+        assert_eq!(error["kind"], "unknown_reference");
+        assert_eq!(error["code"], "antiq::reference::unknown");
+        assert_eq!(
+            error["message"],
+            "cannot find the piece: no piece matches `zzzzzzzz`, as none of the pieces has a path that fits it"
+        );
+        assert_eq!(
+            error["fix"],
+            "Check the spelling, or look for the piece with `antiq list`."
+        );
+    });
+
+    let ambiguous = world.run(&["unearth", "scan"]);
+    ambiguous.expect_code(1).json_only(|value| {
+        let error = &value["error"];
+        assert_eq!(error["kind"], "ambiguous_reference");
+        assert_eq!(error["code"], "antiq::reference::ambiguous");
+        assert_eq!(
+            error["fix"],
+            "Name the piece by more of its path, for example `projects/scanner`."
+        );
+    });
 }

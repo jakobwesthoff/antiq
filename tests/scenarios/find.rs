@@ -177,7 +177,7 @@ fn unearth_refuses_a_word_that_matches_several_pieces_and_takes_a_path() {
                 several.json_only(|json| {
                     let error = json["error"].as_object().expect("an error object");
                     let keys: Vec<&str> = error.keys().map(String::as_str).collect();
-                    assert_eq!(keys, ["kind", "code", "message", "candidates"]);
+                    assert_eq!(keys, ["kind", "code", "message", "fix", "candidates"]);
                     assert_eq!(error["kind"], "ambiguous_reference");
                     assert_eq!(
                         error["candidates"],
