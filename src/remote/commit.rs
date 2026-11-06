@@ -124,6 +124,58 @@ pub enum Refusal {
     VersionLimit { number: u32 },
 }
 
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::InvalidMetadata(reason) => {
+                write!(formatter, "the metadata cannot be committed: {reason}")
+            }
+            Refusal::UnreadableHighest { number, reason } => write!(
+                formatter,
+                "version {number} on the remote cannot be read: {reason}"
+            ),
+            Refusal::Behind { highest } => write!(
+                formatter,
+                "the remote has version {highest}, which this change does not build on"
+            ),
+            Refusal::MissingBase { based_on, highest } => write!(
+                formatter,
+                "the remote has version {highest}, below version {based_on} that this change builds on"
+            ),
+            Refusal::ClaimOpen { number } => {
+                write!(
+                    formatter,
+                    "another writer holds the claim for version {number}"
+                )
+            }
+            Refusal::ClaimTaken { number } => write!(
+                formatter,
+                "another writer created the claim for version {number} first"
+            ),
+            Refusal::ClaimLost { number } => write!(
+                formatter,
+                "the claim for version {number} was gone before the rename"
+            ),
+            Refusal::NewerCommitted { highest } => write!(
+                formatter,
+                "version {highest} was committed while this change was being committed"
+            ),
+            Refusal::PayloadMissing { name } => write!(
+                formatter,
+                "{name} is not on the remote and cannot be put again"
+            ),
+            Refusal::TargetTaken { number } => write!(
+                formatter,
+                "another writer committed version {number} before the rename"
+            ),
+            Refusal::VersionLimit { number } => write!(
+                formatter,
+                "version {number} is the largest number a version can have"
+            ),
+        }
+    }
+}
+
 /// Commits `request.metadata` as the next version of the object.
 ///
 /// Remote failures (away, broken, I/O, a payload name taken by other
@@ -687,6 +739,67 @@ mod tests {
     use crate::remote::path::PathRemote;
     use crate::remote::testing::{Call, Fault, FaultRemote, Op, object, path_remote, remote_root};
     use jiff::Timestamp;
+
+    #[test]
+    fn every_refusal_reads_as_one_sentence() {
+        let cases = [
+            (
+                Refusal::InvalidMetadata("it does not parse".to_string()),
+                "the metadata cannot be committed: it does not parse",
+            ),
+            (
+                Refusal::UnreadableHighest {
+                    number: 3,
+                    reason: "it is cut off".to_string(),
+                },
+                "version 3 on the remote cannot be read: it is cut off",
+            ),
+            (
+                Refusal::Behind { highest: 4 },
+                "the remote has version 4, which this change does not build on",
+            ),
+            (
+                Refusal::MissingBase {
+                    based_on: 5,
+                    highest: 2,
+                },
+                "the remote has version 2, below version 5 that this change builds on",
+            ),
+            (
+                Refusal::ClaimOpen { number: 6 },
+                "another writer holds the claim for version 6",
+            ),
+            (
+                Refusal::ClaimTaken { number: 7 },
+                "another writer created the claim for version 7 first",
+            ),
+            (
+                Refusal::ClaimLost { number: 8 },
+                "the claim for version 8 was gone before the rename",
+            ),
+            (
+                Refusal::NewerCommitted { highest: 9 },
+                "version 9 was committed while this change was being committed",
+            ),
+            (
+                Refusal::PayloadMissing {
+                    name: "a.tar.zst".to_string(),
+                },
+                "a.tar.zst is not on the remote and cannot be put again",
+            ),
+            (
+                Refusal::TargetTaken { number: 10 },
+                "another writer committed version 10 before the rename",
+            ),
+            (
+                Refusal::VersionLimit { number: 11 },
+                "version 11 is the largest number a version can have",
+            ),
+        ];
+        for (refusal, text) in cases {
+            assert_eq!(refusal.to_string(), text);
+        }
+    }
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
 

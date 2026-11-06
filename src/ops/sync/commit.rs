@@ -339,7 +339,7 @@ fn commit_one(
         }
         Outcome::Refused(refusal) => Finished::Skipped(
             SkipReason::Refused,
-            format!("the commit was refused: {refusal:?}"),
+            format!("the commit was refused: {refusal}"),
         ),
     })
 }
@@ -805,15 +805,12 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::RemoteAway);
         assert!(has_pending(&anna, id));
-        assert!(
-            !anna
-                .collection
-                .remote_state_path()
-                .to_string_lossy()
-                .is_empty()
-        );
         let state = fs::read_to_string(anna.collection.remote_state_path()).expect("state");
         assert!(!state.contains("last_sync"), "{state}");
+        assert!(
+            !state.contains("away_first_seen"),
+            "the start of the run saw the remote reachable: {state}"
+        );
         assert_payload_kept(&anna, id);
     }
 
@@ -1363,7 +1360,10 @@ mod tests {
 
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].reason, SkipReason::Refused);
-        assert!(report.skipped[0].message.contains("ClaimOpen"));
+        assert_eq!(
+            report.skipped[0].message,
+            "the commit was refused: another writer holds the claim for version 1"
+        );
         assert!(has_pending(&anna, id));
         assert_payload_kept(&anna, id);
     }
@@ -1392,7 +1392,10 @@ mod tests {
         let report = anna.sync_with(&remote);
 
         assert_eq!(report.skipped[0].reason, SkipReason::Refused);
-        assert!(report.skipped[0].message.contains("Behind"));
+        assert_eq!(
+            report.skipped[0].message,
+            "the commit was refused: the remote has version 1, which this change does not build on"
+        );
         assert!(has_pending(&anna, id));
         assert_eq!(
             shared
