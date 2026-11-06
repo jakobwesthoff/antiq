@@ -45,9 +45,7 @@ impl Sink {
         self.write_line_bytes(line.as_bytes())
     }
 
-    /// Writes `bytes` as they are and flushes. A reader that is gone, or a
-    /// terminal that was closed under the run (`EIO`), closes the sink and
-    /// the run goes on without output.
+    /// Writes `bytes` as they are and flushes.
     fn write_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
         if self.closed {
             return Ok(());
@@ -56,16 +54,7 @@ impl Sink {
             .writer
             .write_all(bytes)
             .and_then(|()| self.writer.flush());
-        match written {
-            Err(error)
-                if error.kind() == io::ErrorKind::BrokenPipe
-                    || error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
-            {
-                self.closed = true;
-                Ok(())
-            }
-            other => other,
-        }
+        self.close_if_gone(written)
     }
 
     fn write_line_bytes(&mut self, line: &[u8]) -> io::Result<()> {
@@ -77,14 +66,28 @@ impl Sink {
             .write_all(line)
             .and_then(|()| self.writer.write_all(b"\n"))
             .and_then(|()| self.writer.flush());
+        self.close_if_gone(written)
+    }
+
+    /// A write that failed because the reader is gone closes the sink and
+    /// the run goes on without output. Any other failure is the caller's.
+    fn close_if_gone(&mut self, written: io::Result<()>) -> io::Result<()> {
         match written {
-            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+            Err(error) if is_gone(&error) => {
                 self.closed = true;
                 Ok(())
             }
             other => other,
         }
     }
+}
+
+/// Whether a write failed because nobody reads the stream any more: a
+/// closed pipe (`BrokenPipe`), or a terminal that was closed under the run
+/// (`EIO`).
+fn is_gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::BrokenPipe
+        || error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
 }
 
 /// `{"format": 1, "command": ..., <payload keys>}`. The command is `null`
@@ -1057,6 +1060,14 @@ mod tests {
         let mut out = Output::new(Box::new(DeadTerminal), Box::new(Vec::new()));
         out.stdout_raw(b"x").expect("a dead terminal is no error");
         out.stdout_raw(b"y").expect("and stays closed");
+    }
+
+    #[test]
+    fn a_line_to_a_dead_terminal_is_dropped_like_a_raw_write() {
+        let mut out = Output::new(Box::new(DeadTerminal), Box::new(Vec::new()));
+        out.line("x")
+            .expect("a dead terminal loses the line, not the result of the run");
+        out.line("y").expect("and stays closed");
     }
 
     #[test]
