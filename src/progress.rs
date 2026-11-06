@@ -274,12 +274,31 @@ mod tests {
             operation: Operation::Verifying,
             counter: &counter,
         });
+        observer.event(Event::Planned {
+            items: &[Planned {
+                name: "tools/ray".to_string(),
+                bytes: 9,
+            }],
+        });
+        observer.event(Event::Paused {
+            name: "projects/scanner",
+        });
+        observer.event(Event::Finished {
+            name: "projects/scanner",
+            bytes: 4211,
+            outcome: &Outcome::Files(3),
+        });
+        observer.event(Event::Dropped { name: "tools/ray" });
         assert_eq!(
             *recording.0.lock().expect("no test thread panics"),
             [
                 "started projects/scanner 4211",
                 "projects/scanner Packing 0/3",
                 "projects/scanner Verifying 2/3",
+                "planned 1",
+                "paused projects/scanner",
+                "finished projects/scanner Files(3)",
+                "dropped tools/ray",
             ]
         );
     }

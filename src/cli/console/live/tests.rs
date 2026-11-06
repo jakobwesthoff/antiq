@@ -444,6 +444,7 @@ fn messages_that_arrive_after_the_stop_are_still_applied() {
     let driver = driver(&mut out, 100);
     let (sender, receiver) = mpsc::channel();
     sender.send(Packet::Stop).unwrap();
+    sender.send(Packet::Stop).unwrap();
     sender
         .send(Packet::Msg(started("a", 10), Duration::ZERO))
         .unwrap();
