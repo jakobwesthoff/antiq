@@ -124,14 +124,16 @@ fn read_package_with(package: &Path, counter: Option<&Counter>) -> Result<Packag
 ///
 /// The precondition of [`read_package`] holds here too.
 pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackError> {
-    read_package_observing(source, &mut |_| Ok(()))
+    read_package_observing(source, None, &mut |_| Ok(()))
 }
 
-/// [`read_package_from`], calling `on_file` with the path of every regular
-/// member that is not a hard link as soon as its content has been read. An
-/// error of `on_file` ends the read.
+/// [`read_package_from`], adding the bytes of the content of every regular
+/// member to `content` as they come out of the decompressor, and calling
+/// `on_file` with the path of every regular member that is not a hard link as
+/// soon as its content has been read. An error of `on_file` ends the read.
 pub(crate) fn read_package_observing<R: io::Read>(
     source: R,
+    content: Option<&Counter>,
     on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
 ) -> Result<Package, PackError> {
     let decoder = zstd::decoder(source).map_err(damaged)?;
@@ -190,7 +192,7 @@ pub(crate) fn read_package_observing<R: io::Read>(
         let (kind, link, sha256) = match kind {
             EntryType::Directory => (ListingType::Dir, None, None),
             EntryType::Regular => {
-                let mut reader = HashingReader::new(&mut member);
+                let mut reader = HashingReader::new(Metered::new(&mut member, content));
                 io::copy(&mut reader, &mut io::sink()).map_err(damaged)?;
                 let sha256 = reader.sha256();
                 on_file(&path)?;

@@ -2484,13 +2484,14 @@ mod tests {
         execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
-        // The 9 bytes of content are compared once.
+        // The 9 bytes of content are packed once and counted twice in the
+        // verify, as a member and as a file of the folder.
         assert_eq!(
             recorder.lines(),
             [
                 "started piece 9",
                 "piece Packing 9/9",
-                "piece Verifying 9/9",
+                "piece Verifying 18/18",
                 "piece Storing 0/0",
                 "piece Removing 4/4",
                 "finished piece 9 Files(2)",
@@ -2527,12 +2528,13 @@ mod tests {
             .expect("the run ends");
 
         // The link is a member that neither the packing nor the verify reads
-        // again, so the 9 bytes of content count once.
+        // again, so the 9 bytes of content count once in the packing and
+        // twice in the verify.
         assert_eq!(
             recorder.lines_of("piece")[1..3],
             [
                 "piece Packing 9/9".to_string(),
-                "piece Verifying 9/9".to_string()
+                "piece Verifying 18/18".to_string()
             ]
         );
     }

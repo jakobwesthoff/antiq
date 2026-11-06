@@ -628,7 +628,10 @@ the bytes of the file feed its SHA-256 and the decompressor together, and
 each regular file of the folder is read and hashed as soon as the stream
 has delivered the member of that name. When the file is read to its end,
 its hash is checked against the hash computed while writing it, before any
-difference is judged.
+difference is judged. A walk that fails does not stop the read of the
+archive: a file that is not what was written is reported as that before the
+walk's problem. An I/O error on the archive file is reported as a read
+error of the file, not as a different hash.
 
 Then it compares every member with the tree on disk (type, size, content
 hash, modification time in whole seconds with the same clamp, mode, link
@@ -2190,8 +2193,12 @@ piece: the `packing` and `verifying` of `archive` and the `verifying` of
 size, files, entries). The bar of `packing` follows the content bytes of
 the files among the bytes of the tar stream that the compressor has
 consumed, against the size of the files; the headers and the padding of the
-stream count for nothing. The bar of `verifying` follows the content bytes
-of the files compared with the archive, against the same size. An operation
+stream count for nothing. The bar of the `verifying` of `archive` follows the
+content bytes of the members as the archive hands them out and those of the
+files of the folder as they are read, against twice the size of the files;
+its count shows both numbers halved, in the units of the size. The bar of
+the `verifying` of an `unearth` follows the content bytes of the files
+compared with the listing, against the same size. An operation
 whose total is not known yet, and the `verifying` of an `unearth` whose
 files hold no bytes, has a bar with a moving lit part and no percentage or
 count. The percentage is rounded and stays at 99 until the operation is

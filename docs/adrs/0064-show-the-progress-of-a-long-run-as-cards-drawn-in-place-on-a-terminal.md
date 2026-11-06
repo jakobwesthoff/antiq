@@ -32,8 +32,9 @@ screen during the run and the lines that remain after it look alike.
 The bar of an operation follows the work in bytes where bytes are what
 takes time, and counts the content bytes of the piece's files, the unit of
 the size on the card: packing counts the content bytes among those the
-compressor has consumed, and verifying the content bytes of the files
-compared with the archive. A count under the bar shows numbers only in
+compressor has consumed, and the verifying of an archive the content bytes
+of the members as the archive hands them out plus those of the files of the
+folder as they are read, with the count under the bar halved. A count under the bar shows numbers only in
 units that match the card (its size, files, entries). The compressor works
 behind the writer, so the bytes handed to it reach the total long before it
 has compressed them; the bytes it has consumed are what the bar follows.

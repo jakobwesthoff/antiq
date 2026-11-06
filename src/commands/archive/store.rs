@@ -381,9 +381,10 @@ fn stage_and_store(
     let archive_path = staging_path.join(&names.archive);
     let verifying = context.tracker.operation(Operation::Verifying);
     // The archive is read once and each file of the folder is compared as
-    // its member comes, so the bar counts the content bytes compared out of
-    // the size of the piece, from its first frame.
-    verifying.set_total(content_bytes(&packed.listing));
+    // its member comes. The bar counts the content bytes of the members as
+    // they are decompressed and those of the folder's files as they are
+    // read, so its total is twice the size of the piece.
+    verifying.set_total(2 * content_bytes(&packed.listing));
     context.seams.before_verify(&staging_path);
     let rules = WalkRules {
         rules: request.rules.clone(),
@@ -761,11 +762,11 @@ mod tests {
         store_tracked(&world, &probe, &world.ledger, shared_pool(), tracker)
             .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
 
-        // The 9 bytes of content are compared once, however often the
-        // archive and the folder are read for it.
+        // The 9 bytes of content count once as the members come out of the
+        // archive and once as the files of the folder are read.
         assert_eq!(
             *seen.lock().expect("no panic"),
-            [(0, 9)],
+            [(0, 18)],
             "the total is known before the first byte"
         );
         let verifying: Vec<(u64, u64)> = recorder
@@ -780,7 +781,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(verifying, [(9, 9)]);
+        assert_eq!(verifying, [(18, 18)]);
     }
 
     fn stored(world: &World, probe: &dyn Seams) -> Stored {

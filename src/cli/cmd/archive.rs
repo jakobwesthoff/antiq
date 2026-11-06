@@ -19,9 +19,11 @@ use antiq::plan::{PlanAction, Step};
 use antiq::progress::Operation;
 use anyhow::Context as _;
 
-/// The packing and the verifying of a piece count the content bytes of its
-/// files, as the size on the card does. The removing of a piece counts the
-/// entries of its listing, and every other operation counts files.
+/// The packing and the verifying of a piece show the content bytes of its
+/// files, as the size on the card does. The bar of the verifying counts those
+/// bytes twice, once as the archive hands them out and once as the folder
+/// delivers them, so the text halves both numbers. The removing of a piece
+/// counts the entries of its listing, and every other operation counts files.
 pub(super) const COUNTS: &[(Operation, Count)] = &[
     (
         Operation::Packing,
@@ -33,7 +35,7 @@ pub(super) const COUNTS: &[(Operation, Count)] = &[
     (
         Operation::Verifying,
         Count {
-            text: sizes,
+            text: |done, total| sizes(done / 2, total.map(|total| total / 2)),
             percent: true,
         },
     ),
@@ -200,7 +202,6 @@ mod tests {
     fn the_cards_of_an_archive_name_each_operation_and_what_it_counts() {
         for (operation, word, count) in [
             (Operation::Packing, "packing", "1 B/4 B"),
-            (Operation::Verifying, "verifying", "1 B/4 B"),
             (Operation::Storing, "storing", "1/4 files"),
             (Operation::Removing, "removing", "1/4 entries"),
         ] {
@@ -213,5 +214,13 @@ mod tests {
             };
             assert!(second.ends_with(&expected), "{second:?}");
         }
+    }
+
+    #[test]
+    fn the_verifying_card_shows_the_content_bytes_once_though_the_bar_counts_them_twice() {
+        let [first, second] =
+            progress::card_of(COUNTS, Operation::Verifying, 200_000_000, 400_000_000);
+        assert!(first.ends_with("  verifying"), "{first:?}");
+        assert!(second.ends_with("50%  100 MB/200 MB"), "{second:?}");
     }
 }

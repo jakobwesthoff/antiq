@@ -197,9 +197,10 @@ pub(crate) struct ArchiveHash<'a> {
 }
 
 /// [`verify_strict`] that also checks the archive against `archive` and
-/// adds the content bytes of the files it compares to `counter`. The caller
-/// sets the total, since it knows the sum of the file sizes before the read
-/// starts.
+/// adds to `counter` the content bytes of the regular members as they are
+/// decompressed and those of the files of the folder as they are read. The
+/// caller sets the total, which is twice the sum of the file sizes, since it
+/// knows that sum before the read starts.
 pub(crate) fn verify_strict_counted(
     package: &Path,
     root: &TreeRoot,
@@ -239,7 +240,7 @@ fn verify_strict_observed(
                 // A file that is not what was written is the first thing to
                 // tell, whatever the folder looks like.
                 if archive.is_some() {
-                    read_archive(package, archive, &mut |_| Ok(()))?;
+                    read_archive(package, archive, None, &mut |_| Ok(()))?;
                 }
                 return Err(walk_error);
             }
@@ -247,7 +248,7 @@ fn verify_strict_observed(
         let mut directories = DirectoryStack::new(root);
         let mut reads: Vec<Option<Read>> = entries.iter().map(|_| None).collect();
         let wanted = read_by_fold(&entries);
-        let package = read_archive(package, archive, &mut |path| {
+        let package = read_archive(package, archive, meter, &mut |path| {
             // The entries are in path order.
             let found = entries.binary_search_by(|entry| entry.path.cmp(path));
             if let Ok(index) = found
@@ -300,10 +301,11 @@ fn verify_strict_observed(
 fn read_archive(
     package: &Path,
     archive: Option<&ArchiveHash<'_>>,
+    meter: Option<&Counter>,
     on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
 ) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
-    read_stream(package, file, archive, on_file)
+    read_stream(package, file, archive, meter, on_file)
 }
 
 /// [`read_archive`] for the bytes of `source`, which is the file `package`.
@@ -311,6 +313,7 @@ fn read_stream(
     package: &Path,
     source: impl io::Read,
     archive: Option<&ArchiveHash<'_>>,
+    meter: Option<&Counter>,
     on_file: &mut dyn FnMut(&RelPath) -> Result<(), PackError>,
 ) -> Result<Package, PackError> {
     let failure = Rc::new(RefCell::new(None));
@@ -318,7 +321,7 @@ fn read_stream(
         inner: source,
         failure: Rc::clone(&failure),
     });
-    let read = read_package_observing(&mut hashed, on_file);
+    let read = read_package_observing(&mut hashed, meter, on_file);
     let Some(archive) = archive else {
         return read;
     };
@@ -1251,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn the_strict_verify_counts_the_content_bytes_of_the_files_once() {
+    fn the_strict_verify_counts_the_content_bytes_of_the_members_and_of_the_files_once_each() {
         let (_dir, archive, package, tree) = archived();
         let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
         let counter = Counter::new();
@@ -1270,11 +1273,42 @@ mod tests {
         )
         .expect("the folder equals the archive");
 
-        // The archive and the folder are both read, and the bytes of a file
-        // count once, the hard link not at all.
+        // The bytes of a file count once as a member and once as a file of
+        // the folder, the hard link not at all.
         let contents = content_bytes(&package.packed.listing);
         assert!(contents > 0, "the fixture has content");
-        assert_eq!(counter.done(), contents);
+        assert_eq!(counter.done(), 2 * contents);
+    }
+
+    #[test]
+    fn the_content_of_a_member_counts_before_the_file_of_the_folder_is_read() {
+        let (_dir, archive, package, tree) = archived();
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let counter = Counter::new();
+        let expected = ArchiveHash {
+            file: "proj.tar.zst",
+            sha256: &package.packed.sha256,
+        };
+        let mut done_at_first_file = None;
+        let mut observe = |stage: Stage, seen: &RelPath| {
+            if (stage, seen.to_string().as_str()) == (Stage::AfterWalk, "notes.txt") {
+                done_at_first_file = Some(counter.done());
+            }
+        };
+
+        verify_strict_observed(
+            &archive,
+            &root,
+            &WalkRules::default(),
+            &RealFs,
+            Some(&counter),
+            Some(&expected),
+            &mut observe,
+        )
+        .expect("the folder equals the archive");
+
+        // "hello" is the first member with content.
+        assert_eq!(done_at_first_file, Some(5));
     }
 
     fn verify_against(archive: &Path, tree: &Tree, sha256: &str) -> Result<Verified, PackError> {
@@ -1498,8 +1532,9 @@ mod tests {
         .expect_err("the link structure changed");
 
         assert!(matches!(&error, PackError::Differs(_)), "{error:?}");
+        // The members count once and the files of the folder count once.
         let contents = content_bytes(&package.packed.listing);
-        assert_eq!(counter.done(), contents);
+        assert_eq!(counter.done(), 2 * contents);
     }
 
     #[test]
@@ -1561,7 +1596,7 @@ mod tests {
             data: &package.bytes[..cut],
         };
 
-        let error = read_stream(&archive, source, Some(&expected), &mut |_| Ok(()))
+        let error = read_stream(&archive, source, Some(&expected), None, &mut |_| Ok(()))
             .expect_err("the file cannot be read to its end");
 
         assert!(
