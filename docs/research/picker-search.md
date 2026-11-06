@@ -134,11 +134,63 @@ Parts of the join, over all 15 000 000 members, best of 3:
 
 ## Read path: cache file and listing
 
-_Not yet measured._
+What the picker pays to get the members of one piece of 50 000 members
+from disk and into the `Vec<String>` form of `Members`. The files were
+read from the macOS page cache (they had just been written or read), so
+disk latency is not part of these figures. Mean over 20 pieces, best of 3
+program runs (the first run, made while another process loaded the
+machine, took 28.5 ms and 56.0 ms in total and is left out):
+
+| Step | Cache file | Listing |
+| --- | ---: | ---: |
+| `fs::read` of the file | 0.21 ms | |
+| JSON parse into `Vec<RelPath>` (`serde_json::from_slice`) | 10.04 ms | |
+| zstd decode and JSON parse of all entries (`listing::read_all`) | | 26.39 ms |
+| `RelPath::to_string` and `sanitize` into a new `String` per member | 9.45 ms | 9.49 ms |
+| Total per piece | 19.72 ms | 35.89 ms |
+
+Decoding the listing with zstd alone, without the JSON parse, took
+5.45 ms per piece (best of the same 3 runs). The files are 2 597 761
+bytes (cache) and 2 874 061 bytes (listing) per piece.
+
+For the 260 pieces that the 2 000 000 member budget does not retain, the
+cache path is 260 times 19.72 ms = 5.1 s and the listing path 260 times
+35.89 ms = 9.3 s for every key.
 
 ## Picker replica on files
 
-_Not yet measured._
+A copy of the retain-and-narrow logic of `recompute` (retained members
+up to 2 000 000, hits kept for retained pieces, a key that extends the
+last narrows, a piece with no hit is skipped while narrowing) reading the
+members of piece `i` from the files of piece `i % 60`. No row matches, so
+every piece goes through its members. It is not the product code: the
+picker state lives in the binary crate and cannot be linked from an
+example. One run of each, the stages are the sum over the pieces read
+or scored in that key; in the first key the 40 retained pieces are read
+too. Milliseconds.
+
+Members from the cache files:
+
+| Key | Total | Read file | JSON parse | `to_string`+`sanitize` | Join and score |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `c` | 7293.4 | 88.0 | 3030.4 | 2855.4 | 1073.5 |
+| `ct` | 11364.8 | 66.6 | 2937.6 | 2713.7 | 5399.1 |
+| `ctrl` | 10578.3 | 54.8 | 2649.7 | 2479.4 | 5160.9 |
+| `ctr` (backspace) | 11197.4 | 61.2 | 2702.5 | 2554.0 | 5642.8 |
+| `qxz` | 6984.2 | 69.0 | 3020.2 | 2944.8 | 695.2 |
+
+Members from the zstd listings (no cache files):
+
+| Key | Total | zstd decode and parse | `to_string`+`sanitize` | Join and score |
+| --- | ---: | ---: | ---: | ---: |
+| `c` | 13731.2 | 8950.0 | 3194.4 | 1166.6 |
+| `ct` | 16322.8 | 7763.2 | 2748.0 | 5428.5 |
+| `ctrl` | 14946.0 | 6944.5 | 2512.6 | 5133.5 |
+| `ctr` (backspace) | 16965.3 | 7738.4 | 2823.4 | 6008.1 |
+| `qxz` | 12335.4 | 8300.2 | 2871.2 | 760.5 |
+
+At the end of each run 2 000 000 of the 15 000 000 members were
+retained. The run was made with load average 10 to 12 from other work.
 
 ## Scoring in parallel
 
