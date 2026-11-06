@@ -223,6 +223,10 @@ impl Piece<'_, '_> {
             );
             return Err(self.left_for_the_repairs(&what, &reason));
         }
+        self.warn(format!(
+            "`{}` could not be moved to the trash ({refusal}); it was deleted where it stood",
+            self.path
+        ));
         self.mark_gone(entry)
     }
 

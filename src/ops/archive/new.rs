@@ -3186,6 +3186,24 @@ mod tests {
             entry(&world, done.id).expect("an entry").state,
             EntryState::Gone
         );
+        let warning = report
+            .warnings
+            .iter()
+            .find(|w| w.message.contains("could not be moved to the trash"))
+            .unwrap_or_else(|| panic!("a warning names the refusal: {:?}", report.warnings));
+        assert!(warning.message.contains("`a`"), "{}", warning.message);
+        // The OS words the error differently: "Cross-device link" on macOS,
+        // "Invalid cross-device link" on Linux.
+        assert!(
+            warning.message.to_lowercase().contains("cross-device link"),
+            "{}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains("deleted where it stood"),
+            "{}",
+            warning.message
+        );
     }
 
     #[test]

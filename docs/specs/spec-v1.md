@@ -1228,7 +1228,8 @@ For each idle, unpinned piece:
 5. Delete it and set the entry to `gone`, keeping its local payloads.
 
 When a rename fails, the folder is walked and compared in place and then
-deleted there, with the entry `removing`. A folder that differs from the
+deleted there, with the entry `removing`, and a warning names the refusal.
+A folder that differs from the
 record of the verify stays and is unearthed. A process that still holds a
 file open can write after the walk; that write is lost. Uploading is
 left to the next `sync`. (ADR 0032)
