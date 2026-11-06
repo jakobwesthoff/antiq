@@ -469,15 +469,49 @@ pub(crate) fn archive_with(
             },
         };
         let mut listing_stored = false;
-        for result in run_pieces(&cx, &candidates, request.workers)? {
-            warnings.extend(result.warnings);
-            listing_stored |= result.listing_stored;
-            match result.outcome {
-                new::PieceOutcome::Dropped => {}
-                new::PieceOutcome::Skipped(row) => skipped.push(row),
-                new::PieceOutcome::Archived(row) => archived.push(row),
-                new::PieceOutcome::Kept(row) => kept.push(row),
-            }
+        let slots = run_pieces(&cx, &candidates, request.workers);
+        // The pieces that did not finish are skipped rows named after the
+        // first failure in path order: a failure ends the run, and every
+        // piece not yet started is left alone.
+        let stopped_at = candidates
+            .iter()
+            .zip(&slots)
+            .find(|(_, slot)| matches!(slot, Slot::Failed(_)))
+            .map(|(candidate, _)| candidate.path.clone());
+        for (candidate, slot) in candidates.iter().zip(slots) {
+            let message = match slot {
+                Slot::Done(result) => {
+                    warnings.extend(result.warnings);
+                    listing_stored |= result.listing_stored;
+                    match result.outcome {
+                        new::PieceOutcome::Dropped => {}
+                        new::PieceOutcome::Skipped(row) => skipped.push(row),
+                        new::PieceOutcome::Archived(row) => archived.push(row),
+                        new::PieceOutcome::Kept(row) => kept.push(row),
+                    }
+                    continue;
+                }
+                Slot::Failed(error) => {
+                    let cause = new::chain(&error);
+                    if stopped_at.as_ref() == Some(&candidate.path) {
+                        warnings.push(Warning::new(format!(
+                            "the run stopped at `{}`: {cause}",
+                            candidate.path
+                        )));
+                    }
+                    cause
+                }
+                Slot::NotStarted => match &stopped_at {
+                    Some(path) => format!("not started because the run stopped at `{path}`"),
+                    None => unreachable!("a piece is only left unstarted after a failure"),
+                },
+            };
+            skipped.push(Skipped {
+                id: candidate.id,
+                path: candidate.path.clone(),
+                reason: SkipReason::Error,
+                message,
+            });
         }
         if listing_stored && let Err(error) = index::update(collection, guard.lock()) {
             warnings.push(Warning::new(format!("cannot update the index: {error}")));
@@ -493,45 +527,55 @@ pub(crate) fn archive_with(
     })
 }
 
+/// What became of one candidate.
+enum Slot {
+    Done(new::PieceResult),
+    /// The piece hit what no piece can go on after.
+    Failed(ArchiveError),
+    /// A piece failed first, so this one was never started.
+    NotStarted,
+}
+
 /// Archives the candidates on `workers` threads that take the next piece
-/// in path order as they become free, and returns the results in path
-/// order. When a piece fails the run, no new piece is started and the
-/// error of the first such piece in path order is returned.
-fn run_pieces(
-    cx: &new::Context<'_>,
-    candidates: &[Candidate],
-    workers: usize,
-) -> Result<Vec<new::PieceResult>, ArchiveError> {
+/// in path order as they become free, and returns one slot per candidate in
+/// path order. When a piece fails the run, no new piece is started; the
+/// pieces running by then finish.
+fn run_pieces(cx: &new::Context<'_>, candidates: &[Candidate], workers: usize) -> Vec<Slot> {
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
-    let mut finished: Vec<(usize, Result<new::PieceResult, ArchiveError>)> =
-        thread::scope(|scope| {
-            let threads: Vec<_> = (0..workers.clamp(1, candidates.len()))
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut mine = Vec::new();
-                        while !failed.load(Ordering::SeqCst) {
-                            let index = next.fetch_add(1, Ordering::SeqCst);
-                            let Some(candidate) = candidates.get(index) else {
-                                break;
-                            };
-                            let result = new::archive_piece(cx, candidate);
-                            if result.is_err() {
-                                failed.store(true, Ordering::SeqCst);
-                            }
-                            mine.push((index, result));
+    let finished: Vec<(usize, Result<new::PieceResult, ArchiveError>)> = thread::scope(|scope| {
+        let threads: Vec<_> = (0..workers.clamp(1, candidates.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    while !failed.load(Ordering::SeqCst) {
+                        let index = next.fetch_add(1, Ordering::SeqCst);
+                        let Some(candidate) = candidates.get(index) else {
+                            break;
+                        };
+                        let result = new::archive_piece(cx, candidate);
+                        if result.is_err() {
+                            failed.store(true, Ordering::SeqCst);
                         }
-                        mine
-                    })
+                        mine.push((index, result));
+                    }
+                    mine
                 })
-                .collect();
-            threads
-                .into_iter()
-                .flat_map(|thread| thread.join().unwrap_or_else(|panic| resume_unwind(panic)))
-                .collect()
-        });
-    finished.sort_by_key(|(index, _)| *index);
-    finished.into_iter().map(|(_, result)| result).collect()
+            })
+            .collect();
+        threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap_or_else(|panic| resume_unwind(panic)))
+            .collect()
+    });
+    let mut slots: Vec<Slot> = candidates.iter().map(|_| Slot::NotStarted).collect();
+    for (index, result) in finished {
+        slots[index] = match result {
+            Ok(result) => Slot::Done(result),
+            Err(error) => Slot::Failed(error),
+        };
+    }
+    slots
 }
 
 fn open_root(collection: &Collection) -> Result<TreeRoot, ArchiveError> {

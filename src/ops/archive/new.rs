@@ -189,7 +189,7 @@ impl Stop {
 }
 
 /// The error and its causes on one line.
-fn chain(error: &(dyn Error + 'static)) -> String {
+pub(super) fn chain(error: &(dyn Error + 'static)) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -2538,24 +2538,6 @@ mod tests {
     }
 
     #[test]
-    fn running_out_of_descriptors_fails_the_run() {
-        let world = lone_piece("a");
-        let mut seams = Scripted::real();
-        let armed = Arc::clone(&seams.mount.1);
-        seams.on = Box::new(move |step, _| {
-            if step == Step::Walk {
-                armed.store(true, Ordering::SeqCst);
-            }
-            Ok(())
-        });
-        let (ids, now) = (SeqIds::new(1), clock());
-        let error = archive_with(&request(&world, &ids, &now, shared_pool(), false), &seams)
-            .expect_err("the run fails");
-        assert!(matches!(error, ArchiveError::Walk(_)), "{error}");
-        assert!(objects(&world).is_empty());
-    }
-
-    #[test]
     fn an_object_with_unreadable_metadata_does_not_stop_a_new_piece() {
         let world = lone_piece("a");
         let id = ObjectId::from_ulid(ulid::Ulid::from_parts(1_600_000_000_000, 7));
@@ -3850,8 +3832,13 @@ mod tests {
             workers: 2,
             ..request(&world, &ids, &now, &pool, false)
         };
-        let error = archive_with(&request, &seams).expect_err("the run fails");
-        assert!(matches!(error, ArchiveError::Walk(_)), "{error}");
+        let report = archive_with(&request, &seams).expect("the run reports");
+        let paths: Vec<String> = skipped(&report)
+            .iter()
+            .map(|row| row.path.to_string())
+            .collect();
+        assert_eq!(paths, ["a", "b", "c"], "{report:?}");
+        assert!(archived(&report).is_empty());
     }
 
     #[test]
@@ -3869,8 +3856,15 @@ mod tests {
             Ok(())
         });
         let (ids, now, pool) = (SeqIds::new(1), clock(), big_pool(1));
-        archive_with(&request(&world, &ids, &now, &pool, false), &seams)
-            .expect_err("the run fails");
+        let report = archive_with(&request(&world, &ids, &now, &pool, false), &seams)
+            .expect("the run reports");
         assert_eq!(walks.load(Ordering::SeqCst), 1);
+        let messages: Vec<&str> = skipped(&report)
+            .iter()
+            .map(|row| row.message.as_str())
+            .collect();
+        assert!(messages[0].contains("Too many open files"), "{messages:?}");
+        assert!(messages[1].contains("not started"), "{messages:?}");
+        assert!(messages[2].contains("not started"), "{messages:?}");
     }
 }

@@ -1241,6 +1241,11 @@ mount point, an excluded path or a nested collection is skipped with that
 reason. After packing, the package file is hashed again from the disk and
 must give the hash computed while writing it, and the listing of the
 packing must equal the members the strict verify reads from the package.
+Running out of file descriptors in the walk of a piece ends the run:
+pieces already running finish, the piece and every piece not yet started
+are skipped with reason `error`, one warning names the cause, the report
+lists every piece as usual, the index learns of the stored listings and
+the run exits 3.
 
 The walk of step 4 compares every entry's type, size, modification time,
 inode and change time with the record of the verify, directories
