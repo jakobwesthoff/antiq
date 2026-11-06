@@ -2,9 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! A stand-in for rsync for the binary tests: the same fixture script and
-//! the same answers as the crate's own `target::fake::Fake`, which a test
-//! outside the crate cannot reach.
+//! A stand-in for rsync, for tests of code that runs it.
+//!
+//! This file is shared: the binary tests include it through
+//! `support::fake_rsync`, the library tests through
+//! `testing::fake_rsync`.
 
 use std::fs;
 use std::os::unix::fs::symlink;

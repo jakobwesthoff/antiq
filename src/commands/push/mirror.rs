@@ -200,8 +200,8 @@ pub(super) fn run_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::fake::Fake;
     use crate::target::rsync::{Call, Outcome, RsyncError};
+    use crate::testing::fake_rsync::FakeRsync;
     use std::cell::RefCell;
     use std::fs;
 
@@ -217,14 +217,14 @@ mod tests {
     }
 
     struct Fixture {
-        _fake: Fake,
+        _fake: FakeRsync,
         rsync: Rsync,
         url: TargetUrl,
         scratch: tempfile::TempDir,
     }
 
     fn fixture() -> Fixture {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let rsync = Rsync::probe(&fake.path()).expect("the stand-in passes");
         Fixture {
             _fake: fake,

@@ -1065,8 +1065,8 @@ mod tests {
     // An ssh target
     // -----------------------------------------------------
 
-    use crate::target::fake::Fake;
     use crate::target::rsync::{Options, Outcome};
+    use crate::testing::fake_rsync::FakeRsync;
     use std::cell::RefCell;
 
     const RSYNC_3_5_1: &str =
@@ -1177,14 +1177,14 @@ mod tests {
     }
 
     struct Ssh {
-        _fake: Fake,
+        _fake: FakeRsync,
         rsync: Rsync,
         url: TargetUrl,
         scratch: tempfile::TempDir,
     }
 
     fn ssh() -> Ssh {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let rsync = Rsync::probe(&fake.path()).expect("the stand-in passes");
         Ssh {
             _fake: fake,

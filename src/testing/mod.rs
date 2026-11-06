@@ -20,6 +20,14 @@ pub mod tree;
 #[path = "../../tests/support/versions.rs"]
 pub mod versions;
 
+// The integration tests include the same file; each test crate uses a part of it.
+#[allow(
+    dead_code,
+    reason = "shared with the integration tests, which each use a part"
+)]
+#[path = "../../tests/support/fake_rsync.rs"]
+pub mod fake_rsync;
+
 pub mod package;
 mod pool;
 pub use pool::shared_pool;

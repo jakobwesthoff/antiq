@@ -511,7 +511,7 @@ fn scrub_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::fake::Fake;
+    use crate::testing::fake_rsync::FakeRsync;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -520,7 +520,7 @@ mod tests {
     const OPENRSYNC: &str = "openrsync: protocol version 29\nrsync version 2.6.9 compatible\n";
 
     fn probed(text: &str) -> Result<Rsync, RsyncError> {
-        let fake = Fake::new(text);
+        let fake = FakeRsync::new(text);
         Rsync::probe(&fake.path())
     }
 
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn probe_keeps_the_path_it_was_given() {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
         assert_eq!(rsync.path(), fake.path());
     }
@@ -594,14 +594,14 @@ mod tests {
 
     #[test]
     fn a_refused_rsync_is_reported_with_its_path_and_the_config_key() {
-        let fake = Fake::new(OPENRSYNC);
+        let fake = FakeRsync::new(OPENRSYNC);
         let error = Rsync::probe(&fake.path()).expect_err("openrsync is refused");
         let text = error.to_string();
         assert!(text.contains(&fake.path().display().to_string()), "{text}");
         assert!(text.contains("openrsync"), "{text}");
         assert!(text.contains("`[target] rsync`"), "{text}");
         assert!(text.contains("3.2.4"), "{text}");
-        let old = Fake::new(&line("3.1.0"));
+        let old = FakeRsync::new(&line("3.1.0"));
         let text = Rsync::probe(&old.path()).expect_err("3.1.0").to_string();
         assert!(
             text.contains("3.1.0") && text.contains("`[target] rsync`"),
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn probe_refuses_a_failing_version_call() {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         fake.version_exit(3);
         match Rsync::probe(&fake.path()).expect_err("the probe refuses") {
             RsyncError::Refused {
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn probe_runs_version_with_one_argument_in_a_scrubbed_environment() {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         Rsync::probe(&fake.path()).expect("3.5.1 passes");
         assert_eq!(fake.calls(), [["version", "--version"]]);
         let env = String::from_utf8(fake.read("env.log")).expect("text");
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn the_fake_sees_no_rsync_variables_and_lc_all_c() {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let mut base = Command::new(fake.path());
         base.arg("--version")
             .env("RSYNC_PASSWORD", "secret")
@@ -757,16 +757,16 @@ mod tests {
 
     #[test]
     fn resolve_prefers_the_configured_path() {
-        let configured = Fake::new(RSYNC_3_5_1);
-        let searched = Fake::new("rsync  version 3.2.7  protocol version 32\n");
+        let configured = FakeRsync::new(RSYNC_3_5_1);
+        let searched = FakeRsync::new("rsync  version 3.2.7  protocol version 32\n");
         let rsync = resolve_in(Some(&configured.path()), &[searched.dir()]).expect("it resolves");
         assert_eq!(rsync.path(), configured.path());
     }
 
     #[test]
     fn resolve_does_not_fall_back_when_the_configured_path_fails() {
-        let configured = Fake::new(OPENRSYNC);
-        let searched = Fake::new(RSYNC_3_5_1);
+        let configured = FakeRsync::new(OPENRSYNC);
+        let searched = FakeRsync::new(RSYNC_3_5_1);
         match resolve_in(Some(&configured.path()), &[searched.dir()]).expect_err("it is refused") {
             RsyncError::Refused { path, reason } => {
                 assert_eq!(path, configured.path());
@@ -788,9 +788,9 @@ mod tests {
 
     #[test]
     fn resolve_takes_the_first_directory_that_passes() {
-        let openrsync = Fake::new(OPENRSYNC);
-        let first = Fake::new(RSYNC_3_5_1);
-        let second = Fake::new("rsync  version 3.2.7  protocol version 32\n");
+        let openrsync = FakeRsync::new(OPENRSYNC);
+        let first = FakeRsync::new(RSYNC_3_5_1);
+        let second = FakeRsync::new("rsync  version 3.2.7  protocol version 32\n");
         let dirs = [openrsync.dir(), first.dir(), second.dir()];
         let rsync = resolve_in(None, &dirs).expect("it resolves");
         assert_eq!(rsync.path(), first.path());
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn resolve_skips_a_directory_without_rsync() {
         let empty = tempfile::tempdir().expect("a temporary directory");
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let dirs = [empty.path().to_path_buf(), fake.dir()];
         let rsync = resolve_in(None, &dirs).expect("it resolves");
         assert_eq!(rsync.path(), fake.path());
@@ -808,8 +808,8 @@ mod tests {
 
     #[test]
     fn resolve_reports_every_refusal_when_none_passes() {
-        let openrsync = Fake::new(OPENRSYNC);
-        let old = Fake::new("rsync  version 3.0.9  protocol version 30\n");
+        let openrsync = FakeRsync::new(OPENRSYNC);
+        let old = FakeRsync::new("rsync  version 3.0.9  protocol version 30\n");
         let dirs = [openrsync.dir(), old.dir()];
         match resolve_in(None, &dirs).expect_err("none passes") {
             RsyncError::NoneFound { refusals } => {
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn resolve_searches_the_path_variable_first() {
-        let fake = Fake::new(RSYNC_3_5_1);
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let rsync = Rsync::resolve(None, fake.dir().as_os_str()).expect("it resolves");
         assert_eq!(rsync.path(), fake.path());
     }
@@ -922,8 +922,8 @@ mod tests {
     }
 
     /// An rsync that passed the probe; the fake stays alive with it.
-    fn probed_fake() -> (Fake, Rsync) {
-        let fake = Fake::new(RSYNC_3_5_1);
+    fn probed_fake() -> (FakeRsync, Rsync) {
+        let fake = FakeRsync::new(RSYNC_3_5_1);
         let rsync = Rsync::probe(&fake.path()).expect("3.5.1 passes");
         (fake, rsync)
     }
@@ -1186,7 +1186,7 @@ mod tests {
     // Running
     // =========================================================
 
-    fn run_with(fake: &Fake, rsync: &Rsync) -> Outcome {
+    fn run_with(fake: &FakeRsync, rsync: &Rsync) -> Outcome {
         rsync
             .list(&options(), &nas())
             .run()
