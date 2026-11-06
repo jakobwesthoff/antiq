@@ -2572,6 +2572,22 @@ the same commit; the lead checks that at acceptance.
   returns the list; I32 adds the key to `Payload` and to spec
   "Metadata" when it writes live payloads; I34 warns on it.
 
+### I12
+
+- 2026-11-04, I12 plan review (ledger `i12-ledger.md`, 8 findings
+  agreed): a staged verify skips only the top's mode (the caller sets it
+  after the rename, I20); `compare_with_listing` also returns the lstat
+  record, so reclaiming feeds archive step 4 with it; `Verified` holds
+  the package's entries (`Verified::listing`), which I19 stores as the
+  listing; negative base-256 tar times list as 0. For I19: the top
+  entry's ctime in the record changes when antiq moves the piece, so
+  step 4 compares kind, inode and `mtime_ns` for the top.
+- 2026-11-04: on a user's tree the strict verify does not compare
+  directory modification times, as the listing comparison does not,
+  since a junk file such as `.DS_Store` changes its directory's time
+  without changing what is archived; on staging it compares them. I12
+  writes it into spec "Verifying".
+
 ### I13
 
 - 2026-11-04: no path-length refusal before unearthing; only name
