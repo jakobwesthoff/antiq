@@ -468,7 +468,11 @@ fn a_usage_error_has_a_null_command_and_exit_2() {
 #[test]
 fn help_and_version_are_text() {
     accepted(&["--json", "--help"], "Usage: antiq\n", 0);
-    accepted(&["--json", "--version"], "antiq 0.1.0\n", 0);
+    accepted(
+        &["--json", "--version"],
+        concat!("antiq ", env!("CARGO_PKG_VERSION"), "\n"),
+        0,
+    );
 }
 
 #[test]
