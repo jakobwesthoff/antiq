@@ -699,6 +699,9 @@ mod pack_tests {
             Problem::MountPoint {
                 other: RelPath::parse("mnt").expect("valid"),
             },
+            Problem::Excluded {
+                path: RelPath::parse("skip").expect("valid"),
+            },
         ] {
             let flawed = PieceTree::new(top.clone(), entries.clone(), vec![problem.clone()]);
             let mut out = Vec::new();
