@@ -938,9 +938,9 @@ impl Hooks for RealHooks {}
 /// Why a version was not brought back although nothing is wrong with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Skipped {
-    /// `needed` is 0 when the version has no listing to read the size from
-    /// and the volume ran full during the extraction.
-    NoSpace { needed: u64, available: u64 },
+    /// `needed` is `None` when the version has no listing to read the size
+    /// from and the volume ran full during the extraction.
+    NoSpace { needed: Option<u64>, available: u64 },
 }
 
 /// What `bring_back` did.
@@ -1089,7 +1089,10 @@ pub(crate) fn bring_back_to(
         let available = hooks.available_space(&tmp)?;
         if available < needed {
             return Ok(Brought::Skipped {
-                reason: Skipped::NoSpace { needed, available },
+                reason: Skipped::NoSpace {
+                    needed: Some(needed),
+                    available,
+                },
                 warnings: Vec::new(),
             });
         }
@@ -1125,7 +1128,7 @@ pub(crate) fn bring_back_to(
             if space::is_out_of_space(&error) {
                 Ok(Brought::Skipped {
                     reason: Skipped::NoSpace {
-                        needed: source.listing.map_or(0, |listing| listing.bytes),
+                        needed: source.listing.map(|listing| listing.bytes),
                         available: hooks.available_space(&tmp).unwrap_or(0),
                     },
                     warnings: placed.warnings,
@@ -3020,7 +3023,7 @@ mod bring_tests {
         spy.space = Some(5);
         match skipped(world.run(&spy)) {
             Skipped::NoSpace { needed, available } => {
-                assert!(needed > 5);
+                assert!(needed.is_some_and(|needed| needed > 5));
                 assert_eq!(available, 5);
             }
         }
@@ -3486,7 +3489,7 @@ mod bring_tests {
         spy.mode = Mode::PerItem;
         let Skipped::NoSpace { needed, .. } =
             skipped(world.run_source(&without_listing(&chosen), "projects/copy", &spy));
-        assert_eq!(needed, 0);
+        assert_eq!(needed, None);
         assert!(!world.extract_dir().exists(), "extract/ is gone");
         assert!(!world.root().join("projects").exists());
     }
@@ -3605,7 +3608,7 @@ mod bring_tests {
         };
         let Skipped::NoSpace { needed, available } =
             skipped(world.run_source(&source, "projects/copy", &spy));
-        assert!(needed > 5);
+        assert!(needed.is_some_and(|needed| needed > 5));
         assert_eq!(available, 5);
         assert!(!spy.entries().contains(&"StagingMade".to_string()));
         assert!(!world.root().join("projects").exists());

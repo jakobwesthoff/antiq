@@ -392,7 +392,7 @@ impl Run<'_> {
             } => {
                 report.skipped = Some(SkippedNote {
                     reason: "no_space",
-                    needed,
+                    needed: needed.expect("a sound version has a listing"),
                     available,
                 });
                 warnings.extend(more.into_iter().map(Warning::new));
