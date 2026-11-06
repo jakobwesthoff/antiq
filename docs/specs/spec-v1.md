@@ -674,9 +674,12 @@ returns that version, which is how a commit that failed after its rename
 is retried.
 
 A commit that ends before the rename because a named file is missing, a
-higher version appeared or a claim above its own appeared deletes its temp name, flushes, and then deletes
-its claim, unless the version of its number exists. A commit that ends
-for any other reason leaves its claim and temp name. The temp name goes
+higher version appeared or a claim above its own appeared deletes its
+temp name, flushes, and then deletes its claim, unless the version of its number exists. A commit that finds
+its claim gone deletes its temp name and flushes. A commit whose write of
+the temp name fails tries the same release, stops at the first error of
+it and reports the write's error. A commit that ends for any other
+reason, or whose release fails too, leaves its claim and temp name. The temp name goes
 first so that a stop between the two leaves a claim without a temp name,
 which blocks, and never a temp name without a claim, which would pass for
 an interrupted attempt of this machine under a claim another writer made.

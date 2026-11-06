@@ -143,11 +143,14 @@ pub enum Refusal {
 /// local archive.
 ///
 /// A refusal after the claim that is known before the rename
-/// (`PayloadMissing`, `NewerCommitted`) removes the claim and the temp
-/// file, unless the version number is taken. Every other stop leaves them:
-/// the next commit recognises a claim with this machine's metadata temp
-/// beside it as its own interrupted attempt, which the run lock proves is
-/// not in flight, and skips it.
+/// (`PayloadMissing`, `NewerCommitted`, `ClaimOpen` above the commit's own
+/// claim) removes the claim and the temp file, unless the version number is
+/// taken. `ClaimLost` removes the temp file. A failed temp write removes
+/// both on a best-effort basis: the removal stops at its first error and
+/// the write's error is the one returned. Every other stop leaves them: the
+/// next commit recognises a claim with this machine's metadata temp beside
+/// it as its own interrupted attempt, which the run lock proves is not in
+/// flight, and skips it.
 ///
 /// Known limits:
 ///
@@ -386,7 +389,13 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
     // Everything that could still make the rename wrong is checked after
     // the claim, against a listing taken after the temp file is durable.
     let temp = metadata_temp_name(settings.machine, number);
-    remote.write_temp(request.id, &temp, request.metadata)?;
+    if let Err(error) = remote.write_temp(request.id, &temp, request.metadata) {
+        // Without this the claim blocks the object for a grace period. The
+        // write failed, so the remote may fail again here; the error to
+        // report is the write's.
+        let _ = release(remote, request.id, number, &temp, &found.directory);
+        return Err(error.into());
+    }
     remote.flush()?;
     let listed = Directory::load(remote, request.id)?;
     if listed.highest() > found.highest {
@@ -397,6 +406,11 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
         return Err(refusal.into());
     }
     if listed.file(&claim_name(number)).is_none() {
+        // Only the temp file is ours to take back. Left behind, it would
+        // pass for this machine's interrupted attempt under the claim
+        // another writer makes for this number.
+        remote.delete(request.id, &temp)?;
+        remote.flush()?;
         return Err(Refusal::ClaimLost { number }.into());
     }
     // A writer whose number is above ours skipped our claim as abandoned.
@@ -965,7 +979,7 @@ mod tests {
             );
             assert_eq!(
                 names.contains(&CLAIM.to_string()),
-                index > claimed,
+                index > claimed && index != written,
                 "the claim after a failure at call {index}"
             );
             assert_eq!(
@@ -1155,8 +1169,74 @@ mod tests {
         let outcome = world.committed(0, &metadata("a", true));
         assert_eq!(outcome, refused(Refusal::ClaimLost { number: 1 }));
         let names = world.names();
-        assert!(names.contains(&OWN_TEMP.to_string()), "the temp stays");
+        assert!(!names.contains(&OWN_TEMP.to_string()), "{names:?}");
         assert!(!names.contains(&"meta.1".to_string()));
+    }
+
+    #[test]
+    fn a_lost_claim_takes_back_the_temp_and_flushes() {
+        let world = World::new();
+        world.remote.after(Op::CreateExclusive, 1, |inner| {
+            inner.delete(id(), CLAIM).expect("the claim is removed");
+        });
+        world.committed(0, &metadata("a", true));
+        let log = world.remote.calls();
+        assert_eq!(
+            log[log.len() - 2..],
+            [Call::new(Op::Delete, OWN_TEMP), Call::new(Op::Flush, "")]
+        );
+    }
+
+    /// The temp file of a write that failed after it began.
+    fn half_written_temp(world: &World) {
+        world.remote.before(Op::WriteTemp, 1, |inner| {
+            inner
+                .write_temp(id(), OWN_TEMP, b"half")
+                .expect("the half write");
+        });
+    }
+
+    #[test]
+    fn a_failing_temp_write_takes_back_the_claim_and_the_temp() {
+        let world = World::new();
+        half_written_temp(&world);
+        world.remote.fail(Op::WriteTemp, 1, Fault::Away);
+        let error = world
+            .commit(0, &metadata("a", true))
+            .expect_err("the write fails");
+        assert_eq!(error.kind(), ErrorKind::RemoteAway, "{error}");
+        let names = world.names();
+        assert!(!names.contains(&CLAIM.to_string()), "{names:?}");
+        assert!(!names.contains(&OWN_TEMP.to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn a_temp_write_that_fails_beside_a_failing_delete_of_the_temp_leaves_the_claim() {
+        let world = World::new();
+        half_written_temp(&world);
+        world.remote.fail(Op::WriteTemp, 1, Fault::Away);
+        world.remote.fail(Op::Delete, 1, Fault::Io);
+        let error = world
+            .commit(0, &metadata("a", true))
+            .expect_err("the write fails");
+        assert_eq!(error.kind(), ErrorKind::RemoteAway, "the first error wins");
+        let names = world.names();
+        assert!(names.contains(&CLAIM.to_string()), "{names:?}");
+        assert!(names.contains(&OWN_TEMP.to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn a_temp_write_that_fails_beside_a_failing_delete_of_the_claim_never_leaves_the_temp_alone() {
+        let world = World::new();
+        half_written_temp(&world);
+        world.remote.fail(Op::WriteTemp, 1, Fault::Away);
+        world.remote.fail(Op::Delete, 2, Fault::Io);
+        world
+            .commit(0, &metadata("a", true))
+            .expect_err("the write fails");
+        let names = world.names();
+        assert!(names.contains(&CLAIM.to_string()), "{names:?}");
+        assert!(!names.contains(&OWN_TEMP.to_string()), "{names:?}");
     }
 
     #[test]
