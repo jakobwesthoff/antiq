@@ -333,11 +333,12 @@ pub(crate) fn plan_with(
     clock: &dyn Clock,
     seams: &dyn Seams,
 ) -> Result<ArchiveReport, ArchiveError> {
-    let (candidates, mut warnings) = candidates(collection, clock, seams, false)?;
+    let (candidates, warnings) = candidates(collection, clock, seams, false)?;
     let config = &collection.config().collection;
     let root = open_root(collection)?;
     let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
-    let junk = status::junk_names(&config.junk, &mut warnings);
+    // `status` has warned about the junk list already.
+    let junk = status::junk_names(&config.junk, &mut Vec::new());
     let mut plan = Plan::new();
     for candidate in candidates {
         let tree =
@@ -772,6 +773,19 @@ mod tests {
                 .any(|warning| warning.message.contains("another run holds the lock")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn a_junk_entry_that_is_no_file_name_warns_once_in_a_dry_run() {
+        let mut world = world();
+        world.file("a/note.txt", 30);
+        world.configure("junk = [\"a/b\"]");
+        let warnings = world.plan().warnings;
+        let count = warnings
+            .iter()
+            .filter(|warning| warning.message.contains("collection.junk"))
+            .count();
+        assert_eq!(count, 1, "{warnings:?}");
     }
 
     // =========================================================
