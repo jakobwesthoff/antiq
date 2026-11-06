@@ -96,6 +96,11 @@ own on the staging volume and reads the answers. Disk images made with
 - exFAT answers a name that is not UTF-8 with `EINVAL`, where APFS
   answers `EILSEQ` (**measured**). The probe takes both as "the volume
   refuses such names".
+- HFS+ stores a precomposed name decomposed, so a directory listing
+  returns other bytes than the ones written, and the 255-unit limit
+  applies to the decomposed form: 127 times `é` creates and 128 times
+  fails with errno 63, "File name too long" (**measured**). The probe
+  creates a precomposed name, lists the directory and compares the bytes.
 
 ## Not verified
 

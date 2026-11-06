@@ -127,6 +127,9 @@ pub struct TargetRules {
     pub case_insensitive: bool,
     /// `café` spelled with one code point and with two are one name.
     pub normalization_insensitive: bool,
+    /// The volume stores a name in its decomposed form (HFS+), so the
+    /// name it holds is longer than the one that was written.
+    pub decomposes: bool,
     /// A name that is not valid UTF-8 cannot be created.
     pub requires_utf8: bool,
     /// The longest name one directory entry can have.

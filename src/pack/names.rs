@@ -7,6 +7,7 @@
 use super::TargetRules;
 use crate::fsx::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -111,6 +112,7 @@ impl TargetRules {
         TargetRules {
             case_insensitive: true,
             normalization_insensitive: true,
+            decomposes: false,
             requires_utf8: true,
             name_limit: NameLimit {
                 max: 255,
@@ -124,6 +126,7 @@ impl TargetRules {
         TargetRules {
             case_insensitive: false,
             normalization_insensitive: false,
+            decomposes: false,
             requires_utf8: false,
             name_limit: NameLimit {
                 max: 255,
@@ -176,9 +179,16 @@ fn name_problems(path: &RelPath, rules: &TargetRules, problems: &mut Vec<NamePro
     if rules.requires_utf8 && std::str::from_utf8(name).is_err() {
         problems.push(NameProblem::NotUtf8 { path: path.clone() });
     }
+    // The limit applies to the name as the volume holds it.
+    let stored: Cow<[u8]> = if rules.decomposes {
+        let decomposed: String = String::from_utf8_lossy(name).nfd().collect();
+        Cow::Owned(decomposed.into_bytes())
+    } else {
+        Cow::Borrowed(name)
+    };
     let length = match rules.name_limit.unit {
-        LengthUnit::Bytes => name.len(),
-        LengthUnit::Utf16Units => String::from_utf8_lossy(name).encode_utf16().count(),
+        LengthUnit::Bytes => stored.len(),
+        LengthUnit::Utf16Units => String::from_utf8_lossy(&stored).encode_utf16().count(),
     };
     if length > rules.name_limit.max {
         problems.push(NameProblem::TooLong {
@@ -287,6 +297,12 @@ impl<'a> ProbeDirectory<'a> {
             Err(error) => Err(error),
         }
     }
+
+    /// Whether listing the probe directory gives `name`, byte for byte.
+    fn lists(&self, name: &[u8]) -> io::Result<bool> {
+        let entries = self.root.read_dir(&self.path)?;
+        Ok(entries.iter().any(|entry| entry.name.as_bytes() == name))
+    }
 }
 
 impl Drop for ProbeDirectory<'_> {
@@ -333,8 +349,14 @@ impl TargetRules {
         let lower = directory.create_file(b"antiq-probe-case")?;
         let case_insensitive = directory.finds(b"ANTIQ-PROBE-CASE")?;
 
-        directory.create_file("antiq-probe-caf\u{e9}".as_bytes())?;
+        // A volume that ignores normalisation finds the decomposed
+        // spelling of the precomposed name just written. One that stores
+        // names decomposed lists it under another spelling than the one
+        // it was created with.
+        let precomposed = "antiq-probe-caf\u{e9}".as_bytes();
+        directory.create_file(precomposed)?;
         let normalization_insensitive = directory.finds("antiq-probe-cafe\u{301}".as_bytes())?;
+        let decomposes = !directory.lists(precomposed)?;
 
         let requires_utf8 = refuses_non_utf8(directory.create_file(b"antiq-probe-\xff"))?;
 
@@ -346,6 +368,7 @@ impl TargetRules {
         Ok(TargetRules {
             case_insensitive,
             normalization_insensitive,
+            decomposes,
             requires_utf8,
             name_limit: NameLimit {
                 max,
@@ -552,6 +575,53 @@ mod tests {
         );
     }
 
+    fn hfs_plus() -> TargetRules {
+        TargetRules {
+            decomposes: true,
+            ..TargetRules::macos()
+        }
+    }
+
+    #[test]
+    fn a_volume_that_decomposes_counts_the_name_in_its_decomposed_form() {
+        // 200 precomposed characters are 200 UTF-16 units and, stored
+        // decomposed, 400.
+        let name = repeated(200, "\u{e9}");
+        let members = paths(&[&name]);
+        assert_eq!(
+            check_paths(&members, &hfs_plus()),
+            [NameProblem::TooLong {
+                path: rel(&name),
+                length: 400,
+                limit: hfs_plus().name_limit,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_volume_that_keeps_the_name_as_written_counts_it_as_written() {
+        let name = repeated(200, "\u{e9}");
+        assert_eq!(check_paths(&paths(&[&name]), &TargetRules::macos()), []);
+    }
+
+    #[test]
+    fn a_decomposing_volume_counts_bytes_of_the_decomposed_form_too() {
+        // 100 precomposed characters are 200 bytes and, decomposed, 300.
+        let name = repeated(100, "\u{e9}");
+        let rules = TargetRules {
+            decomposes: true,
+            ..TargetRules::linux()
+        };
+        assert_eq!(
+            check_paths(&paths(&[&name]), &rules),
+            [NameProblem::TooLong {
+                path: rel(&name),
+                length: 300,
+                limit: rules.name_limit,
+            }]
+        );
+    }
+
     #[test]
     fn a_name_that_is_not_utf8_is_refused_only_where_the_volume_requires_utf8() {
         let odd = RelPath::from_bytes(vec![b'a', 0xff]).expect("a valid path");
@@ -713,6 +783,16 @@ mod probe_tests {
     }
 
     #[test]
+    fn a_probe_directory_lists_a_name_byte_for_byte() {
+        let (_dir, root) = temp_root();
+        let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
+        probe.create_file(b"here").expect("a file is created");
+        assert!(probe.lists(b"here").expect("the listing works"));
+        assert!(!probe.lists(b"HERE").expect("the listing works"));
+        assert!(!probe.lists(b"missing").expect("the listing works"));
+    }
+
+    #[test]
     fn a_lookup_that_fails_for_another_reason_is_an_error() {
         let (_dir, root) = temp_root();
         let mut probe = ProbeDirectory::create(&root).expect("the directory is created");
@@ -780,6 +860,7 @@ mod probe_tests {
         assert_eq!(rules.requires_utf8, requires_utf8);
         assert_eq!(rules.name_limit.max, name_max);
         assert_eq!(rules.name_limit.unit, LengthUnit::Utf16Units);
+        assert!(!rules.decomposes, "APFS keeps names as written");
     }
 
     /// A disk image with a file system of its own, attached below a temp
@@ -824,6 +905,17 @@ mod probe_tests {
                 .arg(&self.mount)
                 .output();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "attaches a disk image with hdiutil"]
+    fn the_probe_finds_that_names_are_stored_decomposed_on_a_real_hfs_plus_volume() {
+        let volume = DiskImage::attach("HFS+");
+        let root = TreeRoot::open(&volume.mount).expect("the volume opens");
+        let rules = TargetRules::probe(&root).expect("the probe runs");
+        assert!(rules.decomposes);
+        assert!(is_empty(&root));
     }
 
     #[cfg(target_os = "macos")]
