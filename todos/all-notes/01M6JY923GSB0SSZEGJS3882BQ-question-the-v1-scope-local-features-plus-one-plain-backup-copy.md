@@ -165,6 +165,20 @@ open, so the discussion survives without the conversation.
   timestamps somewhere temporary and run `import` on the folder. The
   user asked for ideas and another round.
 
+## Decided in round 9 (asqr 01M6K440FS9VRZGA2HZ96AV5VR, 2026-11-04)
+
+- grep runs on all cores but two.
+- grep output: a table for now. The user asked for the lead's ideal
+  proposal based on how the command is used, with the match highlighted
+  in the output.
+- `forget <piece> <version>` removes exactly one version (`-n` to see
+  it first). All versions at once only with `--all-versions --force`.
+  The next `push` mirrors the deletion.
+- `import <folder> [--as <path>]` packs a folder from outside directly
+  as an archived version. The version time is the newest mtime in the
+  folder, and a parameter can set it explicitly. The source folder is
+  kept.
+
 ## Presented
 
 - The grep study was presented in round 8
