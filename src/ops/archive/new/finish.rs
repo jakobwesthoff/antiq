@@ -15,7 +15,7 @@ use crate::clock::whole_seconds;
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::ops::archive::durable::DurableArchive;
-use crate::ops::archive::{Kept, KeptHow, Step};
+use crate::ops::archive::{Kept, KeptHow, Step, UnfinishedWhere};
 use crate::pack::verify::LstatRecord;
 use crate::relpath::RelPath;
 use crate::repair::{Outcome, move_trashed, recovered_name};
@@ -105,6 +105,26 @@ fn difference(record: &[LstatRecord], walked: Result<PieceTree, String>) -> Opti
     }
 }
 
+/// What the repairs of the next run do with an unfinished piece.
+#[derive(Clone, Copy)]
+enum Repair {
+    /// They finish the removal or the marking that failed.
+    Finishes,
+    /// They move the tree from the trash back to its path.
+    MovesBack,
+}
+
+impl Repair {
+    /// `head`, then what stays and what the repair does.
+    fn message(self, head: &str) -> String {
+        let next = match self {
+            Repair::Finishes => "finishes it",
+            Repair::MovesBack => "moves it back",
+        };
+        format!("{head}; the entry stays removing; the next run's repair {next}")
+    }
+}
+
 fn trash_name(id: ObjectId) -> RelPath {
     RelPath::parse(&id.to_string()).expect("an ID is a plain name")
 }
@@ -131,12 +151,29 @@ impl Piece<'_, '_> {
             .to_path_buf()
     }
 
-    /// What is left to the repairs of the next run: the entry stays
-    /// `removing`.
-    fn left_for_the_repairs(&mut self, what: &str, reason: &str) -> Stop {
-        let message = format!("{what}: {reason}; the entry stays removing");
+    /// The piece stays as it is for the repairs of the next run: the entry
+    /// stays `removing`, and the row names where the tree is and what the
+    /// repair does with it.
+    fn unfinished(&self, id: ObjectId, place: UnfinishedWhere, repair: Repair, head: &str) -> Stop {
+        Stop::Unfinished {
+            id,
+            place,
+            message: repair.message(head),
+        }
+    }
+
+    /// A step that failed: its reason goes to the row and to a warning.
+    fn left_for_the_repairs(
+        &mut self,
+        id: ObjectId,
+        place: UnfinishedWhere,
+        repair: Repair,
+        what: &str,
+        reason: &str,
+    ) -> Stop {
+        let message = repair.message(&format!("{what}: {reason}"));
         self.warn(message.clone());
-        Stop::error(message)
+        Stop::Unfinished { id, place, message }
     }
 
     pub(super) fn remove_folder(
@@ -221,7 +258,13 @@ impl Piece<'_, '_> {
                 "`{}` could not be moved to the trash ({refusal}) and cannot be deleted",
                 self.path
             );
-            return Err(self.left_for_the_repairs(&what, &reason));
+            return Err(self.left_for_the_repairs(
+                durable.id(),
+                UnfinishedWhere::InPlace,
+                Repair::Finishes,
+                &what,
+                &reason,
+            ));
         }
         self.warn(format!(
             "`{}` could not be moved to the trash ({refusal}); it was deleted where it stood",
@@ -279,7 +322,13 @@ impl Piece<'_, '_> {
             .and_then(|()| effects.remove_tree_at(&trash).map_err(|e| chain(&e)));
         if let Err(reason) = removed {
             let what = format!("cannot delete the trashed tree of `{}`", self.path);
-            return Err(self.left_for_the_repairs(&what, &reason));
+            return Err(self.left_for_the_repairs(
+                durable.id(),
+                UnfinishedWhere::Trash,
+                Repair::Finishes,
+                &what,
+                &reason,
+            ));
         }
         if let Err(error) = effects.flush_dir(&cx.collection.trash_dir()) {
             self.warn(format!(
@@ -340,8 +389,11 @@ impl Piece<'_, '_> {
                 ));
                 self.mark_unearthed(durable, entry, Step::GiveBackEntry)
             }
-            Outcome::Stuck => Err(Stop::error(
-                "the tree went back to its path but the move cannot be flushed; the entry stays removing",
+            Outcome::Stuck => Err(self.unfinished(
+                durable.id(),
+                UnfinishedWhere::InPlace,
+                Repair::Finishes,
+                "the tree went back to its path but the move cannot be flushed",
             )),
             Outcome::Refused(refusal) => self.recover(durable, entry, reason, &refusal),
         }
@@ -383,7 +435,13 @@ impl Piece<'_, '_> {
                 entry.removing_payload = None;
                 if let Err(written) = self.write_at(Step::RecoveredEntry, entry) {
                     let what = format!("cannot mark `{}` gone", self.path);
-                    return Err(self.left_for_the_repairs(&what, &written));
+                    return Err(self.left_for_the_repairs(
+                        durable.id(),
+                        UnfinishedWhere::Recovered,
+                        Repair::Finishes,
+                        &what,
+                        &written,
+                    ));
                 }
                 Ok(Finished::Kept(Kept {
                     id: durable.id(),
@@ -392,15 +450,24 @@ impl Piece<'_, '_> {
                     recovered_as: Some(name),
                 }))
             }
-            Outcome::Stuck => Err(Stop::error(
-                "the tree moved to recovered/ but the move cannot be flushed; the entry stays removing",
+            Outcome::Stuck => Err(self.unfinished(
+                durable.id(),
+                UnfinishedWhere::Recovered,
+                Repair::Finishes,
+                "the tree moved to recovered/ but the move cannot be flushed",
             )),
             Outcome::Refused(second) => {
                 let what = format!(
                     "the trashed tree of `{}` changed after it was verified ({reason}) and could not be moved ({refusal}; {second}); it stays in the trash",
                     self.path
                 );
-                Err(self.left_for_the_repairs(&what, "no other place took it"))
+                Err(self.left_for_the_repairs(
+                    durable.id(),
+                    UnfinishedWhere::Trash,
+                    Repair::MovesBack,
+                    &what,
+                    "no other place took it",
+                ))
             }
         }
     }
@@ -419,7 +486,13 @@ impl Piece<'_, '_> {
         entry.unearthed = Some(whole_seconds(self.cx.clock.now()));
         if let Err(reason) = self.write_at(step, entry) {
             let what = format!("cannot mark `{}` unearthed", self.path);
-            return Err(self.left_for_the_repairs(&what, &reason));
+            return Err(self.left_for_the_repairs(
+                durable.id(),
+                UnfinishedWhere::InPlace,
+                Repair::Finishes,
+                &what,
+                &reason,
+            ));
         }
         Ok(Finished::Kept(Kept {
             id: durable.id(),

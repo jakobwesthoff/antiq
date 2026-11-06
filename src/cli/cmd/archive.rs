@@ -96,6 +96,7 @@ pub(super) enum Word {
     Removed,
     Kept,
     Skipped,
+    Unfinished,
 }
 
 impl Word {
@@ -104,6 +105,7 @@ impl Word {
             Word::Removed => "removed",
             Word::Kept => "kept",
             Word::Skipped => "skipped",
+            Word::Unfinished => "stuck",
         }
     }
 
@@ -111,7 +113,7 @@ impl Word {
         match self {
             Word::Removed => Color::Green,
             Word::Kept => Color::Yellow,
-            Word::Skipped => Color::Red,
+            Word::Skipped | Word::Unfinished => Color::Red,
         }
     }
 }
@@ -171,6 +173,14 @@ fn rows(report: &ArchiveReport) -> Vec<Row> {
             detail: sanitize(&row.message),
         });
     }
+    for row in report.unfinished.iter().flatten() {
+        rows.push(Row {
+            path: sanitize(&row.path.to_string()),
+            size: None,
+            word: Word::Unfinished,
+            detail: sanitize(&row.message),
+        });
+    }
     // The report lists each outcome in path order; the console lists the
     // pieces in path order.
     rows.sort_by(|a, b| a.path.cmp(&b.path));
@@ -208,6 +218,10 @@ fn header(report: &ArchiveReport) -> String {
     let skipped = report.skipped.as_deref().map_or(0, <[_]>::len);
     if skipped > 0 {
         header.push_str(&format!(", {skipped} skipped"));
+    }
+    let unfinished = report.unfinished.as_deref().map_or(0, <[_]>::len);
+    if unfinished > 0 {
+        header.push_str(&format!(", {unfinished} unfinished"));
     }
     header
 }
@@ -303,7 +317,9 @@ fn continue_lines(lines: &mut Vec<String>, lead: String, indent: usize, detail: 
 mod tests {
     use super::*;
     use antiq::id::ObjectId;
-    use antiq::ops::archive::{ArchiveAction, Archived, Kept, KeptHow, SkipReason, Skipped};
+    use antiq::ops::archive::{
+        ArchiveAction, Archived, Kept, KeptHow, SkipReason, Skipped, Unfinished, UnfinishedWhere,
+    };
     use antiq::plan::Plan;
     use antiq::relpath::RelPath;
     use antiq::report::Warning;
@@ -341,6 +357,7 @@ mod tests {
             archived: None,
             skipped: None,
             kept: None,
+            unfinished: None,
             warnings: vec![Warning::new("the collection is on an NFS mount")],
         };
         let lines = render(&report, narrow());
@@ -365,6 +382,7 @@ mod tests {
             archived: None,
             skipped: None,
             kept: None,
+            unfinished: None,
             warnings: Vec::new(),
         };
         assert_eq!(render(&report, narrow()).stdout, ["Nothing to do."]);
@@ -424,8 +442,23 @@ mod tests {
             archived: Some(archived),
             skipped: Some(skipped),
             kept: Some(kept),
+            unfinished: Some(Vec::new()),
             warnings: Vec::new(),
         }
+    }
+
+    fn unfinished(text: &str, place: UnfinishedWhere, message: &str) -> Unfinished {
+        Unfinished {
+            id: id(3),
+            path: path(text),
+            place,
+            message: message.to_string(),
+        }
+    }
+
+    fn with_unfinished(mut report: ArchiveReport, rows: Vec<Unfinished>) -> ArchiveReport {
+        report.unfinished = Some(rows);
+        report
     }
 
     fn every_outcome() -> ArchiveReport {
@@ -523,6 +556,39 @@ mod tests {
     fn a_run_without_pieces_has_nothing_to_do() {
         let report = run_report(Vec::new(), Vec::new(), Vec::new());
         assert_eq!(render(&report, narrow()).stdout, ["Nothing to do."]);
+    }
+
+    #[test]
+    fn an_unfinished_row_has_its_word_its_message_and_a_count_in_the_header() {
+        let report = with_unfinished(
+            run_report(
+                vec![archived("projects/a", 412_000_000, 88_000_000)],
+                Vec::new(),
+                Vec::new(),
+            ),
+            vec![unfinished(
+                "projects/b",
+                UnfinishedWhere::Trash,
+                "cannot delete the trashed tree of `projects/b`: Input/output error (os error 5); the entry stays removing; the next run's repair finishes it",
+            )],
+        );
+        insta::assert_snapshot!(render(&report, wide()).stdout.join("\n"), @"
+        archived 1 piece \u{b7} 412 MB, 1 unfinished
+
+          projects/a  412 MB  removed  88 MB archive, verified
+          projects/b       -  stuck    cannot delete the trashed tree of `projects/b`: Input/output error
+                                       (os error 5); the entry stays removing; the next run's repair
+                                       finishes it
+        ");
+    }
+
+    #[test]
+    fn an_unfinished_row_alone_makes_the_run_partial() {
+        let report = with_unfinished(
+            run_report(Vec::new(), Vec::new(), Vec::new()),
+            vec![unfinished("a", UnfinishedWhere::InPlace, "stuck")],
+        );
+        assert_eq!(exit_code(&report), 3);
     }
 
     #[test]

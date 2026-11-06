@@ -26,8 +26,8 @@ mod finish;
 
 use super::durable::{self, Matched};
 use super::{
-    ArchiveError, Archived, Candidate, Kept, Seams, SkipReason, Skipped, Step, apparent_size,
-    size_text,
+    ArchiveError, Archived, Candidate, Kept, Seams, SkipReason, Skipped, Step, Unfinished,
+    UnfinishedWhere, apparent_size, size_text,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -132,6 +132,7 @@ pub(super) enum PieceOutcome {
     Skipped(Skipped),
     Archived(Archived),
     Kept(Kept),
+    Unfinished(Unfinished),
 }
 
 pub(super) struct PieceResult {
@@ -146,6 +147,13 @@ enum Stop {
     Dropped,
     Skip {
         reason: SkipReason,
+        message: String,
+    },
+    /// The piece is stored and its entry is `removing`, but the folder is
+    /// not out of the way; the repairs of the next run finish it.
+    Unfinished {
+        id: ObjectId,
+        place: UnfinishedWhere,
         message: String,
     },
     /// Only what no piece can go on after: out of file descriptors.
@@ -237,6 +245,12 @@ pub(super) fn archive_piece(
             id: candidate.id,
             path: candidate.path.clone(),
             reason,
+            message,
+        }),
+        Err(Stop::Unfinished { id, place, message }) => PieceOutcome::Unfinished(Unfinished {
+            id,
+            path: candidate.path.clone(),
+            place,
             message,
         }),
         Err(Stop::Fail(error)) => return Err(error),
@@ -950,7 +964,9 @@ mod tests {
     use crate::listing::{self, ListingType};
     use crate::meta::{CreatedSource, Lifecycle, PayloadKind};
     use crate::ops::archive::tests::{NOW, World, clock, days_ago, live_piece, world};
-    use crate::ops::archive::{ArchiveReport, ArchiveRequest, KeptHow, Step, archive_with};
+    use crate::ops::archive::{
+        ArchiveReport, ArchiveRequest, KeptHow, Step, Unfinished, UnfinishedWhere, archive_with,
+    };
     use crate::pack::verify::LstatRecord;
     use crate::pack::{PackError, PackSettings, Packager, Packed, TarZstd};
     use crate::relpath::RelPath;
@@ -1233,6 +1249,43 @@ mod tests {
             .skipped
             .as_deref()
             .expect("a real run lists what it skipped")
+    }
+
+    const FINISHES_IT: &str = "the next run's repair finishes it";
+    const MOVES_IT_BACK: &str = "the next run's repair moves it back";
+
+    fn unfinished(report: &ArchiveReport) -> &[Unfinished] {
+        report
+            .unfinished
+            .as_deref()
+            .expect("a real run lists what it left unfinished")
+    }
+
+    /// The one piece `a` the run left unfinished: it is the only row of
+    /// the report, its entry is `removing`, it is no skipped piece, and the
+    /// run exits 3.
+    fn assert_unfinished<'r>(
+        world: &World,
+        report: &'r ArchiveReport,
+        place: UnfinishedWhere,
+        then: &str,
+    ) -> &'r Unfinished {
+        let [row] = unfinished(report) else {
+            panic!("one piece is unfinished: {report:?}");
+        };
+        assert_eq!(row.place, place, "{row:?}");
+        assert_eq!(row.path.to_string(), "a");
+        assert_eq!(row.id, objects(world)[0]);
+        assert!(
+            row.message
+                .ends_with(&format!("the entry stays removing; {then}")),
+            "{}",
+            row.message
+        );
+        assert!(skipped(report).is_empty(), "{report:?}");
+        assert!(archived(report).is_empty(), "{report:?}");
+        assert!(report.partial_for_test());
+        row
     }
 
     fn store(world: &World) -> Store<'_> {
@@ -3092,10 +3145,7 @@ mod tests {
         mode_of(world.temp.root(), 0o755);
         mode_of(&recovered, 0o755);
 
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::Trash, MOVES_IT_BACK);
         assert!(report.kept.as_deref().is_some_and(<[Kept]>::is_empty));
         assert_eq!(trash_names(&world).len(), 1, "the tree stays in the trash");
         assert!(report.warnings.iter().any(|w| w.message.contains("trash")));
@@ -3127,10 +3177,7 @@ mod tests {
             },
         );
         let report = run(&world, &seams);
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::InPlace, FINISHES_IT);
         assert!(piece_path(&world, "a/top.txt").exists());
         let id = objects(&world)[0];
         assert_eq!(
@@ -3160,10 +3207,7 @@ mod tests {
                 Ok(())
             }),
         );
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::InPlace, FINISHES_IT);
         assert!(piece_path(&world, "a/top.txt").exists());
         let id = objects(&world)[0];
         assert_eq!(
@@ -3197,10 +3241,7 @@ mod tests {
                 Ok(())
             }),
         );
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::Recovered, FINISHES_IT);
         assert_eq!(recovered_names(&world).len(), 1);
         let id = objects(&world)[0];
         assert_eq!(
@@ -3293,10 +3334,7 @@ mod tests {
             &Scripted::before(Step::MoveToTrash, move || mode_of(&root, 0o555)),
         );
         mode_of(world.temp.root(), 0o755);
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::InPlace, FINISHES_IT);
         assert!(
             piece_path(&world, "a").is_dir(),
             "the delete got as far as emptying the folder"
@@ -3326,10 +3364,7 @@ mod tests {
         )
         .failing_at(Step::MoveToTrash, libc::EXDEV);
         let report = run(&world, &seams);
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::InPlace, FINISHES_IT);
         let id = objects(&world)[0];
         assert_eq!(
             entry(&world, id).expect("an entry").state,
@@ -3351,10 +3386,7 @@ mod tests {
             },
         );
         let report = run(&world, &seams);
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::Trash, FINISHES_IT);
         assert_eq!(trash_names(&world).len(), 1);
         let id = objects(&world)[0];
         assert_eq!(
@@ -3657,10 +3689,7 @@ mod tests {
                 Ok(())
             }),
         );
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::Trash, MOVES_IT_BACK);
         assert_eq!(trash_names(&world).len(), 1);
     }
 
@@ -3684,10 +3713,7 @@ mod tests {
             },
         );
         let report = run(&world, &seams);
-        let [row] = skipped(&report) else {
-            panic!("the piece is skipped: {report:?}");
-        };
-        assert_eq!(row.reason, SkipReason::Error);
+        assert_unfinished(&world, &report, UnfinishedWhere::Recovered, FINISHES_IT);
         assert_eq!(recovered_names(&world).len(), 1);
         let id = objects(&world)[0];
         assert_eq!(

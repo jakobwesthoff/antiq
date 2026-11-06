@@ -1263,7 +1263,9 @@ unearthed at the version of the new payload. The report lists the piece
 as kept. When the path is taken or the move back is refused, the tree goes
 to `.antiq/recovered/<ulid>-<time>/` and the entry becomes `gone`. When
 neither move works, the tree stays in the trash and the entry stays
-`removing`; the repairs of the next run judge the tree again.
+`removing`; the repairs of the next run judge the tree again. A step that
+fails with the entry `removing` (the delete, the entry write, a flush)
+leaves the same state, and the report lists the piece as unfinished.
 
 A new piece first looks for the object of an earlier run that died after
 it wrote the metadata and before it wrote the tracking entry: an object at
@@ -1826,8 +1828,8 @@ idle piece the next `archive` takes, in path order. `id` is null for a
 new piece and `size` is the piece's apparent size in bytes (a file with
 several names counts once).
 
-`archive` has `archived`, `skipped`, `kept` and `warnings`, in that
-order, each list in path order. `archived` has `{id, path, size,
+`archive` has `archived`, `skipped`, `kept`, `unfinished` and `warnings`,
+in that order, each list in path order. `archived` has `{id, path, size,
 archive_size, payload_version}` for each piece whose folder was removed:
 `size` is the apparent size in bytes and `archive_size` the bytes of the
 stored archive. `skipped` has `{id, path, reason, message}` for each piece
@@ -1838,7 +1840,12 @@ path, how, recovered_as}` for each piece that was archived and whose folder
 was not removed because it differs from the archive: `how` is `unearthed`
 when the folder is back at its path and `recovered` when it is below
 `.antiq/recovered/`, where `recovered_as` names it (present only then).
-The run exits 3 when `skipped` is not empty; a `kept` row alone does not
+`unfinished` has `{id, path, where, message}` for each piece that was
+archived and whose removal stopped with the entry still `removing`: `id` is
+the piece's ID, minted in this run for a new piece, and `where` is
+`trash`, `recovered` or `in_place`, naming where the tree is. `message`
+says what failed and what the repair of the next run does. The run exits 3
+when `skipped` or `unfinished` is not empty; a `kept` row alone does not
 make it partial.
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before

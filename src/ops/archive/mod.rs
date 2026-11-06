@@ -267,6 +267,29 @@ pub struct Kept {
     pub recovered_as: Option<String>,
 }
 
+/// Where the tree of an unfinished piece is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedWhere {
+    /// Below `.antiq/trash/`.
+    Trash,
+    /// Below `.antiq/recovered/`.
+    Recovered,
+    /// At the piece's path.
+    InPlace,
+}
+
+/// A piece that was archived but whose removal stopped half way: the entry
+/// stays `removing` and the repairs of the next run finish it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Unfinished {
+    pub id: ObjectId,
+    pub path: RelPath,
+    #[serde(rename = "where")]
+    pub place: UnfinishedWhere,
+    pub message: String,
+}
+
 /// What `archive` did, or with `--dry-run` would do.
 #[derive(Debug, Serialize)]
 pub struct ArchiveReport {
@@ -283,6 +306,9 @@ pub struct ArchiveReport {
     /// Real runs only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept: Option<Vec<Kept>>,
+    /// Real runs only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unfinished: Option<Vec<Unfinished>>,
     pub warnings: Vec<Warning>,
 }
 
@@ -295,9 +321,9 @@ impl ArchiveReport {
 
 impl CommandReport for ArchiveReport {
     fn partial(&self) -> bool {
-        self.skipped
-            .as_ref()
-            .is_some_and(|skipped| !skipped.is_empty())
+        let skipped = self.skipped.as_deref().unwrap_or_default();
+        let unfinished = self.unfinished.as_deref().unwrap_or_default();
+        !skipped.is_empty() || !unfinished.is_empty()
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -403,6 +429,7 @@ pub(crate) fn plan_with(
         archived: None,
         skipped: None,
         kept: None,
+        unfinished: None,
         warnings,
     })
 }
@@ -443,6 +470,7 @@ pub(crate) fn archive_with(
     let mut archived = Vec::new();
     let mut skipped = Vec::new();
     let mut kept = Vec::new();
+    let mut unfinished = Vec::new();
     if !candidates.is_empty() {
         let config = &collection.config().collection;
         let root = open_root(collection)?;
@@ -488,6 +516,7 @@ pub(crate) fn archive_with(
                         new::PieceOutcome::Skipped(row) => skipped.push(row),
                         new::PieceOutcome::Archived(row) => archived.push(row),
                         new::PieceOutcome::Kept(row) => kept.push(row),
+                        new::PieceOutcome::Unfinished(row) => unfinished.push(row),
                     }
                     continue;
                 }
@@ -523,6 +552,7 @@ pub(crate) fn archive_with(
         archived: Some(archived),
         skipped: Some(skipped),
         kept: Some(kept),
+        unfinished: Some(unfinished),
         warnings,
     })
 }
@@ -988,6 +1018,20 @@ mod tests {
         assert_eq!(
             text,
             r#"{"dry_run":true,"actions":[{"action":"archive","path":"a","id":null,"size":1}],"warnings":[]}"#
+        );
+    }
+
+    #[test]
+    fn an_unfinished_row_serialises_its_place_as_where() {
+        let row = Unfinished {
+            id: ObjectId::from_ulid(ulid::Ulid::from_parts(1_600_000_000_000, 7)),
+            path: RelPath::parse("a").expect("valid"),
+            place: UnfinishedWhere::InPlace,
+            message: "the entry stays removing".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&row).expect("the row serialises"),
+            r#"{"id":"01EJ3PX0000000000000000007","path":"a","where":"in_place","message":"the entry stays removing"}"#
         );
     }
 }
