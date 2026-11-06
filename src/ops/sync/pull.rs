@@ -32,14 +32,35 @@ fn known_versions(store: &Store<'_>) -> Result<KnownVersions, SyncError> {
     Ok(known)
 }
 
-/// Asks the remote for the versions this machine lacks. A failed read of
-/// the remote's directories is asked once more, since the second read often
-/// passes where a share was only slow to answer.
-fn pull_files(remote: &dyn Remote, known: &KnownVersions) -> Result<Vec<MetaFile>, RemoteError> {
-    match remote.pull_metadata(known) {
-        Err(RemoteError::Io { .. }) => remote.pull_metadata(known),
-        other => other,
+/// How the read of the remote's metadata ended when it failed.
+pub(super) enum PullFailure {
+    /// The remote is gone, which ends the run.
+    RunEnds(RemoteError),
+    /// The read failed twice and the remote is reachable.
+    Failed(RemoteError),
+}
+
+/// Asks the remote for the versions this machine lacks. A failed read is
+/// asked once more, since the second read often passes where a share was
+/// only slow to answer. A failure that says the remote is gone is not.
+pub(super) fn pull_files(
+    remote: &dyn Remote,
+    known: &KnownVersions,
+) -> Result<Vec<MetaFile>, PullFailure> {
+    let first = match remote.pull_metadata(known) {
+        Ok(files) => return Ok(files),
+        Err(error) => error,
+    };
+    if ends_run(remote, &first) {
+        return Err(PullFailure::RunEnds(first));
     }
+    remote.pull_metadata(known).map_err(|error| {
+        if ends_run(remote, &error) {
+            PullFailure::RunEnds(error)
+        } else {
+            PullFailure::Failed(error)
+        }
+    })
 }
 
 /// Pulls the metadata the remote has beyond this machine's, fetches the
@@ -51,8 +72,8 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<bool
     let known = known_versions(&store)?;
     let files = match pull_files(ctx.remote, &known) {
         Ok(files) => files,
-        Err(error) if ends_run(ctx.remote, &error) => return Err(error.into()),
-        Err(error) => {
+        Err(PullFailure::RunEnds(error)) => return Err(error.into()),
+        Err(PullFailure::Failed(error)) => {
             report.warnings.push(crate::report::Warning::new(format!(
                 "cannot read the metadata on the remote: {error}"
             )));

@@ -852,6 +852,7 @@ mod tests {
         let ben = Machine::new(&shared, "ben");
         let remote = ben.remote();
         remote.fail(Op::PullMetadata, 1, Fault::Away);
+        remote.fail(Op::PullMetadata, 2, Fault::Away);
 
         let report = done(sync_with(&ben.collection, &ben.clock, &remote, false));
 
@@ -861,6 +862,39 @@ mod tests {
                 .iter()
                 .any(|w| w.message.contains("cannot read the metadata"))
         );
+    }
+
+    #[test]
+    fn an_away_pull_that_is_away_again_while_the_remote_is_gone_ends_the_run() {
+        let shared = Shared::new();
+        let ben = Machine::new(&shared, "ben");
+        let remote = ben.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Away);
+        remote.fail(Op::PullMetadata, 2, Fault::Away);
+        remote.fail(Op::Reachability, 3, Fault::Away);
+
+        let error =
+            sync_with(&ben.collection, &ben.clock, &remote, false).expect_err("the remote is gone");
+
+        assert_eq!(error.kind(), ErrorKind::RemoteAway);
+        assert_eq!(remote.count(Op::PullMetadata), 2);
+    }
+
+    #[test]
+    fn an_away_pull_that_succeeds_when_asked_again_is_no_warning() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let ben = Machine::new(&shared, "ben");
+        let id = anna.import_piece("notes", "hello");
+        anna.publish_by_hand(&shared, id, 1);
+        let remote = ben.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Away);
+
+        let report = done(sync_with(&ben.collection, &ben.clock, &remote, false));
+
+        assert_eq!(report.pulled.len(), 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(remote.count(Op::PullMetadata), 2);
     }
 
     #[test]
