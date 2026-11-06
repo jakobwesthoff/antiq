@@ -9,11 +9,10 @@ use crate::cli::output::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// From this width on, tables use their wide layout.
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) const WIDE_FROM: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "used again by C1")]
+#[allow(dead_code, reason = "the variants that list does not use belong to C1")]
 pub(super) enum Color {
     Plain,
     Dim,
@@ -25,7 +24,6 @@ pub(super) enum Color {
     Cyan,
 }
 
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
     let code = match color {
         Color::Plain => return text.to_string(),
@@ -44,24 +42,20 @@ pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
     }
 }
 
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) fn spaces(count: usize) -> String {
     " ".repeat(count)
 }
 
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", spaces(width.saturating_sub(text.width())))
 }
 
-#[allow(dead_code, reason = "used again by C1")]
 pub(super) fn pad_left(text: &str, width: usize) -> String {
     format!("{}{text}", spaces(width.saturating_sub(text.width())))
 }
 
 /// A size in decimal units (1 kB = 1000 bytes), with one decimal below 10
 /// and none from 10 on.
-#[allow(dead_code, reason = "used by the list command (C10) and C1")]
 pub(crate) fn decimal_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
     if bytes < 1000 {
@@ -88,7 +82,6 @@ pub(crate) fn decimal_size(bytes: u64) -> String {
 
 /// Shows control characters of a name in the escaped form of the spec, so
 /// that a name cannot move the cursor or end a line.
-#[allow(dead_code, reason = "used again by C1")]
 pub(crate) fn sanitize(text: &str) -> String {
     let mut shown = String::new();
     for character in text.chars() {
@@ -106,7 +99,6 @@ pub(crate) fn sanitize(text: &str) -> String {
 
 /// Cuts `text` to `width` columns by replacing its middle with `…`,
 /// keeping the start and the end. A text that fits stays as it is.
-#[allow(dead_code, reason = "used again by C1")]
 pub(crate) fn mid(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();

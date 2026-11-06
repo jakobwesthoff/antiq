@@ -146,8 +146,27 @@ command_line!(
         "-n"
     ]
 );
-command_line!(list_all, "list", ["list"]);
-command_line!(list_a_query, "list", ["list", "query"]);
+
+#[test]
+fn list_needs_a_collection() {
+    for args in [&["list"][..], &["list", "query"]] {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(dir.path())
+            .args(args)
+            .run();
+        assert_eq!(
+            run.code(),
+            1,
+            "stdout: {}, stderr: {}",
+            run.stdout,
+            run.stderr
+        );
+        assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
+        assert_eq!(run.json()["command"], "list");
+    }
+}
 command_line!(grep, "grep", ["grep", "pattern"]);
 command_line!(pin, "pin", ["pin", "piece", "-n"]);
 command_line!(unpin, "unpin", ["unpin", "piece", "-n"]);
