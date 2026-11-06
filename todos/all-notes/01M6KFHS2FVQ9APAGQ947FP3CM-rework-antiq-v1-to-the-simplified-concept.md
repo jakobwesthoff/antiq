@@ -1360,7 +1360,9 @@ neighbouring-hunk conflicts.
   exits 3 without `--yes`, `tests/init.rs`); `init --yes` is a usage
   error (PO11); `-n` prints the config; the four refusals of concept
   "init"; no `archive.sh` proposal; the due count printed and in the
-  JSON.
+  JSON; the written `config.toml` carries a comment for every key and a
+  commented-out `[target]` block with examples (8.5), and parses back
+  to the defaults.
 - Risk: low. Opus review: no.
 
 #### C3 pin and unpin
@@ -1801,6 +1803,13 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
 - The mirror keeps hard links: `rsync -a -H`. The user's reason: without
   it hard links of live folders become separate files and waste space.
   Copying the target back keeps them only with `rsync -aH`.
+- `init` writes a commented `config.toml` with examples: every
+  `[collection]` key with its value and a short comment saying what it
+  does, and a commented-out `[target]` block with example values for
+  each key (url forms, `rsync`, `rsync_path`, `fsync`, `rsync_args`).
+  The user's reason: the config explains itself where it is edited.
+  Item C2; the spec's "init" and "Configuration" sections show the
+  written file.
 
 ## Appendix A. Code map (evidence for the sections above)
 
