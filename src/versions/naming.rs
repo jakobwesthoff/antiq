@@ -5,6 +5,7 @@
 //! Matching a `--version` argument against the versions of a piece.
 
 use super::stamp::Stamp;
+use crate::error::HasKind;
 use jiff::tz::TimeZone;
 
 /// A version of a piece as far as naming it goes.
@@ -23,6 +24,52 @@ pub enum Lookup {
     NoMatch,
     /// Several versions match; their stamps in order.
     Several(Vec<Stamp>),
+}
+
+/// Why an input names no single version of a piece.
+#[derive(Debug, thiserror::Error)]
+pub enum VersionLookupError {
+    #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
+    NoSuch {
+        piece: String,
+        input: String,
+        stamps: Vec<String>,
+    },
+    #[error("`{input}` matches several versions of {piece}: {}", stamps.join(", "))]
+    Ambiguous {
+        piece: String,
+        input: String,
+        stamps: Vec<String>,
+    },
+}
+
+impl HasKind for VersionLookupError {}
+
+/// The stamp of the one version of `piece` that `input` names, or the error
+/// that lists the stamps that were to choose from.
+pub fn resolve_version(
+    piece: &str,
+    input: &str,
+    versions: &[Candidate],
+    zone: &TimeZone,
+) -> Result<Stamp, VersionLookupError> {
+    let texts = |stamps: &[Stamp]| stamps.iter().map(Stamp::to_string).collect();
+    match find_version(input, versions, zone) {
+        Lookup::Found(stamp) => Ok(stamp),
+        Lookup::NoMatch => Err(VersionLookupError::NoSuch {
+            piece: piece.to_string(),
+            input: input.to_string(),
+            stamps: versions
+                .iter()
+                .map(|version| version.stamp.to_string())
+                .collect(),
+        }),
+        Lookup::Several(found) => Err(VersionLookupError::Ambiguous {
+            piece: piece.to_string(),
+            input: input.to_string(),
+            stamps: texts(&found),
+        }),
+    }
 }
 
 /// The time of `stamp` in `zone` with seconds, `2026-11-04 10:02:11`.
@@ -439,5 +486,39 @@ mod tests {
             find("2026-11-04t090211", &versions, &berlin()),
             Lookup::NoMatch
         );
+    }
+
+    #[test]
+    fn resolving_an_input_that_matches_nothing_lists_the_stamps_to_choose_from() {
+        let versions = [
+            complete("2026-11-04T090211"),
+            incomplete("2026-11-03T100000"),
+        ];
+        let error = resolve_version("tools/scan", "2020", &versions, &TimeZone::UTC)
+            .expect_err("nothing matches");
+        assert!(matches!(error, VersionLookupError::NoSuch { .. }));
+        assert_eq!(
+            error.to_string(),
+            "`2020` matches no version of tools/scan; there are 2026-11-04T090211, 2026-11-03T100000"
+        );
+    }
+
+    #[test]
+    fn resolving_an_input_that_matches_several_lists_them() {
+        let versions = [complete("2026-11-04T090212"), complete("2026-11-04T090211")];
+        let error = resolve_version("tools/scan", "2026-11-04", &versions, &TimeZone::UTC)
+            .expect_err("two match");
+        assert!(matches!(error, VersionLookupError::Ambiguous { .. }));
+        assert_eq!(
+            error.to_string(),
+            "`2026-11-04` matches several versions of tools/scan: 2026-11-04T090211, 2026-11-04T090212"
+        );
+    }
+
+    #[test]
+    fn resolving_an_input_that_names_one_version_returns_its_stamp() {
+        let versions = [complete("2026-11-04T090211"), complete("2026-11-03T100000")];
+        let found = resolve_version("tools/scan", "2026-11-03T", &versions, &TimeZone::UTC);
+        assert_eq!(found.expect("one match"), stamp("2026-11-03T100000"));
     }
 }

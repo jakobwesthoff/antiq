@@ -29,7 +29,7 @@ use crate::select::Rules;
 use crate::tree::{EntryKind, TreeEntry};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Damage, Places};
-use crate::versions::naming::{self, Candidate, Lookup};
+use crate::versions::naming::{self, Candidate, VersionLookupError};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
 use jiff::Timestamp;
@@ -55,18 +55,8 @@ pub enum RestoreError {
     Listing(#[from] ListingError),
     #[error("cannot read {path}: {source}")]
     Read { path: String, source: io::Error },
-    #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
-    NoSuchVersion {
-        piece: String,
-        input: String,
-        stamps: Vec<String>,
-    },
-    #[error("`{input}` matches several versions of {piece}: {}", stamps.join(", "))]
-    AmbiguousVersion {
-        piece: String,
-        input: String,
-        stamps: Vec<String>,
-    },
+    #[error("{0}")]
+    Version(#[from] VersionLookupError),
     #[error("version {stamp} of {piece} has no archive; `forget` removes what is left of it")]
     Incomplete { piece: String, stamp: String },
     #[error(
@@ -277,27 +267,11 @@ fn pick(
                     incomplete: candidate.is_incomplete(),
                 })
                 .collect();
-            let stamps = |stamps: &[Stamp]| stamps.iter().map(Stamp::to_string).collect();
-            match naming::find_version(input, &candidates, zone) {
-                Lookup::Found(stamp) => versions
-                    .iter()
-                    .find(|candidate| candidate.stamp == stamp)
-                    .expect("a found stamp is one of the candidates"),
-                Lookup::NoMatch => {
-                    return Err(RestoreError::NoSuchVersion {
-                        piece: piece.to_string(),
-                        input: input.to_string(),
-                        stamps: stamps(&candidates.iter().map(|c| c.stamp).collect::<Vec<_>>()),
-                    });
-                }
-                Lookup::Several(found) => {
-                    return Err(RestoreError::AmbiguousVersion {
-                        piece: piece.to_string(),
-                        input: input.to_string(),
-                        stamps: stamps(&found),
-                    });
-                }
-            }
+            let stamp = naming::resolve_version(&piece.to_string(), input, &candidates, zone)?;
+            versions
+                .iter()
+                .find(|candidate| candidate.stamp == stamp)
+                .expect("a found stamp is one of the candidates")
         }
     };
     let (piece_text, stamp_text) = (piece.to_string(), version.stamp.to_string());
@@ -1802,7 +1776,10 @@ mod choice_tests {
             .choose("scanner", Some("1999"))
             .expect_err("no match");
         assert!(
-            matches!(error, RestoreError::NoSuchVersion { .. }),
+            matches!(
+                error,
+                RestoreError::Version(VersionLookupError::NoSuch { .. })
+            ),
             "{error:?}"
         );
         let text = error.to_string();

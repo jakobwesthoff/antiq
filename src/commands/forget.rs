@@ -15,7 +15,7 @@ use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::versions::VersionsError;
 use crate::versions::names::VersionFile;
-use crate::versions::naming::{self, Candidate, Lookup};
+use crate::versions::naming::{self, Candidate, VersionLookupError};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StorePiece, StoreScan, StoreVersion};
 use jiff::Timestamp;
@@ -40,14 +40,8 @@ pub enum ForgetError {
     /// The piece or the version on the command line is empty.
     #[error("{0}")]
     Usage(&'static str),
-    #[error("`{input}` matches no version of {piece}")]
-    NoSuchVersion { input: String, piece: String },
-    #[error("`{input}` matches {} versions of {piece}: {}", stamps.len(), stamps.join(", "))]
-    AmbiguousVersion {
-        input: String,
-        piece: String,
-        stamps: Vec<String>,
-    },
+    #[error("{0}")]
+    Version(#[from] VersionLookupError),
 }
 
 impl HasKind for ForgetError {
@@ -56,9 +50,8 @@ impl HasKind for ForgetError {
             ForgetError::Run(error) => error.kind(),
             ForgetError::Reference(error) => error.kind(),
             ForgetError::Usage(_) => ErrorKind::Usage,
-            ForgetError::Versions(_)
-            | ForgetError::NoSuchVersion { .. }
-            | ForgetError::AmbiguousVersion { .. } => ErrorKind::Other,
+            ForgetError::Version(error) => error.kind(),
+            ForgetError::Versions(_) => ErrorKind::Other,
         }
     }
 }
@@ -324,27 +317,13 @@ fn choose(
                     incomplete: version.is_incomplete(),
                 })
                 .collect();
-            match naming::find_version(input, &named, zone) {
-                Lookup::Found(stamp) => found
-                    .versions
-                    .iter()
-                    .filter(|version| version.stamp == stamp)
-                    .cloned()
-                    .collect(),
-                Lookup::NoMatch => {
-                    return Err(ForgetError::NoSuchVersion {
-                        input: input.to_string(),
-                        piece: folder.to_string(),
-                    });
-                }
-                Lookup::Several(stamps) => {
-                    return Err(ForgetError::AmbiguousVersion {
-                        input: input.to_string(),
-                        piece: folder.to_string(),
-                        stamps: stamps.iter().map(ToString::to_string).collect(),
-                    });
-                }
-            }
+            let stamp = naming::resolve_version(&folder.to_string(), input, &named, zone)?;
+            found
+                .versions
+                .iter()
+                .filter(|version| version.stamp == stamp)
+                .cloned()
+                .collect()
         }
     };
     Ok(Chosen { folder, versions })
@@ -404,24 +383,11 @@ mod tests {
 
     #[test]
     fn a_version_that_is_not_there_is_an_error_of_no_kind_of_its_own() {
-        let none = ForgetError::NoSuchVersion {
+        let none = ForgetError::Version(VersionLookupError::NoSuch {
+            piece: "tools/scan".to_string(),
             input: "2020".to_string(),
-            piece: "tools/scan".to_string(),
-        };
+            stamps: vec!["2026-01-01T000000".to_string()],
+        });
         assert_eq!(none.kind(), ErrorKind::Other);
-        assert_eq!(none.to_string(), "`2020` matches no version of tools/scan");
-        let several = ForgetError::AmbiguousVersion {
-            input: "2026".to_string(),
-            piece: "tools/scan".to_string(),
-            stamps: vec![
-                "2026-01-01T000000".to_string(),
-                "2026-02-01T000000".to_string(),
-            ],
-        };
-        assert_eq!(several.kind(), ErrorKind::Other);
-        assert_eq!(
-            several.to_string(),
-            "`2026` matches 2 versions of tools/scan: 2026-01-01T000000, 2026-02-01T000000"
-        );
     }
 }

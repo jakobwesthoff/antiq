@@ -26,7 +26,7 @@ use crate::run::{self, RunError, RunGuard, Started};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Damage, Places};
 use crate::versions::names::VersionFile;
-use crate::versions::naming::{self, Candidate, Lookup};
+use crate::versions::naming::{self, Candidate, VersionLookupError};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
 use jiff::Timestamp;
@@ -57,14 +57,8 @@ pub enum RebuildError {
     /// The piece or the version on the command line is empty.
     #[error("{0}")]
     Usage(&'static str),
-    #[error("`{input}` matches no version of {piece}")]
-    NoSuchVersion { input: String, piece: String },
-    #[error("`{input}` matches {} versions of {piece}: {}", stamps.len(), stamps.join(", "))]
-    AmbiguousVersion {
-        input: String,
-        piece: String,
-        stamps: Vec<String>,
-    },
+    #[error("{0}")]
+    Version(#[from] VersionLookupError),
     #[error("version {stamp} of {piece} is not damaged, there is nothing to rebuild")]
     NotDamaged { piece: String, stamp: String },
     #[error(
@@ -324,22 +318,7 @@ fn choose(request: &RebuildRequest<'_>, zone: &TimeZone) -> Result<Chosen, Rebui
             incomplete: version.is_incomplete(),
         })
         .collect();
-    let stamp = match naming::find_version(request.version, &named, zone) {
-        Lookup::Found(stamp) => stamp,
-        Lookup::NoMatch => {
-            return Err(RebuildError::NoSuchVersion {
-                input: request.version.to_string(),
-                piece: folder.to_string(),
-            });
-        }
-        Lookup::Several(stamps) => {
-            return Err(RebuildError::AmbiguousVersion {
-                input: request.version.to_string(),
-                piece: folder.to_string(),
-                stamps: stamps.iter().map(ToString::to_string).collect(),
-            });
-        }
-    };
+    let stamp = naming::resolve_version(&folder.to_string(), request.version, &named, zone)?;
     let version = found
         .versions
         .iter()

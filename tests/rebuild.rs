@@ -601,10 +601,16 @@ fn assert_refused_with(world: &World, args: &[&str], code: i32) -> Outcome {
 fn an_unknown_and_an_ambiguous_version_and_an_unknown_piece_are_refused() {
     both(two_versions, |world| {
         let run = assert_refused(world, &["rebuild", PIECE, "2020"]);
-        assert_all_in(&error_text(&run), &["`2020` matches no version"]);
+        assert_all_in(
+            &error_text(&run),
+            &["`2020` matches no version", "there are", STAMP, OLD_STAMP],
+        );
 
         let run = assert_refused(world, &["rebuild", PIECE, "2026"]);
-        assert_all_in(&error_text(&run), &["matches 2 versions", STAMP, OLD_STAMP]);
+        assert_all_in(
+            &error_text(&run),
+            &["matches several versions", STAMP, OLD_STAMP],
+        );
 
         let run = assert_refused(world, &["rebuild", "zzzzzz", STAMP]);
         run.json_only(|_| assert_eq!(run.error_kind().as_deref(), Some("unknown_reference")));
