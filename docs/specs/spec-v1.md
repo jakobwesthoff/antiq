@@ -1202,7 +1202,10 @@ in place.
 - The source must not lie inside the collection, and must be a folder, not
   a symlink to one. A relative `<folder>` and a relative `--as` start at
   the directory `-C` names, else at the current directory. `--as` is
-  resolved as a piece reference path is (see "Piece references").
+  resolved as a piece reference path is (see "Piece references"). An
+  `--as` that is not a path is a usage error; the name of the folder, which
+  stands in when `--as` is missing, that is not a valid piece name is the
+  error kind `other`.
 - `<path>` must be one the patterns select, not excluded, not in
   `.antiq/` and not inside another piece. A pin on a live folder at
   `<path>` does not block the import.
@@ -1883,7 +1886,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate, or `unearth`, `fork` or `rebuild` is given a piece that holds only incomplete versions | |

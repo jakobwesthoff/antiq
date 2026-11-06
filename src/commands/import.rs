@@ -236,6 +236,12 @@ pub enum ImportError {
     },
     #[error("the name of the folder is not a valid piece name")]
     Name(#[from] RelPathError),
+    #[error("`{given}` is not a path: {source}")]
+    AsNotAPath {
+        given: String,
+        #[source]
+        source: RelPathError,
+    },
     #[error("cannot prepare the import")]
     Archive(#[from] ArchiveError),
     #[error("cannot choose a version stamp")]
@@ -277,7 +283,7 @@ impl HasKind for ImportError {
         match self {
             ImportError::Run(error) => error.kind(),
             ImportError::Reference(error) => error.kind(),
-            ImportError::Time { .. } => ErrorKind::Usage,
+            ImportError::Time { .. } | ImportError::AsNotAPath { .. } => ErrorKind::Usage,
             _ => ErrorKind::Other,
         }
     }
@@ -511,7 +517,18 @@ fn prepare(
     }
 
     let piece = match &request.as_path {
-        Some(path) => resolve_path(collection, &request.cwd, path)?,
+        Some(path) => match resolve_path(collection, &request.cwd, path) {
+            Ok(resolved) => resolved,
+            // The user typed this path, so a path that cannot be one is a
+            // mistake in the command line, as with `fork --name`.
+            Err(ReferenceError::Path(source)) => {
+                return Err(ImportError::AsNotAPath {
+                    given: path.to_string_lossy().into_owned(),
+                    source,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        },
         None => RelPath::root().join(&Name::from_bytes(name.as_bytes().to_vec())?),
     };
     let select = Rules::new(&config.patterns, &config.exclude)?;
@@ -1025,6 +1042,29 @@ mod tests {
         let root = world.collection.root();
         assert_eq!(entries(&root.join(".antiq/pieces")), Vec::<String>::new());
         assert_eq!(entries(&root.join(".antiq/tmp/pack")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_as_that_is_no_path_is_a_usage_error() {
+        let world = world();
+        let request = Request {
+            as_path: Some(PathBuf::from("tools/a\0b")),
+            ..request(&world, true)
+        };
+
+        let error = plan(
+            &collection(&world),
+            &FixedClock::new(Timestamp::now()),
+            &request,
+            None,
+            Vec::new(),
+            Vec::new(),
+            &RealSeams,
+        )
+        .expect_err("a path with a NUL byte is refused");
+
+        assert_eq!(error.kind(), ErrorKind::Usage, "{error}");
+        assert!(error.to_string().contains("`tools/a"), "{error}");
     }
 
     #[test]
