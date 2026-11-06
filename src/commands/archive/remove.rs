@@ -970,6 +970,34 @@ mod tests {
     }
 
     #[test]
+    fn a_flush_that_fails_when_the_folder_goes_back_is_a_warning_that_starts_with_the_piece() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let recording = Recording::new();
+        // The flushes 0 to 3 belong to the move into trash/; the flushes of
+        // the way back come after them.
+        recording.fail_dirs_from(4);
+        let seams = Probe {
+            recording: Some(recording),
+            after_trash_rename: Some(Box::new(|tree| {
+                fs::write(tree.join("a.txt"), "changed later").expect("the file is written");
+            })),
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        let (destination, _) = expect_differs(&removal);
+        assert_eq!(destination, Destination::Live);
+        let texts = warning_texts(&removal);
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].starts_with("`piece`: cannot give a tree in trash/ back "),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn a_taken_path_sends_the_folder_to_recovered() {
         let world = world(&["piece"]);
         let stored = store(&world, "piece");

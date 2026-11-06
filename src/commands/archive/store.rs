@@ -1144,6 +1144,38 @@ mod tests {
     }
 
     #[test]
+    fn a_sparse_piece_is_a_note_that_starts_with_the_piece_as_a_code_span() {
+        let file = crate::tree::TreeEntry {
+            path: path("big"),
+            kind: EntryKind::File,
+            size: 2 << 30,
+            allocated: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            inode: 1,
+            device: 1,
+            mode: 0o100644,
+            nlink: 1,
+            link_target: None,
+            birth_ns: None,
+            mount_root: false,
+            uid: 0,
+            flag_locked: false,
+            class: crate::tree::Class::Counted,
+        };
+        let tree = PieceTree::new(path("beta/notes"), vec![file], Vec::new());
+
+        let notes = notes_of("beta/notes", &tree, &[], &[]);
+
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            notes[0].message,
+            "`beta/notes`: its files add up to 2147483648 bytes and take 0 bytes on disk; sparse files are stored in full"
+        );
+        assert_eq!(notes[0].lead().map(|(lead, _)| lead), Some("beta/notes"));
+    }
+
+    #[test]
     fn a_fifo_is_a_note_naming_the_piece() {
         let mut world = world();
         world.temp.tree().fifo("piece/pipe");
