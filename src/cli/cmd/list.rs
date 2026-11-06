@@ -8,7 +8,8 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, pad, paint, painted, sanitize, spaces, thousands,
+    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, sanitize, spaces,
+    thousands,
 };
 use crate::cli::{Context, ListArgs};
 use antiq::collection::Collection;
@@ -244,8 +245,8 @@ pub(in crate::cli) fn table(
     let header = [
         pad("PIECE", piece_width),
         pad("VERSION", version_width),
-        pad("SIZE", size_width),
-        pad("FILES", files_width),
+        numeric_header("SIZE", size_width),
+        numeric_header("FILES", files_width),
     ]
     .join(GAP);
     let mut lines = vec![format!(
@@ -390,7 +391,7 @@ mod tests {
     fn the_terminal_table_shows_local_time_decimal_sizes_and_grouped_files() {
         let lines = render(&example(), Some("scan"), TERMINAL, &plus_one());
         insta::assert_snapshot!(lines.stdout.join("\n"), @r"
-        PIECE              VERSION               SIZE     FILES
+        PIECE              VERSION                 SIZE    FILES
         projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
         projects/scanner   2026-09-03 13:15:00   1.0 GB   47 980
         tools/scan-old     2025-02-11 19:40:07    40 MB      812
@@ -428,7 +429,7 @@ mod tests {
         };
         let lines = table(&scanner_versions(), TERMINAL, &plus_one(), Some(&marking));
         insta::assert_snapshot!(lines.join("\n"), @r"
-          PIECE              VERSION               SIZE    FILES
+          PIECE              VERSION                SIZE   FILES
           projects/scanner   2026-11-05 13:02:11   214 B       3
           projects/scanner   2025-11-20 08:15:30   207 B       3
         ▸ projects/scanner   2025-06-18 16:45:09   198 B       2
@@ -479,7 +480,7 @@ mod tests {
         let lines = table(&scanner_versions(), style, &plus_one(), None);
         assert_eq!(
             lines[0],
-            format!("{dim}PIECE              VERSION               SIZE    FILES{off}")
+            format!("{dim}PIECE              VERSION                SIZE   FILES{off}")
         );
         assert!(lines[1].starts_with("projects/scanner"), "{:?}", lines[1]);
 
@@ -491,7 +492,7 @@ mod tests {
         let lines = table(&scanner_versions(), style, &plus_one(), Some(&marking));
         assert_eq!(
             lines[0],
-            format!("  {dim}PIECE              VERSION               SIZE    FILES{off}")
+            format!("  {dim}PIECE              VERSION                SIZE   FILES{off}")
         );
     }
 

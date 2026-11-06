@@ -96,7 +96,7 @@ fn an_ambiguous_word_lists_the_list_table_of_the_store_pieces() {
          ▌   Attempting to find the piece to unearth.\n\
          \n\
          The 2 pieces that match `scan`\n\
-         PIECE              VERSION               SIZE    FILES\n\
+         PIECE              VERSION                SIZE   FILES\n\
          projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
          projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
          tools/scan-old     2026-11-04 22:02:11   NNN B       1\n\
@@ -155,7 +155,7 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
          ▌   Attempting to find the version to unearth.\n\
          \n\
          The versions of projects/scanner, the 2 matches marked\n\
-         \x20\x20PIECE              VERSION               SIZE    FILES\n\
+         \x20\x20PIECE              VERSION                SIZE   FILES\n\
          \x20\x20projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
          \x20\x20projects/scanner   2025-11-20 20:15:30   NNN B       1\n\
          ▸ projects/scanner   2025-06-19 03:45:09   NNN B       1\n\
@@ -180,7 +180,7 @@ fn an_unknown_word_offers_the_closest_pieces_in_a_table() {
          ▌   Attempting to find the piece to unearth.\n\
          \n\
          The closest pieces\n\
-         PIECE              VERSION               SIZE    FILES\n\
+         PIECE              VERSION                SIZE   FILES\n\
          projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
          projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
          \n\
@@ -213,7 +213,7 @@ fn a_word_that_fits_one_piece_is_offered_in_a_table_and_nothing_is_done() {
              ▌   Attempting to find the piece to {command}.\n\
              \n\
              The piece that matches `scaner`\n\
-             PIECE              VERSION               SIZE    FILES\n\
+             PIECE              VERSION                SIZE   FILES\n\
              projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
              projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
              \n\
@@ -265,7 +265,7 @@ fn colour_marks_the_matches_and_dims_the_rest() {
     // carry a bold red marker and a bold red start of the time.
     assert_eq!(
         masked,
-        "\x20\x20\x1b[2mPIECE              VERSION               SIZE    FILES\x1b[0m\n\
+        "\x20\x20\x1b[2mPIECE              VERSION                SIZE   FILES\x1b[0m\n\
          \x20\x20\x1b[2mprojects/scanner\x1b[0m   \x1b[2m2026-11-04 22:02:11\x1b[0m   \x1b[2mNNN B\x1b[0m       \x1b[2m1\x1b[0m\n\
          \x1b[1m\x1b[31m▸\x1b[0m projects/scanner   \x1b[1m\x1b[31m2025-06\x1b[0m-19 03:45:09   NNN B       1\n\
          \x1b[1m\x1b[31m▸\x1b[0m projects/scanner   \x1b[1m\x1b[31m2025-06\x1b[0m-01 22:30:00   NNN B       1"

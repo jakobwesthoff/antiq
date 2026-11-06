@@ -71,6 +71,12 @@ pub(super) fn pad_left(text: &str, width: usize) -> String {
     format!("{}{text}", spaces(width.saturating_sub(text.width())))
 }
 
+/// The header of a column of numbers. It sits at the right edge of the
+/// column, over the right-aligned values.
+pub(super) fn numeric_header(text: &str, width: usize) -> String {
+    pad_left(text, width)
+}
+
 /// A size in decimal units (1 kB = 1000 bytes), with one decimal below 10
 /// and none from 10 on.
 pub(crate) fn decimal_size(bytes: u64) -> String {

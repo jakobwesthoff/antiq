@@ -1402,13 +1402,14 @@ with the UTC offset added where two versions of a piece render alike (see
 
 ```text
 $ antiq list scan
-PIECE              VERSION               SIZE     FILES
+PIECE              VERSION                 SIZE    FILES
 projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
 projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
 tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
 
-The header row is dim and has no rule under it. Without a terminal there is
+The header row is dim and has no rule under it. The header of a column of
+numbers sits at the right edge of the column, over its right-aligned values. Without a terminal there is
 no header and a row is one line of tab-separated
 fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
 and the numbers unformatted. A control character in a piece path is written

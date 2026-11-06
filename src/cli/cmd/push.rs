@@ -13,7 +13,7 @@ use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::{pad, pad_left, sanitize, thousands};
+use crate::cli::table::{numeric_header, pad, sanitize, thousands};
 use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -213,9 +213,9 @@ fn pieces_table(rows: &[(String, [u64; 3])], env: &Env) -> Vec<String> {
     let header = format!(
         "{}{GAP}{}{GAP}{}{GAP}{}",
         pad("PIECE", name_width),
-        pad_left("CREATED", NUMBER),
-        pad_left("UPDATED", NUMBER),
-        pad_left("DELETED", NUMBER)
+        numeric_header("CREATED", NUMBER),
+        numeric_header("UPDATED", NUMBER),
+        numeric_header("DELETED", NUMBER)
     );
     let mut lines = vec![paint(env, theme::DIM, &header)];
     let number = |count: u64| {

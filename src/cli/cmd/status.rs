@@ -11,7 +11,8 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, painted, sanitize, spaces, wrap,
+    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, pad_left, paint, painted, sanitize,
+    spaces, wrap,
 };
 use crate::cli::unresolved::pasteable_line;
 use antiq::clock::{Clock, SystemClock, whole_seconds};
@@ -259,7 +260,7 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         spaces(GAP),
         heading(pad("PIECE", piece_width)),
         spaces(GAP),
-        heading(pad_left("IDLE", IDLE_WIDTH)),
+        heading(numeric_header("IDLE", IDLE_WIDTH)),
         spaces(GAP),
         heading("WHAT".to_string())
     )];
