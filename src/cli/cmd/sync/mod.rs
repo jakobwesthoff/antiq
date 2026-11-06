@@ -106,6 +106,12 @@ fn lines(report: &SyncReport) -> Vec<String> {
             committed.version, committed.id
         ));
     }
+    for removed in &report.removed_live {
+        lines.push(format!(
+            "Deleted the live package {} of {}",
+            removed.file, removed.id
+        ));
+    }
     if report.cleanup.removed > 0 {
         lines.push(format!(
             "Removed {} leftover files from the remote",

@@ -172,6 +172,13 @@ pub struct MintedPiece {
     pub path: RelPath,
 }
 
+/// A live package that was deleted from the remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemovedLive {
+    pub id: ObjectId,
+    pub file: String,
+}
+
 /// A payload or listing that was written to the remote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadedFile {
@@ -207,6 +214,8 @@ pub struct SyncReport {
     pub committed: Vec<CommittedVersion>,
     /// New pieces that got their ID in this run.
     pub minted: Vec<MintedPiece>,
+    /// Live packages deleted once their archive was committed.
+    pub removed_live: Vec<RemovedLive>,
     pub skipped: Vec<SkippedObject>,
     /// Pieces that got no live backup or no ID.
     pub unbacked: Vec<UnbackedPiece>,
@@ -258,6 +267,12 @@ pub enum SyncAction {
     Commit {
         id: ObjectId,
     },
+    /// A live package is deleted once the commit that drops it is in
+    /// place.
+    RemoveLive {
+        id: ObjectId,
+        file: String,
+    },
     /// The live package of a piece is made again.
     PackLive {
         id: ObjectId,
@@ -293,6 +308,9 @@ impl PlanAction for SyncAction {
             }
             SyncAction::Upload { id, file, .. } => format!("upload {file} of {id}"),
             SyncAction::Commit { id } => format!("commit the change to {id}"),
+            SyncAction::RemoveLive { id, file } => {
+                format!("delete the live package {file} of {id} once its change is committed")
+            }
             SyncAction::PackLive { id, path } => format!("pack {path} ({id}) as a live package"),
             SyncAction::MintId { path } => format!("give {path} an ID"),
             SyncAction::RemoveLeftover {
@@ -506,7 +524,7 @@ fn plan_cleanup(
 /// The phases of a real run, in the order of the spec.
 fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
     let pull_failed = pull::run(ctx, report)?;
-    live::refresh(ctx, report, pull_failed)?;
+    let captured = live::refresh(ctx, report, pull_failed)?;
     if pull_failed {
         commit::skip_all(
             ctx,
@@ -521,7 +539,7 @@ fn real_run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncEr
         }
     }
     cleanup(ctx, report)?;
-    live::delete_committed(ctx)?;
+    live::delete_committed(ctx, report, captured)?;
     tiers::apply(ctx)?;
     away::record_sync(ctx.collection, ctx.lock, ctx.clock.now())?;
     Ok(())

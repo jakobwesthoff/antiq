@@ -354,6 +354,68 @@ fn a_folder_that_cannot_be_read_gets_no_id_and_the_run_exits_3() {
 }
 
 // =========================================================
+// Live packages
+// =========================================================
+
+fn days_ago(days: i64) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs() as i64;
+    now - days * 86_400
+}
+
+/// The names in the object directories of the remote, sorted.
+fn remote_files(remote: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for object in fs::read_dir(remote.join("objects")).expect("lists") {
+        for file in fs::read_dir(object.expect("an object").path()).expect("lists") {
+            names.push(
+                file.expect("a file")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    names.sort();
+    names
+}
+
+#[test]
+fn the_json_of_a_sync_names_the_live_package_it_deletes_after_the_archive_is_committed() {
+    let remote = remote_root();
+    let mut anna = attached_as(remote.path(), "anna", COLLECTION_ID);
+    anna.tree()
+        .file_with("proj/a.txt", "hello", 0o644, days_ago(40));
+    let first = antiq_in(&anna, &["sync"]);
+    assert_eq!(first.code(), 0, "{}{}", first.stdout, first.stderr);
+    let before = remote_files(remote.path());
+    let package = before
+        .iter()
+        .find(|name| name.ends_with("-proj.tar.zst"))
+        .expect("the live package is on the remote")
+        .clone();
+    let archived = antiq_in(&anna, &["archive"]);
+    assert_eq!(archived.code(), 0, "{}{}", archived.stdout, archived.stderr);
+
+    let json = antiq_in(&anna, &["--json", "sync"]).json();
+
+    assert_eq!(
+        json["removed_live"].as_array().map(Vec::len),
+        Some(1),
+        "{json}"
+    );
+    assert_eq!(json["removed_live"][0]["file"], package.as_str());
+    let after = remote_files(remote.path());
+    assert!(!after.contains(&package), "{after:?}");
+    assert!(
+        after.iter().any(|name| name.ends_with("-proj.tar.zst")),
+        "the archive is on the remote: {after:?}"
+    );
+}
+
+// =========================================================
 // An away remote
 // =========================================================
 

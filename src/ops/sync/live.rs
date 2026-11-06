@@ -6,8 +6,8 @@
 
 use super::commit::{self, Class, Versions};
 use super::{
-    MintedPiece, SkipReason, SyncAction, SyncContext, SyncError, SyncReport, UnbackedPiece,
-    UnbackedReason, skip,
+    MintedPiece, RemovedLive, SkipReason, SyncAction, SyncContext, SyncError, SyncReport,
+    UnbackedPiece, UnbackedReason, ends_run, path_of, skip,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -16,7 +16,7 @@ use crate::fsx::device::{self, FsKind};
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::meta::{
-    Checksum, FORMAT, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload,
+    self, Checksum, FORMAT, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload,
     PayloadKind,
 };
 use crate::ops::archive::apparent_size;
@@ -38,6 +38,7 @@ use crate::tracking::{self, EntryState, TrackingEntry, VersionTakenOut};
 use crate::tree::{PieceTree, Problem};
 use crate::walk::{self, WalkError};
 use jiff::Timestamp;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -147,12 +148,26 @@ pub(super) fn refresh(
     ctx: &SyncContext<'_>,
     report: &mut SyncReport,
     pull_failed: bool,
-) -> Result<(), SyncError> {
+) -> Result<Captured, SyncError> {
     refresh_with(ctx, report, pull_failed, &NoHooks)
 }
 
 /// [`refresh`] with the points a test can change the world at.
 pub(super) fn refresh_with(
+    ctx: &SyncContext<'_>,
+    report: &mut SyncReport,
+    pull_failed: bool,
+    hooks: &dyn LiveHooks,
+) -> Result<Captured, SyncError> {
+    back_up_pieces(ctx, report, pull_failed, hooks)?;
+    if !pull_failed {
+        strip_archives(ctx, report)?;
+    }
+    capture(ctx)
+}
+
+/// Mints and packs the pieces that are in their folders.
+fn back_up_pieces(
     ctx: &SyncContext<'_>,
     report: &mut SyncReport,
     pull_failed: bool,
@@ -555,18 +570,9 @@ impl Backup<'_> {
             .collect();
         let metadata = self.with_package(&current, base.as_ref(), &package, file.clone());
         store.write_pending(ctx.lock, &metadata)?;
-        // A package that only the replaced recorded change named was never
-        // committed or uploaded.
         if replaced {
-            for old in dropped.iter().filter(|old| {
-                **old != file
-                    && !base
-                        .iter()
-                        .flat_map(|base| &base.payloads)
-                        .any(|payload| payload.file == **old)
-            }) {
-                remove_quietly(&store.file_path(id, old));
-            }
+            let dropped: Vec<FileName> = dropped.into_iter().filter(|old| *old != file).collect();
+            remove_unshared(&store, id, &dropped, base.as_ref());
         }
         fresh.write_recorded(&manifest_path, &package.sha256)?;
         self.clear_stale(entry)
@@ -628,6 +634,21 @@ impl Backup<'_> {
             ));
         }
         metadata
+    }
+}
+
+/// Removes the local files `dropped` that the version `base` does not name.
+/// A package that only a replaced recorded change named was never committed
+/// or uploaded.
+fn remove_unshared(store: &Store<'_>, id: ObjectId, dropped: &[FileName], base: Option<&Metadata>) {
+    for old in dropped {
+        let shared = base
+            .iter()
+            .flat_map(|base| &base.payloads)
+            .any(|payload| payload.file == *old);
+        if !shared {
+            remove_quietly(&store.file_path(id, old));
+        }
     }
 }
 
@@ -719,14 +740,262 @@ pub(super) fn plan(
             plan.push(SyncAction::Commit { id });
         }
     }
+    plan_removals(collection, machine, plan)
+}
+
+/// The live packages a real run would delete, and the commit that a
+/// committed archive still naming its package needs for it. An object whose
+/// state cannot be read is left out; the real run reports it.
+fn plan_removals(
+    collection: &Collection,
+    machine: &str,
+    plan: &mut Plan<SyncAction>,
+) -> Result<(), SyncError> {
+    let store = Store::new(collection);
+    for id in store.objects()? {
+        let Ok(Some(current)) = store.current(id) else {
+            continue;
+        };
+        let metadata = &current.metadata;
+        if metadata.collection != collection.id() {
+            continue;
+        }
+        let mut after = metadata.clone();
+        if after.lifecycle == Lifecycle::Archived {
+            after.payloads.retain(|payload| {
+                !(payload.kind == PayloadKind::Live && payload.machine == machine)
+            });
+        }
+        if names_live(&after) {
+            continue;
+        }
+        // The package the newest committed version names goes with the
+        // change that no longer names a live package.
+        let Some(&highest) = store.committed_versions(id).unwrap_or_default().last() else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(store.meta_path(id, highest)) else {
+            continue;
+        };
+        let Ok(base) = meta::parse(&bytes) else {
+            continue;
+        };
+        let files = live_files(&base, machine);
+        if files.is_empty() || (current.source != Source::Pending && after == *metadata) {
+            continue;
+        }
+        for file in files {
+            plan.push(SyncAction::RemoveLive {
+                id,
+                file: file.as_str().to_string(),
+            });
+        }
+        if current.source != Source::Pending {
+            plan.push(SyncAction::Commit { id });
+        }
+    }
     Ok(())
+}
+
+// =========================================================
+// Archived objects drop their live package
+// =========================================================
+
+/// The files of the live payloads `machine` made.
+fn live_files(metadata: &Metadata, machine: &str) -> Vec<FileName> {
+    metadata
+        .payloads
+        .iter()
+        .filter(|payload| payload.kind == PayloadKind::Live && payload.machine == machine)
+        .map(|payload| payload.file.clone())
+        .collect()
+}
+
+/// Whether `metadata` names a live package of any machine.
+fn names_live(metadata: &Metadata) -> bool {
+    metadata
+        .payloads
+        .iter()
+        .any(|payload| payload.kind == PayloadKind::Live)
+}
+
+/// Takes the live payloads of this machine out of every archived object of
+/// this collection that still names them. The archive command records the
+/// archive with the live payload still in place, so that the package stays
+/// on the remote until the archive is committed. Runs over every object in
+/// the store, not over the pieces in their folders, since an archived piece
+/// has none.
+fn strip_archives(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
+    let store = Store::new(ctx.collection);
+    for id in store.objects()? {
+        if report.skipped.iter().any(|skipped| skipped.id == id) {
+            continue;
+        }
+        if let Err(error) = strip(ctx, &store, id) {
+            let message = error.to_string();
+            match path_of(ctx.collection, id) {
+                Some(path) => report.unbacked.push(UnbackedPiece {
+                    id: Some(id),
+                    path,
+                    reason: UnbackedReason::Error,
+                    message,
+                }),
+                None => report.warnings.push(Warning::new(format!(
+                    "the live package of {id} was not dropped from its archive: {message}"
+                ))),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn strip(ctx: &SyncContext<'_>, store: &Store<'_>, id: ObjectId) -> Result<(), SyncError> {
+    let Some(current) = store.current(id)? else {
+        return Ok(());
+    };
+    let metadata = &current.metadata;
+    if metadata.collection != ctx.collection.id()
+        || metadata.lifecycle != Lifecycle::Archived
+        || live_files(metadata, ctx.machine).is_empty()
+    {
+        return Ok(());
+    }
+    let base = match current.source {
+        Source::Pending => match commit::classify(ctx.collection, id, &Versions::new())? {
+            Class::Commit { base, .. } => base.map(|base| *base),
+            Class::Settle(_) | Class::Conflict { .. } => return Ok(()),
+        },
+        Source::Committed(number) => {
+            let Some(entry) = tracking::read(ctx.collection, id)? else {
+                return Ok(());
+            };
+            let built_on = entry.version_taken_out == VersionTakenOut::Committed(number)
+                || entry.committed_versions.contains(&number);
+            if !built_on {
+                return Ok(());
+            }
+            Some(metadata.clone())
+        }
+    };
+    let dropped = live_files(metadata, ctx.machine);
+    let mut stripped = metadata.clone();
+    stripped
+        .payloads
+        .retain(|payload| !(payload.kind == PayloadKind::Live && payload.machine == ctx.machine));
+    if current.source != Source::Pending {
+        stripped.history.push(HistoryEntry::new(
+            ctx.clock.now(),
+            ctx.machine,
+            HistoryAction::Sync,
+        ));
+    }
+    store.write_pending(ctx.lock, &stripped)?;
+    remove_unshared(store, id, &dropped, base.as_ref());
+    Ok(())
+}
+
+/// The live packages of this machine that the newest committed version of
+/// an object with a recorded change names, with that version's number.
+#[derive(Debug, Default)]
+pub(super) struct Captured {
+    held: BTreeMap<ObjectId, (u32, Vec<FileName>)>,
+}
+
+/// Notes the live packages that a commit of this run may leave without a
+/// name, before the commit phase runs.
+fn capture(ctx: &SyncContext<'_>) -> Result<Captured, SyncError> {
+    let store = Store::new(ctx.collection);
+    let mut captured = Captured::default();
+    for id in commit::pending_objects(ctx.collection)? {
+        let Some(&highest) = store.committed_versions(id)?.last() else {
+            continue;
+        };
+        let path = store.meta_path(id, highest);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(base) = meta::parse(&bytes) else {
+            continue;
+        };
+        let files = live_files(&base, ctx.machine);
+        if !files.is_empty() {
+            captured.held.insert(id, (highest, files));
+        }
+    }
+    Ok(captured)
 }
 
 /// Deletes the live packages on the remote whose archive is committed.
 /// Runs after the commits.
-// TODO(I32): replace this stub with the deletion of committed live packages.
-pub(super) fn delete_committed(_ctx: &SyncContext<'_>) -> Result<(), SyncError> {
+///
+/// A package goes only when the version committed in this run and every
+/// version above the one it was built on name no live package at all, and
+/// only for an object committed in this run. A conflict, a refused commit
+/// or a failed upload leaves the package where it is. A package that is
+/// replaced by a newer one stays for cleanup.
+pub(super) fn delete_committed(
+    ctx: &SyncContext<'_>,
+    report: &mut SyncReport,
+    captured: Captured,
+) -> Result<(), SyncError> {
+    let store = Store::new(ctx.collection);
+    let committed: BTreeSet<ObjectId> = report.committed.iter().map(|c| c.id).collect();
+    for id in committed {
+        let Some((highest, files)) = captured.held.get(&id) else {
+            continue;
+        };
+        if !names_no_live_above(&store, id, *highest)? {
+            continue;
+        }
+        let mut all_gone = true;
+        for file in files {
+            match ctx.remote.delete(id, file.as_str()) {
+                Ok(()) => {
+                    remove_quietly(&store.file_path(id, file));
+                    report.removed_live.push(RemovedLive {
+                        id,
+                        file: file.as_str().to_string(),
+                    });
+                }
+                Err(error) if ends_run(ctx.remote, &error) => return Err(error.into()),
+                Err(error) => {
+                    all_gone = false;
+                    report.warnings.push(Warning::new(format!(
+                        "the live package {} of {id} could not be deleted, cleanup will remove it: {error}",
+                        file.as_str()
+                    )));
+                }
+            }
+        }
+        if all_gone {
+            remove_quietly(&ctx.collection.manifest_path(id));
+        }
+    }
     Ok(())
+}
+
+/// Whether the newest committed version of `id` and every committed version
+/// above `built_on` name no live package.
+fn names_no_live_above(store: &Store<'_>, id: ObjectId, built_on: u32) -> Result<bool, SyncError> {
+    let versions = store.committed_versions(id)?;
+    let Some(&newest) = versions.last() else {
+        return Ok(false);
+    };
+    for number in versions
+        .into_iter()
+        .filter(|number| *number > built_on || *number == newest)
+    {
+        let path = store.meta_path(id, number);
+        let bytes = fs::read(&path).map_err(|source| SyncError::Io {
+            action: "read",
+            path: path.display().to_string(),
+            source,
+        })?;
+        if names_live(&meta::parse(&bytes)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1971,5 +2240,418 @@ mod tests {
             Some(live_payloads(&anna, id)[0].checksum.value.as_str())
         );
         assert!(third.unbacked.is_empty(), "{third:?}");
+    }
+
+    // =====================================================
+    // Deleting live packages once their change is committed
+    // =====================================================
+
+    /// Records the change of `id` through `edit` as a command of this
+    /// machine would, and removes the folder of the piece.
+    fn record_by_hand(
+        machine: &Machine,
+        id: ObjectId,
+        edit: impl FnOnce(&mut crate::meta::Metadata),
+    ) {
+        let mut metadata = machine
+            .store()
+            .current(id)
+            .expect("reads")
+            .expect("exists")
+            .metadata;
+        edit(&mut metadata);
+        let lock = crate::lock::acquire(
+            &machine.collection.lock_path(),
+            machine.name,
+            &machine.clock,
+        )
+        .expect("free");
+        machine
+            .store()
+            .write_pending(&lock, &metadata)
+            .expect("recorded");
+        drop(lock);
+        fs::remove_dir_all(machine.collection.root().join("proj")).expect("the folder goes");
+    }
+
+    /// The change `archive` records: the lifecycle `archived` with the live
+    /// payload still named.
+    fn archive_by_hand(machine: &Machine, id: ObjectId) {
+        let now = machine.clock.now();
+        let name = machine.name;
+        record_by_hand(machine, id, |metadata| {
+            metadata.lifecycle = Lifecycle::Archived;
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                name,
+                HistoryAction::Archive,
+            ));
+        });
+    }
+
+    fn live_on_remote(shared: &Shared, id: ObjectId, payload: &Payload) -> bool {
+        shared
+            .names(id)
+            .contains(&payload.file.as_str().to_string())
+    }
+
+    #[test]
+    fn the_live_package_of_an_archived_piece_is_deleted_only_after_the_commit() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        archive_by_hand(&anna, id);
+        let failing = anna.remote();
+        failing.fail(Op::CreateExclusive, 1, Fault::Io);
+
+        let first = anna.sync_with(&failing);
+
+        assert!(first.removed_live.is_empty(), "{first:?}");
+        assert!(live_on_remote(&shared, id, &package), "the commit failed");
+
+        let remote = anna.remote();
+        let second = anna.sync_with(&remote);
+
+        assert_eq!(
+            second.removed_live,
+            vec![crate::ops::sync::RemovedLive {
+                id,
+                file: package.file.as_str().to_string()
+            }]
+        );
+        assert!(!live_on_remote(&shared, id, &package));
+        assert!(
+            !anna
+                .collection
+                .object_dir(id)
+                .join(package.file.as_str())
+                .exists()
+        );
+        assert!(!anna.collection.manifest_path(id).exists());
+        let calls = remote.calls();
+        let deleted = calls
+            .iter()
+            .position(|call| call.op == Op::Delete && call.name.contains(package.file.as_str()))
+            .expect("the package is deleted");
+        let committed = calls
+            .iter()
+            .rposition(|call| call.op == Op::RenameIntoPlace)
+            .expect("the metadata is put in place");
+        assert!(committed < deleted, "{calls:?}");
+    }
+
+    #[test]
+    fn the_archive_strips_the_live_payload_from_its_recorded_change() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        archive_by_hand(&anna, id);
+        let failing = anna.remote();
+        failing.fail(Op::CreateExclusive, 1, Fault::Io);
+
+        anna.sync_with(&failing);
+
+        assert!(anna.collection.meta_pending_path(id).exists());
+        assert!(live_payloads(&anna, id).is_empty());
+    }
+
+    #[test]
+    fn a_conflicting_archive_deletes_nothing_and_keeps_its_live_payload() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            metadata.lifecycle = Lifecycle::Archived;
+            metadata.history[0].machine = "somebody-else".into();
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Archive,
+            ));
+        });
+
+        let report = anna.sync();
+
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(live_on_remote(&shared, id, &package));
+        assert_eq!(live_payloads(&anna, id), vec![package]);
+    }
+
+    #[test]
+    fn a_change_that_drops_the_live_payload_deletes_the_package_after_its_commit() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            metadata
+                .payloads
+                .retain(|payload| payload.kind != PayloadKind::Live);
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Fork,
+            ));
+        });
+
+        let report = anna.sync();
+
+        assert_eq!(report.removed_live.len(), 1, "{report:?}");
+        assert!(!live_on_remote(&shared, id, &package));
+    }
+
+    #[test]
+    fn a_replaced_package_is_not_deleted_by_sync() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let first = live_payloads(&anna, id).remove(0);
+        change(&folder, "a.txt", "hello again");
+
+        let report = anna.sync();
+
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(live_on_remote(&shared, id, &first));
+    }
+
+    #[test]
+    fn a_delete_that_fails_is_a_warning_and_the_run_stays_complete() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        archive_by_hand(&anna, id);
+        let remote = anna.remote();
+        remote.fail(Op::Delete, 1, Fault::Io);
+
+        let report = anna.sync_with(&remote);
+
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains(package.file.as_str())),
+            "{report:?}"
+        );
+        assert!(
+            !crate::report::CommandReport::partial(&report),
+            "{report:?}"
+        );
+        assert_eq!(report.committed.len(), 1);
+    }
+
+    #[test]
+    fn a_package_of_another_machine_is_never_deleted() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            let mut other = metadata.payloads[0].clone();
+            other.machine = "ben".into();
+            other.version = 2;
+            other.file = crate::meta::FileName::new("ffffffffffffffff-proj.tar.zst")
+                .expect("a payload name");
+            metadata.payloads.push(other);
+            metadata.lifecycle = Lifecycle::Archived;
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Archive,
+            ));
+        });
+        let remote = anna.remote();
+
+        let report = anna.sync_with(&remote);
+
+        assert!(report.removed_live.is_empty(), "{report:?}");
+        assert!(
+            !remote
+                .calls()
+                .iter()
+                .any(|call| call.op == Op::Delete && call.name.ends_with(".tar.zst")),
+            "{:?}",
+            remote.calls()
+        );
+        let payloads = live_payloads(&anna, id);
+        assert_eq!(payloads.len(), 1, "{payloads:?}");
+        assert_eq!(payloads[0].machine, "ben");
+    }
+
+    #[test]
+    fn a_committed_archive_that_still_names_a_live_package_is_stripped_in_a_new_version() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        archive_by_hand(&anna, id);
+        anna.publish_by_hand(&shared, id, 2);
+        // The first run records the version as committed.
+        anna.sync();
+        assert!(!anna.collection.meta_pending_path(id).exists());
+
+        let report = anna.sync();
+
+        assert_eq!(
+            report
+                .committed
+                .iter()
+                .map(|c| c.version)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(live_payloads(&anna, id).is_empty());
+        let current = anna.store().current(id).expect("reads").expect("exists");
+        assert_eq!(
+            current.metadata.history.last().map(|e| e.action.as_str()),
+            Some(HistoryAction::Sync.as_str())
+        );
+        assert_eq!(report.removed_live.len(), 1, "{report:?}");
+        assert!(!live_on_remote(&shared, id, &package));
+    }
+
+    #[test]
+    fn a_dry_run_lists_remove_live_for_an_archive_and_for_a_dropped_payload() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        archive_by_hand(&anna, id);
+
+        let actions = anna.plan();
+
+        assert!(
+            actions.contains(&SyncAction::RemoveLive {
+                id,
+                file: package.file.as_str().to_string()
+            }),
+            "{actions:?}"
+        );
+        assert!(
+            shared
+                .names(id)
+                .contains(&package.file.as_str().to_string())
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_remove_live_for_a_dropped_payload() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        let now = anna.clock.now();
+        record_by_hand(&anna, id, |metadata| {
+            metadata
+                .payloads
+                .retain(|payload| payload.kind != PayloadKind::Live);
+            metadata.history.push(crate::meta::HistoryEntry::new(
+                now,
+                "anna",
+                HistoryAction::Fork,
+            ));
+        });
+
+        let actions = anna.plan();
+
+        assert!(
+            actions.contains(&SyncAction::RemoveLive {
+                id,
+                file: package.file.as_str().to_string()
+            }),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_commit_for_a_committed_archive_that_names_a_live_package() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        let package = live_payloads(&anna, id).remove(0);
+        archive_by_hand(&anna, id);
+        anna.publish_by_hand(&shared, id, 2);
+        anna.sync();
+        assert!(!anna.collection.meta_pending_path(id).exists());
+
+        let actions = anna.plan();
+
+        let file = package.file.as_str().to_string();
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(
+                    action,
+                    SyncAction::RemoveLive { .. } | SyncAction::Commit { .. }
+                ))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                SyncAction::RemoveLive { id, file },
+                SyncAction::Commit { id }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_removal_for_a_live_piece_or_an_archive_of_another_machines_package() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        change(&folder, "a.txt", "hello again");
+
+        let actions = anna.plan();
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, SyncAction::RemoveLive { .. })),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_finds_the_remote_gone_ends_the_run() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        archive_by_hand(&anna, id);
+        let remote = anna.remote();
+        remote.fail(Op::Delete, 1, Fault::Away);
+        remote.fail(Op::Reachability, 2, Fault::Away);
+
+        let error = anna.sync_request(&remote, false).expect_err("the run ends");
+
+        assert_eq!(error.kind(), crate::error::ErrorKind::RemoteAway, "{error}");
     }
 }

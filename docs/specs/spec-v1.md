@@ -1684,13 +1684,32 @@ piece, or finds it unchanged, removes the mark. A piece whose walk
 reports a problem is listed with the matching reason and not packed. A
 failure of one piece makes the run exit 3 and leaves the piece for the
 next run, except for a shortage of file descriptors, which ends the run.
-After a fork,
+
+The same phase takes the live payloads of this machine out of every
+object of this collection whose metadata has the lifecycle `archived`,
+under the same conditions: the recorded archive is rewritten without
+them, and a committed archive that still names one gets a recorded change
+without them, with the history action `sync`. The package stays on the
+remote until the commit.
+
+After the commits and the cleanup, `sync` deletes the live package of an
+object it committed in this run when the newest committed version and every
+version above the one the change was built on name no live package of any
+machine. The package is deleted on the remote and in the object's
+directory, and the object's manifest goes with it. A conflict, a refused or
+contested commit, a failed upload, and a package that a newer package
+replaces leave the package where it is; cleanup removes the replaced one
+after the grace period. A package of another machine is not deleted. A
+delete that fails is a warning and the cleanup removes the package later;
+a delete that finds the remote gone ends the run. After a fork,
 the old ID's live package is deleted once the fork's change is
 committed. A dry run reads the remote and writes nothing, locally or on
 the remote. It lists what the run would do against the versions it would
 pull: the versions to pull, the listings to fetch, the changes to record
-as committed, the conflicts, the files to upload, the commits and the
-removals of cleanup. Removals that depend on a file's age are marked as
+as committed, the conflicts, the live packages to make and to delete,
+the files to upload, the commits and the removals of cleanup. The file of
+a live package to make is not named, as it is known only once the piece is
+packed. Removals that depend on a file's age are marked as
 such, since a dry run does not read the remote's clock.
 
 The archive tier starts from a piece's activity; the remote-only tier
@@ -2475,14 +2494,16 @@ each file written to the remote), `committed` (`{id, version}`), `cleanup`
 (`{removed, skipped}`), `skipped` (a list of `{id, path,
 reason, message}`, `path` null where the piece's metadata cannot be read,
 `reason` one of `pull`, `error`, `conflict`, `contested` and `refused`),
-`minted` (`{id, path}` for each new piece that got its ID), `unbacked` (`{id,
+`minted` (`{id, path}` for each new piece that got its ID), `removed_live`
+(`{id, file}` for each live package deleted from the remote), `unbacked` (`{id,
 path, reason, message}` for each piece that got no ID or no live backup, `id`
 null where it has none, `reason` one of `unreadable`, `mount_point`,
 `excluded`, `nested_collection`, `stale` and `error`; only `unreadable`,
 `stale` and `error` make the run exit 3) and `warnings`. The plan of a `--dry-run` has
 `pull_metadata` actions (`id`, `version`), `fetch_listing` (`id`, `file`),
 `settle` (`id`, `version`), `conflict` (`id`), `upload` (`id`, `file`,
-`size`), `commit` (`id`), `pack_live` (`id`, `path`), `mint_id` (`path`; the ID does not exist yet, so
+`size`), `commit` (`id`), `pack_live` (`id`, `path`), `remove_live` (`id`,
+`file`), `mint_id` (`path`; the ID does not exist yet, so
 there is no `commit` for it) and `remove_leftover` (`id`, `name`, `what`,
 `age_unknown`).
 
