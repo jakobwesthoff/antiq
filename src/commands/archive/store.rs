@@ -517,13 +517,16 @@ fn notes_of(
 ) -> Vec<Warning> {
     let mut notes = Vec::new();
     for note in pack_notes {
-        notes.push(Warning::new(format!("{piece}: {note}")));
+        notes.push(Warning::marked(piece, format!(": {note}")));
     }
     if let Some(sparse) = sparse_warning(tree) {
-        notes.push(Warning::new(format!(
-            "{piece}: its files add up to {} bytes and take {} bytes on disk; sparse files are stored in full",
-            sparse.apparent, sparse.allocated
-        )));
+        notes.push(Warning::marked(
+            piece,
+            format!(
+                ": its files add up to {} bytes and take {} bytes on disk; sparse files are stored in full",
+                sparse.apparent, sparse.allocated
+            ),
+        ));
     }
     let members: Vec<MemberName> = listing
         .iter()
@@ -539,7 +542,7 @@ fn notes_of(
         })
         .collect();
     for warning in portability_warnings(&members) {
-        notes.push(Warning::new(format!("{piece}: {warning}")));
+        notes.push(Warning::marked(piece, format!(": {warning}")));
     }
     notes
 }
@@ -1135,7 +1138,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note.starts_with("piece: ") && note.contains("become one name")),
+                .any(|note| note.starts_with("`piece`: ") && note.contains("become one name")),
             "{notes:?}"
         );
     }
@@ -1151,7 +1154,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note.starts_with("piece: ") && note.contains("pipe")),
+                .any(|note| note.starts_with("`piece`: ") && note.contains("pipe")),
             "{notes:?}"
         );
     }

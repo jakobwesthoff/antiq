@@ -154,7 +154,7 @@ fn remove(
             .unwrap_or_else(PoisonError::into_inner)
     };
     let warn = |warnings: &mut Vec<Warning>, text: String| {
-        warnings.push(Warning::new(format!("{piece}: {text}")));
+        warnings.push(Warning::marked(&piece, format!(": {text}")));
     };
 
     // =========================================================
@@ -435,7 +435,7 @@ fn give_back(
     match given {
         Ok(given) => {
             if let Some(note) = given.note {
-                warnings.push(Warning::new(format!("{}: {note}", request.live)));
+                warnings.push(Warning::marked(request.live, format!(": {note}")));
             }
             let _guard = context
                 .run_dirs
@@ -1255,7 +1255,7 @@ mod tests {
         let texts = warning_texts(&removal);
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert!(
-            texts[0].starts_with("piece: the move into trash/ cannot be flushed"),
+            texts[0].starts_with("`piece`: the move into trash/ cannot be flushed"),
             "{texts:?}"
         );
     }
@@ -1310,7 +1310,7 @@ mod tests {
         let texts = warning_texts(&removal);
         assert_eq!(texts.len(), 1, "{texts:?}");
         assert!(
-            texts[0].starts_with("piece: the deletion cannot be flushed"),
+            texts[0].starts_with("`piece`: the deletion cannot be flushed"),
             "{texts:?}"
         );
     }
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(texts.len(), 2, "into trash/ and into doomed/: {texts:?}");
         assert!(
             texts.iter().all(|text| text.starts_with(
-                "piece: cannot restore the mode of the moved tree: cannot restore the mode of moved"
+                "`piece`: cannot restore the mode of the moved tree: cannot restore the mode of moved"
             )),
             "{texts:?}"
         );

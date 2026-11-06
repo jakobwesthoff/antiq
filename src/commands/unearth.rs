@@ -511,9 +511,10 @@ impl Run<'_> {
 /// The warning for a folder that is in place while the run could not finish
 /// the unearth.
 fn in_place(piece: &RelPath, what: String) -> Warning {
-    Warning::new(format!(
-        "`{piece}` is in place, but {what}; the next run finishes it"
-    ))
+    Warning::marked(
+        piece,
+        format!(" is in place, but {what}; the next run finishes it"),
+    )
 }
 
 fn dry_plan(plan: Plan<PlanStep<UnearthAction>>, warnings: Vec<Warning>) -> DryRunPlan {

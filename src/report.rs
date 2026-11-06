@@ -12,12 +12,15 @@ use crate::lock::{self, Holder};
 use miette::Diagnostic;
 use serde::Serialize;
 use serde::ser::SerializeMap;
+use std::fmt::Display;
 
 /// Something the user should know that did not stop the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {
     pub message: String,
     pub kind: Option<WarningKind>,
+    /// The value a [`Warning::marked`] message starts with.
+    lead: Option<String>,
 }
 
 /// What a warning is about. The message, the help and the code of a kind
@@ -63,13 +66,35 @@ impl Warning {
         Warning {
             message: message.into(),
             kind: None,
+            lead: None,
         }
+    }
+
+    /// A warning that starts with a value from the user's files, such as a
+    /// piece path, and goes on with `rest`. The value stands in a code span,
+    /// so a console shows it as it is spelled and does not capitalise it.
+    pub fn marked(lead: impl Display, rest: impl Display) -> Self {
+        let lead = lead.to_string();
+        Warning {
+            message: format!("{}{rest}", CodeSpan(&lead)),
+            kind: None,
+            lead: Some(lead),
+        }
+    }
+
+    /// The value and the text after it, for a warning made by
+    /// [`Warning::marked`].
+    pub fn lead(&self) -> Option<(&str, &str)> {
+        let lead = self.lead.as_deref()?;
+        let rest = self.message.get(CodeSpan(lead).to_string().len()..)?;
+        Some((lead, rest))
     }
 
     pub fn of(kind: WarningKind) -> Self {
         Warning {
             message: kind.to_string(),
             kind: Some(kind),
+            lead: None,
         }
     }
 }
@@ -217,6 +242,18 @@ mod tests {
 
     fn messages(warnings: &[Warning]) -> Vec<&str> {
         warnings.iter().map(|w| w.message.as_str()).collect()
+    }
+
+    #[test]
+    fn a_marked_warning_fences_its_value_and_hands_it_back_with_the_text_after_it() {
+        let warning = Warning::marked("beta/a`b", ": cannot read `x`");
+        assert_eq!(warning.message, "``beta/a`b``: cannot read `x`");
+        assert_eq!(warning.lead(), Some(("beta/a`b", ": cannot read `x`")));
+        assert_eq!(Warning::new("beta: plain").lead(), None);
+        assert_eq!(
+            serde_json::to_value(&warning).expect("serialises"),
+            json!({"message": "``beta/a`b``: cannot read `x`"})
+        );
     }
 
     #[test]

@@ -460,9 +460,10 @@ impl Run<'_> {
                 warnings.extend(more.into_iter().map(Warning::new));
                 if let Some(error) = failure {
                     report.unfinished = true;
-                    warnings.push(Warning::new(format!(
-                        "`{destination}` is in place, but it could not be made durable: {error}"
-                    )));
+                    warnings.push(Warning::marked(
+                        &destination,
+                        format!(" is in place, but it could not be made durable: {error}"),
+                    ));
                 }
             }
         }

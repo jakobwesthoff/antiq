@@ -37,7 +37,8 @@ impl Notice {
 
 /// A warning as a block: the message of its kind is the title and the
 /// help of the kind is the fix. A kind with the severity of advice is an
-/// info, as nothing is wrong. A warning without a kind shows its message.
+/// info, as nothing is wrong. A warning without a kind shows its message,
+/// with the value it starts with as a code span when it has one.
 fn warning_block(warning: &Warning) -> Block {
     let message = &warning.message;
     let advice = warning
@@ -55,7 +56,11 @@ fn warning_block(warning: &Warning) -> Block {
     } else if warning.kind.is_some() && !free_text {
         Block::warning(Rich::parse(message)).pipe(&format!("warning: {message}"))
     } else {
-        Block::warning(Rich::new().text(message)).pipe(&format!("warning: {message}"))
+        let title = match warning.lead() {
+            Some((lead, rest)) => Rich::new().cmd(lead).text(rest),
+            None => Rich::new().text(message),
+        };
+        Block::warning(title).pipe(&format!("warning: {message}"))
     };
     match warning.kind.as_ref().and_then(|kind| kind.help()) {
         Some(help) => block.fix(Rich::parse(&help.to_string())),
@@ -118,6 +123,37 @@ mod tests {
             [" ⚠ WARNING  Cannot open notes/a: denied"]
         );
         assert_eq!(pipe(notice), ["warning: cannot open notes/a: denied"]);
+    }
+
+    #[test]
+    fn a_warning_that_starts_with_a_piece_keeps_the_case_of_its_name() {
+        let marked = Notice::Warning(Warning::marked(
+            "beta/notes",
+            ": its files add up to 9 bytes",
+        ));
+        assert_eq!(
+            rich(marked.clone()),
+            [" ⚠ WARNING  beta/notes: its files add up to 9 bytes"]
+        );
+        assert_eq!(
+            pipe(marked),
+            ["warning: `beta/notes`: its files add up to 9 bytes"]
+        );
+        let plain = Notice::Warning(Warning::new("beta/notes: its files add up to 9 bytes"));
+        assert_eq!(
+            rich(plain),
+            [" ⚠ WARNING  Beta/notes: its files add up to 9 bytes"]
+        );
+    }
+
+    #[test]
+    fn a_marked_warning_with_backticks_in_its_value_and_text_keeps_both_whole() {
+        let marked = Notice::Warning(Warning::marked("a`b", ": cannot read `x` or `y`"));
+        assert_eq!(
+            rich(marked.clone()),
+            [" ⚠ WARNING  a`b: cannot read `x` or `y`"]
+        );
+        assert_eq!(pipe(marked), ["warning: ``a`b``: cannot read `x` or `y`"]);
     }
 
     #[test]

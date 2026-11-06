@@ -2080,6 +2080,9 @@ title of a warning is its message, with the first letter in upper case
 unless the message starts with a command or path; a warning that has a fix
 adds it as a `→` line. The unknown config key is the one with a fix. A pipe
 gets one `warning: <message>` line for each, the message as written.
+A warning that starts with a piece path or another value from the user's files has
+that value in a code span, in the pipe line and in the JSON `message` too, so the
+console shows it as spelled and does not capitalise it.
 Notes that are no warning, such as a repair that ran, a reason in `push` or
 the run that holds the lock, are info blocks on a rich stderr, with the
 title in the same case as a warning, and `note: <text>` lines on a pipe.
