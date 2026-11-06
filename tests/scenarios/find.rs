@@ -6,6 +6,8 @@
 
 use crate::support::scenario::collection::Collection;
 use crate::support::scenario::world::{Mode, Outcome, Setup, World, both_modes};
+use serde_json::json;
+use std::collections::BTreeSet;
 
 /// The piece of every row `list` printed, in the order printed, read from
 /// the pipe lines or from the JSON, so one expectation serves both modes.
@@ -148,6 +150,92 @@ fn a_path_names_its_piece_where_the_same_word_matches_several() {
                     &["forget", "-n", "./scan", "--all-versions", "--force"],
                 ));
             });
+        },
+    );
+}
+
+#[test]
+fn unearth_refuses_a_word_that_matches_several_pieces_and_takes_a_path() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .patterns(&["*/*"])
+                .version("projects/scan", "2026-09-03T121500", &[("a.txt", "a")])
+                .version("projects/scanner", "2026-09-03T121500", &[("b.txt", "b")])
+                .version("tools/scan-old", "2025-02-11T184007", &[("c.txt", "c")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            world.assert_unchanged(|| {
+                // The word is a part of three piece names, so no piece is
+                // meant for sure and the candidates are listed.
+                let several = world.run(&["unearth", "scan"]);
+                several.expect_code(1);
+                several.keys(&["format", "command", "error"]);
+                several.text_only(|out| assert_eq!(out, ""));
+                several.json_only(|json| {
+                    let error = json["error"].as_object().expect("an error object");
+                    let keys: Vec<&str> = error.keys().map(String::as_str).collect();
+                    assert_eq!(keys, ["kind", "message", "candidates"]);
+                    assert_eq!(error["kind"], "ambiguous_reference");
+                    assert_eq!(
+                        error["candidates"],
+                        json!([
+                            {"path": "projects/scan"},
+                            {"path": "projects/scanner"},
+                            {"path": "tools/scan-old"}
+                        ])
+                    );
+                });
+                if world.mode() == Mode::Text {
+                    // Each candidate is a line of its own, and no line, so no
+                    // sentence of the message, appears twice.
+                    for candidate in ["projects/scan", "projects/scanner", "tools/scan-old"] {
+                        let line = format!("    candidate: {candidate}");
+                        let count = several.stderr.lines().filter(|l| *l == line).count();
+                        assert_eq!(count, 1, "{:?}", several.stderr);
+                    }
+                    let lines: Vec<&str> = several.stderr.lines().collect();
+                    let distinct: BTreeSet<&str> = lines.iter().copied().collect();
+                    assert_eq!(lines.len(), distinct.len(), "{:?}", several.stderr);
+                }
+
+                // A word that fits one piece names it.
+                let one = world.run(&["unearth", "-n", "scanner"]);
+                one.expect_code(0);
+                one.text_only(|out| {
+                    assert!(
+                        out.starts_with("Would unearth projects/scanner (version "),
+                        "{out:?}"
+                    );
+                });
+                one.json_only(|json| {
+                    assert_eq!(json["actions"][0]["piece"], "projects/scanner");
+                });
+
+                // A piece outside the collection is no piece.
+                let outside = world.collection().root().with_file_name("elsewhere");
+                let outside = outside.to_str().expect("the path is UTF-8");
+                let refused = world.run(&["unearth", outside]);
+                refused.expect_code(1);
+                refused.keys(&["format", "command", "error"]);
+                refused.json_only(|_| {
+                    assert_eq!(refused.error_kind().as_deref(), Some("outside_collection"));
+                });
+            });
+
+            // As the path of a piece, the same text names that piece alone.
+            let path = world.run(&["unearth", "projects/scan"]);
+            path.expect_code(0);
+            assert!(world.collection().path("projects/scan/a.txt").is_file());
+            assert!(!world.collection().path("projects/scanner").exists());
+            assert_eq!(
+                world.collection().versions("projects/scan"),
+                Vec::<String>::new()
+            );
+            assert_eq!(world.collection().versions("projects/scanner").len(), 1);
+            assert_eq!(world.collection().versions("tools/scan-old").len(), 1);
         },
     );
 }
