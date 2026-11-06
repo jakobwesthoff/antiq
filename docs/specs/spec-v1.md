@@ -364,8 +364,9 @@ An entry line is a JSON object with these keys, in this order:
 | `sha256` | string | lower-case hex; for `file` only |
 
 `link` is required for a `symlink` and a `hardlink`, and `sha256` for a
-`file`. A listing with a line that breaks these rules, or with a line for
-the top-level directory, is refused when it is read and when it is written.
+`file`. A listing with a line that breaks these rules or the size and time
+rules above, or with a line for the top-level directory, is refused when
+it is read and when it is written.
 
 ### Local state
 

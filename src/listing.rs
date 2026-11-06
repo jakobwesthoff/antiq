@@ -115,6 +115,12 @@ fn check_entry(entry: &ListingEntry) -> Result<(), String> {
         return Err("`link` belongs to symlinks and hard links, and only to them".into());
     }
     let is_file = entry.kind == ListingType::File;
+    if !is_file && entry.size != 0 {
+        return Err("only a file has a size".into());
+    }
+    if entry.mtime < 0 {
+        return Err("a time before 1970 is listed as 0".into());
+    }
     match &entry.sha256 {
         Some(digest) if is_file && is_sha256_hex(digest) => Ok(()),
         Some(_) if is_file => Err("`sha256` is not lower-case hex of 64 digits".into()),
@@ -130,10 +136,9 @@ fn check_entry(entry: &ListingEntry) -> Result<(), String> {
 /// caller, who holds the file.
 pub fn write<'a, W: Write>(
     entries: impl IntoIterator<Item = &'a ListingEntry>,
-    out: &mut W,
+    out: W,
 ) -> Result<Written, ListingError> {
-    let mut encoder =
-        Encoder::new(HashingWriter::new(&mut *out), LISTING_LEVEL).map_err(io_error)?;
+    let mut encoder = Encoder::new(HashingWriter::new(out), LISTING_LEVEL).map_err(io_error)?;
     encoder.include_checksum(true).map_err(io_error)?;
     encoder
         .write_all(format!("{{\"format\":{FORMAT}}}\n").as_bytes())
@@ -201,12 +206,14 @@ impl<R: Read> Reader<R> {
 /// Only `format` is read from the header, so a later format whose header
 /// has more keys is still recognised as later.
 fn check_header(line: &[u8]) -> Result<(), ListingError> {
-    #[derive(Deserialize)]
-    struct Header {
-        format: u32,
-    }
-    let Header { format } =
+    // Read into a map: a struct would also take a JSON array.
+    let header: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(line).map_err(|_| ListingError::InvalidHeader)?;
+    let format = header
+        .get("format")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|format| u32::try_from(format).ok())
+        .ok_or(ListingError::InvalidHeader)?;
     match format {
         0 => Err(ListingError::InvalidHeader),
         FORMAT => Ok(()),
@@ -416,7 +423,7 @@ mod tests {
             path: path("a/%FF"),
             kind: ListingType::File,
             size: 1,
-            mtime: -3,
+            mtime: 0,
             mode: 0o644,
             link: None,
             sha256: Some("ab".repeat(32)),
@@ -770,6 +777,58 @@ mod tests {
             ..file_entry()
         };
         assert_refused_on_write(&entry);
+    }
+
+    fn dir_with_a_size() -> ListingEntry {
+        ListingEntry {
+            size: 5,
+            ..dir_entry()
+        }
+    }
+
+    fn hard_link_with_a_size() -> ListingEntry {
+        ListingEntry {
+            size: 5,
+            ..hardlink_entry()
+        }
+    }
+
+    fn file_from_before_1970() -> ListingEntry {
+        ListingEntry {
+            mtime: -3,
+            ..file_entry()
+        }
+    }
+
+    #[test]
+    fn the_reader_refuses_a_directory_with_a_size() {
+        assert_refused_on_read(&dir_with_a_size());
+    }
+
+    #[test]
+    fn the_reader_refuses_a_hard_link_with_a_size() {
+        assert_refused_on_read(&hard_link_with_a_size());
+    }
+
+    #[test]
+    fn the_reader_refuses_a_time_before_1970() {
+        assert_refused_on_read(&file_from_before_1970());
+    }
+
+    #[test]
+    fn the_writer_refuses_a_directory_with_a_size() {
+        assert_refused_on_write(&dir_with_a_size());
+    }
+
+    #[test]
+    fn the_writer_refuses_a_time_before_1970() {
+        assert_refused_on_write(&file_from_before_1970());
+    }
+
+    #[test]
+    fn a_header_that_is_a_json_array_is_invalid() {
+        let error = Reader::new(&frame("[1]\n")[..]).expect_err("an array");
+        assert!(matches!(error, ListingError::InvalidHeader));
     }
 
     /// A sink that fails where it is told to.
