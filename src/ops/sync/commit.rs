@@ -319,13 +319,24 @@ fn commit_one(
                 ),
             )
         }
-        Outcome::Contested { number, claim } => Finished::Skipped(
-            SkipReason::Contested,
-            format!(
-                "another machine holds the claim for version {claim} above version {number}; \
-                 the next sync reads the remote again"
-            ),
-        ),
+        Outcome::Contested { number, claim } => {
+            // The version is on the remote. Once a newer version builds on
+            // it and the remote no longer holds it, this entry is what
+            // gives its number.
+            if let Some(mut entry) = tracking::read(ctx.collection, id)?
+                && !entry.committed_versions.contains(&number.get())
+            {
+                entry.committed_versions.push(number.get());
+                tracking::write(ctx.collection, ctx.lock, ctx.clock, &mut entry)?;
+            }
+            Finished::Skipped(
+                SkipReason::Contested,
+                format!(
+                    "another machine holds the claim for version {claim} above version \
+                     {number}; the next sync reads the remote again"
+                ),
+            )
+        }
         Outcome::Refused(refusal) => Finished::Skipped(
             SkipReason::Refused,
             format!("the commit was refused: {refusal:?}"),
@@ -1037,6 +1048,44 @@ mod tests {
 
         fs::remove_file(shared.objects().join(id.to_string()).join("meta.2.claim"))
             .expect("released");
+        let again = anna.sync();
+
+        assert_eq!(again.committed, [CommittedVersion { id, version: 1 }]);
+        assert!(!has_pending(&anna, id));
+    }
+
+    #[test]
+    fn a_contested_version_is_listed_as_committed() {
+        let (_shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        remote.after(Op::RenameIntoPlace, 1, move |inner| {
+            use crate::remote::Remote;
+            inner.create_exclusive(id, "meta.2.claim").expect("a claim");
+        });
+
+        let report = anna.sync_with(&remote);
+
+        assert_eq!(report.skipped[0].reason, SkipReason::Contested);
+        assert_eq!(anna.entry(id).committed_versions, [1]);
+    }
+
+    #[test]
+    fn a_contested_version_that_cleanup_removed_is_settled_when_the_newest_builds_on_it() {
+        let (shared, anna, ben) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        remote.after(Op::RenameIntoPlace, 1, move |inner| {
+            use crate::remote::Remote;
+            inner.create_exclusive(id, "meta.2.claim").expect("a claim");
+        });
+        let first = anna.sync_with(&remote);
+        assert_eq!(first.skipped[0].reason, SkipReason::Contested);
+        let dir = shared.objects().join(id.to_string());
+        fs::remove_file(dir.join("meta.2.claim")).expect("released");
+        fs::write(dir.join("meta.2"), built_on_pending(&anna, &ben, id)).expect("ben's version");
+        fs::remove_file(dir.join("meta.1")).expect("cleanup removed the version");
+
         let again = anna.sync();
 
         assert_eq!(again.committed, [CommittedVersion { id, version: 1 }]);

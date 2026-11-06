@@ -1550,7 +1550,7 @@ the outcome leaves behind:
 |---|---|---|---|
 | committed | becomes `meta.<n>` | version taken out `pending` becomes `n`, `n` is listed in `committed_versions` | 0 |
 | overtaken | stays | `n` is listed in `committed_versions`, decision `version_conflict` | 3 |
-| contested | stays | unchanged; the next `sync` reads the remote again | 3 |
+| contested | stays | `n` is listed in `committed_versions`; the next `sync` reads the remote again | 3 |
 | landed | stays until a second pull; then judged like an overtaken version: committed if the newer version builds on it, else a conflict | as for that outcome | 0 or 3 |
 | refused, or a failed upload or commit | stays | unchanged | 3 |
 
