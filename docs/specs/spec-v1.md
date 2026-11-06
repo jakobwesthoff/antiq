@@ -1687,7 +1687,9 @@ input is a search word, matched with the same fuzzy pattern `list` uses
 (smart case, smart normalization) against the candidates' paths in their
 escaped form, and must match exactly one candidate.
 No match is the error kind `unknown_reference`; several matches are
-`ambiguous_reference`, listing the candidates. Both exit 1. The
+`ambiguous_reference`, listing the candidates. Both exit 1. On the
+console the error line is followed by one line `    candidate: <path>` per
+candidate, in the order and the escaped form of `error.candidates`. The
 candidates are the live pieces for `archive`, `pin` and `unpin`; the
 pieces of the store for `unearth`, `fork` and `rebuild`; the pieces of the
 store and the store folders that hold sidecars only for `forget`.
@@ -1701,11 +1703,13 @@ the middle, keeping its start and its end. Without a terminal the width is
 80. Colour is used only on a terminal, and not when the environment
 variable `NO_COLOR` is set to a non-empty value. (ADR 0056)
 
-Data goes to stdout, messages to stderr. Under `--json` an error is data:
-its JSON goes to stdout, like any other JSON output, and a usage error too
-prints the JSON envelope (kind `usage`) and exits 2. When the reader of
-stdout or stderr is gone, antiq stops writing to that stream without a
-panic, and the run ends with the exit code it would have had.
+Data goes to stdout, messages to stderr. An error line gives the error and
+its causes joined with `: `. A cause whose text the cause above it already
+contains is not repeated, on the console and in the JSON `message`. Under
+`--json` an error is data: its JSON goes to stdout, like any other JSON
+output, and a usage error too prints the JSON envelope (kind `usage`) and
+exits 2. When the reader of stdout or stderr is gone, antiq stops writing to
+that stream without a panic, and the run ends with the exit code it would have had.
 
 ### JSON output
 
