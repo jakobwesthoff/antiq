@@ -27,8 +27,9 @@ use std::path::Path;
 /// changed. Nothing is followed across a device boundary: a top or a
 /// directory on another device than `root` fails with
 /// [`FsxError::ForeignDevice`], leaving what it holds untouched. So does the
-/// root of another mount on the same device, such as a bind mount. An entry
-/// that is gone already counts as removed. A directory more than
+/// root of another mount on the same device, such as a bind mount, and so
+/// does a directory above the top that is a mount root. An entry that is
+/// gone already counts as removed. A directory more than
 /// [`MAX_DEPTH`] levels below the top is not entered: the removal fails
 /// with [`FsxError::TooDeep`] naming it, each level holding one directory
 /// open. The root path is refused as an
@@ -104,11 +105,26 @@ fn remove_tree_with(
         return Err(failure("remove", root, path)(source));
     }
     // The removal has to stay on the device of `root`, so a top on another
-    // device is refused, and so is the root of a mount on that same device.
+    // device is refused, and so is the root of a mount on that same device
+    // or a mount root above the top.
     let holder = root
         .lstat(&RelPath::root())
         .map_err(failure("stat", root, &RelPath::root()))?;
     let reference = device_of(&holder);
+
+    // A mount root above the top shares the device of everything below it,
+    // so only the directories above show it.
+    let mut above = RelPath::root();
+    let mut names: Vec<&[u8]> = path.components().collect();
+    names.pop();
+    for component in names {
+        let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
+        above = above.join(&name);
+        let found = skip_if_missing(root.lstat(&above)).map_err(failure("stat", root, &above))?;
+        if found.is_some_and(|entry| mount_root_of(&entry)) {
+            return Err(foreign_device(root, &above));
+        }
+    }
 
     let stat = skip_if_missing(root.lstat(path)).map_err(failure("stat", root, path))?;
     let Some(top) = stat else { return Ok(()) };
@@ -493,6 +509,28 @@ mod tests {
             "{error}"
         );
         assert!(tree.path("t/mnt/file").exists());
+    }
+
+    #[test]
+    fn a_mount_root_above_the_top_stops_the_removal_before_anything_is_removed() {
+        let mut tree = Tree::new();
+        tree.file("a/b/t/f", "x");
+        let device = |entry: &TreeEntry| entry.device;
+        let mount_root = |entry: &TreeEntry| entry.path == path("a");
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("a/b/t"),
+            &device,
+            &mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("refused");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "a"),
+            "{error}"
+        );
+        assert!(tree.path("a/b/t/f").exists());
     }
 
     #[test]

@@ -41,6 +41,13 @@ pub(crate) trait Hooks {
         reported
     }
 
+    /// Whether the directory at `prefix`, relative to the collection and
+    /// above the piece's top, is the root of a mount, in place of the
+    /// `reported` answer.
+    fn prefix_mount_root(&self, _prefix: &RelPath, reported: bool) -> bool {
+        reported
+    }
+
     /// An error to raise instead of making the call of kind `call` that
     /// works on `path`.
     fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error>;
@@ -94,7 +101,8 @@ pub(crate) fn is_out_of_descriptors(error: &io::Error) -> bool {
 /// Entries come back relative to the top, with the top itself as the
 /// entry with the root path. Nothing is followed: every entry is read with
 /// `lstat`, and a directory is entered only while it stays on the device of
-/// the top directory and is no mount root. Files named in `junk` are left out; a directory
+/// the top directory and is no mount root. A top below a mount root of the
+/// collection counts as a mount point at its own path. Files named in `junk` are left out; a directory
 /// with a junk name is walked like any other. An entry that is on the
 /// exclude list of `rules` is reported and, if a directory, not entered. A
 /// directory named `.antiq` marks a collection of its own: the directory
@@ -136,16 +144,23 @@ pub(crate) fn walk_piece_with(
     let read_top = walker.attempt(&root, Call::Stat, || {
         let top_entry = collection.lstat(top)?;
         let collection_device = collection.lstat(&RelPath::root())?.device;
-        Ok((top_entry, collection_device))
+        let mut below_a_mount_root = false;
+        for prefix in directories_above(top) {
+            let above = collection.lstat(&prefix)?;
+            below_a_mount_root |= hooks.prefix_mount_root(&prefix, above.mount_root);
+        }
+        Ok((top_entry, collection_device, below_a_mount_root))
     })?;
-    if let Some((mut top_entry, collection_device)) = read_top {
+    if let Some((mut top_entry, collection_device, below_a_mount_root)) = read_top {
         top_entry.path = root.clone();
         walker.top_device = hooks.device(&root, top_entry.device);
-        // A top directory on another device, or the root of a mount on the
-        // collection's device, is a mount point of its own, although
-        // nothing inside it differs from the top.
+        // A top directory on another device, the root of a mount on the
+        // collection's device, or a top below such a mount root is a mount
+        // point of its own, although nothing inside it differs from the
+        // top. A mount root above the top shares the device of everything
+        // below it, so only the directories above show it.
         let top_is_mount_root = hooks.mount_root(&root, top_entry.mount_root);
-        if walker.top_device != collection_device || top_is_mount_root {
+        if walker.top_device != collection_device || top_is_mount_root || below_a_mount_root {
             walker.mount_points.push(root.clone());
         }
         let is_directory = top_entry.kind == EntryKind::Directory;
@@ -192,6 +207,21 @@ pub(crate) fn walk_piece_with(
             .map(|root| Problem::NestedCollection { root }),
     );
     Ok(PieceTree::new(top.clone(), walker.entries, problems))
+}
+
+/// The directories between the collection root and `top`, the root
+/// excluded and `top` itself too: `a` and `a/b` for `a/b/c`.
+fn directories_above(top: &RelPath) -> Vec<RelPath> {
+    let mut components: Vec<&[u8]> = top.components().collect();
+    components.pop();
+    let mut above = Vec::new();
+    let mut prefix = RelPath::root();
+    for component in components {
+        let name = Name::from_bytes(component.to_vec()).expect("a component of a path is a name");
+        prefix = prefix.join(&name);
+        above.push(prefix.clone());
+    }
+    above
 }
 
 /// A directory being walked: what is left of its listing.
@@ -362,6 +392,7 @@ mod tests {
     struct Staged {
         foreign: Vec<RelPath>,
         mount_roots: Vec<RelPath>,
+        above_mount_roots: Vec<RelPath>,
         faults: Vec<(RelPath, Call, Errno)>,
         depth: Option<usize>,
     }
@@ -381,6 +412,10 @@ mod tests {
 
         fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
             reported || self.mount_roots.contains(path)
+        }
+
+        fn prefix_mount_root(&self, prefix: &RelPath, reported: bool) -> bool {
+            reported || self.above_mount_roots.contains(prefix)
         }
 
         fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
@@ -735,6 +770,35 @@ mod tests {
                 Problem::NestedCollection { root: path("z") },
             ]
         );
+    }
+
+    #[test]
+    fn a_piece_below_a_mount_root_counts_as_a_mount_point_at_its_own_path() {
+        let mut tree = Tree::new();
+        tree.file("proj/deeper/piece/f", "x");
+        for above in ["proj", "proj/deeper"] {
+            let hooks = Staged {
+                above_mount_roots: vec![path(above)],
+                ..Staged::default()
+            };
+            let walked = walk_with(&tree, "proj/deeper/piece", &[], &hooks).expect("walks");
+            assert_eq!(
+                walked.problems(),
+                [Problem::MountPoint {
+                    other: RelPath::root()
+                }],
+                "{above}"
+            );
+            assert_eq!(paths(&walked), ["", "f"], "the content is walked");
+        }
+    }
+
+    #[test]
+    fn directories_above_the_top_that_are_no_mount_roots_add_no_problem() {
+        let mut tree = Tree::new();
+        tree.file("proj/piece/f", "x");
+        let walked = walk(&tree, "proj/piece");
+        assert_eq!(walked.problems(), []);
     }
 
     #[test]

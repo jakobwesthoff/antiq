@@ -373,6 +373,42 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_piece_below_a_bind_mount_is_a_mount_point_and_is_not_removed() {
+        use crate::fsx::{FsxError, remove::remove_tree};
+        use crate::select::Rules;
+        use crate::tree::Problem;
+        use crate::walk::walk_piece;
+        if !privileged() {
+            return;
+        }
+        let mut tree = Tree::new();
+        tree.file("outside/x/precious", "x");
+        tree.dir("proj");
+        let _mount = BindMount::new(&tree.path("outside"), &tree.path("proj"));
+
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let rules = Rules::new(&[], &[]).expect("no patterns are valid");
+        let piece = RelPath::parse("proj/x").expect("valid path");
+        let walked = walk_piece(&root, &piece, &[], &rules).expect("walks");
+        assert_eq!(
+            walked.problems(),
+            [Problem::MountPoint {
+                other: RelPath::root()
+            }]
+        );
+        let error = remove_tree(&root, &piece).expect_err("refused");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "proj"),
+            "{error}"
+        );
+        assert!(
+            tree.path("outside/x/precious").exists(),
+            "the source was emptied"
+        );
+    }
+
     #[test]
     fn macos_type_names_map_to_kinds() {
         for (name, kind) in [

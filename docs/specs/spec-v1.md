@@ -141,8 +141,11 @@ the piece's top directory. A piece that contains another device (a
 mount point or a btrfs subvolume) is never archived, reclaimed or packed
 for backup; `status` lists it with the path of the mount point. A piece
 whose top directory is itself on another device than the collection
-root, or is itself a mount root, counts as containing a mount point, at
-its own path. The walk
+root, is itself a mount root, or lies below a directory between the
+collection root and the top that is a mount root, counts as containing a
+mount point, at its own path. A mount root above the top shares the device
+of everything below it, so the walk reads the directories above the top as
+well. The walk
 compares the device of every entry with the top directory's, not only
 that of directories: an entry on another device is recorded, and a
 directory there is not entered. The same holds for the root of a mounted
@@ -167,7 +170,8 @@ directories up to 512 levels below the piece's top, since each level holds
 one directory open. A deeper directory is not entered and makes the piece
 unreadable.
 The delete helper never crosses a device boundary or enters a mount root,
-refuses the root of its own tree, and stops at the same depth: a
+refuses a path with a mount root above its top, refuses the root of its
+own tree, and stops at the same depth: a
 directory more than 512 levels below the top it removes is not entered
 and fails the removal, naming that directory.
 
