@@ -2512,6 +2512,16 @@ the same commit; the lead checks that at acceptance.
   "Storage", "Metadata changes" and ADR 0058.
 - 2026-11-04: an object none of whose metadata versions reads and that
   has no `meta.pending` is an error naming the versions (I08, spec).
+- 2026-11-04 (merged, from the opus diff review): for I30,
+  `store_committed` writes a pulled `meta.<N>` byte for byte;
+  `promote_pending(lock, id, number, committed_sha256)` returns
+  `Renamed` or `AlreadyCommitted` and refuses with `PendingChanged` when
+  `meta.pending` no longer hashes to what was uploaded. The listing
+  reader and writer refuse wrong keys per type, a root path, a size
+  other than 0 on non-files and a time before 1970, so I06 and I12 must
+  not produce negative times. Every store write flushes `objects/` and
+  `.antiq/`. A short corrupt listing fails in `Reader::new`; callers
+  that need all entries verified use `read_all`.
 
 ### I09
 
