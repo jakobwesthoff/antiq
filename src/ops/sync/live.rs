@@ -1847,11 +1847,19 @@ mod tests {
         anna.sync();
         let id = only_object(&anna);
         change(&folder, "a.txt", "hello again");
+        let failing = anna.remote();
+        failing.fail(Op::PutPayload, 1, Fault::Io);
+        anna.sync_with(&failing);
+        let recorded = fs::read(anna.collection.meta_pending_path(id)).expect("the change");
         fs::remove_file(anna.collection.tracking_path(id)).expect("removed");
+        change(&folder, "a.txt", "hello once more");
 
         back_up_piece(&anna, id, "proj");
 
-        assert!(!anna.collection.meta_pending_path(id).exists());
+        assert_eq!(
+            fs::read(anna.collection.meta_pending_path(id)).expect("the change"),
+            recorded
+        );
     }
 
     #[test]
@@ -1868,6 +1876,11 @@ mod tests {
             .expect("exists")
             .metadata;
         metadata.collection = crate::remote::testing::object(9);
+        metadata.history.push(crate::meta::HistoryEntry::new(
+            anna.clock.now(),
+            "anna",
+            HistoryAction::Unearth,
+        ));
         let lock =
             crate::lock::acquire(&anna.collection.lock_path(), "anna", &anna.clock).expect("free");
         anna.store()
@@ -1899,6 +1912,11 @@ mod tests {
             .expect("exists")
             .metadata;
         metadata.lifecycle = Lifecycle::Archived;
+        metadata.history.push(crate::meta::HistoryEntry::new(
+            anna.clock.now(),
+            "anna",
+            HistoryAction::Archive,
+        ));
         let lock =
             crate::lock::acquire(&anna.collection.lock_path(), "anna", &anna.clock).expect("free");
         anna.store()
@@ -2465,6 +2483,16 @@ mod tests {
         anna.sync();
         let id = only_object(&anna);
         let now = anna.clock.now();
+        let package = live_payloads(&anna, id).remove(0);
+        // The other machine's package has to be uploadable for the commit
+        // to go through.
+        fs::copy(
+            anna.collection.object_dir(id).join(package.file.as_str()),
+            anna.collection
+                .object_dir(id)
+                .join("ffffffffffffffff-proj.tar.zst"),
+        )
+        .expect("copied");
         record_by_hand(&anna, id, |metadata| {
             let mut other = metadata.payloads[0].clone();
             other.machine = "ben".into();
@@ -2483,6 +2511,7 @@ mod tests {
 
         let report = anna.sync_with(&remote);
 
+        assert_eq!(report.committed.len(), 1, "{report:?}");
         assert!(report.removed_live.is_empty(), "{report:?}");
         assert!(
             !remote
