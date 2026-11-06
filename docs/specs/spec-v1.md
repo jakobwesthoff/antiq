@@ -513,7 +513,7 @@ Local layout:
 ```
 .antiq/config.toml
 .antiq/lock
-.antiq/remote-state.json              when the remote was last reachable, when the last sync finished
+.antiq/remote-state.json              when the remote was last reachable or first found away, when the last sync finished
 .antiq/objects/<ulid>/...             same layout as on the remote
 .antiq/objects/<ulid>/meta.pending    a recorded change not committed yet
 .antiq/tracking/<ulid>.json           tracking entries
@@ -741,10 +741,18 @@ operations at a time; compression may run ahead of uploads.
 
 When the remote has been away for longer than `away_warn_days` while
 remote work is pending, `status` warns and `--if-reachable` no longer
-turns away into exit 0. The time the remote was last reachable is kept
-in `.antiq/remote-state.json`, a JSON object. Its key `last_sync` holds the
-time the last `sync` finished (RFC 3339, whole seconds); a reader takes
-that key and ignores every other.
+turns away into exit 0.
+
+`.antiq/remote-state.json` is a JSON object. Only a run that holds the
+lock writes it. A run that finds the remote reachable sets
+`last_reachable` and removes `away_first_seen`; a run that finds it away
+sets `away_first_seen` unless the key is there. The key `last_sync` holds
+the time the last `sync` finished. All three are RFC 3339 times in whole
+seconds. A writer keeps the keys it does not own, and a reader takes the
+keys it needs and ignores every other. A writer replaces a file that is
+not a JSON object or does not parse with a new one, which drops
+`last_sync` until the next `sync`; a file it cannot read at all it leaves
+alone and fails.
 
 ### Path remote
 
