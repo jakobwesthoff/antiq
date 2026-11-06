@@ -12,7 +12,7 @@
 //! finishes or drops.
 
 use super::{
-    Skipped, TargetProblem, UnearthError, UnearthPlan, UnearthReport, absolute,
+    Skipped, TargetProblem, UnearthError, UnearthPlan, UnearthReport, absolute, ancestors,
     check_target_on_disk, io_error, target_error,
 };
 use crate::clock::Clock;
@@ -22,10 +22,11 @@ use crate::fsx::moves::{Moved, move_dir};
 use crate::fsx::remove::remove_tree;
 use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
+use crate::id::ObjectId;
 use crate::lock::RunLock;
 use crate::meta::PayloadKind;
 use crate::pack::hashing::HashingReader;
-use crate::pack::names::{MemberName, check_members};
+use crate::pack::names::{MemberName, check_members, fold_path};
 use crate::pack::{PackError, Packager, TarZstd, TargetRules, WalkRules};
 use crate::relpath::RelPath;
 use crate::repair::record_unearth;
@@ -225,6 +226,7 @@ fn place(
     let volume = (env.probe)(&staged).map_err(io_error("probe", &collection.staging_dir()))?;
     let missing = check_target_on_disk(&root, &rules, target)?;
     check_target_names(target, &missing, &volume)?;
+    check_entries_on_volume(collection, plan.id, target, &volume)?;
 
     let unpacked = match env.packager.unpack(package, &staged, &volume) {
         Ok(unpacked) => unpacked,
@@ -300,6 +302,8 @@ fn unearthing_entry(plan: &UnearthPlan, clock: &dyn Clock) -> TrackingEntry {
     entry.unearthed = None;
     entry.unearthed_payload_version = Some(plan.payload.version);
     entry.removing_payload = None;
+    // A folder made from the current archive has not been changed since.
+    entry.set_diverged(false);
     if !entry
         .local_payloads
         .iter()
@@ -370,6 +374,46 @@ fn remove_created(root: &TreeRoot, created: &[RelPath]) {
     }
 }
 
+/// Entries keep the spelling their folder had when they were written. A
+/// volume that folds case or Unicode normalisation reaches that folder
+/// under the target's spelling too, so another entry that holds a folder
+/// there, or above the target, makes the target taken.
+fn check_entries_on_volume(
+    collection: &Collection,
+    id: ObjectId,
+    target: &RelPath,
+    volume: &TargetRules,
+) -> Result<(), UnearthError> {
+    let target_key = fold_path(target, volume);
+    let above: Vec<Vec<u8>> = ancestors(target)
+        .iter()
+        .map(|ancestor| fold_path(ancestor, volume))
+        .collect();
+    let held = tracking::read_all(collection)?
+        .entries
+        .into_iter()
+        .filter(|other| other.id != id)
+        .filter(|other| {
+            matches!(
+                other.state,
+                EntryState::Unearthing | EntryState::Live | EntryState::Removing
+            )
+        });
+    for other in held {
+        let key = fold_path(&other.path, volume);
+        if key == target_key {
+            return Err(target_error(target, TargetProblem::Taken));
+        }
+        if above.contains(&key) {
+            return Err(target_error(
+                target,
+                TargetProblem::InsidePiece { piece: other.path },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Holds the names of the target to the rules of the volume: every name
 /// on the way is a directory, and the ones that are made here must be
 /// stored as written.
@@ -434,7 +478,7 @@ mod tests {
     use super::*;
     use crate::fsx::remove::remove_tree;
     use crate::listing::ListingEntry;
-    use crate::ops::unearth::tests::{FILES, Fixture, ID, NOW, id, path, time};
+    use crate::ops::unearth::tests::{FILES, Fixture, ID, NOW, OTHER_ID, id, path, time};
     use crate::ops::unearth::{Planned, UnearthRequest};
     use crate::pack::verify::compare_with_listing;
     use crate::pack::{PackError, Unpacked, Verified};
@@ -675,11 +719,17 @@ mod tests {
         fx.archived(ID, "projects/a", FILES);
         let mut entry = fx.entry(ID);
         entry.committed_versions = vec![1];
+        entry.missing_on_remote = true;
+        entry.decide(tracking::DecisionKind::DivergedFolder);
         fx.write_entry(&mut entry);
 
         unearth(&fx);
 
-        assert_eq!(fx.entry(ID).committed_versions, vec![1]);
+        let kept = fx.entry(ID);
+        assert_eq!(kept.committed_versions, vec![1]);
+        assert!(!kept.diverged);
+        assert!(kept.pending_decisions.is_empty());
+        assert!(kept.missing_on_remote, "what the remote said stays");
     }
 
     #[test]
@@ -1208,6 +1258,81 @@ mod tests {
         };
 
         unearth_in(&fx, &request, &env).expect("works");
+    }
+
+    #[test]
+    fn a_target_that_another_entry_holds_under_another_spelling_is_taken_on_a_folding_volume() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.hold(OTHER_ID, "projects/A", EntryState::Live);
+
+        let error = with_rules(&fx, "projects/a", TargetRules::macos());
+
+        assert!(
+            matches!(
+                &error,
+                UnearthError::Target {
+                    problem: TargetProblem::Taken,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_nothing_changed(&fx, "projects/a");
+    }
+
+    #[test]
+    fn a_folder_above_the_target_that_another_entry_holds_under_another_spelling_is_a_piece() {
+        let mut fx = Fixture::configured(|config| {
+            config.collection.patterns = vec!["projects/*/*".into()];
+        });
+        fx.archived(ID, "projects/b/a", FILES);
+        fx.hold(OTHER_ID, "projects/X", EntryState::Live);
+
+        let error = with_rules(&fx, "projects/x/a", TargetRules::macos());
+
+        assert!(
+            matches!(
+                &error,
+                UnearthError::Target {
+                    problem: TargetProblem::InsidePiece { .. },
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn another_entry_with_the_same_spelling_does_not_matter_where_the_volume_does_not_fold() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.hold(OTHER_ID, "projects/A", EntryState::Live);
+        let probe = |_: &TreeRoot| Ok(TargetRules::linux());
+        let env = Environment {
+            packager: &TarZstd,
+            probe: &probe,
+            free_space: &plenty,
+            rename: &real_move,
+        };
+
+        unearth_in(&fx, &fx.request(ID), &env).expect("works");
+    }
+
+    #[test]
+    fn an_entry_of_this_object_or_a_gone_one_is_no_claim_on_the_target() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fx.archived(OTHER_ID, "projects/A", FILES);
+        let probe = |_: &TreeRoot| Ok(TargetRules::macos());
+        let env = Environment {
+            packager: &TarZstd,
+            probe: &probe,
+            free_space: &plenty,
+            rename: &real_move,
+        };
+
+        unearth_in(&fx, &fx.request(ID), &env).expect("works");
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod remote;
 
 use crate::clock::Clock;
 use crate::collection::Collection;
+use crate::error::ErrorKind;
 use crate::fsx::FsxError;
 use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
@@ -21,7 +22,7 @@ use crate::id::ObjectId;
 use crate::index::{Index, IndexError};
 use crate::listing::{self, ListingError, ListingType};
 use crate::machine::MachineError;
-use crate::meta::{Payload, PayloadKind};
+use crate::meta::{self, Payload, PayloadKind};
 use crate::pack::{PackError, PackageFormat};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
@@ -77,7 +78,12 @@ pub enum UnearthError {
         available: String,
     },
     #[error("committed versions of {id} cannot be read: {versions}")]
-    UnreadableVersions { id: ObjectId, versions: String },
+    UnreadableVersions {
+        id: ObjectId,
+        versions: String,
+        /// One of them states a format this version does not know.
+        too_new: bool,
+    },
     #[error("the archive {file} cannot be unearthed: {reason}")]
     UnsupportedPayload { file: String, reason: String },
     #[error("the archive {file} does not match its metadata: {what}")]
@@ -89,7 +95,16 @@ pub enum UnearthError {
     },
 }
 
-impl crate::error::HasKind for UnearthError {}
+impl crate::error::HasKind for UnearthError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            UnearthError::Store(error) => error.kind(),
+            UnearthError::Listing(error) => error.kind(),
+            UnearthError::UnreadableVersions { too_new: true, .. } => ErrorKind::FormatTooNew,
+            _ => ErrorKind::Other,
+        }
+    }
+}
 
 /// Why a target is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +190,13 @@ pub enum UnearthAction {
         path: RelPath,
         payload_version: u32,
     },
+    /// The run leaves the piece as it is.
+    Skip {
+        id: ObjectId,
+        path: RelPath,
+        #[serde(flatten)]
+        why: Skipped,
+    },
 }
 
 impl PlanAction for UnearthAction {
@@ -185,6 +207,11 @@ impl PlanAction for UnearthAction {
                 payload_version,
                 ..
             } => format!("unearth {path} from archive version {payload_version}"),
+            UnearthAction::Skip {
+                path,
+                why: Skipped::NoSpace { needed, available },
+                ..
+            } => format!("skip {path}: it needs {needed} bytes and the volume has {available}"),
         }
     }
 }
@@ -247,11 +274,18 @@ pub enum Planned {
 
 impl Planned {
     /// The plan a dry run prints: nothing to do for a piece that is
-    /// unearthed.
+    /// unearthed, a skip for one the volume has no room for.
     pub fn plan(&self) -> Plan<UnearthAction> {
         let mut plan = Plan::new();
         if let Planned::Unearth(unearth) = self {
-            plan.push(unearth.action());
+            plan.push(match unearth.shortfall {
+                Some(Shortfall { needed, available }) => UnearthAction::Skip {
+                    id: unearth.id,
+                    path: unearth.target.clone(),
+                    why: Skipped::NoSpace { needed, available },
+                },
+                None => unearth.action(),
+            });
         }
         plan
     }
@@ -397,6 +431,11 @@ pub(crate) fn plan_with(
         return Err(UnearthError::UnreadableVersions {
             id,
             versions: versions.join(", "),
+            too_new: current.unreadable.iter().any(|unreadable| {
+                unreadable
+                    .format
+                    .is_some_and(|format| format > meta::FORMAT)
+            }),
         });
     }
 
@@ -549,11 +588,16 @@ fn check_planned_target(
     }
     if let Some(claimant) = index.at_path(target).claimant {
         // This object's own `live` or `gone` entry says nothing about the
-        // target: its folder is not there. One in the middle of arriving
-        // or leaving does.
+        // target: its folder is not there, and an `unearthing` one without a
+        // folder is what a dead run left, which the next run drops. One in
+        // the middle of leaving does: its tree may come back.
         let own_and_idle = claimant == id
-            && entry
-                .is_some_and(|entry| matches!(entry.state, EntryState::Live | EntryState::Gone));
+            && entry.is_some_and(|entry| {
+                matches!(
+                    entry.state,
+                    EntryState::Live | EntryState::Gone | EntryState::Unearthing
+                )
+            });
         if !own_and_idle {
             return Err(refuse(TargetProblem::Taken));
         }
@@ -640,6 +684,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::clock::FixedClock;
     use crate::config::Config;
+    use crate::error::{ErrorKind, HasKind};
     use crate::lock::{self, RunLock};
     use crate::meta::{
         self, Checksum, CreatedSource, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata,
@@ -1159,6 +1204,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn metadata_of_a_later_format_is_reported_with_its_own_kind() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fs::write(
+            fx.collection.object_dir(id(ID)).join("meta.2"),
+            r#"{"format": 2}"#,
+        )
+        .expect("meta.2");
+
+        let error = fx.refusal(&fx.request(ID));
+
+        assert_eq!(error.kind(), ErrorKind::FormatTooNew, "{error}");
+    }
+
+    #[test]
+    fn a_broken_later_version_is_an_error_of_the_generic_kind() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        fs::write(fx.collection.object_dir(id(ID)).join("meta.2"), "not json").expect("meta.2");
+
+        let error = fx.refusal(&fx.request(ID));
+
+        assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+    }
+
+    #[test]
+    fn a_listing_of_a_later_format_and_unreadable_metadata_keep_their_kinds() {
+        let listing = UnearthError::Listing(ListingError::FormatTooNew { found: 2 });
+        assert_eq!(listing.kind(), ErrorKind::FormatTooNew);
+        let store = UnearthError::Store(StoreError::NothingReadable {
+            unreadable: vec![crate::store::Unreadable {
+                number: 1,
+                format: Some(2),
+                reason: "too new".into(),
+            }],
+        });
+        assert_eq!(store.kind(), ErrorKind::FormatTooNew);
+    }
+
+    #[test]
     fn a_package_format_other_than_tar_zstd_is_refused_by_name() {
         let mut fx = Fixture::new();
         fx.archived(ID, "projects/a", FILES);
@@ -1260,6 +1345,34 @@ pub(crate) mod tests {
         let planned = plan(&fx.collection, &fx.request(ID)).expect("planned");
 
         assert!(matches!(planned, Planned::Unearth(plan) if plan.shortfall().is_none()));
+    }
+
+    #[test]
+    fn a_dry_run_on_a_volume_without_room_says_the_piece_would_be_skipped() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        let planned = plan_with(&fx.collection, &fx.request(ID), &|_| Ok(10)).expect("planned");
+
+        let plan = planned.plan();
+
+        assert_eq!(
+            plan.lines(),
+            ["Would skip projects/a: it needs 17 bytes and the volume has 10"]
+        );
+        assert_eq!(
+            serde_json::to_value(plan.dry_run()).expect("serialises"),
+            json!({
+                "dry_run": true,
+                "actions": [{
+                    "action": "skip",
+                    "id": ID,
+                    "path": "projects/a",
+                    "reason": "no_space",
+                    "needed": 17,
+                    "available": 10,
+                }],
+            })
+        );
     }
 
     #[test]
@@ -1508,6 +1621,18 @@ pub(crate) mod tests {
         entry.state = EntryState::Removing;
         fx.write_entry(&mut entry);
         assert_eq!(problem(fx.refusal(&fx.request(ID))), TargetProblem::Taken);
+    }
+
+    #[test]
+    fn an_unearthing_entry_of_this_object_without_a_folder_does_not_block_the_target() {
+        // A dry run does not repair, so it can meet what a dead run left.
+        let mut fx = Fixture::new();
+        fx.archived(ID, "projects/a", FILES);
+        let mut entry = fx.entry(ID);
+        entry.state = EntryState::Unearthing;
+        fx.write_entry(&mut entry);
+
+        assert_eq!(fx.planned(&fx.request(ID)).target(), &path("projects/a"));
     }
 
     #[test]

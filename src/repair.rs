@@ -698,7 +698,17 @@ impl Repairs<'_> {
             let mut entry = self.entry(id);
             let present = self.folder_in_place(&entry);
             let usable = present && !self.held_by_other(&entry.path, id);
-            let current = Store::new(self.collection).current(id).ok().flatten();
+            // Metadata that cannot be read says nothing about the unearth; the
+            // entry waits for a run that can read it.
+            let current = match Store::new(self.collection).current(id) {
+                Ok(current) => current,
+                Err(error) => {
+                    self.warn(format!(
+                        "cannot read the metadata of {id}: {error}; its unearthing entry stays for the next run"
+                    ));
+                    continue;
+                }
+            };
             let recorded = current.as_ref().is_some_and(|current| {
                 records_unearth(&current.metadata, &self.machine, entry.written)
             });
@@ -738,8 +748,14 @@ impl Repairs<'_> {
                     entry.path
                 ));
             }
-            if let (true, Some(current)) = (recorded, &current) {
-                entry.version_taken_out = taken_out(current.source);
+            if let Some(current) = &current {
+                if recorded {
+                    entry.version_taken_out = taken_out(current.source);
+                } else {
+                    // An unearth to another path wrote the target into the
+                    // entry; the object is still where its metadata says.
+                    entry.path = current.metadata.path.clone();
+                }
             }
             self.drop_unearthing(entry)?;
         }
@@ -2590,6 +2606,46 @@ mod tests {
         let entry = world.entry(ID);
         assert_eq!(entry.state, EntryState::Gone);
         assert_eq!(entry.version_taken_out, VersionTakenOut::Committed(1));
+    }
+
+    #[test]
+    fn metadata_that_cannot_be_read_keeps_the_unearthing_entry_for_the_next_run() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        unearthing(&world, ID, "projects/a");
+        // The object's directory cannot be listed, so its metadata cannot be
+        // found.
+        let object = world.collection.object_dir(id(ID));
+        let _restore = crate::fsx::RestoreModes(vec![object.clone()]);
+        fs::set_permissions(&object, Permissions::from_mode(0o000)).expect("chmod");
+        assert!(
+            fs::read_dir(&object).is_err(),
+            "this test needs a user that mode 000 locks out"
+        );
+
+        let warnings = world.run();
+
+        assert!(mentions(&warnings, "metadata"), "{warnings:?}");
+        assert!(!mentions(&warnings, "new piece"), "{warnings:?}");
+        assert_eq!(world.entry(ID).state, EntryState::Unearthing);
+        assert!(world.at("projects/a/notes.txt").exists());
+    }
+
+    #[test]
+    fn a_dropped_unearthing_to_another_path_goes_back_to_the_stored_path() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        fs::remove_dir_all(world.at("projects/a")).expect("never renamed into place");
+        let mut entry = world.entry_in(ID, "projects/b", EntryState::Unearthing);
+        entry.unearthed_payload_version = Some(1);
+        entry.committed_versions = vec![1];
+        world.store_entry(&entry);
+
+        world.run();
+
+        let entry = world.entry(ID);
+        assert_eq!(entry.state, EntryState::Gone);
+        assert_eq!(entry.path, path("projects/a"));
     }
 
     #[test]

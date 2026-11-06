@@ -1089,8 +1089,9 @@ Every state-changing run, right after taking the lock, in this order:
   (any such payload the entry holds, or any of the version when it holds
   none), and the repair first records the metadata change: lifecycle
   `live`, owner this collection, the entry's path and name, history
-  `unearth` at the entry's time. A change that cannot be written leaves
-  the entry `unearthing` for the next run, with a warning. The version
+  `unearth` at the entry's time. A change that cannot be written, or
+  metadata that cannot be read, leaves the entry `unearthing` for the
+  next run, with a warning. The version
   taken out reads `pending` once the change is recorded.
   Any other `unearthing` entry is dropped: it goes back to `gone` when it
   holds local payloads or committed versions, and is removed otherwise. A
@@ -1204,6 +1205,9 @@ a file, symlink or piece in the path refuses), renames the tree into
 place, records the metadata change, and sets the entry to `live` with the
 time of unearthing. Unearthing an ID that is already unearthed does
 nothing and says where it is. (ADR 0034)
+
+The entry of an unearthed folder is not diverged, whatever the entry of
+the gone piece said.
 
 A volume without room for the listing's total size skips the piece, and
 so does a volume that fills up during the extraction; the staged tree is
@@ -1655,10 +1659,12 @@ unearthed, left out when nothing was), `skipped` (`{"reason": "no_space",
 "needed", "available"}` for a piece left alone for want of room, which
 exits 3) and `warnings`. A refused target, an archive that is not on this
 machine, a version that does not exist and an archive that does not match
-its metadata are errors of kind `other`; a path outside the collection is
+its metadata are errors of kind `other`; metadata or a listing of a higher
+`format` is `format_too_new`, and a path outside the collection is
 `outside_collection`. The plan of a `--dry-run` has one `unearth` action
-with `id`, `path` and `payload_version`, and no action for a piece that is
-unearthed already.
+with `id`, `path` and `payload_version`, or a `skip` action with `id`,
+`path`, `reason`, `needed` and `available` when the volume has no room,
+and no action for a piece that is unearthed already.
 
 `fork` has no payload defined yet.
 

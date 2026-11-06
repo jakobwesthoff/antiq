@@ -84,7 +84,7 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
                     .map_err(antiq::Error::from)
                     .context("unearth the piece")?,
             };
-            print_report(ctx, &report, out)?;
+            print_report(ctx, &report, out).context("print the report")?;
             Ok(if report.partial() { 3 } else { 0 })
         }
     }

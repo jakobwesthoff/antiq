@@ -225,7 +225,7 @@ fn fold_component(name: &[u8], rules: &TargetRules) -> Vec<u8> {
 
 /// The whole path as the volume compares it. Folding the directories as
 /// well makes `a/X` and `A/x` one key.
-fn fold_path(path: &RelPath, rules: &TargetRules) -> Vec<u8> {
+pub(crate) fn fold_path(path: &RelPath, rules: &TargetRules) -> Vec<u8> {
     let components: Vec<Vec<u8>> = path
         .components()
         .map(|name| fold_component(name, rules))
