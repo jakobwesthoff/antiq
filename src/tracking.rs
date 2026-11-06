@@ -14,7 +14,7 @@ use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, write_atomic};
 use crate::id::ObjectId;
 use crate::lock::RunLock;
-use crate::meta::{FileName, PayloadKind};
+use crate::meta::{FileName, Lifecycle, Metadata, PayloadKind};
 use crate::relpath::RelPath;
 use jiff::Timestamp;
 use serde::de::Error as _;
@@ -42,6 +42,14 @@ pub enum TrackingError {
     },
     #[error("the tracking entry {path} is for {found}, not for the ID in its name")]
     IdMismatch { path: String, found: ObjectId },
+    #[error("nothing is tracked here: no entry, no metadata and no folder")]
+    NothingTracked,
+    #[error("the tracking entry of {id} has no metadata")]
+    EntryWithoutMetadata { id: ObjectId },
+    #[error("the entry of {entry} was given the metadata of {metadata}")]
+    MetadataOfOtherObject { entry: ObjectId, metadata: ObjectId },
+    #[error("{id} is live in this collection but has no tracking entry")]
+    OwnLiveWithoutEntry { id: ObjectId },
 }
 
 impl crate::error::HasKind for TrackingError {}
@@ -238,6 +246,104 @@ impl TrackingEntry {
         if !diverged {
             self.resolve_decision(DecisionKind::DivergedFolder);
         }
+    }
+}
+
+/// The states of spec "States", as one piece shows them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PieceState {
+    New,
+    Live,
+    Unearthed,
+    Gone,
+    Archived,
+    RemoteOnly,
+    LiveOnAnotherMachine,
+}
+
+/// Derives the state of a piece from its tracking entry, its metadata and
+/// whether a folder exists at the entry's path.
+///
+/// With no entry, `folder_present` describes a folder that belongs to no
+/// object, so it only matters when the metadata is missing too: that is a
+/// new piece. A folder next to an archived piece is derived on its own as
+/// `(None, None, true, ..)`.
+///
+/// Anything the spec's table has no row for is an error of that one
+/// piece, which `status` lists and the start-of-run repairs fix.
+pub fn derive_state(
+    entry: Option<&TrackingEntry>,
+    metadata: Option<&Metadata>,
+    folder_present: bool,
+    own_collection: ObjectId,
+) -> Result<PieceState, TrackingError> {
+    let (entry, metadata) = match (entry, metadata) {
+        (None, None) if folder_present => return Ok(PieceState::New),
+        (None, None) => return Err(TrackingError::NothingTracked),
+        (Some(entry), None) => return Err(TrackingError::EntryWithoutMetadata { id: entry.id }),
+        (None, Some(metadata)) => return without_entry(metadata, own_collection),
+        (Some(entry), Some(metadata)) => (entry, metadata),
+    };
+    if entry.id != metadata.id {
+        return Err(TrackingError::MetadataOfOtherObject {
+            entry: entry.id,
+            metadata: metadata.id,
+        });
+    }
+
+    // The folder at the entry's path belongs to this piece while it is in
+    // place (`live`) or arriving (`unearthing`). One on its way out
+    // (`removing`) does not count. A `gone` entry gets its folder back
+    // only while the metadata says live: with archived metadata, a folder
+    // at that path is a new piece.
+    let present = folder_present
+        && match entry.state {
+            EntryState::Live | EntryState::Unearthing => true,
+            EntryState::Gone => metadata.lifecycle == Lifecycle::Live,
+            EntryState::Removing => false,
+        };
+    let has_archive_payload = metadata
+        .payloads
+        .iter()
+        .any(|payload| payload.kind == PayloadKind::Archive);
+    let holds_archive = entry
+        .local_payloads
+        .iter()
+        .any(|payload| payload.kind == PayloadKind::Archive);
+
+    Ok(match metadata.lifecycle {
+        // An archived piece with a folder is one whose archive is durable
+        // and whose entry has not caught up yet: unearthed at that version.
+        Lifecycle::Archived if present => PieceState::Unearthed,
+        Lifecycle::Archived if holds_archive => PieceState::Archived,
+        Lifecycle::Archived => PieceState::RemoteOnly,
+        // A piece with an archive payload that is live again was unearthed
+        // from it; one without was never archived, or was unearthed from
+        // its live package.
+        Lifecycle::Live if present && has_archive_payload => PieceState::Unearthed,
+        Lifecycle::Live if present => PieceState::Live,
+        Lifecycle::Live if metadata.collection != own_collection => {
+            PieceState::LiveOnAnotherMachine
+        }
+        Lifecycle::Live => PieceState::Gone,
+    })
+}
+
+/// A piece this machine has metadata for and no entry: an archive it
+/// learned of, or another collection's live piece. Its own live piece
+/// without an entry is the crash window between writing the metadata and
+/// the entry; the start-of-run repair writes the entry.
+fn without_entry(
+    metadata: &Metadata,
+    own_collection: ObjectId,
+) -> Result<PieceState, TrackingError> {
+    match metadata.lifecycle {
+        Lifecycle::Archived => Ok(PieceState::RemoteOnly),
+        Lifecycle::Live if metadata.collection != own_collection => {
+            Ok(PieceState::LiveOnAnotherMachine)
+        }
+        Lifecycle::Live => Err(TrackingError::OwnLiveWithoutEntry { id: metadata.id }),
     }
 }
 
@@ -999,5 +1105,289 @@ mod tests {
         fs::write(&manifest, "{}").expect("a manifest");
         remove(&fixture.collection, &fixture.lock, entry.id).expect("removes");
         assert!(manifest.exists());
+    }
+
+    // =====================================================================
+    // Derived states
+    // =====================================================================
+
+    const OWN: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+    const OTHER: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
+
+    fn own() -> ObjectId {
+        OWN.parse().expect("an ID")
+    }
+
+    fn payload(kind: PayloadKind) -> crate::meta::Payload {
+        crate::meta::Payload {
+            kind,
+            version: 1,
+            file: FileName::new("0123456789abcdef-a.tar.zst").expect("a name"),
+            package_format: "tar+zstd/1".into(),
+            size: 1,
+            checksum: crate::meta::Checksum::sha256("00"),
+            listing: None,
+            machine: "imperius".into(),
+            created: NOW.parse().expect("a time"),
+            verified: None,
+            superseded: false,
+            encoder: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// Metadata of the object `ID`, owned by `collection`.
+    fn metadata(lifecycle: Lifecycle, collection: &str, payloads: &[PayloadKind]) -> Metadata {
+        Metadata {
+            format: 1,
+            id: ID.parse().expect("an ID"),
+            collection: collection.parse().expect("an ID"),
+            path: RelPath::parse("projects/a").expect("a path"),
+            name: crate::relpath::Name::from_bytes(b"a".to_vec()).expect("a name"),
+            created: NOW.parse().expect("a time"),
+            created_source: crate::meta::CreatedSource::Birth,
+            lifecycle,
+            payloads: payloads.iter().map(|kind| payload(*kind)).collect(),
+            history: Vec::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    fn with_state(state: EntryState, local_archive: bool) -> TrackingEntry {
+        let mut entry = entry(state, VersionTakenOut::Committed(1));
+        if local_archive {
+            entry.local_payloads = vec![archive(1, "0123456789abcdef-a.tar.zst")];
+        }
+        entry
+    }
+
+    fn derive(
+        entry: Option<&TrackingEntry>,
+        metadata: Option<&Metadata>,
+        folder: bool,
+    ) -> Result<PieceState, TrackingError> {
+        derive_state(entry, metadata, folder, own())
+    }
+
+    // The rows of spec "States".
+
+    #[test]
+    fn a_folder_without_an_id_is_new() {
+        assert_eq!(derive(None, None, true).expect("derives"), PieceState::New);
+    }
+
+    #[test]
+    fn a_folder_with_a_live_entry_and_no_archive_is_live() {
+        let entry = with_state(EntryState::Live, false);
+        let metadata = metadata(Lifecycle::Live, OWN, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Live
+        );
+    }
+
+    #[test]
+    fn a_folder_with_an_archive_payload_is_unearthed() {
+        let entry = with_state(EntryState::Live, true);
+        let metadata = metadata(
+            Lifecycle::Live,
+            OWN,
+            &[PayloadKind::Archive, PayloadKind::Live],
+        );
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Unearthed
+        );
+    }
+
+    #[test]
+    fn a_live_entry_whose_folder_is_missing_is_gone() {
+        let entry = with_state(EntryState::Live, false);
+        let metadata = metadata(Lifecycle::Live, OWN, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::Gone
+        );
+    }
+
+    #[test]
+    fn a_gone_folder_with_a_local_archive_is_archived() {
+        let entry = with_state(EntryState::Gone, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn a_gone_folder_without_a_local_archive_is_remote_only() {
+        let entry = with_state(EntryState::Gone, false);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::RemoteOnly
+        );
+    }
+
+    #[test]
+    fn metadata_alone_of_an_archived_piece_is_remote_only() {
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(None, Some(&metadata), false).expect("derives"),
+            PieceState::RemoteOnly
+        );
+    }
+
+    #[test]
+    fn metadata_alone_of_another_collections_live_piece_is_live_on_another_machine() {
+        let metadata = metadata(Lifecycle::Live, OTHER, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(None, Some(&metadata), false).expect("derives"),
+            PieceState::LiveOnAnotherMachine
+        );
+    }
+
+    // Cases the table has no row for.
+
+    #[test]
+    fn a_live_entry_with_a_folder_but_archived_metadata_is_unearthed() {
+        let entry = with_state(EntryState::Live, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Unearthed
+        );
+    }
+
+    #[test]
+    fn an_unearthing_entry_with_its_folder_is_unearthed() {
+        let entry = with_state(EntryState::Unearthing, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Unearthed
+        );
+    }
+
+    #[test]
+    fn an_unearthing_entry_without_its_folder_is_what_the_metadata_says() {
+        let entry = with_state(EntryState::Unearthing, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn a_removing_entry_does_not_count_its_folder() {
+        let entry = with_state(EntryState::Removing, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn a_folder_back_at_the_path_of_a_gone_live_piece_keeps_its_id() {
+        let entry = with_state(EntryState::Gone, false);
+        let metadata = metadata(Lifecycle::Live, OWN, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Live
+        );
+    }
+
+    #[test]
+    fn a_folder_at_the_path_of_an_archived_piece_is_not_that_piece() {
+        let entry = with_state(EntryState::Gone, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn a_diverged_folder_of_another_collections_piece_is_still_unearthed() {
+        let mut entry = with_state(EntryState::Live, true);
+        entry.set_diverged(true);
+        let metadata = metadata(Lifecycle::Live, OTHER, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Unearthed
+        );
+    }
+
+    #[test]
+    fn a_piece_the_other_collection_took_over_is_live_on_another_machine() {
+        let entry = with_state(EntryState::Gone, true);
+        let metadata = metadata(Lifecycle::Live, OTHER, &[PayloadKind::Live]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::LiveOnAnotherMachine
+        );
+    }
+
+    #[test]
+    fn an_imported_piece_with_its_local_archive_is_archived() {
+        let mut entry = entry(EntryState::Gone, VersionTakenOut::Pending);
+        entry.local_payloads = vec![archive(1, "0123456789abcdef-a.tar.zst")];
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), false).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    #[test]
+    fn an_old_id_after_a_fork_keeps_its_local_archive_and_is_archived() {
+        let entry = with_state(EntryState::Gone, true);
+        let metadata = metadata(Lifecycle::Archived, OWN, &[PayloadKind::Archive]);
+        assert_eq!(
+            derive(Some(&entry), Some(&metadata), true).expect("derives"),
+            PieceState::Archived
+        );
+    }
+
+    // Errors of one piece.
+
+    #[test]
+    fn nothing_tracked_is_an_error() {
+        let error = derive(None, None, false).expect_err("nothing is there");
+        assert!(matches!(error, TrackingError::NothingTracked), "{error:?}");
+    }
+
+    #[test]
+    fn an_entry_without_metadata_is_an_error() {
+        let entry = with_state(EntryState::Live, false);
+        let error = derive(Some(&entry), None, true).expect_err("no metadata");
+        assert!(
+            matches!(error, TrackingError::EntryWithoutMetadata { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_of_another_object_is_an_error() {
+        let entry = entry_of(OTHER);
+        let metadata = metadata(Lifecycle::Live, OWN, &[]);
+        let error = derive(Some(&entry), Some(&metadata), true).expect_err("two objects");
+        assert!(
+            matches!(error, TrackingError::MetadataOfOtherObject { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn own_live_metadata_without_an_entry_is_an_error() {
+        let metadata = metadata(Lifecycle::Live, OWN, &[PayloadKind::Live]);
+        let error = derive(None, Some(&metadata), true).expect_err("no entry");
+        assert!(
+            matches!(error, TrackingError::OwnLiveWithoutEntry { .. }),
+            "{error:?}"
+        );
     }
 }

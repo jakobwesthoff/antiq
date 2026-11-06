@@ -331,12 +331,30 @@ An entry line is a JSON object with these keys, in this order:
 Each machine keeps a tracking entry per folder: path, ID, the metadata
 version taken out, the payload version it was unearthed from, the time
 it was unearthed, a state (`unearthing`, `live`, `removing`, `gone`),
-which payloads are present locally, the metadata versions this machine
-committed, pending decisions, the time the entry was written, a stale
-backup's time, and whether the entry is missing on the remote or
-diverged. While a recorded change is not committed yet, the version
-taken out reads `pending`; the commit replaces it with the committed
-number. "Remote-only" is derived.
+the archive payload a `removing` folder is compared with, which
+payloads are present locally (each by its file name), the metadata
+versions this machine committed, pending decisions, the time the entry
+was written, a stale backup's time, and whether the entry is missing on
+the remote or diverged. While a recorded change is not committed yet,
+the version taken out reads `pending`; the commit replaces it with the
+committed number. "Remote-only" is derived.
+
+The entry states mean:
+
+- `unearthing`: `unearth` is bringing the folder.
+- `live`: the folder is in place.
+- `removing`: the archive is durable and the folder is on its way out.
+- `gone`: the folder was removed, or was found missing. An archived or
+  remote-only piece keeps its entry in this state, with its local
+  payloads.
+
+At most one entry is `unearthing`, `live` or `removing` for a path. A
+pending decision about a diverged folder implies diverged; a folder can
+be diverged without a decision pending. A pending decision carries the
+answers of its row under "Decisions".
+
+An entry file that cannot be read is reported and skipped, and the
+other entries are used.
 
 ### States
 
@@ -349,6 +367,36 @@ number. "Remote-only" is derived.
 | archived | gone | archive | archive once synced |
 | remote-only | gone | metadata only | archive |
 | live on another machine | elsewhere | metadata only | that machine's live package |
+
+A piece with an archive payload in its metadata shows as unearthed
+when its folder is present, otherwise as live. The state is derived
+from the entry, the metadata and whether the folder exists. Cases the
+table has no row for:
+
+- A `live` entry whose folder is present but whose metadata is already
+  archived is unearthed: the archive is durable and the entry has not
+  caught up.
+- An `unearthing` entry shows as unearthed with its folder, and as the
+  metadata says without it.
+- The folder of a `removing` entry does not count: the piece is
+  archived, or remote-only without a local archive.
+- A `gone` entry whose metadata is live and owned by this collection
+  gets its folder back when one appears at its path, with its ID. With
+  archived metadata, a folder at that path is a new piece next to the
+  archived one.
+- Archived metadata without an entry shows as remote-only. An entry
+  without metadata, metadata of another ID, and live metadata of this
+  collection without an entry are errors of that piece, which `status`
+  lists and the start-of-run repairs fix.
+
+Entries are written in an order the repairs rely on. A new ID's
+metadata comes before its entry. `archive` makes payload, listing,
+metadata and the entry (`pending`) durable, then sets `removing` with
+the payload, renames the folder and sets `gone`. `unearth` writes
+`unearthing`, renames, writes `live`, and only then records the
+metadata change. `fork` records the old ID's archived metadata, sets
+its entry `gone` with its local payloads, then records the new ID's
+metadata and entry.
 
 A renamed folder is a new piece, and the entry of its old path becomes
 gone. A gone piece keeps its live package; `unearth` restores it from
@@ -782,7 +830,8 @@ Every state-changing run, right after taking the lock, in this order:
 
 - finishes `removing` entries, for a folder still in place and for a
   tree in `.antiq/trash/<ulid>` alike, by comparing the tree with the
-  listing of the committed version before deleting it, since the lstat
+  listing of the archive payload the entry names before deleting it,
+  since the lstat
   record of the verify does not survive a crash; a tree that differs is
   kept as unearthed at the committed version, a trashed one renamed back
   to its path first, and moved to `.antiq/recovered/<ulid>-<time>/` when
@@ -821,13 +870,14 @@ For each idle, unpinned piece:
 1. Pack into `.antiq/tmp/` and verify strictly against the tree.
 2. Store the payload and listing and record the metadata change; payload,
    listing, metadata and tracking are durable before the next step.
-3. Set the tracking entry to `removing` and rename the folder to
+3. Set the tracking entry to `removing`, naming the archive payload the
+   folder is compared with, and rename the folder to
    `.antiq/trash/<ulid>`.
 4. Walk the trashed tree and compare it with the lstat record from the
    verify. On any difference, rename it back and treat it as unearthed
    at the committed version; when its path is taken by then, move it to
    `.antiq/recovered/<ulid>-<time>/` and list it in `status`.
-5. Delete it and clear the entry.
+5. Delete it and set the entry to `gone`, keeping its local payloads.
 
 When a rename fails, the folder is walked and compared in place and then
 deleted there, with the entry `removing`. A process that still holds a
