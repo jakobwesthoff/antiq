@@ -308,6 +308,16 @@ fn cores_from(parallelism: io::Result<NonZeroUsize>) -> usize {
     parallelism.map_or(1, NonZeroUsize::get)
 }
 
+/// The workers for reading and checking many files at once: every core
+/// but two, at least one.
+pub fn default_workers() -> usize {
+    workers_from(cores_from(std::thread::available_parallelism()))
+}
+
+fn workers_from(cores: usize) -> usize {
+    cores.saturating_sub(2).max(1)
+}
+
 fn for_machine_with(
     ram: Result<u64, SysmemError>,
     cores: usize,
@@ -322,6 +332,20 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn the_default_workers_leave_two_cores_and_keep_one() {
+        for (cores, workers) in [(1, 1), (2, 1), (3, 1), (4, 2), (16, 14)] {
+            assert_eq!(workers_from(cores), workers, "{cores} cores");
+        }
+    }
+
+    #[test]
+    fn the_default_workers_follow_the_cores_of_the_machine() {
+        let cores = cores_from(std::thread::available_parallelism());
+        assert_eq!(default_workers(), workers_from(cores));
+        assert!(default_workers() >= 1);
+    }
 
     /// Failure bound for a thread that should have been woken: a test that
     /// waits this long has failed.

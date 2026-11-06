@@ -15,9 +15,11 @@ use crate::relpath::{Name, RelPath};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// How much of a version `inspect` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,9 @@ pub enum Check {
     /// The head of the listing, the checksum file and the size of the
     /// archive.
     Head,
+    /// Everything `Head` reads, and the whole listing: decoded to its end,
+    /// parsed to its end, with the counts of its head checked.
+    Full,
 }
 
 /// The two folders `inspect` looks in.
@@ -64,6 +69,11 @@ pub enum Damage {
     Head {
         reason: String,
     },
+    /// The listing does not decode or parse to its end, or its counts
+    /// differ from its entries.
+    Listing {
+        reason: String,
+    },
     /// The archive has another size than its listing records.
     ArchiveSize {
         found: u64,
@@ -98,6 +108,7 @@ impl fmt::Display for Damage {
                 f,
                 "the archive has {found} bytes, its listing records {recorded}"
             ),
+            Damage::Listing { reason } => write!(f, "the listing is damaged: {reason}"),
             Damage::Checksum { reason } => write!(f, "the checksum file is damaged: {reason}"),
         }
     }
@@ -137,7 +148,6 @@ pub fn inspect(
     version: &StoreVersion,
     check: Check,
 ) -> Result<Inspection, VersionsError> {
-    let Check::Head = check;
     if version.archives.is_empty() {
         return without_archive(places, piece, version);
     }
@@ -161,10 +171,44 @@ pub fn inspect(
 
     let store = TreeRoot::open(places.pieces_dir)
         .map_err(|source| io_error("open", places.pieces_dir.display().to_string(), source))?;
-    match examine(&store, piece, version)? {
+    match examine(&store, piece, version, check)? {
         Some(inspection) => Ok(inspection),
         None => without_archive(places, piece, version),
     }
+}
+
+/// Inspects every item with `workers` threads (at least one, at most one
+/// per item). The results come in the order of `items`.
+pub fn inspect_all(
+    places: &Places,
+    items: &[(RelPath, StoreVersion)],
+    check: Check,
+    workers: usize,
+) -> Vec<Result<Inspection, VersionsError>> {
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<Result<Inspection, VersionsError>>>> =
+        Mutex::new(items.iter().map(|_| None).collect());
+    std::thread::scope(|scope| {
+        for _ in 0..workers.clamp(1, items.len().max(1)) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((piece, version)) = items.get(index) else {
+                        break;
+                    };
+                    let found = inspect(places, piece, version, check);
+                    let mut results = results.lock().unwrap_or_else(PoisonError::into_inner);
+                    results[index] = Some(found);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .map(|found| found.expect("every item was inspected"))
+        .collect()
 }
 
 /// A version found without a `.tar.zst`: being stored when the archive is
@@ -195,15 +239,18 @@ fn examine(
     store: &TreeRoot,
     piece: &RelPath,
     version: &StoreVersion,
+    check: Check,
 ) -> Result<Option<Inspection>, VersionsError> {
     let mut of_listing = Vec::new();
     let mut of_checksum = Vec::new();
     let mut newer_format = false;
     let mut head = None;
+    // The listing, when its head is sound and the whole of it is to be read.
+    let mut to_decode = None;
 
     match open_sidecar(store, piece, version, VersionFile::Listing)? {
         None => of_listing.push(Damage::NoListing),
-        Some((file, _)) => match listing::read_head(file) {
+        Some((file, path)) => match listing::read_head(&file) {
             Err(ListingError::FormatTooNew { .. }) => newer_format = true,
             Err(error) => of_listing.push(Damage::Head {
                 reason: error.to_string(),
@@ -211,6 +258,8 @@ fn examine(
             Ok(read) => {
                 if let Some(reason) = read.damage() {
                     of_listing.push(Damage::Head { reason });
+                } else {
+                    to_decode = Some((file, path));
                 }
                 head = Some(read);
             }
@@ -242,6 +291,19 @@ fn examine(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(io_error("look at", archive.to_string(), source)),
     };
+    // A damaged head is not read again: the whole listing would only
+    // repeat it.
+    if check == Check::Full
+        && let Some((mut file, path)) = to_decode
+    {
+        file.rewind()
+            .map_err(|source| io_error("read", path.to_string(), source))?;
+        if let Err(error) = listing::read_full(&file) {
+            of_listing.push(Damage::Listing {
+                reason: error.to_string(),
+            });
+        }
+    }
     let mut of_size = Vec::new();
     if let Some(recorded) = head.as_ref().and_then(|head| head.archive_bytes)
         && recorded != archive_size
@@ -750,6 +812,148 @@ mod tests {
         assert_eq!(found.condition, Condition::Sound);
     }
 
+    fn full(store: &Store, version: &StoredVersion) -> Inspection {
+        let stored = scanned(store, version);
+        inspect(&store.places(), &version.piece, &stored, Check::Full).expect("inspected")
+    }
+
+    #[test]
+    fn a_check_in_full_finds_a_listing_cut_inside_its_entries() {
+        let (store, version) = sound();
+        version.cut_listing();
+        assert_eq!(condition(&store, &version), Condition::Sound);
+        match full(&store, &version).condition {
+            Condition::Damaged(damages) => {
+                assert!(
+                    matches!(damages.as_slice(), [Damage::Listing { .. }]),
+                    "{damages:?}"
+                )
+            }
+            other => panic!("expected damage, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_check_in_full_finds_counts_that_differ_from_the_entries() {
+        let (store, version) = sound();
+        version.edit_listing(|text| text.replace("# files         2", "# files         3"));
+        assert_eq!(condition(&store, &version), Condition::Sound);
+        assert!(matches!(
+            full(&store, &version).condition,
+            Condition::Damaged(damages) if matches!(damages.as_slice(), [Damage::Listing { .. }])
+        ));
+    }
+
+    #[test]
+    fn a_check_in_full_finds_an_entry_line_out_of_format() {
+        let (store, version) = sound();
+        version.edit_listing(|text| text.replace("# file ", "# fyle "));
+        assert!(matches!(
+            full(&store, &version).condition,
+            Condition::Damaged(damages) if matches!(damages.as_slice(), [Damage::Listing { .. }])
+        ));
+    }
+
+    #[test]
+    fn a_check_in_full_does_not_repeat_a_damaged_head() {
+        let (store, version) = sound();
+        version.listing_without("piece");
+        let found = full(&store, &version);
+        head_damage(found.condition);
+    }
+
+    #[test]
+    fn a_check_in_full_keeps_the_other_damage_of_a_cut_listing() {
+        let (store, version) = sound();
+        version.cut_listing();
+        version.remove(Checksum);
+        match full(&store, &version).condition {
+            Condition::Damaged(damages) => assert!(
+                matches!(
+                    damages.as_slice(),
+                    [Damage::Listing { .. }, Damage::NoChecksum]
+                ),
+                "{damages:?}"
+            ),
+            other => panic!("expected damage, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_check_in_full_passes_a_sound_version_with_its_head() {
+        let (store, version) = sound();
+        let found = full(&store, &version);
+        assert_eq!(found.condition, Condition::Sound);
+        assert!(found.head.is_some());
+    }
+
+    #[test]
+    fn a_check_in_full_leaves_a_newer_format_alone() {
+        let (store, version) = sound();
+        newer_format(&version);
+        assert_eq!(full(&store, &version).condition, Condition::NewerFormat);
+    }
+
+    /// Nine versions of one piece, three of them damaged in different ways.
+    fn nine_versions() -> (Store, Vec<(RelPath, StoreVersion)>) {
+        let mut source = Tree::new();
+        source.file("notes/a.txt", "alpha");
+        let mut store = Store::new();
+        for second in 1..=9 {
+            let version = store.add_version(&source, "notes", &format!("2026-11-04T09020{second}"));
+            match second {
+                3 => version.cut_listing(),
+                5 => version.remove(Checksum),
+                7 => version.remove(Archive),
+                _ => {}
+            }
+        }
+        let items = store
+            .scan()
+            .pieces
+            .into_iter()
+            .flat_map(|piece| {
+                let path = piece.path;
+                piece
+                    .versions
+                    .into_iter()
+                    .map(move |version| (path.clone(), version))
+            })
+            .collect();
+        (store, items)
+    }
+
+    #[test]
+    fn inspect_all_answers_in_the_order_of_its_items_whatever_the_workers() {
+        let (store, items) = nine_versions();
+        let places = store.places();
+        let one_by_one: Vec<Inspection> = items
+            .iter()
+            .map(|(piece, version)| {
+                inspect(&places, piece, version, Check::Full).expect("inspected")
+            })
+            .collect();
+        assert!(
+            one_by_one
+                .iter()
+                .any(|found| found.condition != Condition::Sound),
+            "the versions hold damage"
+        );
+        for workers in [0, 1, 3, 20] {
+            let all: Vec<Inspection> = inspect_all(&places, &items, Check::Full, workers)
+                .into_iter()
+                .map(|found| found.expect("inspected"))
+                .collect();
+            assert_eq!(all, one_by_one, "{workers} workers");
+        }
+    }
+
+    #[test]
+    fn inspect_all_of_nothing_is_nothing() {
+        let (store, _) = nine_versions();
+        assert!(inspect_all(&store.places(), &[], Check::Full, 4).is_empty());
+    }
+
     #[test]
     fn the_damages_read_as_sentences() {
         let doubled = Damage::Doubled {
@@ -779,6 +983,10 @@ mod tests {
             }
             .to_string(),
             "the archive has 10 bytes, its listing records 20"
+        );
+        assert_eq!(
+            Damage::Listing { reason: "x".into() }.to_string(),
+            "the listing is damaged: x"
         );
         assert_eq!(
             Damage::Checksum { reason: "x".into() }.to_string(),

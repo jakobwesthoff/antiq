@@ -153,6 +153,12 @@ impl StoredVersion {
         fs::write(self.path(VersionFile::Listing), bytes).expect("the listing is written");
     }
 
+    /// Replaces the listing with `change` applied to its text.
+    pub fn edit_listing(&self, change: impl FnOnce(String) -> String) {
+        let text = String::from_utf8(self.listing_text()).expect("the listing is UTF-8");
+        self.listing_from_text(change(text).as_bytes());
+    }
+
     /// The listing without the head line `# <key> ...`, compressed anew.
     pub fn listing_without(&self, key: &str) {
         let text = self.listing_text();
