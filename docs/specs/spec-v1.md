@@ -695,17 +695,32 @@ run later.
 Cleanup:
 
 - A claim without metadata older than the grace period is abandoned and
-  skipped. It is removed only once a higher version is committed.
+  skipped. A claim is removed once a higher version is committed and it
+  is older than the grace period; the claim of a version that is removed
+  goes with it, and the claim of a version that stays stays. A claim at
+  or above the highest committed version stays.
 - The highest committed `meta.<N>` is retained. An older one is removed
   once a higher version is committed and it is older than the grace
   period. A listing goes with the payload it describes.
-- A final-named payload is removed only when no retained metadata
-  version references it, it is older than the grace period, and no
-  claim is open for its ID. A referenced payload, superseded ones
-  included, is never removed by cleanup.
+- A final-named payload or listing is removed only when no metadata
+  version that is present references it, it is older than the grace
+  period, and no claim without metadata that is within the grace period
+  exists in the object's directory. A referenced payload, superseded ones
+  included, is never removed by cleanup. A payload that only a version
+  slated for removal references is removed one run after that version.
+  A directory without any metadata is cleaned by the same rules, so an
+  abandoned first upload goes once it is older than the grace period.
 - Cleanup runs in an object directory only when every `meta.<N>` there
-  parses with a known `format`; otherwise the directory is left alone
-  and reported.
+  parses with a known `format` and names that object, and no directory
+  is named like a version or a claim; otherwise the directory is left
+  alone and reported.
+- Just before it deletes in a directory, cleanup looks at the directory
+  again and deletes only what that look confirms. It lists the directory
+  once more before the first payload or listing of an object is deleted,
+  and deletes none of them when a version, a claim or a metadata temp name
+  has appeared. Another machine's commit that starts between the last
+  look and a deletion cannot be excluded without locks on the remote; the
+  grace period makes it rare.
 - A collection removes its own temp names and partial files before the
   grace period only in object directories whose committed metadata
   names it as owner, while its lock shows no other run. Its temp names
@@ -715,8 +730,8 @@ Cleanup:
 - Ages are measured on the remote's clock: over SSH against `date +%s`
   printed by the same command, on a path remote against the modification
   time of a probe file written there. A dry run writes no probe file;
-  it reports cleanup that depends on an age as "age unknown in a dry
-  run".
+  it reports every removal that depends on an age as "age unknown in a
+  dry run", whatever the file's age.
 
 When the highest `meta.<N>` does not parse, `status` and `reconcile`
 report it, readers use the highest version that parses, and nothing is

@@ -51,6 +51,60 @@ pub fn path_remote(root: &Path, machine: &str) -> PathRemote {
     )
 }
 
+/// The collection that owns the objects of the fixtures.
+pub const COLLECTION_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
+
+/// The bytes of a metadata version of `id` at `path`, owned by
+/// `collection`. Each of `payloads` is an archive file name with the
+/// listing it names; the size recorded is 13.
+pub fn metadata_bytes(
+    id: ObjectId,
+    collection: &str,
+    path: &str,
+    payloads: &[(&str, &str)],
+) -> Vec<u8> {
+    use crate::meta::{
+        self, Checksum, CreatedSource, FileName, Lifecycle, Metadata, Payload, PayloadKind,
+    };
+    use crate::relpath::{Name, RelPath};
+    let created: Timestamp = "2026-11-04T12:00:00Z".parse().expect("a time");
+    let payloads = payloads
+        .iter()
+        .map(|(file, listing)| Payload {
+            kind: PayloadKind::Archive,
+            version: 1,
+            file: FileName::new(*file).expect("a payload name"),
+            package_format: "tar+zstd/1".into(),
+            size: 13,
+            checksum: Checksum::sha256("00"),
+            listing: Some(FileName::new(*listing).expect("a listing name")),
+            machine: "laptop".into(),
+            created,
+            verified: None,
+            superseded: false,
+            encoder: None,
+            extra: serde_json::Map::new(),
+        })
+        .collect();
+    let path = RelPath::parse(path).expect("a valid path");
+    let name =
+        Name::from_bytes(path.components().last().expect("a name").to_vec()).expect("a name");
+    meta::to_bytes(&Metadata {
+        format: 1,
+        id,
+        collection: collection.parse().expect("an ID"),
+        path,
+        name,
+        created,
+        created_source: CreatedSource::Birth,
+        lifecycle: Lifecycle::Live,
+        payloads,
+        history: Vec::new(),
+        extra: serde_json::Map::new(),
+    })
+    .expect("metadata serialises")
+}
+
 /// One method of [`Remote`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Op {

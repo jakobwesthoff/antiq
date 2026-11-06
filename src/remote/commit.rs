@@ -264,7 +264,7 @@ struct Named {
 
 /// The metadata of `bytes`, if this version reads it and it belongs to
 /// `id`; else the reason it cannot be used.
-fn read_document(id: ObjectId, bytes: &[u8]) -> Result<meta::Metadata, String> {
+pub(super) fn read_document(id: ObjectId, bytes: &[u8]) -> Result<meta::Metadata, String> {
     let metadata = meta::parse(bytes).map_err(|error| error.to_string())?;
     if metadata.id != id {
         return Err(format!("it belongs to {}", metadata.id));
