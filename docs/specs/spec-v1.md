@@ -7,1257 +7,569 @@ behind technical choices is in `docs/research/`.
 ## Purpose
 
 antiq looks after directories where working folders pile up, such as
-`~/playground`. It packs folders that have not changed for a set number
-of days into compressed archives, keeps every folder searchable through
-its metadata, brings archives back on request, backs live folders up to
-a remote, and moves archives to the remote in tiers.
+`~/playground`. It archives the folders of a collection that nobody has
+touched for a while, finds them again by name or by the files they hold,
+brings them back, and mirrors the whole collection to one backup target.
 
 ## Scope
+
+All work happens on one machine.
+
+The target is a plain copy of the collection: copying it back restores
+the live folders and the versions. Not kept, neither in versions nor on
+the target: extended attributes, ACLs, access and creation times. Hard
+links are kept, in versions and in the mirror of live folders; copying
+the target back keeps them only with `rsync -aH`. Sparse files are stored
+in full in versions and come back fully allocated.
+
+Everything antiq writes can be understood and used without antiq:
+archive files are `tar.zst`, and a listing is a checksum list that
+`shasum -c` reads once `zstd` has decompressed it. Inside an unpacked
+folder: `zstd -dc <listing> | shasum -a 256 -c -`.
 
 Version 1 covers what the scripts `archive.sh` and `timecapsule-sync.sh`
 do for `~/playground`:
 
-- archiving folders by age
-- compressed tar archives
-- an index of each archive's contents
-- searching the archives and bringing one back through a picker
-- rebuilding missing index entries
-- backing up to a NAS
-
-On top of that, version 1 moves archives through tiers by age, including
-the remote-only tier (ADR 0007), backs live folders up as packages, lets
-several machines share one remote, and imports existing compressed tar
-archives (ADR 0055).
+- archiving folders by age into compressed tar archives
+- searching the archives by piece name and by the paths of the files they
+  hold, and bringing one back
+- mirroring the collection to one target
 
 Not in version 1:
 
-- syncing one live folder between machines (ADR 0008, ADR 0017)
-- reading the archives and listings that `archive.sh` produced
-  (ADR 0009)
-- changing a collection's selection strategy after `init` (ADR 0012)
-- more than one remote per collection (ADR 0015)
-- backing up content outside every piece (ADR 0041)
-- a setting that keeps a folder until its archive is on the remote
-  (ADR 0032)
+- multi-machine support, version conflicts, claims, versioned metadata
+  documents and tiers; a second machine that needs a version copies its
+  files from the target by hand (ADR 0008)
+- reading the archives and listings that `archive.sh` produced; old
+  archive files are brought in by unpacking them and importing the
+  folders (ADR 0009)
 - extended attributes (ADR 0050)
-- keeping sparse files sparse: they are stored in full and come back
-  fully allocated
+
+## Concepts
+
+- **Collection:** a directory with a `.antiq/` folder.
+- **Piece:** a folder of the collection that antiq manages, chosen by
+  `patterns` and `exclude`. Its path relative to the collection is its
+  identity: archiving the same path again adds a version of the same
+  piece.
+- **Live:** a piece that exists as a folder.
+- **Version:** one archived state of a piece, made at one moment. A piece
+  can have several versions side by side. User-facing text calls it a
+  version throughout; "archive" is only the verb.
+- **Version stamp:** the UTC time of a version, written
+  `YYYY-MM-DDTHHMMSS`, with a counter `-2`, `-3`, ... when the same piece
+  has several versions within one second (`-1` is not a valid spelling).
+  Stamp and piece path together name a version exactly.
+- **Archive file:** the `.tar.zst` of a version. The word appears only
+  where the files on disk matter.
+- **Listing:** the `.sha256.zst` of a version (see "Listing format").
+- **Checksum file:** the `.tar.zst.sha256` of a version.
+- **Sidecars:** the listing and the checksum file together.
+- **Pinned:** a live piece with a `.antiq-pin` file at its top, never
+  archived.
+- **Control files:** `.antiqignore` and `.antiq-timeless` (rule files, at
+  any level), `.antiq-pin` and `.antiq-restored` (markers, only at a
+  piece's top; elsewhere they are ordinary files, packed and counted like
+  any other).
+- **Target:** the backup location, an absolute path (a mounted disk or
+  share) or `[user@]host:path` reached over ssh by rsync. A port or other
+  ssh options go into `~/.ssh/config`.
 
 ## Collections and pieces
 
 A managed folder is called a collection, and each unit in it a piece.
 (ADR 0022)
 
-A collection is marked by `.antiq/` at its top. A `.antiq` that is a
-file or a symlink does not mark a collection. Commands find it by
-searching upwards from the current directory, or from the path given
-with `-C`, and fail outside a collection. `.antiq/` holds the
-collection's config, metadata, index and local archives. (ADR 0011)
+A collection is marked by `.antiq/` at its top. A `.antiq` that is a file
+or a symlink does not mark a collection. Commands find it by searching
+upwards from the current directory, or from the path given with `-C`, and
+fail outside a collection. `.antiq/` holds the collection's config, lock,
+staging directories and the versions of its pieces. (ADR 0011)
 
-`init` mints the collection's ULID and stores it in the config together
-with the machine name. It lists what the patterns select and asks before
-creating the collection. It detects the layout `archive.sh` leaves
-(`archive/`, a real directory, holding a `*.tar.xz` file, and
-`archive/index/` holding a `*.lst` file) and, when a pattern selects
-`archive`, proposes excluding it; the listing is made with the proposed
-exclude applied. It notes when a pattern contains `**`. Without a
-terminal, or with `--json`, it creates nothing and prints the plan
-unless `--yes` is given, and exits 3. Declining the question, or not
-answering it, ends the same way. `--yes` accepts the plan, the proposed
-exclude included. `--dry-run` prints the plan, asks nothing, creates
-nothing and exits 0. `--pattern` (repeatable) sets the patterns; every
-other setting starts at its default and is changed in the config file.
-A `--pattern` that is invalid (see "Selection") is a usage error: kind
-`usage`, exit 2.
-`init` creates `.antiq/` with the directories of the local layout and
-the config in one step, so it exists complete or not at all. It refuses,
-also under `--dry-run`, where `.antiq/` already exists and inside a
-collection, naming the existing collection's root, where a `.antiq` is a
-file or a symlink, and where a folder that would be a piece holds a
-`.antiq/` directory of its own, naming each such folder. Every refusal
-creates nothing and exits 1.
+## Selection
 
-### Selection
-
-Pieces are the directories antiq treats as one thing each. A list of
-glob patterns selects them, default `*`. When matches nest, the
-shallowest match is the piece. (ADR 0012) An entry whose name starts
-with a dot is a piece only when a pattern names it with a literal
-leading dot in that path component. (ADR 0028)
+Pieces are the directories antiq treats as one thing each. A list of glob
+patterns selects them, default `*`; `**` is allowed. When matches nest,
+the shallowest match is the piece. (ADR 0012) A folder whose name starts
+with a dot is a piece only when a pattern names that dot literally.
+(ADR 0028)
 
 Never pieces: `.antiq/`, symlinks, and paths on the collection's exclude
-list. Exclude entries are literal paths relative to the collection
-root, not patterns, and nothing below an excluded path is a piece. The
-exclude list is applied before pieces are matched and before anything
-below an entry is listed. An exclude entry that exists also excludes the
-directory it names under another spelling that the volume treats as the
-same name, such as another case, since the directory is recognised by its
-device and inode as well. Selection uses lstat and never descends into
-a symlink. Skipped symlinks and dot entries are counted in `status`: a
-skipped symlink is one that a pattern selects, a skipped dot entry a
-directory that a pattern would select, or look below, if the dot rule did
-not keep it out.
+list. Exclude entries are literal paths relative to the collection root,
+not patterns, and nothing below an excluded path is a piece. The exclude
+list is applied before pieces are matched and before anything below an
+entry is listed. An exclude entry that exists also excludes the directory
+it names under another spelling that the volume treats as the same name,
+such as another case, since the directory is recognised by its device and
+inode as well. Selection uses lstat and never descends into a symlink.
 
 A pattern is matched one path component at a time. A component that
 begins with a dot is matched only by a pattern component that begins with
 a literal dot; no other pattern component, `*.txt` included, and no `**`
 matches it. `**` stands for any number of directories without a leading
 dot, none included, and for one or more at the end of a pattern, so
-`a/**` selects what is below `a` and not `a`. A pattern is refused if it has an
-empty component (a trailing `/` included), a `.` or `..` component, or a
-`/` inside a bracket class, which never matches a separator.
-
-A path that is valid UTF-8 is matched against the patterns as it is. A
-path with bytes that are not valid UTF-8 is matched in its escaped form
-(see "Metadata"), since the glob matcher takes only UTF-8. A pattern can
-therefore not tell the two apart: `a%FF` matches the valid name `a%FF`
-and the name `a` followed by the byte `0xFF`, and in the escaped form a
-`%` of the name reads `%25`. Patterns and names compare as bytes, so a
-pattern in composed Unicode form does not match a name in decomposed
-form.
-
-A directory that selection has to look into and cannot read is skipped
-and reported. A path at or below it is neither new
-nor gone in that run. When the collection root itself cannot be listed,
-the run fails. Running out of file descriptors fails the run as it does
-in a walk. An entry deleted while selection runs is skipped. Selection
-looks no more than 512 levels deep; a deeper directory is not entered and
-is reported like one it cannot read.
-
-An exclude entry that exists, found below a selected piece, is not part of
-that piece: the piece is never archived, reclaimed or packed for backup,
-and `status` lists it with the excluded path. An exclude entry that does
-not exist does not count.
-
-A folder at a path that no tracking entry claims is a new piece with a
-new ID, also when an archived piece has the same path; `status` and
-`find` show both.
-
-### Walks
-
-Every walk of a piece (idle check, packing, verifying, change detection,
-deleting) uses lstat, does not follow links, and stays on the device of
-the piece's top directory. A piece that contains another device (a
-mount point or a btrfs subvolume) is never archived, reclaimed or packed
-for backup; `status` lists it with the path of the mount point. A piece
-whose top directory is itself on another device than the collection
-root, is itself a mount root, or lies below a directory between the
-collection root and the top that is a mount root, counts as containing a
-mount point, at its own path. A mount root above the top shares the device
-of everything below it, so the walk reads the directories above the top as
-well. The walk
-compares the device of every entry with the top directory's, not only
-that of directories: an entry on another device is recorded, and a
-directory there is not entered. The same holds for the root of a mounted
-filesystem that shares its parent's device, such as a bind mount: the
-walk reads whether an entry is a mount root. On Linux that is the
-`STATX_ATTR_MOUNT_ROOT` attribute of `statx`; a kernel older than 5.8
-does not report it, and there only the device numbers decide. On macOS
-it is the mount point name of the directory (`f_mntonname`) differing
-from its parent's. A firmlink (macOS links directories such as `/Users`,
-`/Library` and `/usr/local` into the data volume) compares as a mount
-root there, so a piece containing one is refused, which is the safe
-direction. A directory that cannot be searched is not compared on
-macOS; the delete helper reads its flag again once it has given the
-directory owner access and has opened it.
-The walk does not enter an excluded directory either: a piece that
-contains an existing exclude entry is treated like one that contains a
-mount point, and `status` lists it with the excluded path. So is a piece
-that contains a directory named `.antiq`, the marker of a collection of
-its own: `status` lists it with the directory that holds the marker, and
-the walk goes on into it. A walk enters
-directories up to 512 levels below the piece's top, since each level holds
-one directory open. A deeper directory is not entered and makes the piece
-unreadable.
-The delete helper never crosses a device boundary or enters a mount root,
-refuses a path with a mount root above its top, refuses the root of its
-own tree, and stops at the same depth: a
-directory more than 512 levels below the top it removes is not entered
-and fails the removal, naming that directory.
-
-An entry the walk cannot read makes the piece unreadable: it is never
-idle, never archived, its live package is not refreshed, and `status`
-lists it with the first entry that failed. That is the smallest path
-among the failed entries, in the byte order the entries are sorted by.
-An entry that has vanished since its directory was listed counts as one
-the walk cannot read. Running out of file
-descriptors (`EMFILE`, `ENFILE`) is not an unreadable entry: it fails
-the run. antiq raises its soft limit of open files at start, since
-launchd starts jobs with a soft limit of 256.
-
-Paths longer than the platform's path limit are walked, packed,
-verified, extracted and deleted relative to an open directory, never
-through the full path.
-
-### Idle
-
-A piece is idle when the newest modification time of any regular file
-in it is older than the configured number of days. A day is 24 hours,
-and a file exactly that many days old is not yet old enough. Directory
-times do not count, nor do those of symlinks and special files.
-Modification times more than one day in the future do not count either;
-a time exactly one day ahead still counts. `status` lists the files with
-a time too far ahead. (ADR 0013)
-
-Ignore rules in gitignore syntax, from the config and from
-`.antiqignore` files at any level, exclude paths from this check only.
-Changes to `.antiqignore` and `.antiq-pin` files do not count as
-activity. (ADR 0013, ADR 0029)
-
-The rules follow gitignore semantics. The lines of `collection.ignore` apply inside
-every piece, anchored at the piece's top: a leading `/` means the top.
-A `.antiqignore` applies to its own directory and everything below it,
-anchored at that directory. Where several files have a rule for a path,
-the nearest `.antiqignore` wins, then those further out, then the config;
-within one file the last matching rule wins. A directory that an ignore
-rule excludes hides everything below it, and a `!` rule cannot bring back
-a path inside it. An excluded directory's `.antiqignore` is not read. Only
-a regular file named `.antiqignore` is read. A rule that is not valid, a
-file that is not UTF-8 text and a file that cannot be read each make the
-check fail with the file and line named, so a piece with broken rules is
-never called idle.
-
-A junk list, by default `.DS_Store`, is left out of the idle check,
-packages, listings and verification. Junk files are not packed into
-archives or live packages. Only entries that are not directories are
-junk: a directory with a junk name is walked like any other. The junk list is separate from the ignore
-rules.
-
-For an unearthed piece, the idle clock starts at the later of its newest
-file modification time and the time it was unearthed. An unearthing time
-more than one day in the future is taken as one day ahead. (ADR 0037)
-
-A piece in which the idle check finds no file to take a time from (no
-regular files after the ignore rules, marker files and the junk list) is
-empty: never idle and never archived. A piece whose only countable files
-lie in the future is not empty and not idle, and the unearthing time
-does not change that. A piece that the walk could not read completely
-has no verdict. (ADR 0038)
-
-### Pins
-
-A piece with a `.antiq-pin` file at its top is pinned: it is never
-archived, still backed up, and shown as pinned. Any entry of that name
-that is not a directory pins the piece, a dangling symlink included; a
-directory of that name is not a pin, and `unpin` refuses to remove it.
-`pin` and `unpin` create and remove the file and refuse on a piece whose
-folder is not present. They take a new piece, which has no ID yet, as well
-as an object. A piece that is in the state asked for is left as it is and
-reported as such. A pin and its removal are durable when `pin` and
-`unpin` return: the file and the entry in the piece's directory are
-flushed. The pin is checked before the idle and empty tests. (ADR 0024)
-
-## Objects
-
-Every piece is an object with a ULID. The ID survives archiving,
-unearthing and archiving again; the newest archive replaces the
-previous one as the current archive. Forking gives an object a new ID.
-(ADR 0014) ULIDs are written in upper case, in metadata, file names and
-output alike; references accept either case.
-
-The ID time is the earliest of the directory's birth time and the birth
-and modification times of every entry inside it, ignoring times before
-1990; when a birth time and a modification time are equal, the source is
-`oldest-mtime`; when no such time remains, it is the time of minting,
-with a warning. Its source (`birth`, `oldest-mtime`, `import`, `fork`,
-`minted`) is stored with it. The ID is minted once and never
-recomputed. (ADR 0039) `archive` and `sync` mint IDs for new pieces,
-`fork` for the fork (source `fork`, the time of the fork), `import` for
-each archive (source `import`). `status` shows a piece without an ID as
-new.
-
-A live folder's package and its later archive are the same object.
-(ADR 0018)
-
-Each object has an owning collection: the collection that created it,
-or the one that last unearthed or forked it. A machine applies
-selection, idle, tiers, the brake and reclaiming only to objects its
-collection owns, and to local archives it holds. A folder copied
-together with its `.antiq/` to another machine is not detected as a
-copy.
-
-### Versions
-
-Two numbers are kept apart:
-
-- the **metadata version** N of `meta.<N>`, which every committed change
-  to an ID's metadata increases;
-- the **payload version** of each payload, counted per ID and payload
-  kind, starting at 1.
-
-Conflicts and divergence compare metadata versions. Tier checks, the
-current archive and `unearth --version` refer to archive payloads.
-
-### Metadata
-
-Metadata per ID, shared through the remote, is one JSON object. Keys
-are written in this order:
-
-| Key | Type | Content |
-|-----|------|---------|
-| `format` | integer | metadata format, `1` |
-| `id` | string | the object's ULID |
-| `collection` | string | ULID of the owning collection |
-| `path` | string | relative path in the collection, escaped form |
-| `name` | string | the folder's name, escaped form |
-| `created` | string | ID time, RFC 3339 UTC |
-| `created_source` | string | `birth`, `oldest-mtime`, `import`, `fork` or `minted` |
-| `lifecycle` | string | `live` or `archived` |
-| `payloads` | array | payload objects, below |
-| `history` | array | append-only, entries `{time, machine, action}` |
-
-A payload object has, in this order:
-
-| Key | Type | Content |
-|-----|------|---------|
-| `kind` | string | `archive` or `live` |
-| `version` | integer | payload version |
-| `file` | string | payload file name |
-| `package_format` | string | such as `tar+zstd/1` |
-| `size` | integer | bytes |
-| `checksum` | object | `{algorithm: "sha256", value: <hex>}` |
-| `listing` | string | listing file name (archives) |
-| `machine` | string | machine name of the writer |
-| `created` | string | RFC 3339 UTC |
-| `verified` | string or null | time the remote copy was last checked (ADR 0043) |
-| `superseded` | boolean | the archive lost a conflict and is kept |
-| `encoder` | object | zstd version and parameters (live packages, ADR 0052) |
-
-`listing`, `verified`, `superseded` and `encoder` are left out where they
-do not apply; `verified` is `null` where it applies and the remote copy
-was never checked. Times are RFC 3339 UTC in whole seconds, sizes in
-bytes.
-The history entry that a version adds carries the time that version was
-committed, not the time the change was recorded locally; the
-remote-only tier is measured from it.
-`file` and `listing` name files in the object's directory, so each is one
-plain name: not empty, without `/` or NUL, not starting with a dot. In
-format 1 they have the names of the remote layout under "Storage". A
-document that breaks either rule is refused when it is read.
-Unknown fields are kept on rewrite. A file with a higher `format` is
-read-only and any write to it fails with a clear error. (ADR 0053)
-
-The `action` of a history entry is one of these:
-
-| Action | Written by |
-|--------|------------|
-| `archive` | `archive` |
-| `reclaim` | reclaiming |
-| `unearth` | `unearth` |
-| `fork` | `fork`, on the old and on the new ID |
-| `sync` | `sync` |
-| `import` | `import` |
-| `resolve` | `resolve` |
+`a/**` selects what is below `a` and not `a`. A pattern is refused if it
+has an empty component (a trailing `/` included), a `.` or `..`
+component, or a `/` inside a bracket class, which never matches a
+separator.
 
 Paths and names are stored as the bytes the filesystem holds. In the
 escaped form, valid UTF-8 stays as it is, `%` becomes `%25`, and every
 byte that is not part of valid UTF-8 becomes `%XX`, with upper-case hex
 digits. Every byte sequence has this one escaped form, and a reader
-refuses any other spelling, such as `%41` for `A` or `%ff`. A `path` is
+refuses any other spelling, such as `%41` for `A` or `%ff`. A path is
 names joined by single `/`; a name is not empty, has no `/` or NUL and is
-neither `.` nor `..`.
-
-### Listing
-
-Each archive payload has a listing in its own zstd-compressed file next
-to the metadata: JSON Lines, a first line `{"format":1}`, then one line
-per entry with path (escaped form), type, size, modification time in
-whole seconds, mode, link target and SHA-256. Paths are relative to the
-archive's top-level directory (see "Packaging"), which has no line of
-its own. Each line holds what the archive stores for the member: the
-size is 0 for directories, symlinks and hard links, and a modification
-time before 1970 is listed as 0. The listing is the
-manifest that reclaiming compares against, for archived and imported
-pieces alike. Listings are compressed with zstd at level 3 with the
-content checksum and read with the same 128 MiB window limit as every
-other decoder. The content checksum is checked when the last byte is read,
-so the entries of a listing are verified only once it has been read to its
-end. A reader refuses a listing whose first line names a higher format.
-
-An entry line is a JSON object with these keys, in this order:
-
-| Key | Type | Content |
-|-----|------|---------|
-| `path` | string | path in the escaped form |
-| `type` | string | `file`, `dir`, `symlink` or `hardlink`; special files are not archived and have no type |
-| `size` | integer | bytes |
-| `mtime` | integer | modification time in whole seconds since the epoch |
-| `mode` | integer | permission bits |
-| `link` | string | the target in the escaped form, for a `hardlink` the path of the file it links to; for `symlink` and `hardlink` only |
-| `sha256` | string | lower-case hex; for `file` only |
-
-`link` is required for a `symlink` and a `hardlink`, and `sha256` for a
-`file`. A listing with a line that breaks these rules or the size and time
-rules above, or with a line for the top-level directory, is refused when
-it is read and when it is written.
-
-### Local state
-
-Each machine keeps a tracking entry per folder: path, ID, the metadata
-version taken out, the payload version it was unearthed from, the time
-it was unearthed, a state (`unearthing`, `live`, `removing`, `gone`),
-the archive payload a `removing` folder is compared with, which
-payloads are present locally (each by its file name), the metadata
-versions this machine committed, pending decisions, the time the entry
-was written, a stale backup's time, and whether the entry is missing on
-the remote or diverged. While a recorded change is not committed yet,
-the version taken out reads `pending`; the commit replaces it with the
-committed number. "Remote-only" is derived.
-
-The entry states mean:
-
-- `unearthing`: `unearth` is bringing the folder.
-- `live`: the folder is in place.
-- `removing`: the archive is durable and the folder is on its way out.
-- `gone`: the folder was removed, or was found missing. An archived or
-  remote-only piece keeps its entry in this state, with its local
-  payloads.
-
-At most one entry is `unearthing`, `live` or `removing` for a path. A
-pending decision about a diverged folder implies diverged; a folder can
-be diverged without a decision pending. A pending decision carries the
-answers of its row under "Decisions".
-
-An entry file that cannot be read is reported and skipped, and the
-other entries are used.
-
-### States
-
-| State | Folder | Local payloads | Remote payloads |
-|-------|--------|----------------|-----------------|
-| new | present, no ID | none | none |
-| live | present | none | latest live package, if backing up is on |
-| unearthed | present | archive, unless its remote copy is confirmed | archive, and a live package if backing up is on |
-| gone | missing, entry live | none | latest live package, if any |
-| archived | gone | archive | archive once synced |
-| remote-only | gone | metadata only | archive |
-| live on another machine | elsewhere | metadata only | that machine's live package |
-
-A piece with an archive payload in its metadata shows as unearthed
-when its folder is present, otherwise as live. The state is derived
-from the entry, the metadata and whether the folder exists. Cases the
-table has no row for:
-
-- A `live` entry whose folder is present but whose metadata is already
-  archived is unearthed: the archive is durable and the entry has not
-  caught up.
-- An `unearthing` entry shows as unearthed with its folder, and as the
-  metadata says without it.
-- The folder of a `removing` entry does not count: the piece is
-  archived, or remote-only without a local archive.
-- A `gone` entry whose metadata is live and owned by this collection
-  gets its folder back when one appears at its path, with its ID. With
-  archived metadata, a folder at that path is a new piece next to the
-  archived one.
-- Archived metadata without an entry shows as remote-only. An entry
-  without metadata, metadata of another ID, and live metadata of this
-  collection without an entry are errors of that piece, which `status`
-  lists and the start-of-run repairs fix.
-
-Entries are written in an order the repairs rely on. A new ID's
-metadata comes before its entry. `archive` makes payload, listing,
-metadata and the entry (`pending`) durable, then sets `removing` with
-the payload, renames the folder and sets `gone`. `unearth` writes
-`unearthing`, renames, records the metadata change, and only then
-writes `live`. The unearth of another collection's live piece as a fork
-records the new ID's metadata after the rename, since a metadata-first
-order leaves a gone piece behind when the rename fails. `fork` renames the folder first when `--name` is
-given, records the old ID's archived metadata, sets its entry `gone`
-with its local payloads, then records the new ID's metadata and entry.
-
-A renamed folder is a new piece, and the entry of its old path becomes
-gone. A gone piece keeps its live package; `unearth` restores it from
-there when no archive exists, and `reconcile --prune` drops it.
-
-Another collection's live pieces are shown as live on that machine. They
-can be unearthed only as a fork; `archive` and `sync` never touch them.
-(ADR 0040)
-
-### Metadata changes
-
-Changes are recorded locally and committed as a new metadata version at
-the next `sync`. A recorded change is the full next metadata document,
-written as `objects/<ulid>/meta.pending`; `objects/<ulid>/meta.<N>`
-holds only versions known to be committed. Local readers prefer
-`meta.pending`. `sync` commits it with the protocol under "Committing a
-version", which gives its number, and renames it locally to that
-`meta.<N>`. Without a remote it stays pending. (ADR 0058)
-
-The rename leaves the bytes as they are, so the local and the committed
-copy are identical. It is refused when `N` is not above the highest
-committed version in the object's directory, unless `meta.<N>` already
-holds the same bytes, which a promotion cut short by a crash leaves
-behind; then the leftover `meta.pending` is removed. A `meta.pending`
-that cannot be read is an error, not a reason to use an older version,
-as it holds the only copy of the change, and no change is recorded on top
-of it. No change is recorded on top of a committed version that cannot be
-read or has a higher `format`.
-
-| Command | Changes |
-|---------|---------|
-| `archive` | lifecycle `archived`, a new archive payload, history |
-| reclaiming | lifecycle `archived`, live payload removed, history |
-| `unearth` | lifecycle `live`, owning collection, path and name (the target), history |
-| `fork` | old ID: lifecycle `archived`, live payload removed, history; new ID created with source `fork`, lifecycle `live`, no payload, history |
-| `sync` | new ID (lifecycle `live`, a live payload if it backs up), live payload replaced or removed, `verified` times, history |
-| `import` | new ID with its archive payload |
-| `resolve` | replacing with loss: as `archive`, with the history action `resolve`; the other decisions are not answerable yet |
-
-`pin` and `unpin` change no metadata.
-
-## Storage
-
-Local storage in `.antiq/` is fixed. Remotes sit behind one trait, and
-every remote supports every operation. (ADR 0015)
-
-Local layout:
-
-```
-.antiq/config.toml
-.antiq/lock
-.antiq/remote-state.json              when the remote was last reachable or first found away, when the last sync finished
-.antiq/pruned.json                    objects dropped by `reconcile --prune`, each with its highest committed version
-.antiq/objects/<ulid>/...             same layout as on the remote
-.antiq/objects/<ulid>/meta.pending    a recorded change not committed yet
-.antiq/tracking/<ulid>.json           tracking entries
-.antiq/tracking/<ulid>.manifest.json  live manifests
-.antiq/index/                         derived, rebuildable, private to this machine
-.antiq/tmp/
-.antiq/staging/
-.antiq/trash/<ulid>                   a folder on its way out
-.antiq/recovered/
-```
-
-Remote layout:
-
-```
-<root>/antiq-remote.json             {format, id, layout}
-<root>/objects/<ulid>/meta.<N>
-<root>/objects/<ulid>/meta.<N>.claim
-<root>/objects/<ulid>/<sha256 16 hex>-<name part>.tar.zst
-<root>/objects/<ulid>/<sha256 16 hex>.listing.zst
-<root>/objects/<ulid>/.antiq-partial/
-<root>/.antiq-clock.<machine part>   path remote only: its modification time is the remote's clock
-```
-
-The marker is one line of JSON with the keys `format`, `id` and `layout`
-in that order; `format` and `layout` are both 1 in version 1. A reader
-ignores other keys and refuses a marker with a higher `format` or
-`layout`. The marker is written under a temp name, flushed, and renamed
-into place without replacing an existing one, so the name never holds a
-partial file.
-
-Payload files are never overwritten. A put onto an existing payload name
-succeeds only when the full SHA-256 matches; for a listing, which the
-metadata records no checksum for, the SHA-256 of its bytes is compared.
-The name part is the piece's name with every byte outside `[A-Za-z0-9._-]`
-written as `%XX`, cut to 64 bytes without splitting an escape; the real
-name is only in the metadata. The listing of a payload is named after it:
-the first 16 hex digits of the payload's SHA-256, followed by
-`.listing.zst`. Upload temp names are `.<final name>.<machine part>.part`,
-where the machine part is the machine name escaped the same way and cut
-to 32 bytes; the same machine reuses the name on its next attempt. One
-writer runs per collection, and the temp name sits in the object's ULID
-directory, so it is unique per object.
-
-Payloads and listings are written in `.antiq/tmp/`, flushed, and renamed
-into the object's directory, which is then flushed. Every other file antiq
-writes in `.antiq/` (metadata, manifests, tracking, index, config) goes
-through one atomic write: a temp file in the same directory, `sync_all`
-with a fallback to plain `fsync` on `ENOTSUP`, rename, `fsync` of the
-directory. Whenever antiq may create an object's directory (recording a
-change, storing a pulled version, putting a file), it flushes `objects/`
-and `.antiq/` as well, so the directory itself is durable.
-
-The index is derived from metadata and listings, kept as plain files,
-rebuildable, and behind a module interface. Listings are fetched
-incrementally: `sync` fetches the listings it does not have when it
-pulls metadata, and `unearth` fetches one together with its archive.
-The index holds, in `.antiq/index/<ULID>.json`, the member paths of the
-current payload's listing together with that listing's file name, for
-every object whose listing is stored here. Which objects exist, their
-paths, names, sizes and states come from the metadata and the tracking
-entries on every call. A file counts for an object only while it names
-the object's current listing; a listing's file name follows from its
-payload's checksum, so such a file is up to date. Commands that change
-state bring the files in line with the store, and `reconcile` rebuilds
-them from nothing; an index rebuilt this way equals one that was kept
-up to date. Read-only commands that find a file missing, outdated or
-unreadable read the listing instead and do not write the file.
-
-### Config
-
-The config is `.antiq/config.toml`. The `[collection]` table holds the
-policy. The `[machine]` table and the `[[remote]]` list are local to the
-machine, parsed strictly and never uploaded. The config holds a list of
-remotes; version 1 accepts exactly one.
-
-| Key | Default | Content |
-|-----|---------|---------|
-| `collection.id` | minted at `init` | collection ULID |
-| `collection.patterns` | `["*"]` | selection patterns |
-| `collection.exclude` | `[]` | literal paths that are never pieces, in the escaped form of the metadata |
-| `collection.ignore` | `[]` | gitignore lines for the idle check, anchored at each piece's top |
-| `collection.junk` | `[".DS_Store"]` | junk list |
-| `collection.idle_days` | 14 | archive tier |
-| `collection.remote_only_days` | 180 | remote-only tier, from the archive's commit |
-| `collection.backup_live` | `true` | back up live pieces |
-| `collection.live_exclude` | `[]` | paths relative to the collection root, in the escaped form of the metadata, left out of live packages only; an empty entry is an error |
-| `collection.replace_without_asking` | `false` | ADR 0036 |
-| `collection.brake_percent` | 20 | ADR 0045, 0 to 100 |
-| `collection.grace_hours` | 24 | commit protocol, at least 1 |
-| `collection.away_warn_days` | 7 | see `--if-reachable` |
-| `collection.memory_percent` | 25 | compression memory limit, 1 to 100 |
-| `collection.remote_jobs` | 4 | remote operations at a time, at least 1 |
-| `collection.live_retries` | 3 | restarts of a live piece in the tolerant verify, at least 1 |
-| `machine.name` | ComputerName on macOS, hostname elsewhere | stored at `init` |
-| `machine.rsync` | resolved at `remote add` | absolute path |
-| `machine.remote_rsync` | none | passed as `--rsync-path` |
-| `machine.connect_timeout` | 30 | seconds, at least 1 |
-| `machine.server_alive_interval` | 15 | seconds, at least 1 |
-| `machine.server_alive_count` | 4 | at least 1 |
-| `machine.control_persist` | 60 | seconds, at least 1 |
-| `machine.rsync_timeout` | 300 | seconds, at least 1 |
-| `remote.url` | | as given to `remote add` |
-| `remote.id` | | the remote's ULID |
-| `remote.host_key_alias` | none | |
-
-On macOS the hostname stands in when ComputerName cannot be read or is
-empty. An empty `machine.name` is an error.
-
-A value outside the range given in the table is an error that names the
-key. An unknown key in `[machine]` or in a `[[remote]]` entry is an
-error that names it. Unknown keys under `[collection]` are ignored, and
-each one is reported in a warning.
-
-### Committing a version
-
-1. The payload and its listing are uploaded under their temp names,
-   flushed, and renamed to their final names. On the SSH remote the
-   flush is the `sync` on the NAS (see "SSH remote"), which runs once
-   after the uploads and before the claim.
-2. The writer claims metadata version N+1, one above the highest
-   committed version, by creating `meta.<N+1>.claim` exclusively. A claim
-   that already exists is a conflict. So is a claim above the highest
-   committed version that is not abandoned: its writer goes on and this
-   writer tries again at the next sync. A claim above the highest
-   committed version is skipped, and N+1 counts above it, only when it is
-   abandoned (older than the grace period) or when this machine's own
-   metadata temp name for its number is beside it, which marks an
-   interrupted attempt of this machine. Version numbers stop at
-   4294967295: when the number to claim would pass it, the commit stops.
-3. It writes the metadata under a temp name, flushes, lists the
-   directory, and checks that its claim still exists, that no
-   `meta.<M>.claim` above its own exists, that no `meta.<M>`
-   above the highest committed version it saw in step 2 exists, and that
-   every file the metadata names is present, a payload with its recorded
-   size. A named file that is missing and that this commit uploaded is
-   put again once; any other missing file ends the commit. It flushes
-   again if it put anything, checks once more that no `meta.<M>` above
-   the highest committed version it saw exists, and renames the metadata to `meta.<N+1>`.
-   On the SSH remote this rename refuses an existing target (`ln` to the
-   final name, then remove the temp name).
-4. It flushes, lists the directory again, and checks the named files once
-   more, putting a missing one again. A higher committed version is a
-   conflict. So is a claim above its own, which no committed version has
-   yet: the version stays committed and the writer looks again at its next
-   sync.
-
-A version is committed once `meta.<N+1>` exists; readers read only
-`meta.<N>` files. (ADR 0030)
-
-Before it uploads anything, a commit checks that the highest version on
-the remote is the one the change was based on and that it can be read.
-It stops when the remote holds a higher committed version, fewer than
-the base, or a highest version that does not parse, names another object
-or has a format other than 1. When the remote holds a version above the
-base with exactly the bytes about to be committed, an earlier attempt of
-this commit got past the rename. The commit then writes nothing and
-returns that version, which is how a commit that failed after its rename
-is retried.
-
-When the retry finds a higher committed version too, and that version
-names every payload and listing file the retried metadata names, the
-higher version may have been written on top of the retried one, and the
-metadata records no base version to tell. The retry reports the version
-as landed earlier, and the caller pulls the remote and judges the two
-versions instead of treating a conflict. A higher version that lacks any
-of those files, and any higher version that appears during the attempt
-itself, is a conflict.
-
-A commit that ends before the rename because a named file is missing, a
-higher version appeared or a claim above its own appeared deletes its
-temp name, flushes, and then deletes its claim, unless the version of its number exists. A commit that finds
-its claim gone deletes its temp name and flushes. A commit whose write of
-the temp name fails tries the same release, stops at the first error of
-it and reports the write's error. A commit that ends for any other
-reason, or whose release fails too, leaves its claim and temp name. The temp name goes
-first so that a stop between the two leaves a claim without a temp name,
-which blocks, and never a temp name without a claim, which would pass for
-an interrupted attempt of this machine under a claim another writer made.
-
-An interrupted attempt of this machine is recognised by the run lock, which
-shows that no run of this machine is in flight. A crash between creating
-the claim and writing the temp name leaves a claim that is not recognised
-and blocks the object for one grace period. A collection copied to
-another machine with the same name, or two collections of one machine on
-one remote, can have a live claim of the other writer skipped; that
-writer then finds a higher committed version or a higher claim at step 3
-or step 4 and has a conflict, not a silent loss.
-
-When step 4 finds a higher version, the writer's own version stays on the
-remote as committed but not current. The writer treats this as a conflict
-and does not delete its local archive because of that version. Cleanup
-removes it once it is older than the grace period, and its payloads one
-run later.
-
-When step 4 finds a claim above the writer's own version and no higher
-committed version, the writer's version is committed and stays current if
-the claim is released. The claim's writer either skipped this writer's
-claim as abandoned, so that its version will not build on this one, or is
-building on this version. The writer does not delete its local archive
-because of the version and reads the remote again at its next sync.
-
-Cleanup:
-
-- A claim without metadata older than the grace period is abandoned and
-  skipped. A claim is removed once a higher version is committed and it
-  is older than the grace period; the claim of a version that is removed
-  goes with it, and the claim of a version that stays stays. A claim at
-  or above the highest committed version stays.
-- The highest committed `meta.<N>` is retained. An older one is removed
-  once a higher version is committed and it is older than the grace
-  period. A listing goes with the payload it describes.
-- A final-named payload or listing is removed only when no metadata
-  version that is present references it, it is older than the grace
-  period, and no claim without metadata that is within the grace period
-  exists in the object's directory. A referenced payload, superseded ones
-  included, is never removed by cleanup. A payload that only a version
-  slated for removal references is removed one run after that version.
-  A directory without any metadata is cleaned by the same rules, so an
-  abandoned first upload goes once it is older than the grace period.
-- Cleanup runs in an object directory only when every `meta.<N>` there
-  parses with a known `format` and names that object, and no directory
-  is named like a version or a claim; otherwise the directory is left
-  alone and reported.
-- Just before it deletes in a directory, cleanup looks at the directory
-  again and deletes only what that look confirms. It lists the directory
-  once more before the first payload or listing of an object is deleted,
-  and deletes none of them when a version, a claim or a metadata temp name
-  has appeared. Another machine's commit that starts between the last
-  look and a deletion cannot be excluded without locks on the remote; the
-  grace period makes it rare.
-- A collection removes its own temp names and partial files before the
-  grace period only in object directories whose committed metadata
-  names it as owner, while its lock shows no other run. A temp name is
-  `.<file>.<machine part>.part`, where the file is a payload, a listing
-  or `meta.<N>`, followed by `.` and six characters of `[A-Za-z0-9]` for
-  the file rsync leaves when it is killed hard. A name that splits into
-  file and machine part in more than one way counts as another
-  machine's, and a name that fits no split is never removed. The temp
-  name of an upload that is still pending on this machine is never
-  removed, in the object directory or in `.antiq-partial`, since the next
-  run resumes it. An own metadata temp name is not removed early while
-  the claim of its version exists above the highest committed version, as
-  it marks the claim as this machine's. Every other temp name and partial
-  file, own or not, and that temp name as well, is removed once it is
-  older than the grace period. A dry run
-  lists the early removals as removals.
-- Ages are measured on the remote's clock: over SSH against `date +%s`
-  printed by the same command, on a path remote against the modification
-  time of a probe file written there. A dry run writes no probe file;
-  it reports every removal that depends on an age as "age unknown in a
-  dry run", whatever the file's age.
-
-When the highest `meta.<N>` does not parse, `status` and `reconcile`
-report it, readers use the highest version that parses, and nothing is
-written on top of it until it is resolved. An object with no version that
-parses and no recorded change has no readable metadata, which is an
-error. `reconcile` reports any ID whose committed version was written by
-another machine than the local record says.
-
-## Remotes
-
-The remote holds the full metadata set, one current metadata version
-per ID, next to the archives. Attaching a remote copies its metadata;
-archives are fetched on demand. (ADR 0016)
-
-A remote root holds the marker `antiq-remote.json` with the remote's
-ULID and the layout version, and the config stores that ULID. Every
-remote operation checks the marker first and refuses when it is missing
-or does not match. On the SSH remote the check runs on the NAS, before
-the operation writes or deletes anything. (ADR 0031)
-
-`remote add <url>` attaches an existing remote and refuses when its
-root has no marker; `remote add --init <url>` creates a new remote root.
-(ADR 0026) The URL is `ssh://[user@]host[:port]/<path>` for the SSH
-remote or an absolute local path for the path remote. The root path
-may contain only `[A-Za-z0-9._/-]` and is made of components that are
-neither empty nor `.` or `..`; it does not end with `/` and is not `/`
-itself. The user and the host of an ssh URL may contain only
-`[A-Za-z0-9._-]`, the host does not start with `-` (ssh would read it as
-an option), and the port is a number from 1 to 65535. A URL that
-does not fit is a usage error. The config keeps the URL as given.
-`remote add` refuses while a remote
-is attached, and refuses with the reason when a probe fails: no rsync
-3.1 or later, openrsync, no SHA-256 tool or `stat` on the NAS, a failing
-exclusive create or hard link, the remote unreachable. It writes nothing
-then.
-
-On a path remote `remote add` decides every refusal before it writes
-anything: a URL that does not fit, `--host-key-alias` (which applies to
-ssh remotes only), a remote already
-attached, and what the root holds. Without `--init`, a missing root and a
-root without a marker that is no mount point are away, a mount point
-without a marker is broken, and a marker names the remote's ULID, as
-under "Path remote". With `--init`, a missing root is created when its
-parent exists, and a root that already holds a marker, an `objects`
-entry or a `.antiq-clock.*` file is refused with the name it holds; any
-other directory is accepted. The probe for exclusive creation makes a
-file named `.antiq-probe.<machine part>.<pid>.<lower-case ULID>` in the
-root, makes it again, which has to fail, and removes it; a root that a
-refused `--init` made is removed again. Then `--init` writes the
-marker, the `[[remote]]` entry goes into the config, and the metadata of
-the remote is copied into `.antiq/objects/`. A copy that fails leaves the
-remote attached, and `sync` brings in the rest. A config that cannot be
-written after `--init` leaves the marker, and `remote add <url>` without
-`--init` attaches it.
-
-On an ssh remote `remote add` decides every refusal before it writes
-anything on the NAS. `--host-key-alias` is allowed. The local rsync is
-resolved first, as under "Transfers". Then antiq starts the master
-connection and looks at the NAS in one read-only script: the root, the
-names `objects` and `.antiq-clock.*` in it, the NAS rsync, a SHA-256
-tool and `stat`. The NAS rsync is run as `<command> --version` through
-the shell, where the command is `machine.remote_rsync` or `rsync`, so a
-value of several words works. It has to be rsync 3.1 or later and not
-openrsync. A hash tool counts only when it gives the SHA-256 of the
-three bytes `abc`. `stat` has to work in the GNU (`-c`) or the BSD
-(`-f`) form. A rsync, hash tool or `stat` that does not do is broken,
-with the tool named. The root is judged as under "SSH remote": without
-`--init`, a missing root is away and a root without a marker is broken,
-with a hint to use `--init`, and a marker names the remote's ULID. With
-`--init`, a missing root is created when its parent exists, and a root
-that already holds a marker, an `objects` entry or a `.antiq-clock.*`
-file is refused with the name it holds. A dry run ends after these
-probes. The writes follow. `--init` makes the last component of the
-root. The probe for exclusive creation makes a file named
-`.antiq-probe.<machine part>.<pid>.<lower-case ULID>` in the root, makes
-it again, which has to fail, and hard-links it to the same name with
-`.link` added, which has to give a regular file; the file and the link
-are removed. A root that a refused `--init` made is removed again while
-it is empty. Then `--init` writes the marker to a temp name, flushes,
-hard-links it to `antiq-remote.json` when that name is free, removes the
-temp name and flushes. The `[[remote]]` entry and `machine.rsync` go into
-the config in one write, and the metadata of the remote is copied. A
-copy that fails leaves the remote attached, and `sync` brings in the
-rest.
-
-`remote show` prints kind, URL, remote ULID, reachability and the probed
-versions; it reads only, takes no lock, and reports a remote that is away
-or broken with exit 0. On an ssh remote it runs one read-only script over
-a connection of its own and prints, for a remote that is reachable, the
-`rsync` of this machine, the `remote rsync`, the `sha256` tool and the
-`stat` form; a tool that is missing or too old shows as `none`. `remote remove` only detaches: it deletes nothing
-on the remote and keeps the local metadata, lists the remote-only pieces
-that become unreachable, and goes through the brake. A path remote whose
-root is not a mount point gets a warning at `remote add` and at
-`remote show`.
-
-Without a remote, `sync` fails with exit 1 and the error kind
-`no_remote`, `remote show` reports that none is attached and exits 0,
-`reconcile` does its local part, and `--if-reachable` changes nothing.
-
-Remote operations include reachability with three results (reachable,
-away, broken), bulk metadata pull and push, payload put, get and delete,
-and exclusive creation. A run does at most `remote_jobs` remote
-operations at a time; compression may run ahead of uploads.
-
-The remote has been away for longer than `away_warn_days` when more than
-that many days of 24 hours have passed since `last_reachable`, or since
-`away_first_seen` while `last_reachable` is missing, and neither is in
-the future. With neither recorded, or with a state file that cannot be
-used, it has not. Remote work is pending while a piece is
-`pending_upload` or `stale_backup`. When the remote has been away for
-longer than `away_warn_days` and remote work is pending, `status` warns
-and `--if-reachable` no longer turns away into exit 0: the run exits 4. A
-dry run decides the same way, and no dry run writes the state file.
-
-`.antiq/remote-state.json` is a JSON object. Only a run that holds the
-lock writes it. A run that finds the remote reachable sets
-`last_reachable` and removes `away_first_seen`; a run that finds it away
-sets `away_first_seen` unless the key is there. The key `last_sync` holds
-the time the last `sync` finished. All three are RFC 3339 times in whole
-seconds. A writer keeps the keys it does not own, and a reader takes the
-keys it needs and ignores every other. A writer replaces a file that is
-not a JSON object or does not parse with a new one, which drops
-`last_sync` until the next `sync`; a file it cannot read at all it leaves
-alone and fails.
-
-### Path remote
-
-The SSH remote is built first. The path remote stays in version 1 and
-copies plainly: a temporary name in the target directory, written,
-flushed and renamed. Flushing is `sync_all` with a fallback to plain
-`fsync` on `ENOTSUP`, for the file and for its directory after the
-rename. Live packages on a path remote are uploaded in full on every
-change. (ADR 0047)
-
-Reachability: a missing root, or a root that is not a mount point and
-has no marker, is away. So is a root that cannot be looked at because
-the server behind a network mount is gone: the errors `ENOTCONN`,
-`EHOSTDOWN`, `EHOSTUNREACH`, `ENETUNREACH` and `ETIMEDOUT`. A marker
-with another ULID, a mount point without a marker, or an I/O error on
-the marker is broken. So are a marker that cannot be parsed or has a
-higher `format` or `layout`, a root that is not a directory, an error
-while testing for a mount point, and any other error on the root, a
-stale handle (`ESTALE`) included. A root that is a symlink to a
-directory counts as that directory. A matching marker is reachable. The
-marker is checked before every operation, and an operation on a root
-that is not reachable fails without reading or writing.
-
-A put writes the file under its temp name in the object's directory,
-flushes it, renames it to the final name without replacing a file of that
-name, and flushes the directory. Where it makes `objects/<ulid>/` it
-flushes the root and `objects/` as well, and does so each time it writes
-there, so that a directory a killed run made is durable by the time
-anything depends on it. A final name that is taken accepts the put only
-when the file there has the SHA-256 of the upload; the directory is
-flushed then too. Claims are created exclusively. Deleting a file that is
-not there counts as deleted. Every file name given to the remote is one
-path component: an empty name, `.`, `..` and a name with `/` are refused.
-A checksum is computed from a read that bypasses the client's cache of
-the file (`F_NOCACHE` on macOS, `posix_fadvise` with `POSIX_FADV_DONTNEED`
-on Linux); on another system it fails.
-
-The path remote's clock is the modification time of
-`.antiq-clock.<machine part>` in the root, written, flushed and closed
-just before its time is read. The metadata pull lists the objects once
-and reads, of each, the `meta.<N>` files above the highest version this
-machine has; claims, temp names and other files are not versions.
-
-### SSH remote
-
-antiq runs the system's `ssh` with a master connection per run, a short
-finite `ControlPersist` and a short `ControlPath` in a per-user
-directory, named with the run's pid and a counter that keeps two
-sessions of one process apart (`<pid>-<n>.sock`). The directory is
-`/tmp/antiq-<uid>/` with mode `0700`, checked before use: it must be a
-directory, not a link, owned by the user. The `ControlPath` is at most
-86 bytes, since `ssh -M` binds the path plus a suffix of 17 characters
-within the 104 bytes macOS allows for a socket path; a longer one is
-refused with antiq's own error. At start, the sockets and master logs
-of runs that no longer exist are removed, and so is a socket at the new
-run's own path, which an earlier run with the same pid may have left
-behind. Only sockets and master logs are removed, and only in this
+neither `.` nor `..`. Paths in `--json` output and in the config's
+`exclude` list use the escaped form.
+
+A path that is valid UTF-8 is matched against the patterns as it is. A
+path with bytes that are not valid UTF-8 is matched in its escaped form,
+since the glob matcher takes only UTF-8. A pattern can therefore not tell
+the two apart: `a%FF` matches the valid name `a%FF` and the name `a`
+followed by the byte `0xFF`, and in the escaped form a `%` of the name
+reads `%25`. Patterns and names compare as bytes, so a pattern in
+composed Unicode form does not match a name in decomposed form.
+
+A directory that selection has to look into and cannot read is skipped
+and reported: `status` lists it as a note below the table
+("unreadable: <dir>") and `archive` names it in its output. The exit
+code stays 0.
+When the collection root itself cannot be listed, the run
+fails. Running out of file descriptors fails the run as it does in a walk.
+An entry deleted while selection runs is skipped. Selection looks no more
+than 512 levels deep; a deeper directory is not entered and is reported
+like one it cannot read.
+
+An exclude entry that exists, found below a selected piece, is not part of
+that piece: the piece is never archived, and `status` names the entry. An
+exclude entry that does not exist does not count.
+
+Symlinks are never pieces, and no walk follows a link. Links inside a
+piece are archived as links, and rsync copies them as links. A link on the
+target points to whatever its path names there.
+
+### Spelling
+
+The folder under `.antiq/pieces/` holds the spelling of a piece's path. A
+live folder whose path the collection's volume treats as the same name
+(case, Unicode normalization, as probed per ADR 0054) is the same piece
+and is archived into that folder. `unearth` and `fork` extract to the
+stored spelling, `list` shows it, and `status` warns when a live spelling
+differs from the stored one.
+
+## Walks
+
+Every walk of a piece (idle check, packing, verifying, deleting) uses
+lstat, does not follow links, and stays on the device of the piece's top
 directory.
 
-The master writes its messages to a log next to the socket
-(`<pid>-<n>.log`, `ssh -E`), since a detached master has no standard
-error. The failures of starting a master and the keepalive timeout of a
-master that lost its server are read from that log.
+A piece that contains another device (a mount point or a btrfs subvolume)
+or a mount root is never archived; `status` names the mount point. A
+piece whose top directory is itself on another device than the collection
+root, is itself a mount root, or lies below a directory between the
+collection root and the top that is a mount root, counts as containing a
+mount point, at its own path. A mount root above the top shares the device
+of everything below it, so the walk reads the directories above the top as
+well. The walk compares the device of every entry with the top
+directory's, not only that of directories: an entry on another device is
+recorded, and a directory there is not entered. The same holds for the
+root of a mounted filesystem that shares its parent's device, such as a
+bind mount: the walk reads whether an entry is a mount root. On Linux that
+is the `STATX_ATTR_MOUNT_ROOT` attribute of `statx`; a kernel older than
+5.8 does not report it, and there only the device numbers decide. On macOS
+it is the mount point name of the directory (`f_mntonname`) differing from
+its parent's. A firmlink (macOS links directories such as `/Users`,
+`/Library` and `/usr/local` into the data volume) compares as a mount root
+there, so a piece containing one is refused, which is the safe direction.
+A directory that cannot be searched is not compared on macOS; the delete
+helper reads its flag again once it has given the directory owner access
+and has opened it.
 
-Before each remote phase antiq runs `-O check`; when it fails, antiq
-sends `-O exit`, removes the socket (only a socket), starts a new master
-and checks it again. If anything other than a socket is at the control
-path, no master is started, because `ssh -M` there leaves a plain
-connection running that is no master. If starting the master fails with
-exit status 255, the failure is classified as away or broken like a
-command's. If the master starts and the second check still fails, or
-something is in the way, commands run as direct connections, with a
-warning. At the end of the run it sends `-O exit`. Every call passes
-`BatchMode=yes`, `ConnectTimeout`, `ServerAliveInterval`,
-`ServerAliveCountMax`, and `HostKeyAlias` when configured. (ADR 0048)
+The walk does not enter an excluded directory either: a piece that
+contains an existing exclude entry is never archived, and `status` names
+the entry. So is a piece that contains a directory named `.antiq`, the
+marker of a nested collection: `status` names the directory that holds the
+marker, and the walk goes on into it.
 
-Every remote command runs as `/bin/sh -s` with the script and its
-quoted values on standard input, so the login shell parses nothing but
-that. The script is one brace group that starts by setting `LC_ALL=C`,
-so a connection that ends early runs nothing. Exclusive creation runs
-in that shell with `set -C`, never through rsync; `remote add` checks
-that a second create fails.
+A walk enters directories up to 512 levels below the piece's top, since
+each level holds one directory open. A deeper directory is not entered and
+makes the piece unreadable. The delete helper never crosses a device
+boundary or enters a mount root, refuses a path with a mount root above
+its top, refuses the root of its own tree, and stops at the same depth: a
+directory more than 512 levels below the top it removes is not entered and
+fails the removal, naming that directory.
 
-ssh runs with `LC_ALL=C`, because its error text is matched, and with
-`LogLevel=INFO`, `ClearAllForwardings=yes` and `PermitLocalCommand=no`
-set on the command line, so that settings in the user's `~/.ssh/config`
-neither hide that text nor start forwardings or local commands. Commands
-also get `-T` and `RemoteCommand=none`, so that a configured terminal or
-remote command does not change the script's input and output.
+An entry the walk cannot read makes the piece unreadable: it is never
+archived, and `status` names the first entry that failed. That is the
+smallest path among the failed entries, in the byte order the entries are
+sorted by. An entry that has vanished since its directory was listed
+counts as one the walk cannot read. Running out of file descriptors
+(`EMFILE`, `ENFILE`) is not an unreadable entry: it fails the run. antiq
+raises its soft limit of open files at start, since launchd starts jobs
+with a soft limit of 256.
 
-Exit status 255 and ssh's error text decide between away and broken. A
-script never exits with status 255. Only lines in ssh's own forms count.
-Lines about the control socket, the master connection or a proxy's
-`UNKNOWN port 65535` do not, and failures of the master connection are
-told apart from the remote's state. These are away: `ssh: connect to
-host <host> port <port>: <reason>` with any reason, which ssh prints
-when the connection itself fails, `ssh: Could not resolve hostname`, a
-keepalive timeout (`Timeout, server <host> not responding.`) and a
-banner exchange timeout. These are broken: a refused login, a refused
-or changed host key, and a connection the server closes or resets. A
-broken line wins over an away line. A failure with no line in these
-forms is broken. "Connection refused" means away only in the connect
-form; a stale control socket gives the same words in another form. When
-the master connection drops while a command runs, ssh reports nothing
-to the command, and antiq reads the master's log for the keepalive
-text. A session the server refuses through its `MaxSessions` limit gives
-one warning per run.
+A piece with an entry that carries an immutable or append-only flag
+(macOS `st_flags` `UF_IMMUTABLE`, `SF_IMMUTABLE`, `UF_APPEND`,
+`SF_APPEND`; Linux `statx` `STATX_ATTR_IMMUTABLE`, `STATX_ATTR_APPEND`),
+or a directory, the top's parent included, that the user does not own and
+cannot write, is locked: it is never archived, and `status` names it ("locked: <path>"). A directory the user
+owns but has made unwritable is not locked, since removal gives itself
+owner access.
 
-Reachability: a root that does not exist below a directory that can be
-searched is away. A root that is not a directory, a directory above the
-root that cannot be searched, a marker that is missing, cannot be read,
-cannot be parsed or has a higher `format` or `layout`, and the marker of
-another remote are broken. A host that does not answer is away or broken
-as described above. A host that
-answers but cannot run the script (a login that ends with a status
-the script does not use, as `nologin`, a forced command or a missing
-`/bin/sh` do) is broken, with the error text as the reason, for the
-reachability check and for `remote show`; any other operation reports it
-as an I/O error. Every script except those of `remote add` checks the root and the
-marker before its body runs. The script gets the remote's ULID as an
-argument and ends before any write when the marker, read in upper case,
-does not contain it, which is the marker of another remote. The marker
-comes back to antiq as the first block of the answer, and antiq parses
-it again, and `begin_phase` does the same check over the new master. The
-clock is `date +%s` on the NAS, printed as the first line of a script,
-before that check.
+The walk before packing also enters ignored paths for these checks (see
+"Ignore and timeless rules").
 
-A listing gives, for each entry of an object's directory, its name, its
-kind, its size and its modification time, dot names included. A name
-with a byte outside `[A-Za-z0-9._%-]` is left out. A directory
-that cannot be read or searched (`objects/`, an object's directory) is an
-I/O error, never an empty listing. The metadata pull is
-one script for all objects: for each object it prints the
-`meta.<digits>` files (no leading zero) above the highest version this
-machine has, and antiq then applies the version rules to the names. The
-checksum of a file is computed on the NAS by the first of `sha256sum`,
-`shasum -a 256`, `sha256 -q` and `openssl dgst -sha256 -r` that hashes
-`abc` to its known digest; no such tool makes the remote broken. That
-tool alone then hashes the file. A file it cannot read, a result that is
-not 64 lower-case hexadecimal digits, or a name that is not a regular
-file is an I/O error with the tool's message and does not make the
-remote broken. So does a NAS whose `stat` works in neither the GNU (`-c`) nor
-the BSD (`-f`) form. Every file name given to the remote is one path component, as
-on the path remote. The SSH remote accepts only names from
-`[A-Za-z0-9._%-]` other than `.`, `..` and a name with a leading `-`,
-for transfers, temp names and partial names alike, and refuses any
-other with `InvalidName` before it runs a command: rsync before 3.2.4
-hands the remote path to the NAS's shell and later versions expand globs
-in it.
+Paths longer than the platform's path limit are walked, packed, verified,
+extracted and deleted relative to an open directory, never through the
+full path.
 
-Writing a temp file, creating a claim and renaming a temp do not make
-anything durable by themselves. antiq flushes, which runs `sync` on the
-NAS, after writing a run's temp files and before their renames, and once
-more after the renames. A rename is a hard link to the final name that
-runs only when that name is free, and the temp is removed afterwards.
+## Ignore and timeless rules
 
-### Transfers
+What the `ignore` lines of the config and the `.antiqignore` files match
+is not packed, not listed and does not count for the idle check;
+`archive` deletes it with the folder. The default is
+`ignore = [".DS_Store"]`. A typical use is `node_modules/`, which can be
+fetched again.
 
-On the SSH remote, live packages and archives travel with rsync 3.1 or
-later; openrsync is refused. The local rsync is resolved at
-`remote add` (the configured path, else the first of `PATH`,
-`/opt/homebrew/bin`, `/usr/local/bin` that passes the probe), stored as
-an absolute path, and probed on every run. The NAS's rsync and hash tool
-are probed at `remote add`, through the same ssh command antiq uses
-later. (ADR 0049)
+What the `timeless` lines of the config and the `.antiq-timeless` files
+match is packed but does not count for the idle check, such as `.git/`,
+which changes on every `git fetch`. The default is empty.
 
-rsync runs with `LC_ALL=C`, every `RSYNC_*` variable and `CVSIGNORE`
-removed from its environment, `--stats`, `--no-human-readable`,
-`--no-whole-file`, `--ignore-times` and `--timeout`, never with
-`--inplace` or `--append`. `--ignore-times` turns off rsync's skip of a
-destination whose size and modification time equal the source's, so a
-temp name seeded from the current package goes through the delta
-comparison even when both happen to match. A new live package is seeded on the NAS as a hard link to
-the current one and transferred onto it; the link is made only when the
-current package is a regular file and no symlink and the temp name is
-free, and a seed that does not link costs the transfer of the whole
-file, not an error. No transfer of a live package deletes files. An
-upload without a seed goes onto its temp name with
-`--partial-dir=.antiq-partial`, so an interrupted upload resumes; a
-seeded upload has no partial directory. Archives are fetched for
-unearthing into `.antiq/tmp/`.
+The syntax of both kinds is gitignore's. Config lines are anchored at each
+piece's top, a file's lines at its directory. A pattern without a `/`
+except at its end matches at any depth below; a `/` at the start or in the
+middle anchors it, so `docs/*.log` in `a/.antiqignore` matches
+`a/docs/x.log` but not `a/b/docs/x.log` (that needs `**/docs/*.log`). The
+nearest file wins, then those further out, then the config; within one
+file the last matching rule wins. A directory that a rule matches hides
+everything below it, and a `!` rule cannot bring back a path inside it. An
+ignored directory's rule files are not read. Only a regular file named
+`.antiqignore` or `.antiq-timeless` is read as a rule file. A rule that is
+not valid, a file that is not UTF-8 text and a file that cannot be read
+each refuse the piece, with the file and line named ("rule file:
+<path>:<line>"), so a piece with broken rules is never called due.
 
-A final name that holds a file with the SHA-256 of the upload counts as
-put and nothing is transferred; other content there, or an entry that
-is not a regular file, is a conflict and nothing is replaced. This is
-checked before the transfer and again at its end. The command that ends
-an upload runs `sync`, checks the size on the NAS against the local
-file, links the temp name to the final name only when that is free,
-removes the temp name and runs `sync` again. A wrong size fails the
-transfer and leaves the temp name.
+**Ignored subtrees are still checked.** The walk before packing enters
+ignored paths too, without hashing them, for mount points, nested
+collections, unreadable entries, exclude entries, locked entries and the
+depth limit, since `archive` deletes them with the folder. Only packing,
+the listing and the idle check leave them out.
 
-A failed rsync is told apart as a failed command is: ssh's own lines in
-rsync's output, or in the master connection's log written during the
-transfer, decide between away and broken, so a master that drops during
-a transfer is away. Without such a line, exit 255 is broken and every
-other exit is a failed transfer, 30 (timeout) and death by a signal
-included. Exits 23, 24 and 11 are a failed transfer whatever ssh
-printed. After a failed transfer the temp name stays for the next
-attempt or is removed, and the piece stays pending.
+## Control files and markers
 
-### Several machines
+Control files never count as activity and never make a piece non-empty.
+At a piece's top a regular file is a marker (for `.antiq-pin` also a
+symlink); any other entry with a marker's name makes the piece refused
+("<name> is not a file"). Such an entry is never packed silently and
+never deleted unpacked. The two rule files are packed. `.antiq-restored`
+is not packed and is deleted with the folder. `.antiq-pin` never reaches
+packing, since a pinned piece is not archived.
 
-Several machines may share one remote. Putting an ID back with a
-metadata version that is no longer current is a conflict:
+`.antiq-restored` holds one line, `restored <UTC time>[ version <stamp>]`,
+and is read only as a regular file at the piece's top. `unearth` and
+`fork` write it (see there).
 
-| Choice | Remote | This machine |
-|--------|--------|--------------|
-| mine | new version: my archive current, theirs superseded | keeps tracking its version |
-| theirs | nothing written | my local archive goes through trash; tracking follows theirs |
-| fork | my archive becomes version 1 of a new ID; theirs stays current | tracks the new ID |
+Markers (`.antiq-restored`, `.antiq-pin`) are written in `.antiq/tmp/` and
+renamed over their place, then the piece's top is flushed; a leftover
+stays in `tmp/`, which the repairs empty. A top without owner write gets
+it for the rename and its recorded mode back right after. A top on another
+device than `.antiq/tmp/` is refused with the reason "mount point".
 
-A superseded archive stays referenced until `resolve <piece>
---drop-superseded` removes it, through the brake, in a new version.
-`status` lists pieces with superseded archives; `unearth --version`
-brings one back. The machine whose version lost learns it at its next
-sync. (ADR 0017, ADR 0030)
+## Idle
 
-A pending change that touches only metadata, such as `verified` times
-or history entries, is no conflict when the remote has a newer version:
-it is applied on top of that version and committed as the next one. A
-`verified` time is dropped when that version no longer references its
-payload, the local copy of the payload is kept, and history entries
-merge. (ADR 0017)
+The idle clock of a piece is the later of
 
-`sync` pulls metadata first. A local archive is dropped only when that
-payload, by its checksum, is referenced by the remote's metadata
-(current or superseded) and its remote check is recorded (ADR 0043). A
-local archive that no remote metadata references is a conflict and is
-never dropped. When the remote's current archive is newer than the local
-one, the newer one is fetched while the piece is within the local tier;
-otherwise only the metadata is updated.
+- the newest modification time of the regular files that are not ignored,
+  not timeless and not control files, and
+- the time in `.antiq-restored`, if there is one.
 
-An unearthed folder is diverged when the remote's current metadata
-version is neither the one taken out nor one this machine committed
-since. `archive` and `sync` refuse a diverged folder until it is
-resolved.
+Directories, symlinks and special files do not count. A piece is due when
+its idle clock is older than `idle_days`; a day is 24 hours, and a piece
+exactly that old is not yet due. (ADR 0013, ADR 0037)
+
+A file time or a marker time in the future counts like any other, so the
+piece is not due before that time has passed; `status` lists such files
+and markers so the user can fix them.
+
+A marker that cannot be read or parsed fails the idle check of that piece
+with the file named, so the piece is never called due by mistake.
+
+A piece without a countable file is empty: never archived. A piece that
+the walk could not read completely has no verdict. (ADR 0038)
+
+## Pins
+
+A piece with a `.antiq-pin` file at its top is pinned: it is never
+archived, still mirrored by `push`, and shown as pinned. A regular file or
+a symlink of that name pins the piece, a dangling symlink included. A
+directory or any other entry of that name is not a pin: it refuses the
+piece (see "Control files and markers"), and `unpin` refuses to remove it.
+`pin` and `unpin` create and remove the file and refuse on a piece whose
+folder is not present. A piece that is in the state asked for is left as
+it is and reported as such. A pin and its removal are durable when `pin`
+and `unpin` return: the file and the entry in the piece's directory are
+flushed. The pin is checked before the idle and empty tests. (ADR 0024)
+
+## Store layout
+
+```text
+<collection>/
+  projects/scanner/                     a live piece (a plain folder)
+  .antiq/
+    config.toml
+    lock
+    tmp/                                staging; pack/<stamp>/<piece path>/ while archiving
+    trash/                              folders taken out, not yet checked again
+    doomed/                             folders checked again, being deleted
+    recovered/                          folders given back after a failed removal
+    pieces/
+      old/client-site/
+        old-client-site--2026-09-03T101500.tar.zst
+        old-client-site--2026-09-03T101500.tar.zst.sha256
+        old-client-site--2026-09-03T101500.sha256.zst
+```
+
+- The folder under `.antiq/pieces/` is the piece's path, in its stored
+  spelling. A folder there is a piece of the store when it holds at least
+  one `.tar.zst`.
+- File names are `<name>--<version stamp>` plus the suffix. `<name>` is
+  the piece path with every character outside `[A-Za-z0-9._]` replaced by
+  `-` and repeated `-` collapsed. It is for people only: nothing parses
+  it, it need not be unique, and it is cut from the front at a `-`
+  boundary (inside a single over-long component at a character boundary)
+  so the longest file name stays within 200 bytes. A file name is parsed
+  only for its stamp and suffix: it is split at the last `--`, and the
+  suffix is `.tar.zst`, `.sha256.zst` or `.tar.zst.sha256`. (ADR 0060)
+- A file in a store folder whose name does not parse is ignored by every
+  command and by the repairs, keeps its folder from counting as empty,
+  and `status` lists it as a note.
+- Versions order by time, then by counter as a number; no counter counts
+  as 1.
+- The version time of `archive` is the UTC second at which the piece's
+  packing starts. A new stamp for a piece is that second without a counter
+  when no file in the piece's store folder and no directory
+  `tmp/pack/<stamp>/<piece path>` uses it; otherwise the same second with
+  counter 2, then 3, and so on, the first one unused.
+- The checksum file holds one line, `<hash>  <archive file name>`, with
+  the bare file name, so `shasum -a 256 -c <checksum file>` run in the
+  store folder checks the archive. The listing is described under
+  "Listing format".
+- Every directory antiq creates (store folders under `pieces/`, parents
+  above an unearth destination, the `<stamp>/` chains in `trash/` and
+  `doomed/`) is flushed together with its parent before any step relies on
+  it, in particular before `archive` deletes a folder and before `unearth`
+  deletes a version.
+- **A version exists if and only if its `.tar.zst` exists.** The
+  `.tar.zst` is moved in last and deleted first. (ADR 0030)
+- When the last version of a piece goes, its folder under `pieces/` and
+  every parent that became empty go with it.
+- There is no state file: everything antiq needs follows from the
+  folders, the files of the versions, and the control files.
+- Stores in the old layout (`.antiq/objects/`) are not converted.
+
+## Damage
+
+antiq's own crashes never leave the states below behind for good (see
+"Repairs at the start of a run"). They come from outside: a file deleted
+by hand, an incomplete copy back from the target, a disk error. None of
+them is deleted or rewritten automatically. (ADR 0062)
+
+- **Incomplete version:** a listing or `.tar.zst.sha256` without its
+  `.tar.zst`. A store folder that holds sidecars only is not a piece of
+  the store, but its incomplete versions are found and reported. `list`
+  marks an incomplete version, `grep` skips it, `status` reports it, and
+  `forget` removes it, also in such a folder, by piece path and stamp.
+- **Damaged version:** a `.tar.zst` whose listing or checksum file is
+  missing; or whose size differs from the `archive-bytes` its listing
+  records (archive files never change once stored); or whose listing does
+  not decode to its end (zstd checksum) or lacks a parsable `piece`,
+  `archived` or `archive-bytes` line; or whose checksum file is not
+  exactly one checksum line for the archive's name. `status` reports it;
+  `list` marks what it sees in the listing's head; `rebuild` repairs a
+  missing sidecar; `fork` can still extract it, with a warning and
+  without the comparison against the listing; `unearth` refuses it.
+- **Newer format:** a listing whose first line names a higher listing
+  format than antiq knows is neither incomplete nor damaged. `list` and
+  `status` mark it "newer format", `grep` skips it with a warning,
+  `unearth`, `fork` and `rebuild` refuse it with the error kind
+  `format_too_new`, and `forget` takes it by its stamp. `push` neither
+  refuses nor counts it.
+- `push` refuses while either kind exists, naming the exact `forget` or
+  `rebuild` command. It decodes every listing in full for that, in
+  parallel like `grep`, and so does `status`. A scheduled push stops there
+  until the user acts.
+- A change of an archive file that keeps its size is not detected
+  locally.
+
+## Listing format
+
+A listing is a SHA-256 checksum list, zstd-compressed (level 3, with the
+content checksum), with antiq's metadata in comment lines. `shasum -a 256
+-c` and GNU `sha256sum -c` both skip lines that start with `#`, also with
+`--strict`. A comment after the path on the same line does not work: both
+tools read it as part of the file name.
+
+```text
+# antiq listing 1
+# piece         projects/scanner
+# archived      2026-11-04T09:02:11Z
+# archive       projects-scanner--2026-11-04T090211.tar.zst
+# archive-bytes 1093744120
+# files         48211
+# bytes         1288490188
+#
+# dir   0755  2026-10-30T17:40:00Z                 -  src/
+# file  0644  2026-10-30T17:44:02Z              4211  src/main.rs
+3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b  src/main.rs
+# hard  0644  2026-10-30T17:44:02Z                 -  src/main-copy.rs	=> src/main.rs
+3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b  src/main-copy.rs
+# link  0755  2026-10-30T17:41:00Z                 -  src/latest	-> main.rs
+```
+
+- **Header:** `piece` (the stored spelling), `archived` (the version time,
+  the one in the file name), `archive` (the archive file's name),
+  `archive-bytes` (its size, written when packing finishes), `files` and
+  `bytes` (count and total size of the regular files, so `list` and
+  `status` read only the head of a listing). The header lines come in
+  this order, after the first line `# antiq listing 1` (a listing whose
+  first line names a higher number is of a newer format, see "Damage"), and end with a
+  line holding only `#`. A version made by `import` adds `imported <time>`,
+  the real time of the import; a listing written by `rebuild` adds
+  `rebuilt <time>`.
+- **Entry lines:** after `# `, four fixed-width fields: the type, left
+  aligned in 4 characters; the mode as 4 octal digits; the UTC time with
+  `T` in 20 characters; the exact size in bytes, right aligned in 16
+  characters, or `-`. Two spaces separate the fields and two spaces
+  separate the size from the path, which runs to the end of the line and
+  starts at byte offset 54. A link line separates path and target with one
+  tab: `<path>\t-> <target>`.
+- **Types:** `dir` (the path ends in `/`), `file`, `link`, and `hard` for
+  a hard link, written `<path>\t=> <target>` with size `-`; the archive
+  stores it as a tar link member, and it does not count in `files` or
+  `bytes`, which count stored data once. Special files are not archived
+  and have no line.
+- **Checksum lines:** every `file` and `hard` line is followed by a
+  standard checksum line for its path, so `shasum -c` checks hard links
+  like any file.
+- **Escaping in checksum lines:** a path containing a newline or a
+  backslash gets a leading `\` on the line, with newline written `\n` and
+  backslash `\\`; nothing else is escaped, a carriage return or tab stays
+  raw. Both macOS `shasum` and GNU `sha256sum` read that. GNU's own `\r`
+  escape is not used.
+- **Escaping in comment lines:** never a leading backslash. Inside paths
+  and link targets, backslash, newline, tab and carriage return are
+  written `\\`, `\n`, `\t` and `\r`.
+- A test listing with such names passes `shasum -a 256 --strict -c` and
+  `sha256sum --strict -c` with exit 0.
+- An archive unpacks to one top-level directory named after the folder
+  when it was packed; the listing has no line for it, and its paths are
+  relative to it. The hand check therefore runs inside that directory, for
+  example after `tar --zstd -xf <archive file>`.
 
 ## Packaging
 
-A Packager trait packs, verifies, lists and unpacks. Package formats
-have ids such as `tar+zstd/1`. Archives and live packages are both tar
-compressed with zstd, with different settings, and with zstd's content
-checksum, which `tar+zstd/1` implies. (ADR 0019)
+A Packager trait packs, verifies, lists and unpacks. Archives are tar
+compressed with zstd, with zstd's content checksum. (ADR 0019)
 
 Tar is written in-process with hand-built GNU headers: mode masked to
 permission bits, uid and gid 0, empty owner names, the modification time
-in whole seconds (the floor of the file's time, times before 1970
-clamped to 0 and reported), no extended attributes, entries sorted by
-path bytes, hard links stored as links, special files skipped and
-reported. Members follow the byte order of their paths below the
-top-level directory, without the trailing slash of directories. A hard
-link names the first path in that order that holds the same file as its
-target. A symlink's target is stored as the bytes the filesystem holds.
-Each file is read through a reader limited to the size in its
-header; a short read is padded with zeros and marks the file as changed.
-Each file's SHA-256 is computed in the same read and written to the
-listing. Sparse files are stored in full; `archive` warns when a piece's
-apparent size exceeds its allocated size by more than 1 GiB. (ADR 0050)
+in whole seconds (the floor of the file's time, times before 1970 clamped
+to 0 and reported), no extended attributes, entries sorted by path bytes,
+hard links stored as links, special files skipped and reported. Members
+follow the byte order of their paths below the top-level directory,
+without the trailing slash of directories. A hard link names the first
+path in that order that holds the same file as its target. A symlink's
+target is stored as the bytes the filesystem holds. Each file is read
+through a reader limited to the size in its header; a short read is padded
+with zeros and marks the file as changed. Each file's SHA-256 is computed
+in the same read and written to the listing. Sparse files are stored in
+full; `archive` warns when a piece's apparent size exceeds its allocated
+size by more than 1 GiB. (ADR 0050)
 
 An archive holds one top-level directory, named after the folder when it
-was packed, with the piece's entries below it. That directory is the
-first member and has the mode and modification time of the piece's top
-directory. Listings, the strict
-verify and reclaiming compare the paths below it, so neither that name
-nor the folder's current name counts: a piece renamed by `fork --name`,
-unearthed with `--to` or imported with `--path` compares like any
-other. Unearthing extracts the directory's contents into the target.
-Each file, symlink and directory is created by antiq itself through open
-directory handles, never through a symlink, and a name that is already
-taken fails the extraction. Directories keep owner access while their
-members are written; once all members exist, the stored modification
-time and then the stored mode of every directory are set, the deepest
-first, and the target's modification time last. A symlink gets its stored
-mode where the platform can change it (macOS) and keeps the platform's
-mode where it cannot (Linux). The compressed stream is read to its end,
-so a failing content checksum or data after the end of the tar stream
-fails the extraction. (ADR 0050)
+was packed, with the piece's entries below it. That directory is the first
+member and has the mode and modification time of the piece's top
+directory. Listings and the strict verify compare the paths below it, so
+neither that name nor the folder's current name counts: a piece renamed by
+`fork --name` or imported with `--as` compares like any other. Unearthing
+extracts the directory's contents into the target. Each file, symlink and
+directory is created by antiq itself through open directory handles, never
+through a symlink, and a name that is already taken fails the extraction.
+Directories keep owner access while their members are written; once all
+members exist, the stored modification time and then the stored mode of
+every directory are set, the deepest first, and the target's modification
+time last. A symlink gets its stored mode where the platform can change it
+(macOS) and keeps the platform's mode where it cannot (Linux). The
+compressed stream is read to its end, so a failing content checksum or
+data after the end of the tar stream fails the extraction. (ADR 0050)
 
-Archives are compressed with zstd at level 19 with long-distance
-matching and a 128 MiB window, at the default job size of 64 MiB.
-(ADR 0051) Live packages are compressed at level 3 in rsyncable mode,
-with a job size of 512 KiB and no long-distance matching. The zstd
-version is pinned, and each package records the zstd version and
-parameters. (ADR 0018, ADR 0052) The `encoder` record holds `zstd` (the
-version), `level`, `rsyncable`, `job_size`, `long_distance_matching` and
-`checksum`. Every decoder antiq creates sets the maximum window to
-128 MiB.
+Archives are compressed with zstd at level 19 with long-distance matching
+and a 128 MiB window, at the default job size of 64 MiB. (ADR 0051) Every
+decoder antiq creates sets the maximum window to 128 MiB.
 
-All compression in a run shares one pool of one worker per core. A
-piece smaller than one job gets one worker, larger pieces take up to the
-free workers, and several pieces are compressed in parallel. The number
-of compressors in flight is also limited by memory against
-`memory_percent` of RAM: an archive encoder counts 448 MiB plus 160 MiB
-per worker, since zstd allocates a fixed round buffer for each encoder
-with long-distance matching. A live encoder counts 4 MiB plus 2 MiB per
-worker. When nothing else is compressing, one
-worker is always granted, with a warning when the memory limit is below
-the cost of an encoder with one worker. A compressor that finds no free
-worker or not enough memory waits until another finishes, and waiting
-compressors are served in the order they asked.
+All compression in a run shares one pool of one worker per core. A piece
+smaller than one job gets one worker, larger pieces take up to the free
+workers, and several pieces are compressed in parallel. The number of
+compressors in flight is also limited by memory against 25 % of the
+machine's physical memory: an archive encoder counts 448 MiB plus 160 MiB
+per worker. When nothing else is compressing, one worker is always
+granted, with a warning when the memory limit is below the cost of an
+encoder with one worker. A compressor that finds no free worker or not
+enough memory waits until another finishes, and waiting compressors are
+served in the order they asked.
 
-An optional exclude list, `collection.live_exclude`, empty by default,
-applies to live packages only; archives hold the whole tree except junk
-files. Each entry is a path relative to the collection root. The entry
-and everything below it is left out of the live package and of its
-manifest. A piece whose top directory is an entry, or lies below one, has
-no live package. The packer reports the entries that left something out
-of a package, and `sync` records them in the live payload as the key
-`left_out`, a list of paths in the escaped form of the metadata.
-
-Symlinks are archived and restored as they are, whatever their target.
-An archive with a member whose path leads outside the piece is refused,
-and unearthing never writes through a symlink. (ADR 0027)
+Symlinks are archived and restored as they are, whatever their target. An
+archive with a member whose path leads outside the piece is refused, and
+unearthing never writes through a symlink. (ADR 0027)
 
 Before it writes anything, extraction reads the whole package and refuses
 it for the first member that is absolute or has a `..` component; lies
-outside the one top-level directory; is a kind other than file,
-directory, symlink or hard link; appears twice; sits in a directory that
-an earlier member did not create or in something that is not a
-directory (so never below a symlink); lies more than 512 directory
-levels below the top-level directory; is a symlink without a target or
-with a NUL in it; is a hard link to anything but a regular file that an
-earlier member created in the archive; or has a mode or modification
-time that does not parse or is beyond 63 bits of seconds. Paths are
-judged by the names the archive carries, including those of GNU long-name
-and pax records, and by their exact bytes, so `a/x` is not placed in a
-directory `A`. Long-name, long-link and pax records above 64 KiB, sparse
-members, and a pax `size` that differs from the member's header size are
-refused as well, and so is a package without members. The package is
-decompressed three times: once for the
-records, once for the members and once to extract. (ADR 0050)
+outside the one top-level directory; is a kind other than file, directory,
+symlink or hard link; appears twice; sits in a directory that an earlier
+member did not create or in something that is not a directory (so never
+below a symlink); lies more than 512 directory levels below the top-level
+directory; is a symlink without a target or with a NUL in it; is a hard
+link to anything but a regular file that an earlier member created in the
+archive; or has a mode or modification time that does not parse or is
+beyond 63 bits of seconds. Paths are judged by the names the archive
+carries, including those of GNU long-name and pax records, and by their
+exact bytes, so `a/x` is not placed in a directory `A`. Long-name,
+long-link and pax records above 64 KiB, sparse members, and a pax `size`
+that differs from the member's header size are refused as well, and so is
+a package without members. The package is decompressed three times: once
+for the records, once for the members and once to extract. (ADR 0050)
 
 ### Verifying
 
-A strict verify gates archiving and unearthing. It reads the stream to
-its end and checks its integrity. A cut or corrupt stream, a tar stream
+A strict verify gates archiving and unearthing. It reads the stream to its
+end and checks its integrity. A cut or corrupt stream, a tar stream
 without its end marker (two zero blocks after the last member), nonzero
-data after the end of the archive, an empty archive, a first member that is
-not a directory, a member outside the top-level directory, a member path
-that is not a plain relative path, a path that occurs twice, a hard link
-that does not name a file listed before it, a member that is neither
+data after the end of the archive, an empty archive, a first member that
+is not a directory, a member outside the top-level directory, a member
+path that is not a plain relative path, a path that occurs twice, a hard
+link that does not name a file listed before it, a member that is neither
 file, directory, symlink nor hard link and a modification time beyond 64
 bits make the package damaged.
 
-Then it compares every member with the tree on disk (type, size,
-content hash, modification time in whole seconds with the same clamp,
-mode, link target) and requires equal path sets under the same walk
-rules. The walk is the one packing uses, so a tree with an unreadable
-entry or a mount point is refused. A file with several names must be
-stored as packing stores it: the first path in byte order is the file
-and the others link to it. Junk files are left out on both sides.
-Special files are not archived and are not compared. Symlink modes are
-not compared, since Linux cannot set them.
+Then it compares every member with the tree on disk (type, size, content
+hash, modification time in whole seconds with the same clamp, mode, link
+target) and requires equal path sets under the same walk rules. The walk
+is the one packing uses, so a tree with an unreadable entry or a mount
+point is refused. A file with several names must be stored as packing
+stores it: the first path in byte order is the file and the others link to
+it. Ignored paths are left out on both sides. Special files are not
+archived and are not compared. Symlink modes are not compared, since Linux
+cannot set them.
 
 On a user's folder, directory modification times are not compared, the
-top-level directory's included, because creating a junk file such as
-`.DS_Store` changes its directory's time without changing what is
-archived. The top-level directory's mode is compared with the mode of
-the first member. On antiq's staging, directory modification times are
-compared, since the final pass of the extraction sets them from the
-package, and the top-level directory's modification time is compared but
-not its mode: the staging root keeps the mode its maker gave it until the
-piece is moved into place. A staging directory whose mode keeps its
-owner out gets owner access for the read, and its mode is put back
-afterwards. A user's folder is never changed.
+top-level directory's included. The top-level directory's mode is compared
+with the mode of the first member. On antiq's staging, directory
+modification times are compared, since the final pass of the extraction
+sets them from the package, and the top-level directory's modification
+time is compared but not its mode: the staging root keeps the mode its
+maker gave it until the piece is moved into place. A staging directory
+whose mode keeps its owner out gets owner access for the read, and its
+mode is put back afterwards. A user's folder is never changed.
 
 While it reads, the verify records each entry's lstat (kind, size,
 modification time in nanoseconds, ctime, inode), special files and the
@@ -1265,1317 +577,760 @@ top-level directory included, and the members of the package in archive
 order. A file that is replaced, resized or touched while it is read is
 reported as changed while read. (ADR 0033)
 
-Reclaiming compares the folder with the archive's listing: path, type,
-size, modification time, mode, link target and content hash. Directory
-modification times and junk files do not count, junk files are left out
-of the listing side too, and the symlink modes are not compared (Linux
-cannot set a symlink's mode). The top-level directory has no line in the
-listing and is not compared. A file that is replaced, resized or touched
-while it is read is reported as changed while read. A folder whose walk
-finds a problem (an unreadable entry, a mount point) is refused. The
-comparison applies no exclude entries, so the caller walks the folder
-with the collection's rules first and refuses a piece that contains an
-excluded path. The comparison also hands back the lstat record of the
-folder that the deletion steps compare against. It requires a local
-archive that passes the stream check or a remote copy whose check is
-recorded; otherwise the piece is not reclaimed and is listed as pending
-remote work. (ADR 0033, ADR 0035)
-
-A tolerant verify is used for live packages. The walk's record of each
-file is the state before its read. A file whose lstat (type, size,
-modification time, ctime, inode) differs from that record after its read,
-that read short, or that vanished after its read, discards the package
-being written and restarts the piece with a new walk. So does a file that
-was replaced between the walk and its open, by a symlink, a directory or
-another file, or by a change above it. `live_retries` counts the
-restarts, so a piece is tried `live_retries` + 1 times; then the piece is
-skipped for this run and shown as "backup stale since <time>". A file that
-is gone when the packer comes to open it is dropped from the package and
-from the manifest. An entry that a restart's walk lost between listing
-its directory and reading it counts as one more change; in the walk made
-before the first attempt it makes the piece unreadable (see "Walks"). The
-stream checksum is verified before upload: the finished package is read
-back through the decoder, which checks the frame, and its SHA-256 must be
-that of the bytes written.
-
-### Change detection
-
-Each live package has a local manifest, a JSON file with a `format` of
-1 and one entry per file, directory and symlink the package holds, the
-piece's top directory included: path (escaped form), type, size,
-modification time and ctime in nanoseconds, and inode. The entries are
-sorted by path bytes. Fifos, sockets and devices are not packed and are
-not in the manifest. A live piece is packed again when its tree differs
-from the manifest: a path was added or removed, or the type, size,
-modification time, ctime or inode of a path changed. A manifest that
-cannot be read counts as a tree that differs. The manifest file also
-holds the top-level key `package`, the SHA-256 of the package built from
-it. A tree counts as unchanged only when the manifest names the checksum
-of the newest live payload of this machine; a manifest without the key
-counts as different. When the new package has the same SHA-256 as the
-current one, only the manifest is replaced: no new version, no transfer,
-no history entry. The first sync after unearthing packs once. A piece
-that `backup_live = false` or `live_exclude` no longer lets `sync`
-refresh gets `stale_backup_since` from the first run that notices, if it
-has a live package of this machine and no mark yet; the package is not
-deleted for that reason.
-
 ## Operations
 
-Commands that change state take an exclusive lock on `.antiq/lock` and
-write their pid, machine and start time into it. A command that finds
-the lock held fails at once with exit 1 and names the pid and start
-time, when the lock file has them: a run that has taken the lock but not
-yet written them is named by neither. Read-only commands and dry runs
-take no lock; `status`, `find` and dry runs print a note while a run
-holds it, read from the pid in the lock file without trying the lock.
-The note is absent in the moment between a run taking the lock and
-writing the file. A collection on an SMB or NFS mount gets a warning.
+Every command prints readable text on a terminal and has `--json`. Data
+goes to stdout, messages to stderr.
 
-Every state-changing run, right after taking the lock, in this order:
+**Dry runs.** Every command that changes something has `-n`/`--dry-run`:
+`init`, `archive`, `unearth`, `fork`, `forget`, `rebuild`, `import`,
+`pin`, `unpin` and `push`. A dry run takes no lock and changes nothing.
+It computes the repairs read-only and lists them first, as actions of
+kind `repair` (each naming the version or tree it would delete, rename
+back or move to `recovered/`); its other actions assume the repairs were
+done. A dry run that finds the lock held says so, names the holder and
+lists no repairs, since the running command owns those directories. It
+exits 0, and under `--json` the plan carries `pid` and `started`. Each
+command's section says what else its dry run prints. On the console a
+plan is one `Would ...` line per action, or `Nothing to do.` when there
+is none. Under `--json` the plan is JSON (see "JSON output"). (ADR 0046)
 
-- finishes `removing` entries, for a folder still in place and for a
-  tree in `.antiq/trash/<ulid>` alike, by comparing the tree with the
-  listing of the archive payload the entry names (read from the current
-  metadata) before deleting it, since the lstat record of the verify does
-  not survive a crash. A tree in the trash decides over a folder at the
-  path. A tree that holds nothing the archive lacks is deleted and the
-  entry set to `gone`: only paths are missing from it and every remaining
-  path equals the listing, which is what an interrupted delete leaves (a
-  directory whose owner access was added to empty it counts as equal).
-  A tree that differs in any other way, or that cannot be compared (no
-  payload named, no metadata, no listing, a listing or a walk that cannot
-  be read), is kept as unearthed at the committed version, which is not
-  recorded when the payload cannot be found: a trashed one is renamed
-  back to its path, and moved to `.antiq/recovered/<ulid>-<time>/` (the
-  time as `YYYYMMDDTHHMMSSZ`) when it cannot be renamed back (the path is
-  taken, another `unearthing`, `live` or `removing` entry holds it, or the
-  rename is refused), and its entry becomes `gone`. A folder in place that
-  another such entry holds is left to that entry, and the entry becomes
-  `gone`. The move is flushed, with the directory it came from, before the
-  entry is written. A `recovered/` tree of the entry that is newer than
-  the entry means the move already happened: the entry becomes `gone` and
-  a folder at the path is a new piece. A tree that cannot be moved or
-  deleted stays in the trash, with a warning, and so does a tree whose
-  presence in the trash cannot be established;
-- empties `.antiq/trash/`, `.antiq/tmp/` and `.antiq/staging/`, except
-  the trash trees of IDs whose tracking entry cannot be read and of the
-  entries above that stayed; an entry that cannot be removed after one
-  retry with owner write added stays, with a warning, and does not fail
-  the run;
-- removes the temp files an interrupted atomic write left in `.antiq/`
-  and below it, outside `.antiq/recovered/`: regular files named
-  `.<name>.<pid>.<n>.tmp`;
-- turns an `unearthing` entry whose folder is in place into `live`, with
-  the time the entry was written (recorded in the entry) as its
-  unearthing time, when the object's metadata records that unearth: its
-  history holds the `unearth` entry of this machine at that time. The
-  folder may differ from the archive then, since a difference is an edit
-  of the unearthed piece. Without that record the folder has to equal
-  the listing of an archive payload of the version the entry records
-  (any such payload the entry holds, or any of the version when it holds
-  none), and the repair first records the metadata change: lifecycle
-  `live`, owner this collection, the entry's path and name, history
-  `unearth` at the entry's time. A change that cannot be written, or
-  metadata that cannot be read, leaves the entry `unearthing` for the
-  next run, with a warning. The version
-  taken out reads `pending` once the change is recorded.
-  Any other `unearthing` entry is dropped: it goes back to `gone` when it
-  holds local payloads or committed versions, and is removed otherwise. A
-  folder at its path that it does not recognise, or that another entry
-  holds, becomes a new piece, reported once, unless the metadata of the
-  entry's ID is live and owned by this collection: the folder then stays
-  that piece's. An entry made while unearthing from a live package
-  records no payload version and has no listing to match, so it is always
-  dropped;
-- treats a present folder of an ID this machine committed as archived as
-  unearthed at that version, unearthed now: a `live` entry whose folder is
-  in place and whose metadata is archived and owned by this collection,
-  when this machine's newest archive payload that is not superseded is
-  newer than the entry's unearthing, or the entry has none, and is not
-  the version the entry records. The payload is added to the entry's
-  local payloads when its file is present, and the version taken out
-  follows the metadata (`pending` while a recorded change is not
-  committed);
-- writes the missing entry of an object that this collection owns and
-  whose metadata says live: `live` when a folder is at the metadata's
-  path and no other entry holds it, `gone` without local payloads when
-  there is no folder;
-- writes the missing entry of an import that stopped between its metadata
-  and its entry: an object of this collection whose metadata is still a
-  recorded change with the single history entry `import` and the single
-  archive payload of version 1, and whose archive file lies in the object
-  directory with the recorded size and SHA-256, gets an entry `gone` that
-  names that archive as its local payload, with the version taken out
-  `pending`. A file with the recorded size and other bytes is reported and
-  leaves the object without an entry;
-- removes a live manifest whose ID has no tracking entry file, and keeps
-  one whose entry file exists but cannot be read, which the run reports
-  with a warning.
+**Lock.** Every command that changes the collection (`archive`,
+`unearth`, `fork`, `forget`, `rebuild`, `import`, `pin`, `unpin`) and
+`push`, for its whole run, takes the exclusive lock `.antiq/lock` and
+writes its pid, machine name and start time into it. A command that finds
+the lock held fails at once with exit 1 and names the pid and start time,
+when the lock file has them: a run that has taken the lock but not yet
+written them is named by neither. `list`, `grep` and `status` take no
+lock and say when it is held, read from the pid in the lock file without
+trying the lock; the note is absent in the moment between a run taking
+the lock and writing the file. A collection on an SMB or NFS mount gets a
+warning.
 
-Read-only commands and `--dry-run` never touch these directories.
-`.antiq/recovered/` is never emptied.
+**Repairs.** Every locked run, `push` included, first runs the repairs
+(see "Repairs at the start of a run"). A repair that fails is a warning
+naming the path and does not fail the run.
 
-Before packing a piece, `archive` checks free space in `.antiq/`
-against the piece's apparent size, and parallel pieces reserve their
-sum. `archive` works on as many pieces at a time as the machine has
-cores. A piece's reservation lasts until the piece's package and listing are
-stored or removed. `unearth` checks for the archive's size, when it has
-to be fetched, plus the listing's total size. A piece without enough space is skipped,
-and `ENOSPC` during a step removes that step's temp output and skips the
-piece; the run exits 3.
+**Free space.** `archive` and `import` need room in `.antiq/` for a
+piece's apparent size, counted over the entries that are packed; parallel
+pieces reserve their sum, and `archive` works on as many pieces at a time
+as the machine has cores. A piece's reservation lasts until its version
+is stored or removed. `unearth` and `fork` need room for the listing's
+`bytes`; `fork` of a version without a usable listing skips the check
+with a warning. A piece without room is skipped before staging, and
+`ENOSPC` during a step removes that step's staging and skips the piece
+(exit 3).
 
-Moving a piece's top directory to another parent (into trash, into
-place) adds owner write to it first and restores the recorded mode
-right after.
+Moving a piece's top directory to another parent (into `trash/`, into
+place) adds owner write to it first and restores the recorded mode right
+after.
+
+**Exit codes.**
+
+| Exit | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | error, a held lock included |
+| 2 | usage error |
+| 3 | partial: a step failed for some pieces (packing, verifying, moving, a difference in step 6 of `archive`, a refused rename, a failed deletion, no room) |
+| 4 | target unreachable (only `push`, and 0 instead under `--if-reachable`) |
+
+Pieces the walk refuses do not change the exit code; `status` and the
+command's output name them.
+
+**Naming a version.** `unearth` and `fork` take the version as the flag
+`--version <version>`; without it they take the newest version. `forget`
+and `rebuild` take it as a positional argument. Text output shows local time with
+seconds, `--json` and pipe output UTC (RFC 3339 in JSON, the version stamp
+in pipes). The input's spelling decides how it is matched, and the two are
+never mixed:
+
+- an input containing `T` (`2026-11-04T090211`, optional `-N`) is matched
+  against the version stamps;
+- any other input (`2026-11-04 10:02:11`, or a date alone such as
+  `2026-11-04`) is matched against each version's time rendered in the
+  machine's current zone, as a prefix of that text. Near midnight a local
+  date can differ from the UTC date of the stamp.
+
+An exact match wins over prefix matches; several matches are an error
+naming each version's stamp. When two versions of one piece render alike
+in local time (the repeated hour when daylight saving time ends), text
+output adds the UTC offset. An incomplete version matches only by stamp.
+(ADR 0060)
+
+## Repairs at the start of a run
+
+There is no `reconcile` command. Every locked run (`push` included) first
+runs these repairs, in this order; a dry run lists them instead. A repair
+that fails is a warning naming the path. Whenever a tree leaves `trash/`
+or `doomed/`, the parents that became empty go too. (ADR 0059)
+
+1. **Interrupted archive step 4:** for each
+   `.antiq/tmp/pack/<stamp>/<piece path>/` whose sidecars already lie in
+   `.antiq/pieces/<path>/` without their `.tar.zst`: delete those
+   sidecars. The folder is still live, since step 5 waits for step 4.
+2. **Temporary files:** delete what `.antiq/tmp/` holds.
+3. **`doomed/`:** delete every tree there without a comparison. Directory
+   chains that hold no non-directory entry are removed as they are.
+4. **`trash/`:** rename every tree there back to its live path without a
+   comparison, or, when that is not possible for any reason (path taken,
+   a parent missing or not a directory, the rename refused), to
+   `.antiq/recovered/<stamp>/<piece path>/`; the chain inside
+   `recovered/` is created and flushed. Directory chains that hold no
+   non-directory entry are removed as they are. The piece path is the
+   shortest path below `<stamp>/` for which a version with that stamp
+   exists, matched by the volume's name equality (ADR 0054); when no
+   version has that stamp, the first component below `<stamp>/` goes back
+   as it is, which usually lands in `recovered/`. `status` names every
+   folder in `recovered/`.
+5. **Died unearth:** for each live piece whose `.antiq-restored` names a
+   version stamp, delete what is left of that version of that piece (the
+   `.tar.zst` first, if it still exists, then its sidecars), and rewrite
+   the marker to the time alone. A stamp that names nothing is simply
+   dropped from the marker. A version copied back by hand between a crash
+   and the next run is deleted, and the repair names it.
+6. **Empty store folders:** remove folders under `pieces/` that hold
+   nothing.
+
+Sidecars without a `.tar.zst` and without a staged archive file in
+`tmp/pack/` are an incomplete version and stay (see "Damage"). The
+repairs name every version and tree they delete or move.
+
+## Commands
+
+### init
+
+Makes a directory a collection: writes `.antiq/config.toml` with a new
+collection ID and the patterns given, without asking. `--pattern`
+(repeatable) sets the patterns; every other setting starts at its default
+and is changed in the config file. An invalid `--pattern` is a usage
+error: kind `usage`, exit 2. `init` creates `.antiq/` with `config.toml`,
+`tmp/`, `trash/`, `doomed/`, `recovered/` and `pieces/` in one step, so it
+exists complete or not at all. It does not look for the layout of
+`archive.sh`; its old archive files are brought in by hand with `import`.
+
+It refuses, also under `-n`, creating nothing and exiting 1, where
+`.antiq/` already exists, inside another collection (naming its root),
+where `.antiq` is a file or a symlink, and where a folder that would be a
+piece holds a `.antiq/` directory of its own, naming each such folder.
+`-n` prints the config it would write.
+
+After creating the collection, `init` prints how many folders the next
+`archive` would archive.
 
 ### archive
 
-For each idle, unpinned piece:
+`archive [<piece>]`. Without an argument, archives every live piece that
+is due. With a piece, archives that one now, however recently it changed.
+`<piece>` is a live piece's path as the patterns select it, or a search
+word that matches exactly one live piece (see "Piece references");
+anything else is refused. Only the idle check is skipped: a pinned piece
+is refused until it is unpinned, and the walk refusals and the empty rule
+still apply. `-n` lists the pieces it would archive and the ones it
+refuses, with the reason.
 
-1. Pack into `.antiq/tmp/` and verify strictly against the tree.
-2. Store the payload and listing and record the metadata change; payload,
-   listing, metadata and tracking are durable before the next step.
-3. Set the tracking entry to `removing`, naming the archive payload the
-   folder is compared with, and rename the folder to
-   `.antiq/trash/<ulid>`.
-4. Walk the trashed tree and compare it with the lstat record from the
-   verify. On any difference, rename it back and treat it as unearthed
-   at the version of the new payload; when its path is taken by then, move it to
-   `.antiq/recovered/<ulid>-<time>/` and list it in `status`.
-5. Delete it and set the entry to `gone`, keeping its local payloads.
+1. Find the pieces and judge each with the rules of "Selection", "Walks",
+   "Ignore and timeless rules" and "Idle".
+2. Pack the piece into `.antiq/tmp/pack/<version stamp>/<piece path>/`,
+   under the final file names: the `.tar.zst`, the listing and the
+   `.tar.zst.sha256`.
+3. Verify: read the whole archive file back and compare it with the
+   listing and the folder (see "Verifying"). The hash of the archive file
+   read back must equal the hash computed while writing it, and the
+   listing of the packing must equal the members the strict verify reads.
+   A folder that changes meanwhile is skipped.
+4. Move the listing, then the `.tar.zst.sha256`, then the `.tar.zst` into
+   `.antiq/pieces/<path>/`, flushing each and the directory.
+5. Rename the folder to `.antiq/trash/<version stamp>/<piece path>/`,
+   under its live spelling (one rename on the same device; a piece on
+   another device counts as containing a mount point and never gets
+   here). If the rename is refused anyway, step 4 is undone: the
+   `.tar.zst`, then the checksum file, then the listing go back to the
+   staging, flushed as in step 4 (repair 1 finishes this after a crash);
+   the folder stays, the piece is reported with the error, and the run
+   exits 3.
+6. Walk the trashed tree again and compare it with the record of the
+   verify: per entry type, size, modification time, inode and change time,
+   directories included; the top only by type, inode and modification
+   time, since the rename changed its change time. A path found on one
+   side only is a difference. This walk enters ignored subtrees for the
+   same refusals as the walk before packing (any refusal counts as a
+   difference); ignored entries and `.antiq-restored` at the top are not
+   compared. On any difference rename the tree back; when that is not
+   possible for any reason (the path is taken, a parent is missing or not
+   a directory, the rename is refused), move it to
+   `.antiq/recovered/<version stamp>/<piece path>/` instead (the chain
+   inside `recovered/` is created and flushed) and list it in `status`;
+   the version stays.
+7. Rename the tree to `.antiq/doomed/<version stamp>/<piece path>/`,
+   flush, and delete it from there. A deletion that fails leaves the tree
+   in `doomed/`, where the repairs try again; `status` names the tree and
+   its first entry in walk order, with a cause it can read (a locked flag,
+   a directory it cannot write). The error itself appears in the output of
+   the run that failed and in the warning of each later run's repair 3.
+   Whenever a tree leaves `trash/` or `doomed/`, the parents that became
+   empty are removed, up to and including `<stamp>/`.
+8. One output line per folder, a summary at the end.
 
-When a rename fails, the folder is walked and compared in place and then
-deleted there, with the entry `removing`, and a warning names the refusal.
-A folder that differs from the record of the verify stays and is
-unearthed at the version of the new payload. Uploading is left to the next
-`sync`. (ADR 0032)
+Running out of file descriptors in the walk of a piece ends the run:
+pieces already running finish, the piece and every piece not yet started
+are skipped with reason `error`, one warning names the cause, and the run
+exits 3.
 
-A write after the walk of the removal is lost. After the rename into the
-trash, only a process that held a file of the folder open before the
-rename, or has its working directory inside it, can still write. When the
-rename is refused, the folder is deleted at its path, and any write by path
-between its walk and the deletion is lost as well. The deletion lists each
-directory before it deletes the entries. A file created after the deletion
-listed its directory survives; the deletion then fails and the next run
-finds it.
+A write after the walk of step 6 is lost. After the rename into `trash/`,
+only a process that held a file of the folder open before the rename, or
+has its working directory inside it, can still write. The deletion lists
+each directory before it deletes the entries. A file created after the
+deletion listed its directory survives; the deletion then fails and the
+next run finds it.
 
 Pieces that share hard-linked files change each other's change times when
 one of them is removed. When such pieces are archived in the same run, the
-outcome of each depends on timing: it can be kept as unearthed or skipped
-with reason `differs` instead of being removed.
+outcome of each depends on timing: it can be given back instead of
+removed, or skipped with reason `differs`.
 
-The pieces `archive` takes are the ones `status` marks `idle` that are new,
-live or unearthed. Right before packing, each is walked again with the collection's
-rules and judged again. A piece that is no longer idle is left out of the
-run without a report. A piece whose walk finds an entry it cannot read, a
-mount point, an excluded path or a nested collection is skipped with that
-reason. After packing, the package file is hashed again from the disk and
-must give the hash computed while writing it, and the listing of the
-packing must equal the members the strict verify reads from the package.
-When recording the metadata change fails, the payload and listing of the
-run are removed, unless the pending metadata holds the change or cannot be
-read back to tell. Then the files stay for the repairs and the piece is
-skipped with the state named unknown.
-Running out of file descriptors in the walk of a piece ends the run:
-pieces already running finish, the piece and every piece not yet started
-are skipped with reason `error`, one warning names the cause, the report
-lists every piece as usual, the index learns of the stored listings and
-the run exits 3.
+A crash between steps 4 and 5 leaves the live folder next to a complete
+version of it; the next run may archive the unchanged folder again, which
+gives a second, identical version that `forget` removes. The same holds
+for a crash between steps 5 and 6: the repairs give the folder back, since
+`trash/` holds only folders not yet checked again.
 
-The walk of step 4 compares every entry's type, size, modification time,
-inode and change time with the record of the verify, directories
-included. The top directory is compared by type, inode and modification
-time only, as renaming it changes its change time. A path found on one
-side only is a difference, and so is a walk that fails or finds an
-unreadable entry, a mount point, an excluded path or a nested collection.
-A different tree goes back to its path and the entry becomes `live`,
-unearthed at the version of the new payload. The report lists the piece
-as kept. When the path is taken or the move back is refused, the tree goes
-to `.antiq/recovered/<ulid>-<time>/` and the entry becomes `gone`. When
-neither move works, the tree stays in the trash and the entry stays
-`removing`; the repairs of the next run judge the tree again. A step that
-fails with the entry `removing` (the delete, the entry write, a flush)
-leaves the same state, and the report lists the piece as unfinished.
-
-A new piece first looks for the object of an earlier run that died after
-it wrote the metadata and before it wrote the tracking entry: an object at
-the piece's path, owned by this collection, with archived metadata and no
-tracking entry, whose newest archive payload was made by this machine.
-The piece takes the object over, and the run goes on with its tracking
-entry, when the payload's checksum is the one in the metadata, the stored listing equals
-the payload's members and the folder equals the payload. Otherwise it gets
-a new ID.
-
-An unearthed piece that has not changed against its listing is
-reclaimed: the folder is removed the same way and the archive stays,
-with no new payload and no upload. (ADR 0035) The listing compared is
-the one of the payload version the piece was unearthed from, recorded
-in its tracking entry. Two machines can both have made that version; the
-payloads this machine holds are compared, or all of them when it holds
-none, and the piece is reclaimed when the folder equals one of them. A
-superseded payload is not compared. An entry that records no version, or
-whose version has no payload left, is compared with the newest archive
-that is not superseded. A payload whose listing cannot be read is passed
-over. The comparison applies the collection's junk list to the listing and
-to the folder, less the names that a payload it compares holds as files: a
-file packed under a name that became junk later still counts. The same
-list serves the packing of a replacement, its verification and the walks
-that check the folder before and after its removal.
-
-A reclaim records its metadata change first (lifecycle `archived`, live
-payload removed, a `reclaim` history entry), then sets the entry to
-`removing` naming the archive payload, then removes the folder by steps 3
-to 5 above. A reclaim that stops once the entry says `removing` is finished
-by the repairs of the next run. One that stops after the metadata change and
-before that leaves the entry `live`, the folder in place and the `reclaim`
-history entry, which records that the folder was found equal to the
-archive. The next run compares the folder again; a change that an earlier
-run recorded is not recorded twice, and a replacement of a folder that
-differs by then adds its own history entry. A trash tree in the way of the
-move skips the reclaim before anything is written. A folder that is no
-longer the archive when it is walked in the trash goes back as unearthed at
-the same version.
-
-A reclaim needs the archive payload: it must be in the store and pass the
-stream check with the size and SHA-256 of the metadata, or the metadata
-must record a check of the remote copy. When the local file fails and the
-remote check is recorded, a warning says that the remote copy is the good
-one, the folder is removed, and the local file and its entry stay. Without
-either, the piece is skipped with reason `pending_remote` and nothing
-changes.
-
-A changed one replaces its
-archive with a new payload, which gets the history action `archive`; the
-old payload stays. The loss is worked out against the listing of the
-payload the piece was unearthed from, chosen as for a reclaim; of several
-payloads of that version, the one the folder differs from least is the
-basis. A replacement that loses nothing happens
-without asking. Content is lost when a path was removed or when an
-entry's type, size, content, mode or link target, or a file's modification
-time, changed; the mode of a directory counts, its modification time does
-not. Then antiq
-shows what would be lost, the first ten entries and the number of the
-rest, and asks: replace, fork or skip. Skip is the default. A file that
-changed while the comparison read it refuses the piece with reason
-`error`.
-
-Replace walks the folder again after the answer and packs it. When the
-package loses an entry the question did not show, nothing is stored and
-the question is asked again with the loss as it is now; a piece that
-still changes after the third question is skipped with reason `differs`.
-Fork gives the folder a new ID the way `fork` does, and the run lists
-the piece as forked. Skip leaves the folder and the archive as they are,
-removes a decision an earlier run left pending, lists the piece as skipped
-with reason `declined` and makes the run exit 3. Without a terminal
-nobody answers: the entry gets a pending decision `replacing_with_loss`,
-written once, and the run lists the piece as needing a decision and exits
-3. Replacing, forking and reclaiming a piece remove its pending decision.
-A collection can allow replacing without asking, which replaces a loss
-too. (ADR 0036) A diverged
-piece is refused. Archiving warns about names that would not survive on
-macOS or Linux and archives the piece anyway. (ADR 0054)
-
-### sync
-
-`sync` pulls metadata, refreshes the live packages of changed pieces,
-uploads pending archives, commits recorded metadata changes, deletes a
-live package only after its archive's metadata is committed on the
-remote, and applies the tiers. (ADR 0018)
-
-The pull stores every metadata version the remote has beyond the local
-ones as the remote holds it. It then fetches each archive listing that
-the current metadata names and that is not stored here, and brings the
-member index up to date. A version whose number is stored here with other
-bytes, and a listing that does not parse, leave their object alone for
-the run and make it exit 3. A read of the remote's metadata that fails is
-repeated once; when it fails again the run warns and pulls nothing. A
-dry run repeats the read the same way; when it fails again the plan
-holds the IDs to mint and the cleanup only, and the failure is a note.
-
-After the pull, each object with a recorded change is classified once. A
-change that equals a committed version is recorded as committed when no
-newer version exists or the newest one builds on it. A change that the
-newest version builds on without equalling any stored version, because
-the version it was committed as is not on the remote any more, is
-recorded as committed as the highest number in `committed_versions` above
-the highest version the change builds on and below the newest, and the
-recorded change is removed. When no such number is listed, it is a
-conflict that names the newest version as the one holding the change. A
-change that does not build on the newest version, except a change that
-touches only metadata, which is rebased as "Several machines" says, and
-a change with an open `version_conflict` decision, is a conflict:
-nothing of it is uploaded or committed, the piece is skipped and the run exits 3. Any other change is
-committed: the payloads and listings it names that the previous version
-did not are uploaded, at most `remote_jobs` objects at a time, the remote
-is flushed once after all uploads, also when the remote had every file
-already, and each object's metadata is then
-committed with the protocol above, at most `remote_jobs` at a time. What
-the outcome leaves behind:
-
-| Outcome | Recorded change | Tracking entry | Exit |
-|---|---|---|---|
-| committed | becomes `meta.<n>` | version taken out `pending` becomes `n`, `n` is listed in `committed_versions` | 0 |
-| overtaken | stays | `n` is listed in `committed_versions`, decision `version_conflict` | 3 |
-| contested | stays | `n` is listed in `committed_versions`; the next `sync` reads the remote again | 3 |
-| landed | stays until a second pull; then judged like an overtaken version: committed if the newer version builds on it, else a conflict | as for that outcome | 0 or 3 |
-| refused, or a failed upload or commit | stays | unchanged | 3 |
-
-A change that a newer version builds on is committed even when an earlier
-run recorded a `version_conflict` decision for it; recording the change
-as committed removes that decision, since the newer version leaves
-nothing to decide.
-
-`sync` drops no local archive when it commits. An upload stays pending
-(`pending_upload`) until the tier phase confirms the remote copy.
-
-An away or broken answer from the remote ends the run when a new check of
-the remote still finds it away or broken; if the remote is reachable the
-answer only fails the object it came to, and the run goes on. A remote
-error of another kind always fails only its object. What happened before
-the end of a run stays: uploaded files, committed versions, promoted
-changes. A run that ends so does not write `last_sync`.
-
-When the commits recorded any change as committed, `sync` then fetches
-the listings the current metadata names again and updates the member
-index, as a recorded change hides the newest version until it is
-recorded as committed.
-
-After the commits, `sync` cleans the remote (see "Committing a version"), keeping the
-temp names of uploads that are still pending. A cleanup that fails for a
-reason other than the remote's being gone is a warning and makes the run
-exit 3. A run that reaches its end writes `last_sync`.
-
-`sync` gives new pieces their ID. With `backup_live = false`, or for a
-piece the `live_exclude` list covers, it still does, and commits their
-metadata without a live payload. A pinned piece gets its ID too. The ID's
-metadata is recorded as `meta.pending` with the history action `sync`, then
-the piece's entry is written (`live`, version taken out `pending`); the
-commit of the run commits the metadata as the object's first version,
-with the live payload of the piece's first package when backing up is on. A new
-piece gets no ID while its walk reports a problem: something in it cannot
-be read, another filesystem is mounted in it, an exclude entry lies in it
-or it holds a collection of its own. The unreadable piece makes the run
-exit 3; the other three leave the exit code alone. A step that fails on one
-piece leaves that piece for the next run, whose repairs write a missing
-entry, and makes the run exit 3.
-
-Before the uploads, `sync` brings the live package of each live or
-unearthed piece of this collection up to date, when backing up is on
-and the live exclude list does not cover the piece. It builds nothing on
-metadata the pull could not read, on an object the pull left alone, or
-on a recorded change that is already committed or conflicts; those are
-left to the commit phase. A piece with a decision open or a diverged
-folder is left alone. Only objects of lifecycle `live` get a package.
-When the walk differs from the manifest (see "Change detection"), the
-piece is packed into `.antiq/tmp/`, stored in the object's directory as
-`<first 16 hex digits of the SHA-256>-<name part>.tar.zst` and recorded in
-a live payload of this machine, whose version is one above the highest
-live version of the committed version and of the other machines'
-packages. The payload replaces this machine's earlier live payload in the
-recorded change, which gets the history action `sync` unless one is
-recorded already. A package that only a replaced recorded change named
-is removed. The commit phase uploads and commits it like any other
-payload. A piece that keeps changing while it is read, after
-`live_retries` restarts, gets `stale_backup_since` if it has none, keeps
-its previous package and manifest, is listed under `unbacked` with the
-reason `stale` and makes the run exit 3; a later run that packs the
-piece, or finds it unchanged, removes the mark. A piece whose walk
-reports a problem is listed with the matching reason and not packed. A
-failure of one piece makes the run exit 3 and leaves the piece for the
-next run, except for a shortage of file descriptors, which ends the run.
-
-The same phase takes the live payloads of this machine out of every
-object of this collection whose metadata has the lifecycle `archived`,
-under the same conditions: the recorded archive is rewritten without
-them, and a committed archive that still names one gets a recorded change
-without them, with the history action `sync`. The package stays on the
-remote until the commit.
-
-After the commits and the cleanup, `sync` deletes the live package of an
-object it committed in this run when the newest committed version and every
-version above the one the change was built on name no live package of any
-machine. The package is deleted on the remote and in the object's
-directory, and the object's manifest goes with it. A conflict, a refused or
-contested commit, a failed upload, and a package that a newer package
-replaces leave the package where it is; cleanup removes the replaced one
-after the grace period. A package of another machine is not deleted. A
-delete that fails is a warning and the cleanup removes the package later;
-a delete that finds the remote gone ends the run. After a fork,
-the old ID's live package is deleted once the new ID's live package is
-committed, in the run that commits it or in a later one; a new ID that
-gets no live package leaves the old one to the cleanup of the remote. A
-dry run reads the remote and writes nothing, locally or on the remote. It
-lists what the run would do against the versions it would
-pull: the versions to pull, the listings to fetch, the changes to record
-as committed, the conflicts, the live packages to make and to delete,
-the files to upload, the commits and the removals of cleanup. The file of
-a live package to make is not named, as it is known only once the piece is
-packed. Removals that depend on a file's age are marked as
-such, since a dry run does not read the remote's clock.
-
-The archive tier starts from a piece's activity; the remote-only tier
-is measured from the archive's commit. (ADR 0042) A local archive moves
-to the remote-only tier only after the remote's identity, the payload
-and the remote copy's checksum are confirmed (computed on the NAS over
-SSH, read back past the client's file cache on a path remote), and,
-over SSH, after a NAS `sync` that followed its upload. It is then
-deleted through the trash and the time of the check is recorded.
-(ADR 0007, ADR 0043)
+`archive` checks the names of the members against the rules of macOS and
+against those of Linux and warns about each name that one of them would
+refuse. (ADR 0054)
 
 ### unearth
 
-`unearth <piece> [--to <path>] [--version <n>] [--if-reachable]`
-takes the current archive of an archived ID, or the archive with payload
-version `n`. When the remote is reachable it first pulls the metadata
-versions of the ID that this machine lacks, stores them, and says when
-the remote has a newer version than the one this machine had. A change
-recorded here that no sync has committed stays the metadata in use; the
-note then says that `sync` applies it on top. The versions of other IDs
-are left for `sync`. An archive that is not on this machine is fetched
-into `.antiq/tmp/` first, with its listing when the store lacks it.
-`unearth` checks the archive's size and
-checksum, extracts it into the staging directory, verifies the staged
-tree strictly, compares the listing with the members of the staged
-tree (a difference refuses the piece, for a listing held here and for a
-fetched one), sets the staged top directory's mode, stores a fetched
-archive and listing, writes a tracking entry `unearthing`, checks the
-target again (missing parents are created; a file, symlink or piece in
-the path refuses), renames the tree into place, records the metadata
-change, and sets the entry to `live` with the time of unearthing. When
-the rename fails, the previous entry is written back, and only then are
-the files this run stored removed. Unearthing an ID that is already
-unearthed does nothing and says where it is. (ADR 0034)
+`unearth <piece> [--version <version>]` brings a version of a piece back
+as a folder and **removes that version** once the folder is complete and
+verified. The folder is an ordinary live folder again. Archiving it later
+creates a new version. `-n` names the version, the destination path and the
+checks it would make. (ADR 0061)
 
-A plan that needs no remote (an archive this machine holds) goes ahead
-when the remote is away or broken: a note says that the remote is away,
-or is broken and why, and that the unearth works from local data; a
-broken remote's metadata is not read. A plan that needs the remote (an
-archive that is not on this machine, a live package, a fork) fails when
-the remote is away with `remote_away` (exit 4, which `--if-reachable`
-turns into exit 0 unless the remote has been away longer than
-`away_warn_days` while remote work is pending), when it is broken with
-`remote_broken` (exit 1, whatever the flag), and when none is attached
-with `no_remote` (exit 1). A run that holds the lock records whether the
-remote was reachable or away; a state file that cannot be read fails the
-run before anything is pulled. A `--dry-run` plans against the pulled
-versions without storing them, records nothing, counts the room for the
-listing of a remote archive from the remote's copy. For a remote that is
-away, broken or not attached, and for `--if-reachable`, it exits with the
-code the real run would get. A dry run that finds no room for a piece
-exits 0, like every other dry run.
+- `<piece>` is a path, or a search word that matches exactly one piece
+  (see "Piece references"); anything else is an error that lists the
+  candidates. Without `--version` the newest version is taken.
+- A damaged version is refused, naming `fork` (which extracts it with a
+  warning and keeps it), `rebuild` and copying the missing file back from
+  the target.
+- A version whose top holds a non-file with a marker's name is refused.
+- The destination is the piece's stored path. It is refused, and nothing
+  changes, when it is not one the patterns select, is excluded or lies
+  below an excluded folder, lies in `.antiq/`, inside another piece or
+  below a file or symlink, or when anything is at it, a dangling symlink
+  included. Nothing is followed through a symlink. A folder above the
+  path that the volume finds under another spelling than the path's
+  (another case, or another Unicode normalisation) refuses too. Folders
+  above the destination that do not exist are created; a failure before the
+  rename removes what was created.
+- **Order:** extract into `.antiq/tmp/extract/<n>/`; verify every entry against the
+  listing; write `.antiq-restored` at the staged top; flush every
+  extracted file and directory; check the destination path; rename into place;
+  flush the parent; delete the version (`.tar.zst` first, then the
+  listing and the checksum file, flushing between); rewrite
+  `.antiq-restored` to the time alone. No version is deleted before the
+  folder replacing it is durable. The extracted tree is flushed as
+  follows. On macOS every extracted file and directory gets a plain
+  `fsync`, then one `F_FULLFSYNC` on a file of the volume of `.antiq/tmp/`
+  runs before the rename. On Linux one `syncfs` of that volume runs, on a
+  descriptor opened before the extraction starts. On a kernel before 5.8,
+  and where `F_FULLFSYNC` or `syncfs` is refused, every file and directory
+  gets `sync_all`.
+- `.antiq-restored` holds `restored <UTC time> version <stamp>` between
+  the rename and the deletion of the version; if a crash falls in
+  between, the repairs finish the unearth (see "Repairs at the start of a
+  run"). The idle clock starts at its time.
+- There is no reclaim: an unearthed folder that is archived again,
+  changed or not, becomes a new version.
 
-The entry of an unearthed folder is not diverged, whatever the entry of
-the gone piece said.
-
-A volume without room for the listing's total size skips the piece, and
-so does a volume that fills up during the extraction; the staged tree is
-removed and the run exits 3. A step that fails before the rename leaves
-the collection as it was, the entry as it was, and removes the folders it
-made above the target.
-
-The target is the stored relative path, or `--to`, a path inside the
-collection that the patterns select. `unearth` refuses the collection
-root, `.antiq/` and everything below it, and a path at or below an
-excluded folder. It refuses a path that has a piece above it, meaning a
-folder that the patterns select or that a tracked piece holds, and a path
-that has a file or a symlink above it; nothing is followed through a
-symlink. A folder above the path that the volume finds under another
-spelling than the path's (another case, or another Unicode normalisation)
-refuses too. A taken target refuses: anything at the path, a dangling
-symlink included, or a tracked piece that holds it. Folders above the
-target that do not exist are created.
-
-A piece that is gone but whose metadata holds an archive is unearthed from
-that archive, as an archived one is. `--version` names an archive payload
-version, a superseded one included. Of two payloads that share a version,
-the one this machine holds comes first.
-
-Before extracting, `unearth` checks every member name against the
-target: names it cannot hold, name lengths, and names that collide
-under its case and Unicode rules, which come from a probe of the
-staging volume. It refuses the piece with a list of the offending
-names and the reason. A name is too long when it exceeds 255 bytes on
-Linux or 255 UTF-16 code units, counted on the name as stored, on
-macOS; a volume that stores names decomposed (HFS+) counts them in that
-form. macOS also refuses a name that is not valid UTF-8. A symlink whose target is longer than 1023 bytes on macOS or
-4095 bytes on Linux is refused for the same reason, and `archive` warns
-about it for macOS. The probe also
-tries to create a hard link and a symlink on the staging volume; a hard
-link or symlink member of the package is refused, with the others, when
-the volume has none (exFAT has no hard links). Two members
-collide when their paths are equal after Unicode normalisation (where
-the volume ignores it) and full case folding (where the volume ignores
-case); the refusal lists both names. A member more than 512 directory
-levels below the top directory is refused, since the walk, the strict
-verify and the removal of staging go no deeper. The names of the target
-path are held to the same rules as directories, and on a volume that
-stores names decomposed a folder made above the target, or the target,
-is refused when its name would be stored in another form than it is
-written. Paths are not checked for length:
-a path longer than the platform's path limit is extracted directory by
-directory. (ADR 0054)
-
-`archive` runs the same check with the macOS rules and with the Linux
-rules and warns about each name that one of them would refuse. (ADR 0054)
-
-The remote copy is kept while the piece is live. The local archive is
-dropped only under the rule in "Several machines" and is always kept
-without a remote. (ADR 0043) An archive fetched from the remote, with its
-listing, stays as the local archive while the piece is within the local
-tier, and the recorded check of the remote copy stays with it. The
-volume needs room for the listing's total size and for the archive
-before the archive is fetched; a file that is gone from the remote
-fails the run with a note to run `unearth` again.
-
-An ID without an archive (a gone piece, or another collection's live
-piece unearthed as a fork) is unearthed from its current live package:
-its stream checksum is checked and the staged tree is verified against
-the package's members. A live package has no listing, so the volume
-needs room for twice the package's size before it is fetched: the package
-itself and, as a lower bound, its extraction. A fork of another
-collection's piece creates a new ID owned here. `unearth` warns when the package of a piece of this
-collection was marked stale, and for each path the live exclude list left
-out of the package. The result has no archive payload until
-it is archived. A live piece without a live package, as with
-`backup_live = false`, cannot be unearthed this way, and `unearth` says
-so. A fork of another collection's piece writes nothing to that
-collection's ID, apart from storing the committed metadata versions it
-pulls, as `sync` does.
+Before extracting, `unearth` checks every member name against the volume it extracts to:
+names it cannot hold, name lengths, and names that collide under its case
+and Unicode rules, which come from a probe of the volume of `.antiq/tmp/`. It
+refuses the piece with a list of the offending names and the reason. A
+name is too long when it exceeds 255 bytes on Linux or 255 UTF-16 code
+units, counted on the name as stored, on macOS; a volume that stores names
+decomposed (HFS+) counts them in that form. macOS also refuses a name that
+is not valid UTF-8. A symlink whose target is longer than 1023 bytes on
+macOS or 4095 bytes on Linux is refused for the same reason. The probe
+also tries to create a hard link and a symlink on that volume; a
+hard link or symlink member of the package is refused, with the others,
+when the volume has none (exFAT has no hard links). Two members collide
+when their paths are equal after Unicode normalisation (where the volume
+ignores it) and full case folding (where the volume ignores case); the
+refusal lists both names. A member more than 512 directory levels below
+the top directory is refused, since the walk, the strict verify and the
+removal of staging go no deeper. The names of the destination path are held to
+the same rules as directories, and on a volume that stores names
+decomposed a folder made above the destination, or the destination, is refused when
+its name would be stored in another form than it is written. Paths are not
+checked for length: a path longer than the platform's path limit is
+extracted directory by directory. (ADR 0054)
 
 ### fork
 
-`fork <piece> [--name <name>]` works only on unearthed pieces: the
-tracking entry says `live`, the folder is there, the metadata has an
-archive payload and its owning collection is this one. Every other piece
-is refused with the next step. A live piece without an archive has
-nothing to fork from. An archived, remote-only or gone piece has no
-folder, and `unearth` brings it back. Where a folder is at its path, it
-is a new piece and `archive` or `sync` gives it an ID, unless another ID's
-tracking entry claims the path, as after a fork: then the refusal names
-that ID. Another
-collection's live piece is forked by `unearth`. A version of the metadata
-that cannot be written on top of, as under "Metadata changes", refuses
-before anything is renamed.
+`fork <piece> [--version <version>] [--name <new path>]` extracts a
+working copy of a version, which stays unchanged. Without `--name` the
+copy goes to the original path. The same destination rules and staging as for
+`unearth` apply; when the original path is taken, the refusal names
+`--name` as the way out. A damaged version is extracted with a warning and
+without the comparison against the listing. `fork` writes
+`.antiq-restored` with the time alone (no version stamp, so the repairs
+never treat it as an unearth). Archived later, the copy becomes a new
+version (same path) or a new piece (new path); without edits that is an
+identical version, once due or at once with `archive <piece>`. `-n` names
+the version and the destination path. (ADR 0061)
 
-The new ID is minted with the time of the fork and the source `fork`. It
-starts live and owned by this collection, without a payload until it is
-archived, and keeps the tracking entry's unearthed time; a fork made
-while unearthing another collection's piece uses that unearthing time.
-The old ID becomes archived, and its entry `gone` keeps its local
-payloads. A diverged folder and a replacing-with-loss decision belong to
-the folder, so the new ID has neither and the old entry drops both; a
-version conflict and a superseded archive are about the old ID and stay
-on it. The old ID's live package is deleted once the new ID's live
-package is committed (see "sync"). Without `--name`, unearthing the old
-ID afterwards needs `--to`, as its path belongs to the new ID. With `--name` the old path is empty, and `unearth` restores
-there.
+### forget
 
-`--name` renames the folder within its parent before anything is
-written. The name is one name: not empty, not `.` or `..`, without `/`
-or a NUL byte; anything else is a usage error. The new path must be
-selected by the patterns, must not be excluded, `.antiq/` or inside
-another piece, and nothing may be there, a file or a symlink included;
-otherwise the fork is refused and nothing has changed. An archived
-object recorded at the new path does not make it taken. A name equal to
-the folder's current name renames nothing and the fork goes ahead.
+`forget <piece> (<version> | --all-versions --force)` deletes exactly one
+version: the `.tar.zst` first, then the listing and the checksum file. It
+also takes the stamp of an incomplete version and removes its sidecars,
+saying that the version was incomplete. Deleting every version of a piece
+takes `--all-versions --force`, which also removes the piece's incomplete
+versions and says so for each. A crash inside `forget` can leave an
+incomplete version; running the same `forget` again removes it. The next
+`push` mirrors the deletion to the target. `-n` names the files it would
+delete.
 
-If writing the old ID's metadata fails and `meta.pending` shows that
-nothing was written, the folder is renamed back and the fork fails with
-that error. When the folder cannot be renamed back, or `meta.pending`
-cannot be read or holds the write, and for every failure of a later
-step, the fork fails with an error that names the new path and the
-folder stays there. A fork that stops after the rename and before the
-old ID's metadata is written leaves the old ID unchanged and the folder
-under its new name, a new piece as after any rename; `unearth` of the
-old ID restores its archive to the old path. A fork that stops after
-the old ID's metadata is written is finished, without `--name`, by running
-`fork` again, which records one `fork` history entry. With `--name` the
-folder is a new piece under its new name and `fork` of the old ID is
-refused, as there is no folder at its path; a fork that stopped between
-the old ID's metadata and its entry is finished by `fork` again once the
-folder is renamed back to the old path. A fork that stops after the old
-ID's entry is written, before the new ID's metadata, leaves the old ID
-archived and the folder a new piece next to it. A fork that stops
-between the new ID's metadata and its entry loses the unearthed time:
-the repair at the start of the next run writes the new entry without it.
+### rebuild
+
+`rebuild <piece> <version>` repairs a damaged version by writing only what
+is missing, after checking the archive file against what survives. It runs
+only on the user's request, never as a repair. (ADR 0062)
+
+- A listing is regenerated by the rules `archive` uses, from the tar
+  members: mode and whole-second time from the header, size and hash from
+  reading each member, `hard` for tar link members with the first path as
+  target, no line for the top-level directory; `files`, `bytes` and
+  `archive-bytes` come from the same read.
+- Listing missing, checksum file present: hash the archive file and
+  compare it with the checksum file. On a mismatch refuse (exit 1, naming
+  both hashes); otherwise write the listing, with `# rebuilt <UTC time>`,
+  and say that the archive is the one checksummed when it was stored.
+- `.tar.zst.sha256` missing, listing present: verify every member against
+  the listing, as `unearth` does. On any difference refuse; otherwise
+  write the checksum file.
+- Both missing: read the archive in full, write the listing (with
+  `# rebuilt`) and the checksum file, and say that this shows only that
+  the archive reads without error, not that it is unchanged.
+- An archive file whose size differs from its listing's `archive-bytes`
+  cannot be repaired by `rebuild`, since the hash against the surviving
+  checksum file can only fail; `rebuild` refuses and says so.
+- A sidecar that is present but corrupt (see "Damage") is not
+  overwritten: `rebuild` refuses and names deleting that file (after which
+  it is missing and can be rebuilt) or copying it back from the target.
+- Every refusal names `forget` and copying back from the target as the
+  ways out. A version that is not damaged is refused. It takes the lock
+  and has `-n`, which says what it would check and write.
 
 ### import
 
-`import [--path <path>] <file>...` registers compressed tar archives as
-archived pieces. Each file stands alone: a file that is refused is named
-with its reason and skipped, the other files are imported, and the run
-exits 3. Everything that can refuse a file is checked before anything of
-that file is written, and a run in which every file is refused takes no
-lock. For each file it:
+`import <folder> [--as <path>] [--time <time>]` packs a folder from
+outside the collection directly as a version of `<path>` (default: the
+folder's name), with steps 1 to 4 of `archive`; the source folder is left
+in place.
 
-- refuses anything but a regular file holding tar compressed with zstd (by
-  magic bytes), naming the codec of anything else;
-- walks the zstd frames over their headers and block headers, without
-  holding a frame in memory, and refuses a frame whose window exceeds
-  128 MiB or that has no content checksum, giving
-  `zstd -dc <file> | zstd -19 --long=27 -o <new>.tar.zst` to recompress
-  it (the macOS `tar --zstd` writes no content checksum). Skippable frames
-  are walked over; a frame that needs a dictionary, a reserved header bit
-  or block type, bytes after the last frame and a cut frame are refused;
-- reads the whole stream, computes size and SHA-256 and builds the
-  listing as `archive` does. The frame walk and the passes over the tar
-  read one open file, and a file whose bytes differ between them is
-  refused;
-- refuses an archive without exactly one top-level folder, members whose
-  path leads outside it, a tar stream without its end marker, and any
-  archive that `unearth` could not extract for what its headers say;
-  that folder is the archive's top-level directory of "Packaging", and the
-  listing holds the paths below it;
-- warns about names as `archive` does (ADR 0054), the piece's own name
-  included;
-- skips and reports a file whose SHA-256 is already a payload of the
-  collection, counted from the metadata only: a payload file in an object
-  directory that no metadata names does not count. A repeated import
-  therefore exits 0. When the object that has the bytes is this
-  collection's, has its archive file in the object directory and has no
-  tracking entry, the entry is written and the file is reported as
-  skipped with its entry completed;
-- copies the file (a clone where the filesystem supports one, never a
-  hard link) into `.antiq/tmp/`, checks the copy against the SHA-256, and
-  stores it under its payload name, then its listing, then records the
-  metadata and the tracking entry (state `gone`, local archive at payload
-  version 1, version taken out `pending`) in that order. Its metadata is a
-  new ID with the oldest member modification time, the top-level
-  directory's included, as its time, the source `import`, the piece's
-  name and the archive as payload version 1. Times before 1990 are ignored
-  as for `archive`; when no time from 1990 on remains, the ID time is the
-  time of minting, with a warning, and the source is `minted`.
+- The source must not lie inside the collection.
+- `<path>` must be one the patterns select, not excluded, not in
+  `.antiq/` and not inside another piece. A pin on a live folder at
+  `<path>` does not block the import.
+- The idle check does not apply. The source's top is treated as a piece's
+  top: `.antiq-restored` there is left out, `.antiq-pin` there refuses the
+  import, and a source without a countable file is refused as empty, also
+  with `--time`.
+- The ignore and timeless rules of the collection and the folder's own
+  rule files apply, and so do the walk refusals.
+- The version time is the newest counted modification time in the folder,
+  or `--time`. `--time` follows the rules for naming a version: with `T`
+  a UTC stamp, otherwise a local date-time with seconds
+  (`2026-11-04 10:02:11`) in the current zone; a date alone is refused. A
+  version time in the future is refused, naming the file.
+- The listing carries `imported <time>`, the real time of the import.
+- This is also the way to bring in old archive files: unpack them with
+  their original timestamps somewhere temporary, then import each folder.
+  (ADR 0009, ADR 0055)
+- `-n` names the version it would create and what it would leave out.
 
-The relative path is `--path`, by default the top-level folder's name at
-the collection root; `--path` takes exactly one file. The piece's name is
-the last component of the path. A path is refused when it is the
-collection root or below `.antiq/`, when it is or lies below a
-`collection.exclude` entry, when the patterns do not select it, when a
-selected path or the path of an existing object lies above it, and when
-an existing object lies below it. A path that a folder or another object
-already has gives a warning, and both objects are listed by `find`.
-An input file that lies below `.antiq/` is refused, since the repairs at
-the start of a run empty `tmp/`, `staging/` and `trash/`. The input file is
-never moved or deleted. The archive goes up at the next `sync`. A piece
-whose payload and listing were stored but whose metadata was not written
-because the run died leaves files that no metadata names; a rerun imports
-the archive under a new ID. (ADR 0055)
+### list
 
-### reconcile
+`list [query]` prints one row per version, newest first within a piece;
+the query matches piece paths fuzzily. Each row reads only the head of its
+listing. SIZE is the archive file's size (`archive-bytes`) in decimal
+units (1 GB = 10^9 bytes); `--json` also carries the unpacked size and the
+file count. Damaged and incomplete versions are marked. The piece is in
+every row, so each row stands on its own after `sort` or `grep`. With no
+version, or no piece matching the query, `list` exits 0 and says so on
+stderr. A held lock is noted on stderr, and under `--json` in a `note`
+field. (ADR 0021)
 
-`reconcile` rebuilds the index from local and remote metadata, does the
-start-of-run repairs above, removes leftovers as the commit protocol
-describes, and reports IDs whose committed version another machine
-wrote. An entry without a local archive whose archive, verified or
-pulled from the remote before, is gone from the remote is marked missing
-and shown in `status`; `reconcile --prune` drops such entries and gone
-pieces. An entry with a local archive not yet uploaded is pending upload
-and is never pruned. (ADR 0044) Without a remote, `reconcile` does its
-local part only.
+```text
+$ antiq list scan
+PIECE              VERSION               SIZE     FILES
+projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
+projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
+tools/scan-old     2025-02-11 19:40:07    40 MB      812
+```
 
-The local part empties the index and builds it again from the listings
-stored on this machine. An object whose listing cannot be read stays out
-of the index, is named in the report and ends the run with exit code 3. A
-dry run lists the rebuild of the index and neither runs nor lists the
-repairs.
+### grep
 
-The remote part runs after the local part. A remote that is away ends the
-run with exit code 4 and one that is broken with the error kind
-`remote_broken`; the local part stands, and `--if-reachable` and `away_warn_days` change
-the exit code of an away remote as under "Remotes". An open error counts
-as broken. On the console the report of the local part
-comes first and then the error; under `--json` only the error envelope is
-printed, and its error object carries `pruned`, the pieces the local
-part dropped as `{id, path}`, unless there were none. A reachable remote is recorded as such, an away remote as away.
+`grep <pattern>` searches the paths of every archived file, as
+`<piece>/<path>`, in all listings of existing versions (incomplete
+versions are skipped), with a regular expression (`regex::bytes` over each
+decoded listing, the files in parallel on all cores but two). A listing
+that does not decode is skipped with a warning naming the version; the
+exit code stays 0.
 
-With a reachable remote, a real run pulls the metadata versions this
-machine lacks, removes leftovers with the cleanup of the commit protocol
-and marks pieces. A piece is marked missing on the remote when its
-current metadata is committed, this machine holds no archive of it, and
-the current archive file is not in the object's directory on the remote or
-the remote does not list the object. The mark clears once the file is
-back. A remote operation that fails ends the remote part with its error
-and leaves the marks as they are. The upload temp files of this machine
-for pieces that are pending upload, and those of every object with a
-recorded change, are kept. A dry run reads the remote
-without pulling, lists the marks, the drops and the removals, judging
-them on the metadata versions a real run would pull, and writes nothing;
-a removal that depends on the age of a file is listed as such.
+On a terminal the hits are grouped by piece, each in-piece path once with
+the versions that hold it, the match highlighted:
 
-`reconcile --prune` drops a piece from this machine when its entry is
-`gone`, or is `remote_only` and marked while the remote answers. The
-piece must also hold no archive here (neither in the entry nor as a file
-named by an archive payload of any committed version in its object
-directory), have no recorded change that is not committed, no open
-decision and no folder in place. An entry that is being removed or unearthed is never dropped. A folder
-counts as absent only when
-looking at its path says that nothing is there; a path that cannot be
-looked at, such as one below a directory nobody may enter, keeps the
-piece and is named in a warning. It is checked once for the plan and
-again when the piece is dropped. Without a remote, or with one that is
-away or broken, only gone pieces are dropped, never an entry that an
-earlier run marked. The drop goes through the brake ("Safety"): the
-planned drops against every entry this machine tracks and every object in
-its store. A drop removes the entry, the live manifest, the object's
-directory and its index rows, and records the object and its highest
-committed version in `.antiq/pruned.json` first. Pull, `status` and the
-index skip a recorded object until a committed version above the recorded
-one is stored; the remote is never touched.
+```text
+projects/scanner                       2 versions, newest 2026-11-04
+  src/main.rs                          both versions
+  tools/bench/main.rs                  2026-09-03
+tools/scan-old                         1 version, 2025-02-11
+  cli/src/main.rs                      2025-02-11
 
-`reconcile` names each piece whose highest committed version is above the
-version this machine took out and above every version it lists as
-committed, with the machine that wrote it, until `sync` or `resolve`
-brings the piece up to date. A committed version that cannot be read is
-listed with its reason and does not change the exit code.
+3 files in 2 pieces · antiq unearth <piece> [--version <version>]
+```
+
+The pattern is matched against the unescaped path bytes; text output shows
+the path with the comment-line escapes, the pipe form prints the raw path.
+A match wholly inside the piece path gives one row, "piece name matches",
+with the version and file counts and no file list. In a pipe every hit and
+version is one tab-separated line `piece  stamp  path`, with the full
+version stamp (`-` as the path for a name match). With no hit `grep` exits
+0 and says so on stderr; a pattern that is not a valid regular expression
+is a usage error, exit 2. A held lock is noted as for `list`.
 
 ### status
 
-`status` is read-only: it takes no lock and writes nothing below
-`.antiq/`. On the console it lists only the pieces that need the user or
-change at the next run, one table row each with the state, the piece's
-path, the days since its last activity and what is pending: an error of the
-piece, needing a decision, diverged, a superseded archive, a stale backup,
-missing on the remote, a recovered tree, unreadable, containing a mount
-point, a collection of its own or an excluded path, future modification
-times, gone, archiving at the next run, waiting for the upload, or new. A piece with several of
-these has one row, in the state that comes first in that order, and its
-text names them all. A damaged tracking file or object has a row of its
-own. Rows of one state are listed by path, those of archiving at the next
-run by age. A line above the table gives the remote's state, the time of
-the last sync (or that there was none) and the counts of live and archived
-pieces. Without a remote the line says so and no row waits for the upload.
-A line below the table counts the pinned and empty pieces and the skipped
-symlinks and dot entries, which are counted, not listed; a hint line below
-that names `antiq resolve` when a decision is pending and `antiq find` for
-every piece. Without a row `status` says that nothing is to do and names
-the next change, a piece that archives or becomes remote-only, with the
-days until then. Notes, such as a run holding the lock, go to stderr. The
-JSON output carries every piece and the notes. `status` exits 0 whatever
-it shows, unless the command itself fails.
+`status` is local only: it takes no lock and writes nothing below
+`.antiq/`. It prints one row per piece that has a state, sorted by path,
+the state coloured in the first column: `due` (archived on the next run),
+`soon` (due within `soon_days`), `pinned`, and `refused` for the pieces
+`archive` refuses, with their reason (mount point, nested collection,
+unreadable entry, exclude entry, locked entry, unreadable marker, a
+control file that is not a file, broken rule file). Plain live folders are
+only counted in the header. Below the table: files and markers with times
+in the future, damaged and incomplete versions, folders in `recovered/`,
+trees left in `trash/` and leftovers in `doomed/`, live folders whose
+spelling differs from the stored one, directories that selection could not
+read ("unreadable: <dir>"), and files in store folders whose
+names do not parse.
 
-On a terminal the table adapts to the width, see "Command line". Its wide
-layout adds the command that deals with a row where there is room.
+```text
+13 folders · 214 versions (38.2 GB) · archive after 30 days idle
 
-### Safety
+STATE    PIECE                                 IDLE  WHAT
+due      experiments/rust-gpu                   33d  archives next run
+due      old/client-site                       141d  archives next run
+refused  media/camera-import                    52d  mount point: media/camera-import/card
+pinned   projects/antiq                        120d  kept by .antiq-pin
+soon     tools/scan-old                         28d  archives in 2 days
 
-Bulk deletions without a per-item check go through one brake: dropping
-entries (`reconcile --prune`), `remote remove` while pieces exist only
-on the remote, and `resolve --drop-superseded`. When planned removals
-exceed `brake_percent` of the affected set, the step stops and lists up
-to ten. On a terminal it asks; without one it refuses unless `--force`
-is given, and the console prints the listed items below the error, one
-line each with path and ID, and a line counting the rest. `--dry-run` reports where the brake would hold. Removing live
-packages and moving archives to the remote-only tier do not go through
-the brake. `archive` does not either: each folder is deleted only after
-its own strict verify and commit. No archive on the remote is deleted
-except by a newer, verified and committed version of the same ID or an
-explicit drop of a superseded one. (ADR 0045)
+! 1 file with a time in the future: notes/plan.md (2027-01-12)
+! 1 damaged version: tools/scan-old 2024-06-30 08:12:45 (no listing)
+```
 
-The planned removals and the affected set of each step:
+### pin and unpin
 
-| Step | Planned removals | Affected set |
-|------|------------------|--------------|
-| `reconcile --prune` | entries to drop | all entries this machine tracks or knows from metadata |
-| `remote remove` | remote-only pieces that become unreachable | all objects of the collection |
-| `resolve --drop-superseded` | superseded payloads to drop | the ID's archive payloads |
+`pin <piece>` and `unpin <piece>` create or remove `.antiq-pin` at the top
+of a live piece (see "Pins"). `-n` says which.
 
-With one current payload in the set, a drop of superseded payloads is at
-least half of it, so every `resolve --drop-superseded` holds the brake
-at the default: it asks on a terminal and needs `--force` without one.
+## Push
+
+`push [--init] [--force] [--if-reachable]` mirrors the collection to the
+target. `--init` and `--force` are each refused together with
+`--if-reachable`. The steps run in this order.
+
+1. **Repairs** run first, under the lock (see "Operations").
+2. **Check the store.** While a damaged or incomplete version exists,
+   `push` refuses with exit 1 and prints the exact `forget` or `rebuild`
+   command for each. It also refuses, naming both, when two piece paths
+   or two store folders of the collection differ only in case or Unicode
+   normalization. (The same clash between file names inside one live
+   folder is not checked.) And it refuses while `.antiq/trash/` still
+   holds a tree after the repairs.
+3. **Check rsync.** The local rsync's `--version` must name rsync 3.2.4 or
+   newer, the release that added `--fsync`. openrsync, which macOS ships
+   as `/usr/bin/rsync`, and older versions are refused with a message
+   naming the binary and the config key `[target] rsync`. A target whose
+   own rsync is openrsync (any macOS machine) works with `fsync = false`.
+4. **Pre-check the target.** The target path is canonicalized first. A
+   path target that is the collection root or lies below it (compared by
+   the volume's name equality, ADR 0054) is exit 1, also with `--init`,
+   and so is a path target that is a mount root ("use a folder on the
+   volume, not its root"). Otherwise the checks use the file system for a
+   path target and `rsync --list-only <target>/` for an ssh target:
+
+   | Situation | Result |
+   |---|---|
+   | ssh cannot connect | unreachable |
+   | path target answers ENOTCONN, EHOSTDOWN, EHOSTUNREACH, ENETUNREACH or ETIMEDOUT | unreachable |
+   | path target directory does not exist | unreachable, also with `--init` |
+   | ssh target directory does not exist | exit 1, unless `--init` |
+   | directory present, no `.antiq-target`, empty | unreachable with a warning naming `push --init`, unless `--init` |
+   | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
+   | `.antiq-target` of another collection, or not readable | exit 1 |
+   | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is |
+
+   When the listing shows `.antiq-target` on an ssh target, it is fetched
+   with one rsync run of `<target>/.antiq-target` into `.antiq/tmp/`, with
+   the same options as the marker run below; a fetch that fails, or
+   content that does not parse, is "not readable". `--force` changes
+   nothing in the other rows: no marker still needs `--init`, another
+   collection's marker is still exit 1, and with a matching marker it is a
+   plain push, noted in the output.
+
+   rsync runs with `LC_ALL=C`. Over ssh, exit 255 counts as "cannot
+   connect" only when ssh's line starts with `ssh: connect to host` or
+   `ssh: Could not resolve hostname`, or contains `timed out`; any other
+   255 (a changed host key, a refused key) is exit 1 with the line. Exit
+   23 counts as "does not exist" only when the failing `change_dir` or
+   `link_stat` line ends in `(2)`, or openrsync's `(l)stat:` line ends in
+   `No such file or directory`; any other 23 is exit 1.
+
+   Unreachable means exit 0 under `--if-reachable`, otherwise exit 4, and
+   the reason is printed in text and `--json` every time. A missing
+   directory of a path target is never created by antiq: the user creates
+   it on the mounted volume.
+5. **Marker.** `.antiq-target` sits at the target root, outside the
+   collection. It is one line of JSON with a fixed key order,
+   `{"format":1,"id":"<collection ID>","host":"<machine name>","path":"<collection path>"}`.
+   The machine name is the one antiq detects (the ComputerName on macOS,
+   the hostname elsewhere), never a network-dependent host name; the path
+   is the canonical collection root, compared byte for byte. Unknown keys
+   are ignored, a higher `format` is refused as written by a newer antiq.
+   The marker is created only by `push --init` and never rewritten by
+   antiq; after a renamed machine or a moved collection the user edits its
+   `host` or `path` by hand, or pushes with `--force` each time. `--init`
+   is the user's statement that this empty target is the right one;
+   `--force` that this copy may overwrite the target once, after the user
+   made sure the target holds nothing newer. A forced push leaves the
+   marker as it was, so the machine it names pushes on as before. The
+   marker is sent by its own rsync run, as a temp directory in
+   `.antiq/tmp/` holding only `.antiq-target`, sent to `<target>/` with
+   `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so the
+   target root keeps its mode and time) plus the same `-e`,
+   `--rsync-path`, fsync setting and `rsync_args` as the mirror; the
+   marker arrives with mode 0644 masked by the receiving side's umask. For
+   an ssh target that creates the last missing directory level, and a
+   deeper missing path is exit 1 with rsync's mkdir line. `push -n` never
+   writes it. (ADR 0031)
+6. **Mirror.** One rsync run, antiq's options first, then the options of
+   `[target] rsync_args` verbatim, then the two paths:
+
+   ```text
+   rsync -a -H -x --delete --delete-delay --itemize-changes
+         --exclude=/.antiq-target --exclude=/.antiq/tmp/
+         --exclude=/.antiq/trash/ --exclude=/.antiq/doomed/
+         --exclude=/.antiq/lock --exclude=/.DS_Store
+         --exclude=/.Spotlight-V100/ --exclude=/.fseventsd/
+         --exclude=/.DocumentRevisions-V100/ --exclude=/.TemporaryItems/
+         --exclude=/.Trashes/
+         --timeout=300 [--fsync] [--rsync-path=<rsync_path>]
+         -e "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+         <rsync_args> <collection>/ <target>/
+   ```
+
+   `--fsync` unless `[target] fsync = false`. An option in `rsync_args`
+   overrides antiq's (`--no-perms` after `-a`); an `-e` there replaces
+   antiq's ssh command, BatchMode included. The excludes are anchored at
+   the collection root, so the same names inside a live piece are still
+   copied; the exclude of the marker also protects the target's marker
+   from `--delete`. The macOS volume-root directories and `.DS_Store` at
+   the root are left out. `--timeout` counts seconds without data; rsync's exit 30
+   (timeout) is exit 1 with its line. `-x` keeps rsync on the collection's
+   device: a mount point to another device inside a live piece arrives as
+   an empty directory with the mounted directory's attributes; a bind
+   mount of the same device is mirrored like a folder. `-H` keeps hard
+   links. With `--delete-delay`, deletions happen only at the end, so an
+   interrupted run removes nothing that was on the target before.
+7. **Second pass.** When the run's output has a line starting with
+   `*deleting`, `push` runs the same command with `-n` and, if that prints
+   any itemized line, the mirror once more.
+8. **Result.** rsync exit 0 is success; 24 (files vanished during the run)
+   is success with a note naming the paths of the `file has vanished`
+   lines. Everything else, including any failure after the pre-check, is
+   exit 1 with rsync's message, also under `--if-reachable`. With exit 23
+   and the line `IO error encountered -- skipping file deletion`, push
+   says that no deletion reached the target and names the directories
+   rsync could not open. Exit 12 with ``unrecognized option `--fsync'``
+   (openrsync) or `--fsync: unknown option` (older rsync) is reported as:
+   the target's rsync (openrsync, or older than 3.2.4) lacks `--fsync`;
+   set `[target] rsync_path` to a 3.2.4+ rsync there, or `fsync = false`.
+9. `-n` runs the checks and summarizes rsync's `--itemize-changes` per
+   piece.
+
+With `--fsync` the target flushes each file's content before it is renamed
+into place; a power loss can then at most lose the newest names, which the
+next push sends again. Without it, files rsync reported as written can be
+empty or missing. Beyond that antiq relies on rsync's own check: rsync
+computes a whole-file checksum of each file it transfers while writing it
+and compares it with the sender's. Files rsync does not transfer, because
+size and modification time match, are not compared, so damage on the
+target stays unseen. antiq reads nothing back. Nothing records when the
+last push ran.
+
+`push` copies live folders whole, ignored paths such as `node_modules/`
+included; the ignore rules apply to versions only. It mirrors the whole
+collection, content outside every piece included. (ADR 0041)
+
+`push` has no brake: whatever is deleted locally, by antiq or by hand, is
+deleted on the target by the next push. The target is a mirror, not a
+backup with history. (ADR 0049)
+
+`--if-reachable` makes `push` exit 0 when the target is unreachable as
+defined above, for scheduled runs. Scheduling runs the two commands one
+after the other, such as `antiq archive; antiq push --if-reachable`, so
+the push runs after a partial archive too (the scheduler then sees only
+the push's exit status); there is no command that does both. A held lock
+is exit 1, also under `--if-reachable`.
+
+## Configuration
+
+The configuration is per collection, in `.antiq/config.toml`:
+
+```toml
+[collection]
+id = "01JBX…"                  # written at init, also in the target marker
+patterns = ["*"]
+exclude = []
+ignore = [".DS_Store"]
+timeless = []
+idle_days = 30
+soon_days = 3
+
+[target]
+url = "nas.local:/volume1/antiq/projects"   # an absolute path or [user@]host:path
+rsync = "/opt/homebrew/bin/rsync"   # optional, else from PATH
+rsync_path = "/usr/local/bin/rsync" # optional, the target's rsync (--rsync-path)
+fsync = true                        # false when the target's rsync lacks --fsync
+rsync_args = []                     # extra rsync options, e.g. for SMB shares
+```
+
+| Key | Default | Content |
+|-----|---------|---------|
+| `collection.id` | minted at `init` | collection ULID |
+| `collection.patterns` | `["*"]` | selection patterns |
+| `collection.exclude` | `[]` | literal paths that are never pieces, in the escaped form |
+| `collection.ignore` | `[".DS_Store"]` | gitignore lines for ignored paths, anchored at each piece's top |
+| `collection.timeless` | `[]` | gitignore lines for timeless paths, anchored at each piece's top |
+| `collection.idle_days` | 30 | days a piece must be idle before it is due |
+| `collection.soon_days` | 3 | days before due that `status` shows `soon` |
+| `target.url` | none | an absolute path or `[user@]host:path` |
+| `target.rsync` | rsync from `PATH` | path of the local rsync |
+| `target.rsync_path` | none | the target's rsync, passed as `--rsync-path` |
+| `target.fsync` | `true` | pass `--fsync` |
+| `target.rsync_args` | `[]` | extra rsync options |
+
+A path target may be any absolute path; the path of an ssh target is
+passed to rsync verbatim (rsync 3.2.4 and later protect arguments by
+default). A `url` starting with `/` is a path; the host of an ssh target
+does not start with `-`. Unknown keys under `[collection]` or `[target]`
+are ignored, and each one is reported in a warning.
+
+The keys of the earlier design are refused with all their names in one
+error: `junk`, `remote_only_days`, `backup_live`, `live_exclude`,
+`replace_without_asking`, `brake_percent`, `grace_hours`,
+`away_warn_days`, `memory_percent`, `remote_jobs`, `live_retries`, the
+`[machine]` table and the `[[remote]]` list.
+
+### Setting up a target
+
+Put the `[target]` keys into the config, `url` at least, as in the example
+above. Then run `push --init` on an empty directory of the target; it
+writes the marker (see "Push"). `push` without `url` fails with the error
+kind `no_target`, exit 1, naming the key and `push --init`. A `url` that
+is neither an absolute path nor `[user@]host:path` is a configuration
+error naming the key, exit 1.
 
 ## Command line
 
 | Command | Does |
 |---------|------|
-| `init [--pattern <glob>]... [--yes]` | makes a directory a collection |
-| `status` | shows the pieces by state |
-| `archive` | archives idle pieces and removes their folders |
-| `unearth <piece> [--to <path>] [--version <n>]` | brings an archived piece back |
-| `find [<query>] [--print]` | lists and searches all pieces; opens the picker |
-| `fork <piece> [--name <name>]` | gives an unearthed piece a new ID |
-| `pin <piece>`, `unpin <piece>` | create or remove a piece's `.antiq-pin` |
-| `sync` | exchanges backups and archives with the remote |
-| `resolve [<piece> <answer>]` | answers pending decisions |
-| `remote add [--init] [--host-key-alias <alias>] <url>`, `remote show`, `remote remove` | attach, show and detach the remote |
-| `reconcile [--prune]` | brings the index in line with the stored metadata |
-| `import [--path <path>] <file>...` | registers existing compressed tar archives as archived pieces |
+| `init [--pattern <glob>]... [-n]` | makes a directory a collection |
+| `status` | shows the pieces that have a state |
+| `archive [<piece>] [-n]` | archives due pieces, or one piece now |
+| `unearth <piece> [--version <version>] [-n]` | brings a version back and removes it |
+| `fork <piece> [--version <version>] [--name <new path>] [-n]` | extracts a working copy of a version |
+| `forget <piece> (<version> \| --all-versions --force) [-n]` | deletes a version, or all of them |
+| `rebuild <piece> <version> [-n]` | repairs a damaged version |
+| `import <folder> [--as <path>] [--time <time>] [-n]` | packs a folder as a version |
+| `list [<query>]` | lists the versions |
+| `grep <pattern>` | searches the paths of all archived files |
+| `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
+| `push [--init] [--force] [--if-reachable] [-n]` | mirrors the collection to the target |
 
-(ADR 0023, ADR 0055)
+(ADR 0023)
 
-Every command takes `-C <path>` and `--json`. Every state-changing
-command takes `--dry-run`. `--force` applies to the commands with a
-brake step: `reconcile`, `remote remove`, `resolve`. `--if-reachable`
-applies to the commands that contact the remote: `sync`, `unearth`,
-`reconcile`. A flag a command does not take is a usage error.
+Every command takes `-C <path>` and `--json`. A flag a command does not
+take is a usage error. No command asks a question. (ADR 0020)
 
-A piece reference is a path or a ULID. A path is resolved against the
-current directory, normalised, and taken relative to the collection
-root; a path outside the collection is refused; archived pieces resolve
-the same way although their folder is gone. `.` and `..` in a path are
-resolved from its text, and a `..` that would go above the root of the
-filesystem is refused; `--to` and `--path` are normalised the same way,
-also relative to the current directory. Only the collection root itself
-is recognised by device and inode, so another spelling of it, such as
-`/var` and `/private/var` on macOS, still counts as the root; symlinks
-below the root are never followed. A path outside the collection is
-refused with the error kind `outside_collection`, exit 1. A ULID may be
-shortened to a prefix of at least 6 characters that is unique among the objects this
-machine knows at that moment. A reference that matches several objects
-refuses and lists them with their IDs; one that matches none is an
-error. Both exit 1. JSON output always carries full ULIDs; scripts use
-them.
+### Piece references
 
-A reference is read as a path first: a path at which an object is
-recorded, by its metadata or by its tracking entry, names that object,
-also when the text could be a ULID prefix. At a path, the object whose
-tracking entry says its folder is there, arriving or leaving names the
-piece; the objects archived there as well, such as the old ID after a
-`fork`, count only when no object holds the folder, and several of them
-make the reference ambiguous. Only a text of 6 to 26 characters from the
-ULID alphabet, in either case, that no object is recorded at as a path,
-is a ULID prefix; a shorter text is an unknown reference. A folder that
-no object is recorded at is an unknown reference. The objects this
-machine knows for the prefix are those with metadata, those with an
-object directory whose metadata cannot be read, and those with a
-tracking entry or a damaged tracking file. A candidate's `path` is the
-one in its metadata, else the one in its tracking entry, else empty.
+A piece reference is a path or a search word. A path is resolved against
+the current directory, normalised, and taken relative to the collection
+root; a path outside the collection is refused with the error kind
+`outside_collection`, exit 1. `.` and `..` in a path are resolved from its
+text, and a `..` that would go above the root of the filesystem is
+refused; `--as` and `--name` are normalised the same way. Only the
+collection root itself is recognised by device and inode, so another
+spelling of it, such as `/var` and `/private/var` on macOS, still counts
+as the root; symlinks below the root are never followed.
 
-antiq writes console output; the picker of `find` is its only
-full-screen part. (ADR 0056) The output adapts to the terminal's width:
-on a wide terminal tables and progress rows use their wide layout, with
-full paths and extra columns such as sizes and transfer rates, since it
-reads more easily; on a terminal of 80 columns they use their narrow
-layout, in which a path that does not fit is shortened in the middle,
-keeping its start and its end. A terminal of 100 columns or more is wide.
-Without a terminal the width is 80. Colour is used only on a terminal, and
-not when the environment variable `NO_COLOR` is set to a non-empty value.
+An input that names a candidate piece as a path is that piece. Any other
+input is a search word, matched with the same fuzzy pattern `list` uses
+(smart case, smart normalization), and must match exactly one candidate.
+No match is the error kind `unknown_reference`; several matches are
+`ambiguous_reference`, listing the candidates. Both exit 1. The
+candidates are the live pieces for `archive`, `pin` and `unpin`; the
+pieces of the store for `unearth`, `fork` and `rebuild`; the pieces of the
+store and the store folders that hold sidecars only for `forget`.
 
-Long runs show one row per piece: its path, its size, a progress bar,
-the operation running on it (packing, verifying, storing, removing,
-uploading, fetching) and one detail, such as the files checked or the
-bytes moved. A row takes one line when the path fits and two lines
-otherwise, the full path above the bar. `sync` shows its phases (pull,
-live backups, upload, commit, tiers) as a checklist: a finished phase
-is one summary line, the running phase lists its pieces as rows, later
-phases are dimmed. Without a terminal only the finished lines are
-printed.
+### Console output
 
-`--json` also makes a command non-interactive. Otherwise a command is
-interactive when a controlling terminal is available, also when its
-output is redirected. (ADR 0020, ADR 0023)
+The output adapts to the terminal's width: on a terminal of 100 columns or
+more tables use their wide layout, with full paths; on a narrower one they
+use their narrow layout, in which a path that does not fit is shortened in
+the middle, keeping its start and its end. Without a terminal the width is
+80. Colour is used only on a terminal, and not when the environment
+variable `NO_COLOR` is set to a non-empty value. (ADR 0056)
 
-`find` lists and searches all objects; interactively it opens a picker
-from which an object can be unearthed. (ADR 0021) The query matches the
-pieces' names and paths and the member paths in their listings, with
-the picker's fuzzy matching, in and outside the picker. `find` lists
-objects only; a new piece without an ID shows in `status`. The picker
-starts as a copy of ntropy's picker. It offers unearthing (Enter), a
-view of a piece's contents, printing the path (`--print`), forking, and
-pinning or unpinning. After pinning, unpinning or printing the picker
-stays open; unearthing and forking close it. (ADR 0057) The keys are
-Enter, Ctrl-O, Ctrl-F, Ctrl-K and Ctrl-X. Ctrl-O expands the selected
-piece in place into a tree of its contents, read from its listing, and
-collapses it when it is the expanded one. One piece is expanded at a
-time, and moving the selection leaves the expansion. A triangle in front
-of a row shows that the piece has contents: `▸` when collapsed, `▾` when
-expanded. A piece without a listing on this machine, or with one that
-cannot be read, is not expanded, and the status line says why. Enter
-unearths the selected piece and closes the picker; with `--print` it
-prints the piece instead and the picker stays open. Ctrl-F forks the
-piece, keeping its path, and closes the picker. Ctrl-K pins and Ctrl-X
-unpins, and the picker stays open. The result of a pin, an unpin
-or a print, or the error that stopped it, replaces the counter in the
-status line until the next key. A piece that matches through its own
-text ranks above a piece that matches through a member only, and a
-member-only match has no highlight in its row. The first query reads the
-listings of the pieces whose own text does not match, and the status
-line says `reading contents...` while it does; the picker keeps the
-member paths of at most 2 000 000 members and reads a listing again when
-a later query needs one it dropped. Esc and Ctrl-C close the picker
-without an action and the exit code is 0. Unearthing and forking run after the
-picker has closed, as the commands of the same name, and print what they
-print.
-`--print` prints the absolute path of the picked piece's folder, for an
-archived piece the path it would be unearthed to. In the picker each path
-is written to stdout when the picker closes, in the order picked, also
-when stdout is the terminal. Without a terminal it
-prints the path of every match, one per line. The path is written as the
-filesystem holds it, not in the escaped form of "Metadata", so that a
-shell can use it; the table and the JSON use the escaped form. With
-`--json`, `find` prints the matches as JSON and `--print` adds nothing.
-
-The tree sits directly below the piece's row. Its sizes end under the
-size column of the rows; a directory shows the sum of the file sizes
-below it, in bold, and a directory whose only entry is another directory
-is one line with it (`data/raw/`). The tree gets half the height of the
-list, at least three lines, and never the line of the piece itself; the
-last of its lines says how many entries it leaves out, as `… 4 698 more
-matches`. When the list is too short for the rows and the tree, the
-selected row and the expanded piece stay and the tree is clipped to the
-room left. With no query the tree shows every member. With a query it
-shows the members that match as `<path of the piece>/<member>`, with the
-directories that lead to them; a directory that matches is one line that
-stands for everything below it. When the piece's own text matches, every
-member would match through it, so the tree shows the members that match
-by their own path, or every member when none does. The status line then
-gives the number of entries the tree is about, as `4 701 in contents`
-for a query and `4 701 members` without one.
-
-Without `--print` and outside the picker, `find` lists the matches as a
-table of the state, the path, the size of the current payload and the
-shortest prefix of the ID, at least 6 characters, that no other known
-object shares; on a wide terminal it adds the creation date and writes the
-whole ID. Matches through the path come first, then matches through the
-name alone, then matches through a member path alone. Without a query,
-the newest object comes first. When nothing matches, stdout stays empty,
-stderr says so and the exit code is 0. `find` takes no lock and writes
-nothing.
-
-### Decisions
-
-Without a terminal, every decision point takes the non-destructive
-default: no action on that object, which is listed as needing a
-decision with its options; the command continues and exits 3. `archive`
-and `sync` ask in place when a terminal is available. (ADR 0025)
-
-`resolve` goes through the pending decisions interactively. `resolve
-<piece> <answer>` executes one decision at once, under the lock, with
-the loss computed at that moment; no answer is stored for a later run.
-Without a piece and without a terminal, or with `--json`, it lists the
-pending decisions and exits 3 when there are any. `resolve <piece>`
-without an answer goes through that piece's pending decisions
-interactively; without a terminal it lists them and exits 3.
-
-Only the decision "replacing with loss" can be answered in this version;
-an answer to one of the other three is refused with the error kind
-`unsupported`. An answer that fits several pending decisions of the piece
-goes to the first of them in the order of the table below. An answer that
-fits none, or a piece that waits on nothing, is a usage error that names
-what the piece waits on and the answers that fit.
-
-For "replacing with loss", `--replace` runs the archive step for the piece
-at once, as `archive` would: a piece that equals its archive is reclaimed
-after the checks of a reclaim, and a changed one is archived with the
-loss it has at that moment, its new archive getting the history action
-`resolve`. A piece that is in use is not touched: a note says that the
-next archive takes it, the decision stays pending and the command exits
-0. A pinned piece is refused. With `--dry-run`, `--replace` refuses a
-pinned piece the same way, and for a piece in use it plans nothing and
-prints the same note. `--fork` forks the piece, and `--skip`
-removes the pending decision and exits 0, while the skip of a question
-`archive` asks leaves the run at exit 3. Every executed answer removes the
-pending decision. Interactively, each pending decision is asked through
-the question `archive` asks.
-
-| Decision | Answers |
-|----------|---------|
-| version conflict | `--mine`, `--theirs`, `--fork` (see "Several machines") |
-| replacing with loss | `--replace`, `--fork`, `--skip` |
-| diverged folder | `--theirs`: shows the folder's differences to the listing of the version taken out and asks (without a terminal only with `--force`), then the folder goes through trash and the current version is unearthed in its place; `--mine`: archives the folder as the next version after the loss check against the remote's current listing, the other becomes superseded; `--fork`: new ID, divergence cleared |
-| superseded archive | `--drop-superseded` |
-
-An answer that does not fit the pending decision is a usage error.
-
-A version conflict that `sync` recorded goes away without an answer when a
-later `sync` finds that the newest version builds on the change.
-
-### Dry runs, scheduling, exit codes
-
-Every state-changing command takes `--dry-run`, which prints the plan
-and changes nothing; under `--json` the plan is JSON. (ADR 0046) A dry
-run takes no lock and may read the remote; it writes nothing, locally or
-on the remote. A dry run neither runs nor lists the start-of-run repairs.
-On the console a plan is one `Would ...` line per action,
-or `Nothing to do.` when there is none, followed by the place where the
-brake would hold, if it would: `The brake would hold at <planned> of
-<set size>:` and one line per item, up to ten, with path and ID.
-
-`--if-reachable` makes a run exit 0 when the remote is away, for
-scheduled runs, except as `away_warn_days` says. Without a remote it
-changes nothing.
-
-| Exit | Meaning |
-|------|---------|
-| 0 | success |
-| 1 | error, including remote broken, lock held, a held brake without a terminal, an unknown or ambiguous piece |
-| 2 | usage error |
-| 3 | partial: some objects skipped (needing a decision, stale backup, no space, a failed transfer) |
-| 4 | remote away |
-
-A `reconcile` whose local part skipped an object and whose remote is
-away exits 3 under `--if-reachable`, not 0, and still reports the away
-remote.
-
-Colour is used only on a terminal. Data goes to stdout, messages to
-stderr. Under `--json` an error is data: its JSON goes to stdout, like
-any other JSON output, and a usage error, too, prints the JSON envelope
-(kind `usage`) and exits 2. When the reader of stdout or stderr is gone,
-antiq stops writing to that stream without a panic, and the run ends
-with the exit code it would have had.
+Data goes to stdout, messages to stderr. Under `--json` an error is data:
+its JSON goes to stdout, like any other JSON output, and a usage error too
+prints the JSON envelope (kind `usage`) and exits 2. When the reader of
+stdout or stderr is gone, antiq stops writing to that stream without a
+panic, and the run ends with the exit code it would have had.
 
 ### JSON output
 
-Every JSON output is one object `{"format": 1, "command": "<name>",
-...}` on one line of stdout. `<name>` is the words of the command, joined
-by one space: `status`, `remote add`. A command line that fails to parse
-before naming a command has `"command": null`. An error is `{"format": 1,
-"command": ..., "error": {"kind": ..., "message": ...}}`, where `message`
-is the text of the error without the context lines a console shows. Some
-kinds add keys to the error object. A `--dry-run` plan carries
-`"dry_run": true` and an `actions` list, in that order, and a `brake`
-object (`planned`, `set_size`, `items`, as in the `brake` error) where the
-brake would hold.
+Every JSON output is one object `{"format": 1, "command": "<name>", ...}`
+on one line of stdout. `<name>` is the command's name. A command line that
+fails to parse before naming a command has `"command": null`. An error is
+`{"format": 1, "command": ..., "error": {"kind": ..., "message": ...}}`,
+where `message` is the text of the error without the context lines a
+console shows. Some kinds add keys to the error object. A `--dry-run` plan
+carries `"dry_run": true` and an `actions` list, in that order; repairs
+come first in it, as actions of kind `repair`. Paths are in the escaped
+form.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, a `--pattern` of `init` is invalid, the URL of `remote add` is invalid, `--host-key-alias` is given with a path URL, or the `--name` of `fork` is not a name | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
-| `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
-| `unknown_reference` | 1 | a piece reference matches no object | |
-| `outside_collection` | 1 | a path given as a piece, `--to` or `--path` lies outside the collection | |
-| `brake` | 1 | the brake holds and there is no terminal to ask | `planned`, `set_size`, `items`: up to ten `{id, path}` |
+| `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
+| `unknown_reference` | 1 | a piece reference matches no candidate | |
+| `outside_collection` | 1 | a path given as a piece, `--as` or `--name` lies outside the collection | |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
-| `no_remote` | 1 | a command needs a remote and none is attached | |
-| `remote_away` | 4 | the remote cannot be reached | `pruned` of `reconcile --prune`, see "reconcile" |
-| `remote_broken` | 1 | the remote is broken, as "Remotes" defines | `pruned` of `reconcile --prune`, see "reconcile" |
-| `unsupported` | 1 | a command needs something this version does not have yet | |
-| `format_too_new` | 1 | a write meets metadata of a higher `format` | |
+| `target_unreachable` | 4 | the target cannot be reached | |
+| `no_target` | 1 | `push` runs without `[target] url` | |
+| `not_implemented` | 1 | a command is not built yet; removed once every command is | |
+| `format_too_new` | 1 | `unearth`, `fork` or `rebuild` meets a listing of a newer format (see "Damage"), or `push` meets a marker with a higher `format` | |
 | `other` | 1 | any other failure | |
 
-`--help` and `--version` print text and exit 0, also under `--json`.
+`--help` and the top-level `--version` print text and exit 0, also under `--json`.
 
-`status` adds `collection` (`id`, `path`), `remote` (`state`: `none`,
-`reachable`, `away`, `broken`; `url`, when a remote is attached) and
-`pieces`, a list of objects with `id` (null for new pieces), `path`,
-`name`, `state` and `flags`, a list of the conditions `status` shows, such
-as `pinned`, `stale_backup`, `diverged`, `needs_decision`, `superseded`,
-`pending_upload`, `missing_on_remote`, `unreadable`, `mount_point`,
-`future_mtime`, and `remote_only_in_days` where it applies: for an archived
-piece whose archive is on the remote, the days until the archive becomes
-remote-only, at least 0, counted from the commit of the current archive
-(the earliest history entry of an `archive`, `import`, `resolve` or `fork`
-action from the creation of the archive on); it is left out while the
-archive still has to go up or no remote is attached. `archives_in_days` is
-the whole days until an active piece that is not diverged is idle, at least 1. `state` is one
-of the states under "States" (`new`, `live`, `unearthed`, `gone`,
-`archived`, `remote-only`, `live-on-another-machine`) or `error`, the
-state of a piece whose entry, metadata or object cannot be used; the
-piece then carries the flag `error`. A piece's `detail` object holds what
-a state or flag needs to say and leaves out the keys that do not apply:
-`error` (the message), `removal_unfinished` (a `removing` entry whose
-folder is still in place), `below_unreadable` (the directory above a
-piece that selection could not read, which is neither walked nor judged),
-`machine` (the machine that backs up a live piece of another
-collection), `stale_since`, `decisions` (the pending decisions as `{kind,
-options}`), `unreadable_first`, `mount_points`, `nested_collections`,
-`excluded_paths` and `future_files` (paths relative to the collection root, the top directory of
-a piece being the piece's own path) and `idle_clock` (the time the idle
-clock counts from). `age_days` is the whole days from the idle clock to
-now; it is left out for a piece without a verdict. The flags `empty`,
-`excluded`, `nested_collection` (a directory in the piece holds a `.antiq`
-of its own) and `idle` also exist: `idle` marks a new, live or unearthed
-piece that is not diverged and that the next `archive` archives. A piece
-the walk could not read completely has no verdict. A `junk` entry that is
-no file name and a `collection.ignore` line that is no valid rule each give
-a warning; with such a line no piece has a verdict. A piece is `pending_upload` when a recorded change is not committed, or
-when it holds its current archive locally and the metadata records no check
-of the remote copy. `status` adds `last_sync` (from `.antiq/remote-state.json`,
-left out when none is recorded) and also `recovered`, the names below
-`.antiq/recovered/`; `damaged`, a list of `{id, path, error}` for tracking
-files and objects that cannot be used, with the path relative to the
-collection root; `unreadable_directories`, the directories selection could
-not read; `skipped` (`symlinks`, `dot_entries`); `counts` (`live`,
-`archived`, `remote_only`, `pinned`, `empty`) and `warnings`. `live` counts
-the pieces in state `live`, `unearthed` or `new`, `archived` those in state
-`archived` or `remote-only`; pieces in state `gone`,
-`live-on-another-machine` or `error` are in no count. Pieces are sorted by
-path, a new piece before an object at the same path.
-
-`find` adds `query` (null without one), `matches`, a list of objects with
-`id`, `path`, `abs_path`, `name`, `state`, `created` and `size`, and
-`warnings`. `size` is the size in bytes of the object's current payload:
-its newest archive that is not superseded, else its newest live package;
-null without a payload. `state` is one of the states under "States" or
-`error`, the state of an object whose entry, metadata or location cannot
-be used. An object whose metadata cannot be read is not listed and a
-warning names it; an object whose listing cannot be read is left out of
-the matches through members and a warning names it.
-
-`init` adds `created`, `id` (only when created), `path` (the
-collection's root), `machine`, `patterns`, `exclude` (what `--yes` writes:
-the proposed exclude or nothing), `pieces` (what the patterns select, with
-the exclude applied), `actions` (one `create_collection` action with the
-path) and `warnings` (one `message` per note). `dry_run` is present, and
-true, under `--dry-run`. Without a terminal, or with `--json`, it creates
-nothing and prints the plan, the same keys without `id`, unless `--yes` is
-given, and exits 3. Under `--json` nothing goes to stderr.
-
-`archive --dry-run` has `dry_run` (true), `actions` and `warnings`, in
-that order. An action is `{action: "archive", path, id, size}` for each
-idle piece the next `archive` archives, and `{action: "reclaim", path, id,
-size}` for each unearthed piece it reclaims, `{action: "replace", path, id,
-size}` for each unearthed piece that changed without losing content (or
-whose loss the collection replaces without asking) and `{action: "ask",
-path, id, size, lost_count}` for each one whose replacement would lose
-`lost_count` entries and so raises the question, in path order. `id` is null
-for a new piece and `size` is the piece's apparent size in bytes (a file
-with several names counts once). A piece the run would skip has no action
-and a warning.
-
-`archive` has `archived`, `reclaimed`, `skipped`, `kept`, `unfinished`,
-`forked`, `needs_decision` and `warnings`, in that order, each list in
-path order. `archived` has `{id,
-path, size, archive_size, payload_version}` for each piece whose folder was
-removed: `size` is the apparent size in bytes and `archive_size` the bytes
-of the stored archive. `reclaimed` has `{id, path, size}` for each unearthed
-piece whose folder was removed without a new archive. `skipped` has `{id, path, reason, message}` for each piece
-left alone; `id` is present only for a piece that had an ID before the
-run. `reason` is `unreadable`, `mount_point`, `excluded`,
-`nested_collection`, `differs`, `no_space`, `pending_remote`, `declined` or
-`error`.
-`kept` has `{id,
-path, how, recovered_as}` for each piece that was archived and whose folder
-was not removed because it differs from the archive: `how` is `unearthed`
-when the folder is back at its path and `recovered` when it is below
-`.antiq/recovered/`, where `recovered_as` names it (present only then).
-`unfinished` has `{id, path, where, message}` for each piece that was
-archived and whose removal stopped with the entry still `removing`: `id` is
-the piece's ID, minted in this run for a new piece, and `where` is
-`trash`, `recovered` or `in_place`, naming where the tree is. `message`
-says what failed and what the repair of the next run does. `forked` has
-`{id, from, path}` for each piece whose replacement was answered with fork:
-`id` is the new ID and `from` the ID the piece had. `needs_decision` has
-`{id, path, decision, options, lost_count, lost}` for each piece whose
-replacement would lose content and that nobody could be asked about:
-`decision` is `replacing_with_loss`, `options` are `replace`, `fork` and
-`skip`, `lost_count` counts the entries a replacement would lose, and
-`lost` lists the first ten as `{path, change}` with `path` relative to the
-piece and `change` either `removed` or `changed`. The run exits 3 when
-`skipped`, `unfinished` or `needs_decision` is not empty; a `kept` or
-`forked` row alone does not make it partial.
-
-`unearth` adds `unearthed` (false for a piece that was unearthed before
-and for a piece that was skipped), `id` (the new ID for a fork; for a
-skipped fork, the other collection's piece, and `from` is absent), `path`
-(where the piece is, or would have been put), `abs_path`,
-`payload_version` (the archive that was unearthed, left out when nothing
-was and for a live package), `from` (a fork only: the ID of the other
-collection's piece), `skipped` (`{"reason": "no_space",
-"needed", "available"}` for a piece left alone for want of room, which
-exits 3) and `warnings`. An archive that is not on this machine with no
-remote attached is `no_remote`, with the remote away `remote_away` and
-with it broken `remote_broken`; a live package is subject to the same
-three. A refused target, a version that does not exist and an archive that does not match
-its metadata are errors of kind `other`; metadata or a listing of a higher
-`format` is `format_too_new`, and a path outside the collection is
-`outside_collection`. The plan of a `--dry-run` has one `unearth` action
-with `id`, `path`, `source` (`remote_archive`, `live_package` or `fork`;
-left out for an archive this machine holds) and `payload_version` (left
-out for a live package), or a `skip` action with `id`,
-`path`, `reason`, `needed` and `available` when the volume has no room,
-and no action for a piece that is unearthed already.
-
-`fork` adds `id` (the new ID), `from` (the ID the piece had), `path`
-(where the piece is now), `old_path`, `abs_path` and `warnings`. A piece
-that cannot be forked, a taken or unselected new path and a metadata
-version that cannot be written on top of are errors of kind `other`;
-metadata of a higher `format` is `format_too_new`, a `--name` that is not
-a name is `usage`, and a piece path outside the collection is
-`outside_collection`. The plan of a `--dry-run` has one `fork` action
-with `from` (the ID the piece has now), `path` (where it will be) and
-`old_path`; the new ID is minted by the run and is not in the plan.
-
-`pin` and `unpin` add `id` (null for a new piece), `path`, `pinned` (whether
-the piece is pinned afterwards), `changed` (whether the command changed the
-pin file) and `warnings`.
-
-`sync` adds `pulled` (a list of `{id, version}`), `listings` (the IDs of
-the objects whose listing was fetched), `uploaded` (`{id, file, size}` for
-each file written to the remote), `committed` (`{id, version}`), `cleanup`
-(`{removed, skipped}`), `skipped` (a list of `{id, path,
-reason, message}`, `path` null where the piece's metadata cannot be read,
-`reason` one of `pull`, `error`, `conflict`, `contested` and `refused`),
-`minted` (`{id, path}` for each new piece that got its ID), `removed_live`
-(`{id, file}` for each live package deleted from the remote), `unbacked` (`{id,
-path, reason, message}` for each piece that got no ID or no live backup, `id`
-null where it has none, `reason` one of `unreadable`, `mount_point`,
-`excluded`, `nested_collection`, `stale` and `error`; only `unreadable`,
-`stale` and `error` make the run exit 3) and `warnings`. The plan of a `--dry-run` has
-`pull_metadata` actions (`id`, `version`), `fetch_listing` (`id`, `file`),
-`settle` (`id`, `version`), `conflict` (`id`), `upload` (`id`, `file`,
-`size`), `commit` (`id`), `pack_live` (`id`, `path`), `remove_live` (`id`,
-`file`), `mint_id` (`path`; the ID does not exist yet, so
-there is no `commit` for it) and `remove_leftover` (`id`, `name`, `what`,
-`age_unknown`).
-
-`resolve` adds, for an answer that was executed, `resolved` (`{kind,
-answer}`: `kind` is `replacing_with_loss`, `answer` is `replace`, `fork`
-or `skip`), then the lists of `archive`
-that the archive step fills: `archived`, `reclaimed`, `skipped`, `kept`,
-`unfinished` and `forked`, each as there, and `warnings`. `resolved` is
-left out when nothing was executed, as for a piece that is in use. The run
-exits 3 when `skipped` or `unfinished` is not empty. Without a piece and
-without a terminal, or with `--json`, `resolve` lists the pending
-decisions instead: `pending`, a list of `{id, path, decision, options}`
-for each decision in path order, and `warnings`. It exits 3 when
-`pending` is not empty. Interactively it adds `pending` to the lists
-above for the decisions that stayed open. A `--dry-run` of an answer has
-one action: `{action: "reclaim", path, id, size}` or `{action: "replace",
-path, id, size, lost_count}` for `replace`, `{action: "fork", path, id}`
-for `fork` and `{action: "skip", path, id}` for `skip`.
-
-`remote add` adds `kind` (`path` or `ssh`), `url` (as given), `id` (the remote's
-ULID; a dry run of `--init` has none yet), `attached`, `created` (whether
-the run made the marker), `pulled` (the number of objects whose metadata
-was copied; left out in a dry run), `dry_run` (present, and true, under
-`--dry-run`), `actions` and `warnings`. An action is `create_remote` or
-`attach_remote`, each with a `url`, or `copy_metadata` with `objects`.
-The errors are `remote_away` for a missing root or a root without a
-marker that is no mount point, and for an ssh remote that does not
-answer; `remote_broken` for the other roots that cannot be used, for an
-ssh remote that refuses the login and for an ssh remote whose NAS has no
-usable rsync, SHA-256 tool or `stat`; `usage` for an invalid URL or for
-`--host-key-alias` with a path URL; and `other` for the rest, a failing
-exclusive create and a failing hard link among them.
-
-`remote show` adds `attached`. With a remote attached it also adds
-`kind`, `url`, `id`, `state` (`reachable`, `away` or `broken`), `reason`
-(for a remote that is away or broken; it names the place), `probed` (an
-object of what was probed on the remote: for a reachable ssh remote the
-keys `rsync` and `remote_rsync` with the versions of this machine's and
-the NAS's rsync, `sha256` with the name of the hash tool and `stat` with
-`gnu` or `bsd`, each `null` when that tool is missing or too old; empty
-for a path remote and for an ssh remote that is away or broken) and
-`warnings`. Without a remote it reports `"attached": false` and exits 0.
-
-`remote remove` adds `detached`, `url`, `remote_only` (a list of `{id,
-path}` of the pieces whose archive only the remote holds, which cannot be
-reached any more), `brake` (under `--dry-run`, where the brake would hold and
-`--force` is not given), `dry_run` (present, and true,
-under `--dry-run`), `actions` (one `detach_remote` with the `url`) and
-`warnings`. Without a remote it fails with the error kind `no_remote`; a
-held brake with the error kind `brake`.
-
-`reconcile` adds `index` (`written` and `removed`, the numbers of files
-written to and removed from the index, and `skipped`, a list of `{id,
-reason}` for the objects whose listing could not be read), `remote` (left
-out without a remote or when the remote part stopped: `pulled`, the
-metadata versions stored, `removed` and `skipped`, the leftovers removed
-and the ones the second look did not confirm, and `left_alone`, a list of
-`{id, reason}`), `marked` and `unmarked` (lists of `{id, path}`),
-`pruned` (`{id, path}`), `changed_elsewhere` (`{id, path, version, machine}`), `unreadable_versions`
-(`{id, version, reason}`) and `warnings`. Its dry-run actions are
-`rebuild_index` with `member_lists`, the number of listings stored on this
-machine, `mark_missing`, `clear_missing` and `drop` with `id` and `path`, and
-`remove` and `age_unknown` with `id`, `name` and `what`.
-
-`import` adds `imported`, the files that became objects, as `{id, file,
-path, name, created, size, sha256, payload_version}`; `skipped`, as `{file,
-id, reason}` where `reason` is `already_imported`, `entry_completed` or
-`same_archive_in_this_run` and `id` is left out for the last; `refused`, as
-`{file, reason}`; and `warnings`. `file` is the path as it was given. A
-`--dry-run` adds `dry_run` and `actions` (`{action: "import", file, path}`,
-an empty list when nothing would be imported) before them, and `imported`
-is empty. A refused file makes the run exit 3,
-a skipped one does not.
+`list` adds the unpacked size and the file count of each version, and a
+`note` field while the lock is held. The keys that the other commands add
+are not yet established.
