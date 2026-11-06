@@ -1290,6 +1290,12 @@ pieces. An entry with a local archive not yet uploaded is pending upload
 and is never pruned. (ADR 0044) Without a remote, `reconcile` does its
 local part only.
 
+The local part empties the index and builds it again from the listings
+stored on this machine. An object whose listing cannot be read stays out
+of the index, is named in the report and ends the run with exit code 3. A
+dry run lists the rebuild of the index and neither runs nor lists the
+repairs.
+
 ### status
 
 `status` is read-only: it takes no lock and writes nothing below
@@ -1624,6 +1630,10 @@ when there are any.
 `remote add`, `remote show` and `remote remove` have no payload defined
 yet.
 
-`reconcile` has no payload defined yet.
+`reconcile` adds `index` (`written` and `removed`, the numbers of files
+written to and removed from the index, and `skipped`, a list of `{id,
+reason}` for the objects whose listing could not be read) and `warnings`.
+Its dry-run action is `rebuild_index` with `member_lists`, the number of
+listings stored on this machine.
 
 `import` has no payload defined yet.

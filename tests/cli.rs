@@ -260,7 +260,7 @@ accepts!(
     "remote remove",
     ["remote", "remove", "--force", "--dry-run"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     reconcile_takes_its_options,
     "reconcile",
     [
