@@ -1222,8 +1222,8 @@ change at the next run, one table row each with the state, the piece's
 path, the days since its last activity and what is pending: an error of the
 piece, needing a decision, diverged, a superseded archive, a stale backup,
 missing on the remote, a recovered tree, unreadable, containing a mount
-point or an excluded path, future modification times, gone, archiving at
-the next run, waiting for the upload, or new. A piece with several of
+point, a collection of its own or an excluded path, future modification
+times, gone, archiving at the next run, waiting for the upload, or new. A piece with several of
 these has one row, in the state that comes first in that order, and its
 text names them all. A damaged tracking file or object has a row of its
 own. Rows of one state are listed by path, those of archiving at the next
@@ -1465,15 +1465,16 @@ piece then carries the flag `error`. A piece's `detail` object holds what
 a state or flag needs to say and leaves out the keys that do not apply:
 `error` (the message), `removal_unfinished` (a `removing` entry whose
 folder is still in place), `below_unreadable` (the directory above a
-piece that selection could not read, which is neither walked nor judged)
+piece that selection could not read, which is neither walked nor judged),
 `machine` (the machine that backs up a live piece of another
 collection), `stale_since`, `decisions` (the pending decisions as `{kind,
-options}`), `unreadable_first`, `mount_points`, `excluded_paths` and
-`future_files` (paths relative to the collection root, the top directory of
+options}`), `unreadable_first`, `mount_points`, `nested_collections`,
+`excluded_paths` and `future_files` (paths relative to the collection root, the top directory of
 a piece being the piece's own path) and `idle_clock` (the time the idle
 clock counts from). `age_days` is the whole days from the idle clock to
 now; it is left out for a piece without a verdict. The flags `empty`,
-`excluded` and `idle` also exist: `idle` marks a new, live or unearthed
+`excluded`, `nested_collection` (a directory in the piece holds a `.antiq`
+of its own) and `idle` also exist: `idle` marks a new, live or unearthed
 piece that is not diverged and that the next `archive` archives. A piece
 the walk could not read completely has no verdict. A `junk` entry that is
 no file name and a `collection.ignore` line that is no valid rule each give

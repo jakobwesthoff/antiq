@@ -73,6 +73,7 @@ enum Kind {
     Recovered,
     Unreadable,
     Mount,
+    Nested,
     Excluded,
     Future,
     Gone,
@@ -114,7 +115,7 @@ impl Kind {
             Kind::Missing => "missing",
             Kind::Recovered => "recovered",
             Kind::Unreadable => "unreadable",
-            Kind::Mount => "mount",
+            Kind::Mount | Kind::Nested => "mount",
             Kind::Excluded => "excluded",
             Kind::Future => "future",
             Kind::Gone => "gone",
@@ -195,6 +196,7 @@ impl Kind {
                 format!("holds a mount point at {at}")
             }
             Kind::Mount => "holds a mount point".to_string(),
+            Kind::Nested => "holds another collection".to_string(),
             Kind::Excluded if wide => {
                 let at = piece
                     .and_then(|piece| piece.detail.excluded_paths.first())
@@ -267,6 +269,9 @@ fn kinds_of(piece: &Piece, remote_attached: bool) -> Vec<Kind> {
     }
     if has(Flag::MountPoint) {
         kinds.push(Kind::Mount);
+    }
+    if has(Flag::NestedCollection) {
+        kinds.push(Kind::Nested);
     }
     if has(Flag::Excluded) {
         kinds.push(Kind::Excluded);
@@ -1310,6 +1315,22 @@ mod tests {
 
         everything else is up to date · every piece: antiq find
         ");
+    }
+
+    #[test]
+    fn a_collection_inside_a_piece_shows_in_the_mount_state() {
+        let mut report = mock_report();
+        report.pieces.clear();
+        let mut nested = piece(Some(1), "n", PieceKind::Live);
+        nested.flags = vec![Flag::NestedCollection];
+        report.pieces = vec![nested];
+        let narrow = stdout(&report, style(80, false));
+        assert!(
+            narrow.contains("mount   n       -   holds another collection"),
+            "{narrow}"
+        );
+        let wide = stdout(&report, style(120, false));
+        assert!(wide.contains("holds another collection"), "{wide}");
     }
 
     #[test]

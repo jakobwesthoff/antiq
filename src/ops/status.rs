@@ -131,6 +131,7 @@ pub enum Flag {
     MissingOnRemote,
     Unreadable,
     MountPoint,
+    NestedCollection,
     Excluded,
     FutureMtime,
     Idle,
@@ -161,6 +162,9 @@ pub struct Detail {
     /// another device counts as a mount point at the piece's own path.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mount_points: Vec<RelPath>,
+    /// Directories inside the piece that hold a collection of their own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nested_collections: Vec<RelPath>,
     /// Exclude entries inside the piece.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub excluded_paths: Vec<RelPath>,
@@ -712,15 +716,16 @@ fn judge(
                 piece.flags.push(Flag::MountPoint);
                 piece.detail.mount_points.push(piece.path.concat(other));
             }
+            Problem::NestedCollection { root } => {
+                piece.flags.push(Flag::NestedCollection);
+                piece
+                    .detail
+                    .nested_collections
+                    .push(piece.path.concat(root));
+            }
             Problem::Excluded { path } => {
                 piece.flags.push(Flag::Excluded);
                 piece.detail.excluded_paths.push(piece.path.concat(path));
-            }
-            // Until `status` has a row of its own for it, a collection
-            // inside a piece shows as a mount point at its marker.
-            Problem::NestedCollection { root } => {
-                piece.flags.push(Flag::MountPoint);
-                piece.detail.mount_points.push(piece.path.concat(root));
             }
         }
     }
@@ -2196,6 +2201,17 @@ mod tests {
             .pieces
             .remove(0);
         assert_eq!(piece.flags, [Flag::Pinned, Flag::MountPoint]);
+    }
+
+    #[test]
+    fn a_collection_inside_a_piece_is_named_relative_to_the_collection() {
+        let mut world = world();
+        world.file("n/note.txt", 30);
+        world.dir("n/inner/.antiq");
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::NestedCollection]);
+        assert_eq!(piece.detail.nested_collections, [path("n/inner")]);
+        assert_eq!(piece.age_days, None);
     }
 
     #[test]
