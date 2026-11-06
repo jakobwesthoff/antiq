@@ -372,6 +372,18 @@ session 01M6K9S8XCBHG4Z1EWPAAJVSXN was superseded by it):
   changed), to be reviewed adversarially before parallel sonnet agents
   implement it conductor-style.
 
+Adversarial review round 2 of the concept (2026-11-04; ledger in the
+logbook, `plans/concept-review-ledger.md`, round 2 section): 57
+findings (S11-S15, H18-H29, O21-O33, F21-F34), all settled; H19
+withdrawn. One user decision (AskUserQuestion in chat):
+
+- Target marker, other host or other collection path: the user meant
+  by "warning" that push stops and shows the mismatch, and the user
+  forces it deliberately after making sure; otherwise it aborts. So:
+  exit 1 naming both, `push --take-over` pushes anyway and rewrites
+  the marker (never with `--if-reachable`). The marker also records
+  the collection path.
+
 ## Presented
 
 - The grep study was presented in round 8
