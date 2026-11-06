@@ -536,6 +536,7 @@ mod tests {
         let report = list(&collection(&temp, "colour = 1"), None).expect("lists");
         assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
         assert!(report.warnings[0].message.contains("colour"));
+        assert_eq!(CommandReport::warnings(&report), report.warnings.as_slice());
     }
 
     #[test]
