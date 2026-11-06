@@ -12,6 +12,7 @@ pub const BOLD: Style = Style::new().bold();
 pub const DIM: Style = Style::new().dimmed();
 pub const RED: Style = AnsiColor::Red.on_default();
 pub const YELLOW: Style = AnsiColor::Yellow.on_default();
+pub const GREEN: Style = AnsiColor::Green.on_default();
 pub const MAGENTA: Style = AnsiColor::Magenta.on_default();
 pub const CYAN: Style = AnsiColor::Cyan.on_default();
 /// The part of a name a search matched.

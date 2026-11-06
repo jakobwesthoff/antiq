@@ -754,8 +754,9 @@ fn a_dry_run_on_a_terminal_names_the_version_by_its_local_time() {
     let run = world.run_tty(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
     run.expect_code(0);
     assert!(
-        run.stdout
-            .starts_with("Would delete version 2026-11-04 22:02:11 of projects/scanner: "),
+        run.plain().starts_with(
+            "○ would delete  version 2026-11-04 22:02:11 of projects/scanner, three files:\n"
+        ),
         "{:?}",
         run.stdout
     );

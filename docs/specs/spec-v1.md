@@ -674,7 +674,7 @@ that names no running process. The time on the console is UTC, RFC 3339. It exit
 lock is held by pid <pid>, started <time>. No repairs are listed.` Each
 command's section says what else its dry run prints. On the console a
 plan is one `Would ...` line per action, or `Nothing to do.` when there
-is none. Under `--json` the plan is JSON (see "JSON output"). (ADR 0046)
+is none; a terminal shows the lines as described in "Console output". Under `--json` the plan is JSON (see "JSON output"). (ADR 0046)
 
 **Lock.** Every command that changes the collection (`archive`,
 `unearth`, `fork`, `forget`, `rebuild`, `import`, `pin`, `unpin`) and
@@ -898,10 +898,13 @@ It refuses, also under `-n`, creating nothing and exiting 1, where
 `.antiq/` already exists, inside another collection (naming its root),
 where `.antiq` is a file or a symlink, and where a folder that would be a
 piece holds a `.antiq/` directory of its own, naming each such folder.
-`-n` prints the config it would write: the config alone on stdout, so a
-shell can redirect it, and `Would create a collection at <path>` on stderr.
-The collection ID in that config is minted for the print; a real run mints
-its own. A pattern that contains `**` gets a note on stderr, in `warnings`
+`-n` prints the config it would write. The line of the collection ID in
+that config is the comment `# id is minted by the real run`, as a real run
+mints the ID. In a pipe the config is alone on stdout and `Would create a
+collection at <path>` is on stderr. On a terminal stdout has the two action
+lines `would create the antiq collection at <path>` and `would write
+.antiq/config.toml, the settings of the collection:`, the config below them
+behind a `│` on each line, and the dry-run footer. A pattern that contains `**` gets a note on stderr, in `warnings`
 under `--json`.
 
 After creating the collection, `init` prints how many folders the next
@@ -1219,7 +1222,10 @@ terminal and by its stamp otherwise; an incomplete version is always named
 by its stamp. The repairs that were done, the warnings and the failed
 deletions go to stderr. `-n` lists the repairs as `Would ...` lines, then
 for each version `Would delete version <time> of <piece>: <file>, ...`,
-naming the files in the order they are deleted. With `--all-versions` the
+naming the files in the order they are deleted. On a terminal each version
+is an action line `would delete version <time> of <piece>, <n> files:`
+followed by one line for each file, indented by two columns, with its part
+(`archive`, `listing` or `checksum`) in front of its name. With `--all-versions` the
 versions come oldest first, incomplete ones among them, in both the `Deleted`
 and the `Would delete` lines.
 
@@ -1357,7 +1363,8 @@ projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
 tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
 
-Without a terminal there is no header and a row is one line of tab-separated
+The header row is dim and has no rule under it. Without a terminal there is
+no header and a row is one line of tab-separated
 fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
 and the numbers unformatted. A control character in a piece path is written
 as `%` and the two hexadecimal digits of each of its bytes, on a terminal and
@@ -1480,7 +1487,8 @@ The first line counts the live folders (every piece, plain ones included)
 and the versions (those that have a `.tar.zst`), gives the sum of the
 `archive-bytes` their listings record in decimal units, and repeats
 `idle_days`. A blank line and the table follow: one row per piece that has
-a state, sorted by path, the state coloured in the first column: `due`
+a state, sorted by path, the state coloured in the first column and the
+header row and the WHAT column dim: `due`
 (archived on the next run), `soon` (due within `soon_days`), `pinned`, and
 `refused` for the pieces `archive` refuses. Plain live folders are only
 counted in the header; when no piece has a state, the blank line and the
@@ -1497,7 +1505,9 @@ joined by `; `. A reason is one of these, with paths relative to the
 collection root:
 
 - `mount point: <path>`
-- `nested collection: <dir>`, the directory that holds the nested marker
+- `nested collection: <dir>`, the directory that holds the nested marker;
+  the WHAT column of `status` says `nested antiq collection: <dir>`, and
+  `--json` and the `refused` lines of `archive` keep `nested collection`
 - `unreadable entry: <path>`, the first entry that failed
 - `exclude entry: <path>`
 - `locked: <path>`, also for the directory that holds the piece's top
@@ -1582,6 +1592,14 @@ is not present, or that no pattern selects, is the error kind
 `Pinned <piece>`, `Unpinned <piece>`, `<piece> is already pinned` or
 `<piece> is not pinned` and exits 0; `pin` on a piece that is pinned
 already writes nothing and still flushes the piece's directory.
+
+On a terminal a run adds an info block that says what a pin is: under
+`Pinned <piece>` and `Unpinned <piece>` what the pin does, and in place of
+the sentence for a piece in the state asked for ("Nothing to pin: <piece>
+is already pinned." and "Nothing to unpin: <piece> is not pinned.", with
+the line that `antiq status` shows which pieces are pinned). A dry run
+prints the same kind of info, between its action line and its footer. A
+pipe gets the sentences only.
 
 A dry run prints the repairs as `Would ...` lines, then `Would pin <piece>`
 or `Would unpin <piece>`. When the piece is in the state asked for it
@@ -1774,8 +1792,13 @@ target. `--init` and `--force` are each refused together with
    updated, N deleted` line per piece that changed and `  other files:
    ...` where other paths changed; where nothing changed it is `Pushed to
    <target>. Nothing changed.` (`The target <target> is up to date.` in a
-   dry run). A written marker adds `Wrote the marker .antiq-target.` before
-   it.
+   dry run). A written marker adds `Claimed the push target <target> for this
+   antiq collection.` before it. On a terminal a push that wrote the marker
+   prints `✔ Claimed the push target <target>: N created, N updated, N
+   deleted`, a sentence that says the marker now records this antiq
+   collection and host, and a table with the columns PIECE, CREATED, UPDATED
+   and DELETED for the pieces that changed and the other files; a zero is
+   dim.
 
 With `--fsync` the target flushes each file's content before it is renamed
 into place; a power loss can then at most lose the newest names, which the
@@ -1998,9 +2021,13 @@ with a symbol and a word:
 Every warning is its own block. Blocks are separated by an empty line, and
 no bar runs past the last line of text.
 
+Tables have a dim header row and no rule under it. This holds for the
+tables of `list`, `status`, `push` and the tables under an error.
+
 A dry run writes each action line behind a magenta tag `○ would <verb>`,
-and ends with an empty line and "Dry run: nothing was <verb>. Run again
-without `-n` to <what it would do>."
+with the text behind the longest verb of the run lined up, and ends with an
+empty line and "Dry run: nothing was <verb>. Run again without `-n` to
+<what it would do>." A dry run with no action has no footer.
 
 Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
 the dry-run footer. A stream that is not a terminal gets plain lines: on

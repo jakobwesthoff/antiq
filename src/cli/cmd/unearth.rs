@@ -53,9 +53,12 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
                 out.json(Some("unearth"), &plan)
                     .context("print the result")?;
             } else {
-                for line in dry_run_lines(&plan, style, &zone) {
-                    out.line(&line).context("print the result")?;
-                }
+                out.dry_plan(
+                    &dry_run_lines(&plan, style, &zone),
+                    "unearthed",
+                    "unearth the version",
+                )
+                .context("print the result")?;
                 out.notices(&notice::warnings(&plan.warnings))
                     .context("print the notes")?;
             }

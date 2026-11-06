@@ -435,7 +435,12 @@ fn count_table(pieces: &[(String, usize, Vec<usize>)], style: Style) -> Vec<Stri
     } else {
         longest.min(style.width.saturating_sub(header.len() + GAP.len()).max(8))
     };
-    let mut lines = vec![format!("{}{GAP}{header}", pad("PIECE", piece_width))];
+    let mut lines = vec![painted(
+        style,
+        &format!("{}{GAP}{header}", pad("PIECE", piece_width)),
+        theme::DIM,
+        &[],
+    )];
     for ((_, count, matched), name) in pieces.iter().zip(&names) {
         let shown = mid(name, piece_width);
         let matched = if shown == *name {
@@ -720,6 +725,18 @@ mod tests {
         assert_eq!(lines[1].width(), 40);
         assert!(lines[1].contains('…'), "{:?}", lines[1]);
         assert!(lines[1].ends_with("       3"), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn the_header_of_the_count_table_is_dim() {
+        let coloured = Style {
+            width: 80,
+            color: true,
+            terminal: true,
+        };
+        let lines = count_table(&[("projects/scanner".into(), 2, Vec::new())], coloured);
+        assert_eq!(lines[0], "\x1b[2mPIECE              VERSIONS\x1b[0m");
+        assert_eq!(lines[1], "projects/scanner          2");
     }
 
     fn row(piece: &str, stamp: &str) -> Row {

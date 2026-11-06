@@ -4,6 +4,8 @@
 
 //! The `pin` and `unpin` commands: create or remove the `.antiq-pin` of a piece.
 
+use crate::cli::console::block::Block;
+use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
@@ -44,7 +46,7 @@ fn run(
         direction,
     };
 
-    let lines = if args.dry_run {
+    let (lines, dry) = if args.dry_run {
         let planned = plan(&request, &SystemClock)
             .map_err(antiq::Error::from)
             .with_context(|| format!("plan to {name} the piece"))?;
@@ -52,7 +54,7 @@ fn run(
             out.json(Some(name), &planned).context("print the plan")?;
             return Ok(0);
         }
-        render_plan(&planned, direction)
+        (render_plan(&planned, direction), true)
     } else {
         let report = pin_piece(&request, &SystemClock)
             .map_err(antiq::Error::from)
@@ -61,13 +63,42 @@ fn run(
             out.json(Some(name), &report).context("print the result")?;
             return Ok(0);
         }
-        render(&report, direction)
+        (render(&report, direction), false)
     };
-    for line in &lines.stdout {
-        out.line(line).context("print the result")?;
-    }
+    print(&lines, direction, dry, out).context("print the result")?;
     out.notices(&lines.stderr).context("print the notes")?;
     Ok(0)
+}
+
+/// The result on stdout. A terminal gets the info in place of the sentence
+/// when the piece is in the state asked for, and under the lines otherwise.
+/// A dry run ends with the footer, behind the info.
+fn print(lines: &Lines, direction: Direction, dry: bool, out: &mut Output) -> std::io::Result<()> {
+    if lines.instead
+        && let Some(info) = &lines.info
+        && out.info_only(info)?
+    {
+        return Ok(());
+    }
+    let actions = if dry {
+        out.dry_lines(&lines.stdout)?
+    } else {
+        for line in &lines.stdout {
+            out.line(line)?;
+        }
+        0
+    };
+    if let Some(info) = &lines.info {
+        out.info_result(info)?;
+    }
+    if actions > 0 {
+        let (nothing_was, rerun) = match direction {
+            Direction::Pin => ("pinned", "pin the piece"),
+            Direction::Unpin => ("unpinned", "unpin the piece"),
+        };
+        out.dry_footer(nothing_was, rerun)?;
+    }
+    Ok(())
 }
 
 /// What a run prints.
@@ -75,6 +106,94 @@ fn run(
 struct Lines {
     stdout: Vec<String>,
     stderr: Vec<Notice>,
+    /// What a pin is, for a terminal.
+    info: Option<Block>,
+    /// The info stands in place of the stdout lines on a terminal: the
+    /// piece is in the state asked for and nothing happens.
+    instead: bool,
+}
+
+/// The info a terminal gets. `changed` is false when the piece is in the
+/// state asked for already.
+fn explanation(piece: &str, direction: Direction, changed: bool, dry: bool) -> Block {
+    let piece = sanitize(piece);
+    let file = format!("{piece}/.antiq-pin");
+    let status = Rich::new()
+        .cmd("antiq status")
+        .text(" shows which pieces are pinned.");
+    match (direction, changed) {
+        (Direction::Pin, false) => {
+            Block::info(
+                Rich::new()
+                    .text("Nothing to pin: ")
+                    .path(&piece)
+                    .text(" is already pinned."),
+            )
+            .text(Rich::new().text("The file ").path(".antiq-pin").text(
+                " at the top of the piece pins it, and this piece has it. Nothing was changed.",
+            ))
+            .fix(status)
+        }
+        (Direction::Unpin, false) => Block::info(
+            Rich::new()
+                .text("Nothing to unpin: ")
+                .path(&piece)
+                .text(" is not pinned."),
+        )
+        .text(
+            Rich::new()
+                .text("A pin is the file ")
+                .path(".antiq-pin")
+                .text(" at the top of a piece, and this piece has none. Nothing was changed."),
+        )
+        .fix(status),
+        (Direction::Pin, true) if dry => {
+            Block::info(Rich::new().text("A pinned piece is never archived.")).text(
+                Rich::new()
+                    .text("Pinning creates the file ")
+                    .path(&file)
+                    .text(". ")
+                    .cmd("push")
+                    .text(" still mirrors a pinned piece, and ")
+                    .cmd("status")
+                    .text(" shows it as pinned."),
+            )
+        }
+        (Direction::Pin, true) => {
+            Block::info(Rich::new().text("A pinned piece is never archived."))
+                .text(
+                    Rich::new()
+                        .text("The file ")
+                        .path(&file)
+                        .text(" marks it. ")
+                        .cmd("push")
+                        .text(" still mirrors the piece, and ")
+                        .cmd("status")
+                        .text(" shows it as pinned."),
+                )
+                .fix(
+                    Rich::new()
+                        .cmd(&format!("antiq unpin {piece}"))
+                        .text(" removes the file again."),
+                )
+        }
+        (Direction::Unpin, true) if dry => {
+            Block::info(Rich::new().text("An unpinned piece can be archived again.")).text(
+                Rich::new()
+                    .text("Unpinning removes the file ")
+                    .path(&file)
+                    .text(". The piece is archived once it has been idle long enough."),
+            )
+        }
+        (Direction::Unpin, true) => {
+            Block::info(Rich::new().text("The piece can be archived again.")).text(
+                Rich::new()
+                    .text("The file ")
+                    .path(&file)
+                    .text(" is removed. The piece is archived once it has been idle long enough."),
+            )
+        }
+    }
 }
 
 /// What a run, or a dry run in the state asked for, says about the piece.
@@ -96,13 +215,12 @@ fn render(report: &PinReport, direction: Direction) -> Lines {
         }
     }
     stderr.extend(notice::warnings(report.warnings()));
+    let piece = report.piece.to_string();
     Lines {
-        stdout: vec![sentence(
-            &report.piece.to_string(),
-            direction,
-            report.changed,
-        )],
+        stdout: vec![sentence(&piece, direction, report.changed)],
         stderr,
+        info: Some(explanation(&piece, direction, report.changed, false)),
+        instead: !report.changed,
     }
 }
 
@@ -118,6 +236,8 @@ fn render_plan(plan: &PinPlan, direction: Direction) -> Lines {
                     lock_held.pid, lock_held.started
                 )],
                 stderr: Vec::new(),
+                info: None,
+                instead: false,
             };
         }
         PinPlan::Listed {
@@ -142,6 +262,11 @@ fn render_plan(plan: &PinPlan, direction: Direction) -> Lines {
     Lines {
         stdout,
         stderr: notice::warnings(warnings),
+        // With repairs listed above it, the sentence of the state that holds
+        // says it already.
+        info: (changed || actions.is_empty())
+            .then(|| explanation(&piece, direction, changed, true)),
+        instead: !changed && actions.is_empty(),
     }
 }
 

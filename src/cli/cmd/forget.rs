@@ -44,9 +44,8 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
             out.json(Some("forget"), &plan).context("print the plan")?;
         } else {
             let lines = render_plan(&plan, out.stdout_style().terminal, &zone);
-            for line in &lines.stdout {
-                out.line(line).context("print the plan")?;
-            }
+            out.dry_plan(&lines.stdout, "deleted", &rerun_text(&plan))
+                .context("print the plan")?;
             out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
@@ -67,6 +66,22 @@ pub fn run(ctx: &Context, args: &ForgetArgs, out: &mut Output) -> anyhow::Result
         out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(if report.partial() { PARTIAL } else { 0 })
+}
+
+/// What running the plan again without `-n` would do, for the footer.
+fn rerun_text(plan: &ForgetPlan) -> String {
+    let versions = match plan {
+        ForgetPlan::Held { .. } => 0,
+        ForgetPlan::Listed { actions, .. } => actions
+            .iter()
+            .filter(|action| matches!(action, Action::ForgetVersion(_)))
+            .count(),
+    };
+    match versions {
+        0 => "make these repairs".to_string(),
+        1 => "delete the version".to_string(),
+        _ => "delete these versions".to_string(),
+    }
 }
 
 /// What a run prints.
@@ -132,6 +147,36 @@ fn render(report: &ForgetReport, terminal: bool, zone: &TimeZone) -> Lines {
     Lines { stdout, stderr }
 }
 
+/// The action line of a version a terminal gets, and one line below it for
+/// each file the version consists of, named by its part: `archive`,
+/// `listing` or `checksum`.
+fn files_under_action(name: &str, piece: &str, entry: &VersionEntry) -> Vec<String> {
+    let count = match entry.files.len() {
+        1 => "one file".to_string(),
+        2 => "two files".to_string(),
+        3 => "three files".to_string(),
+        many => format!("{many} files"),
+    };
+    let mut lines = vec![format!("Would delete {name} of {piece}, {count}:")];
+    let part = |file: &str| {
+        if file.ends_with(".tar.zst.sha256") {
+            "checksum"
+        } else if file.ends_with(".sha256.zst") {
+            "listing"
+        } else if file.ends_with(".tar.zst") {
+            "archive"
+        } else {
+            "file"
+        }
+    };
+    // "checksum" is the longest part, so the file names line up whichever
+    // files a version has left.
+    for file in &entry.files {
+        lines.push(format!("  {:<8}   {}", part(file), sanitize(file)));
+    }
+    lines
+}
+
 /// The plan of a dry run: one `Would ...` line per action on stdout, or
 /// the line about the holder of the lock.
 fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
@@ -160,18 +205,23 @@ fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
 
     let mut stdout = Vec::new();
     for action in actions {
-        stdout.push(match action {
-            Action::Repair(repair) => format!("Would {}", repair.describe()),
+        match action {
+            Action::Repair(repair) => stdout.push(format!("Would {}", repair.describe())),
             Action::ForgetVersion(entry) => {
                 let name = names.next().expect("a name for each version");
-                let files: Vec<String> = entry.files.iter().map(|file| sanitize(file)).collect();
-                format!(
-                    "Would delete {name} of {}: {}",
-                    sanitize(&entry.piece.to_string()),
-                    files.join(", ")
-                )
+                let piece = sanitize(&entry.piece.to_string());
+                if terminal {
+                    stdout.extend(files_under_action(&name, &piece, entry));
+                } else {
+                    let files: Vec<String> =
+                        entry.files.iter().map(|file| sanitize(file)).collect();
+                    stdout.push(format!(
+                        "Would delete {name} of {piece}: {}",
+                        files.join(", ")
+                    ));
+                }
             }
-        });
+        }
     }
     Lines {
         stdout,
@@ -366,8 +416,12 @@ mod tests {
             lines.stdout,
             [
                 "Would delete .antiq/tmp/leftover",
-                "Would delete version 2026-11-04 10:02:11 of tools/scan: a.tar.zst, a.sha256.zst, a.tar.zst.sha256",
-                "Would delete incomplete version 2026-11-03T090211 of tools/scan: b.sha256.zst",
+                "Would delete version 2026-11-04 10:02:11 of tools/scan, three files:",
+                "  archive    a.tar.zst",
+                "  listing    a.sha256.zst",
+                "  checksum   a.tar.zst.sha256",
+                "Would delete incomplete version 2026-11-03T090211 of tools/scan, one file:",
+                "  listing    b.sha256.zst",
             ]
         );
         assert_eq!(pipe_lines(&lines.stderr), ["warning: watch out"]);

@@ -71,7 +71,7 @@ pub fn render_parts(parts: &[Part], env: &Env) -> Vec<String> {
     lines
 }
 
-pub(super) fn paint(env: &Env, style: Style, text: &str) -> String {
+pub(in crate::cli) fn paint(env: &Env, style: Style, text: &str) -> String {
     if env.color && !text.is_empty() {
         format!("{style}{text}{style:#}")
     } else {
@@ -83,8 +83,6 @@ fn role_style(role: Role, base: Style) -> Style {
     match role {
         Role::Plain => base,
         Role::Strong => theme::BOLD,
-        Role::Dim => theme::DIM,
-        Role::Matched => theme::MATCH,
     }
 }
 
@@ -114,7 +112,7 @@ fn wrap(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
 }
 
 /// The painted lines of `text` wrapped to `width` columns.
-pub(super) fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
+pub(in crate::cli) fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
     wrap(&text.words(), width)
         .iter()
         .map(|line| paint_line(env, line, base))
@@ -152,7 +150,7 @@ fn paint_line(env: &Env, words: &[&Word], base: Style) -> String {
 }
 
 /// How wide the text of a line may be after `indent` columns.
-pub(super) fn available(env: &Env, indent: usize) -> usize {
+pub(in crate::cli) fn available(env: &Env, indent: usize) -> usize {
     if env.width < MIN_WRAP_WIDTH {
         usize::MAX
     } else {

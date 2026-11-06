@@ -98,7 +98,7 @@ url = "/Volumes/nas/antiq/playground"
 
 ```console
 $ antiq push --init
-Wrote the marker .antiq-target.
+Claimed the push target /Volumes/nas/antiq/playground for this antiq collection.
 Changed on /Volumes/nas/antiq/playground:
   projects/antiq: 1 created, 0 updated, 0 deleted
   projects/scanner: 3 created, 0 updated, 0 deleted

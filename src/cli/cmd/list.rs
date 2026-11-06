@@ -248,11 +248,11 @@ pub(in crate::cli) fn table(
         pad("FILES", files_width),
     ]
     .join(GAP);
-    let mut lines = vec![
-        format!("{}{header}", spaces(lead_width))
-            .trim_end()
-            .to_string(),
-    ];
+    let mut lines = vec![format!(
+        "{}{}",
+        spaces(lead_width),
+        painted(style, header.trim_end(), theme::DIM, &[])
+    )];
 
     // A cell is painted first and padded after, because the escape sequences
     // of the paint have no width.
@@ -476,6 +476,33 @@ mod tests {
             format!(
                 "{matched}▸{off} projects/scanner   {matched}2025-06{off}-18 16:45:09   198 B       2"
             )
+        );
+    }
+
+    #[test]
+    fn the_header_row_is_dim_and_has_no_rule_under_it() {
+        let style = Style {
+            color: true,
+            ..TERMINAL
+        };
+        let dim = "\x1b[2m";
+        let off = "\x1b[0m";
+        let lines = table(&scanner_versions(), style, &plus_one(), None);
+        assert_eq!(
+            lines[0],
+            format!("{dim}PIECE              VERSION               SIZE    FILES{off}")
+        );
+        assert!(lines[1].starts_with("projects/scanner"), "{:?}", lines[1]);
+
+        let looks = two_chosen();
+        let marking = Marking {
+            looks: &looks,
+            marker: Some("▸"),
+        };
+        let lines = table(&scanner_versions(), style, &plus_one(), Some(&marking));
+        assert_eq!(
+            lines[0],
+            format!("  {dim}PIECE              VERSION               SIZE    FILES{off}")
         );
     }
 

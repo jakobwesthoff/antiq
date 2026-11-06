@@ -42,9 +42,8 @@ pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result
                 out.json(Some("import"), &plan)
                     .context("print the result")?;
             } else {
-                for line in plan.lines() {
-                    out.line(&line).context("print the result")?;
-                }
+                out.dry_plan(&plan.lines(), "imported", "import the folder")
+                    .context("print the result")?;
                 out.notices(&notice::warnings(&plan.warnings))
                     .context("print the notes")?;
             }

@@ -9,8 +9,8 @@ use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
-use antiq::commands::archive::{ArchiveReport, Outcome, Request, Target, archive};
-use antiq::plan::PlanAction;
+use antiq::commands::archive::{ArchivePlan, ArchiveReport, Outcome, Request, Target, archive};
+use antiq::plan::{PlanAction, Step};
 use anyhow::Context as _;
 
 pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -46,9 +46,8 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
                 out.json(Some("archive"), &plan)
                     .context("print the result")?;
             } else {
-                for line in plan.lines() {
-                    out.line(&line).context("print the result")?;
-                }
+                out.dry_plan(&plan.lines(), "archived", &rerun_text(&plan))
+                    .context("print the result")?;
                 out.notices(&notice::warnings(&plan.warnings))
                     .context("print the notes")?;
             }
@@ -65,6 +64,20 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
             }
             Ok(0)
         }
+    }
+}
+
+/// What running the plan again without `-n` would do, for the footer.
+fn rerun_text(plan: &ArchivePlan) -> String {
+    let pieces = plan
+        .actions
+        .iter()
+        .filter(|step| matches!(step, Step::Command(_)))
+        .count();
+    match pieces {
+        0 => "make these repairs".to_string(),
+        1 => "archive the piece".to_string(),
+        _ => "archive these pieces".to_string(),
     }
 }
 

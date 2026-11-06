@@ -11,9 +11,6 @@ pub enum Role {
     Plain,
     /// A command, a path or another name the reader may copy.
     Strong,
-    Dim,
-    /// The part of a name a search matched.
-    Matched,
 }
 
 /// A run of text without whitespace, made of spans.
@@ -63,14 +60,6 @@ impl Rich {
 
     pub fn path(self, text: &str) -> Rich {
         self.push(Role::Strong, text)
-    }
-
-    pub fn dim(self, text: &str) -> Rich {
-        self.push(Role::Dim, text)
-    }
-
-    pub fn matched(self, text: &str) -> Rich {
-        self.push(Role::Matched, text)
     }
 
     pub fn is_empty(&self) -> bool {

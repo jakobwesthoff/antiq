@@ -633,7 +633,7 @@ fn unearth_a_given_version_by_local_text_or_stamp_across_the_repeated_hour() {
                 let plain = tty.plain();
                 assert_eq!(
                     plain.lines().next(),
-                    Some(format!("Would unearth {JOURNAL} (version {shown})").as_str()),
+                    Some(format!("○ would unearth  {JOURNAL} (version {shown})").as_str()),
                     "{version}"
                 );
             }

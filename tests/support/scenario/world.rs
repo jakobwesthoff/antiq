@@ -146,6 +146,27 @@ impl World {
         outcome
     }
 
+    /// `run_tty` with `envs` added to the environment, such as `NO_COLOR`
+    /// for a terminal without colour.
+    pub fn run_tty_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Outcome {
+        let mut antiq = Antiq::new()
+            .arg("-C")
+            .arg(self.collection.root())
+            .args(args)
+            .env("TZ", TIME_ZONE);
+        for (key, value) in envs {
+            antiq = antiq.env(key, value);
+        }
+        let (run, stdout) = run_on_terminal(antiq);
+        Outcome {
+            code: run.code(),
+            stdout,
+            stderr: run.stderr,
+            mode: Mode::Text,
+            value: None,
+        }
+    }
+
     /// Runs the command with stderr on a pseudo-terminal, `envs` added to
     /// its environment. What it wrote to stderr comes back as `stderr`
     /// with the terminal's `\r\n` as `\n`; stdout is piped.
@@ -387,6 +408,18 @@ pub fn both_modes(build: impl Fn(&Clock) -> Setup, script: impl Fn(&World)) {
         report.is_empty(),
         "the end states of the text run (first) and the JSON run (second) differ\n{report}"
     );
+}
+
+/// Runs `antiq` with its stdout on a pseudo-terminal and returns the run
+/// and what it printed there, the terminal's `\r\n` as `\n`. For a command
+/// that has no collection to run against, such as `init`.
+pub fn run_on_terminal(antiq: Antiq) -> (crate::support::cmd::Run, String) {
+    let mut terminal = Terminal::open();
+    let run = antiq
+        .stdout(terminal.slave())
+        .run_within(TTY_DEADLINE)
+        .expect("the command finishes on a terminal");
+    (run, terminal.finish())
 }
 
 /// A pseudo-terminal pair. A reader thread drains the master end while the

@@ -357,14 +357,13 @@ fn a_terminal_names_the_version_by_its_local_time() {
     let dry = world.run_tty(&["unearth", "projects/scanner", "-n"]);
     dry.expect_code(0);
     // 09:02:11 UTC is 22:02:11 at +13:00.
+    let plain = dry.plain();
     assert!(
-        dry.stdout
-            .contains("Would unearth projects/scanner (version 2026-11-04 22:02:11)"),
-        "{:?}",
-        dry.stdout
+        plain.contains("○ would unearth  projects/scanner (version 2026-11-04 22:02:11)"),
+        "{plain:?}"
     );
     assert_eq!(
-        dry.stdout.lines().nth(1),
+        plain.lines().nth(1),
         Some("  check the version 2026-11-04 22:02:11 is sound"),
         "{:?}",
         dry.stdout

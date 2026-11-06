@@ -4,13 +4,20 @@
 
 //! The `push` command: mirrors the collection to the target.
 
+use crate::cli::console::env::Env;
+use crate::cli::console::render::{available, flow, paint};
+use crate::cli::console::rich::Rich;
+use crate::cli::console::symbols::Symbols;
+use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
+use crate::cli::table::{pad, pad_left, sanitize};
 use crate::cli::{Context, PushArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
-use antiq::commands::push::{PushOutcome, PushRequest, push};
+use antiq::commands::push::{PushOutcome, PushReport, PushRequest, push};
 use anyhow::Context as _;
+use unicode_width::UnicodeWidthStr;
 
 pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -59,11 +66,103 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     Notice::Note(line.strip_prefix("note: ").unwrap_or(&line).to_string())
                 }));
                 out.notices(&notices).context("print the result")?;
-                for line in report.lines() {
-                    out.line(&line).context("print the result")?;
+                let env = out.stdout_env();
+                let lines = if env.rich && report.initialized && report.plan.is_none() {
+                    claimed(&report, &env)
+                } else {
+                    report.lines()
+                };
+                if report.dry_run && report.reason.is_none() {
+                    out.dry_plan(&lines, "pushed", "push to the target")
+                        .context("print the result")?;
+                } else {
+                    for line in lines {
+                        out.line(&line).context("print the result")?;
+                    }
                 }
             }
         }
     }
     Ok(0)
+}
+
+/// What a terminal gets after `push --init` has claimed the target: the
+/// totals, what the marker is for, and a table of what was sent per piece.
+fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
+    let counts = &report.changes;
+    let mut rows: Vec<(String, [u64; 3])> = counts
+        .pieces
+        .iter()
+        .map(|piece| {
+            let c = &piece.counts;
+            (
+                sanitize(&piece.piece.to_string()),
+                [c.created, c.updated, c.deleted],
+            )
+        })
+        .collect();
+    let other = [
+        counts.other.created,
+        counts.other.updated,
+        counts.other.deleted,
+    ];
+    if other != [0; 3] {
+        rows.push(("other files".to_string(), other));
+    }
+    let total = |column: usize| rows.iter().map(|(_, row)| row[column]).sum::<u64>();
+    let headline = format!(
+        "Claimed the push target {}: {} created, {} updated, {} deleted",
+        sanitize(&report.target),
+        total(0),
+        total(1),
+        total(2),
+    );
+    let done = paint(env, theme::GREEN, Symbols::for_env(env).done);
+    let mut lines = vec![format!("{done} {}", paint(env, theme::BOLD, &headline))];
+
+    let why = Rich::parse(
+        "The marker file `.antiq-target` on the target now records this antiq collection and host, so another antiq collection cannot push there by mistake.",
+    );
+    lines.extend(flow(env, &why, anstyle::Style::new(), available(env, 0)));
+
+    if rows.is_empty() {
+        return lines;
+    }
+    const GAP: &str = "   ";
+    const NUMBER: usize = 7;
+    let name_width = rows
+        .iter()
+        .map(|(name, _)| name.width())
+        .chain([5])
+        .max()
+        .expect("the header is a cell");
+    lines.push(String::new());
+    let header = format!(
+        "{}{GAP}{}{GAP}{}{GAP}{}",
+        pad("PIECE", name_width),
+        pad_left("CREATED", NUMBER),
+        pad_left("UPDATED", NUMBER),
+        pad_left("DELETED", NUMBER)
+    );
+    lines.push(paint(env, theme::DIM, &header));
+    // A zero is dim, so the numbers that did something stand out.
+    let number = |count: u64| {
+        let text = count.to_string();
+        let fill = " ".repeat(NUMBER - text.len());
+        if count == 0 {
+            format!("{fill}{}", paint(env, theme::DIM, &text))
+        } else {
+            format!("{fill}{text}")
+        }
+    };
+    for (name, row) in &rows {
+        lines.push(format!(
+            "{}{GAP}{}{GAP}{}{GAP}{}",
+            pad(name, name_width),
+            number(row[0]),
+            number(row[1]),
+            number(row[2])
+        ));
+    }
+    lines
 }

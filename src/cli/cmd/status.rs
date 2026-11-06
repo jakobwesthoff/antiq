@@ -7,15 +7,16 @@
 use crate::cli::Context;
 use crate::cli::console::block::{Block, Para};
 use crate::cli::console::rich::Rich;
+use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, sanitize, spaces, wrap,
+    Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, painted, sanitize, spaces, wrap,
 };
 use antiq::clock::{Clock, SystemClock, whole_seconds};
 use antiq::collection::Collection;
 use antiq::commands::status::{DoomedCause, StatusReport, VersionNote, status};
-use antiq::commands::survey::{FutureTime, SurveyedPiece, Verdict};
+use antiq::commands::survey::{FutureTime, Refusal, RefusalKind, SurveyedPiece, Verdict};
 use antiq::relpath::RelPath;
 use antiq::report::lock_note;
 use antiq::versions::naming::local_labels;
@@ -177,7 +178,7 @@ fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
         Verdict::Refused(reasons) => {
             let joined = reasons
                 .iter()
-                .map(|reason| sanitize(&reason.to_string()))
+                .map(|reason| sanitize(&reason_text(reason)))
                 .collect::<Vec<_>>()
                 .join("; ");
             ("refused", Color::Red, joined)
@@ -189,6 +190,16 @@ fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
         color,
         what,
     })
+}
+
+/// What the WHAT column says of a refusal. It spells out "antiq
+/// collection" where the library's text, which `--json` carries as well,
+/// says "collection".
+fn reason_text(reason: &Refusal) -> String {
+    match reason.kind {
+        RefusalKind::NestedCollection => format!("nested antiq collection: {}", reason.path),
+        _ => reason.to_string(),
+    }
 }
 
 fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
@@ -216,15 +227,16 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
     };
     let continuation = spaces(fixed + piece_width);
 
+    let heading = |text: String| painted(style, &text, theme::DIM, &[]);
     let mut lines = vec![format!(
         "{}{}{}{}{}{}{}",
-        pad("STATE", STATE_WIDTH),
+        heading(pad("STATE", STATE_WIDTH)),
         spaces(GAP),
-        pad("PIECE", piece_width),
+        heading(pad("PIECE", piece_width)),
         spaces(GAP),
-        pad_left("IDLE", IDLE_WIDTH),
+        heading(pad_left("IDLE", IDLE_WIDTH)),
         spaces(GAP),
-        "WHAT"
+        heading("WHAT".to_string())
     )];
     for (row, name) in rows.iter().zip(&names) {
         let shown = if wide {
@@ -246,11 +258,12 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         } else {
             wrap(&row.what, what_width)
         };
-        lines.push(format!("{prefix}{}", wrapped.remove(0)));
+        let dim = |text: &str| painted(style, text, theme::DIM, &[]);
+        lines.push(format!("{prefix}{}", dim(&wrapped.remove(0))));
         lines.extend(
             wrapped
                 .into_iter()
-                .map(|rest| format!("{continuation}{rest}")),
+                .map(|rest| format!("{continuation}{}", dim(&rest))),
         );
     }
     lines
@@ -886,8 +899,31 @@ mod tests {
         let shown = render(&report, colored, &TimeZone::UTC, now());
 
         assert_eq!(
+            lines(&shown)[2],
+            "\x1b[2mSTATE  \x1b[0m  \x1b[2mPIECE\x1b[0m  \x1b[2mIDLE\x1b[0m  \x1b[2mWHAT\x1b[0m"
+        );
+        assert_eq!(
             lines(&shown)[3],
-            "\x1b[33mdue\x1b[0m      a       33d  archives next run"
+            "\x1b[33mdue\x1b[0m      a       33d  \x1b[2marchives next run\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn a_nested_collection_is_named_an_antiq_collection_in_the_what_column() {
+        let report = one(piece(
+            "a",
+            Verdict::Refused(vec![
+                refusal(RefusalKind::NestedCollection, "a/sub"),
+                refusal(RefusalKind::Locked, "a/x"),
+            ]),
+            Some(3),
+        ));
+
+        let shown = render(&report, wide(), &TimeZone::UTC, now());
+
+        assert_eq!(
+            lines(&shown)[3],
+            "refused  a        3d  nested antiq collection: a/sub; locked: a/x"
         );
     }
 

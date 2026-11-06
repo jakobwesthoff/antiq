@@ -22,6 +22,7 @@ use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
+use unicode_width::UnicodeWidthStr;
 
 /// The format number of the JSON envelope.
 const ENVELOPE_FORMAT: u32 = 1;
@@ -250,9 +251,21 @@ impl Output {
 
     /// Writes an info block that belongs to a command's result to stdout.
     /// Only a terminal gets it, after an empty line; a pipe gets nothing.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
     pub fn info_result(&mut self, info: &Block) -> io::Result<()> {
         self.result_block(info)
+    }
+
+    /// Writes an info block that stands for the result itself, without an
+    /// empty line before it. Only a terminal gets it; the answer says
+    /// whether it was written.
+    pub fn info_only(&mut self, info: &Block) -> io::Result<bool> {
+        if !self.stdout_env.rich {
+            return Ok(false);
+        }
+        for line in render_blocks(std::slice::from_ref(info), &self.stdout_env) {
+            self.stdout.write_line(&line)?;
+        }
+        Ok(true)
     }
 
     /// Writes a hint that belongs to a command's result to stdout, under
@@ -330,15 +343,41 @@ impl Output {
         self.blocks(&pending)
     }
 
-    /// Writes one action of a dry run to stdout.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
-    pub fn dry_line(&mut self, verb: &str, rest: &Rich) -> io::Result<()> {
-        let line = dryrun::line(&self.stdout_env, verb, rest);
-        self.stdout.write_line(&line)
+    /// Writes the lines of a dry run to stdout and says how many of them
+    /// were actions. A `Would <verb> <rest>` line gets the tag on a
+    /// terminal, with the rests lined up; any other line is written as it
+    /// is.
+    pub fn dry_lines(&mut self, lines: &[String]) -> io::Result<usize> {
+        let width = lines
+            .iter()
+            .filter_map(|line| dryrun::split(line))
+            .map(|(verb, _)| verb.width())
+            .max()
+            .unwrap_or(0);
+        let mut actions = 0;
+        for line in lines {
+            let Some((verb, rest)) = dryrun::split(line) else {
+                self.stdout.write_line(line)?;
+                continue;
+            };
+            actions += 1;
+            let shown = dryrun::line(&self.stdout_env, verb, width, &Rich::new().text(rest));
+            self.stdout.write_line(&shown)?;
+        }
+        Ok(actions)
+    }
+
+    /// Writes the lines of a dry run and, when any of them is an action,
+    /// the footer. `nothing_was` and `rerun` complete the footer's
+    /// sentence, see [`Output::dry_footer`].
+    pub fn dry_plan(&mut self, lines: &[String], nothing_was: &str, rerun: &str) -> io::Result<()> {
+        if self.dry_lines(lines)? > 0 {
+            self.dry_footer(nothing_was, rerun)?;
+        }
+        Ok(())
     }
 
     /// Writes the closing lines of a dry run to stdout, none to a pipe.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
     pub fn dry_footer(&mut self, nothing_was: &str, rerun: &str) -> io::Result<()> {
         for line in dryrun::footer(&self.stdout_env, nothing_was, rerun) {
             self.stdout.write_line(&line)?;
@@ -600,7 +639,7 @@ mod tests {
     fn a_dry_run_on_a_terminal_gets_the_tag_and_the_footer() {
         let capture = Capture::default();
         let mut out = capture.output_with(terminal(), Env::pipe());
-        out.dry_line("archive", &Rich::new().path("projects/scanner"))
+        out.dry_lines(&["Would archive projects/scanner".to_string()])
             .expect("memory accepts writes");
         out.dry_footer("archived", "archive these pieces")
             .expect("memory accepts writes");
@@ -615,7 +654,7 @@ mod tests {
     fn a_dry_run_on_a_stdout_pipe_keeps_the_would_line_and_has_no_footer() {
         let capture = Capture::default();
         let mut out = capture.output_with(Env::pipe(), terminal());
-        out.dry_line("archive", &Rich::new().path("projects/scanner"))
+        out.dry_lines(&["Would archive projects/scanner".to_string()])
             .expect("memory accepts writes");
         out.dry_footer("archived", "archive these pieces")
             .expect("memory accepts writes");

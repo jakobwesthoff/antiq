@@ -88,10 +88,6 @@ impl Block {
         self
     }
 
-    pub fn kind(&self) -> Kind {
-        self.kind
-    }
-
     /// A paragraph below the title of a warning or info.
     pub fn text(mut self, paragraph: impl Into<Para>) -> Block {
         self.text.push(paragraph.into());

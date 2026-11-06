@@ -137,7 +137,10 @@ impl PushReport {
         if let Some(plan) = &self.plan {
             lines.extend(plan.lines());
         } else if self.initialized {
-            lines.push("Wrote the marker .antiq-target.".to_string());
+            lines.push(format!(
+                "Claimed the push target {} for this antiq collection.",
+                self.target
+            ));
         }
         let verb = if self.dry_run {
             "Would change"
@@ -310,7 +313,10 @@ mod tests {
     #[test]
     fn the_console_lists_the_changes_per_piece() {
         let lines = report().lines();
-        assert_eq!(lines[0], "Wrote the marker .antiq-target.");
+        assert_eq!(
+            lines[0],
+            "Claimed the push target backup@nas:/srv for this antiq collection."
+        );
         assert_eq!(lines[1], "Changed on backup@nas:/srv:");
         assert_eq!(lines[2], "  work: 2 created, 1 updated, 0 deleted");
         assert_eq!(lines[3], "  other files: 0 created, 0 updated, 3 deleted");

@@ -334,7 +334,18 @@ fn a_dry_run_prints_the_config_it_would_write() {
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     assert!(!tree.path(".antiq").exists());
 
-    let config = Config::parse(&run.stdout, None).expect("stdout is the config");
+    // The run mints the ID only when it is real, so the dump has a comment
+    // where the ID goes.
+    assert!(
+        run.stdout.contains("\n# id is minted by the real run\n"),
+        "{}",
+        run.stdout
+    );
+    let with_id = run.stdout.replace(
+        "# id is minted by the real run",
+        "id = \"01ARZ3NDEKTSV4RRFFQ69G5FAV\"",
+    );
+    let config = Config::parse(&with_id, None).expect("stdout is the config");
     assert_eq!(config.collection.patterns, ["a*"]);
     assert_eq!(
         normalised(&run.stderr, &tree),

@@ -4,6 +4,8 @@
 
 //! The `init` command.
 
+use crate::cli::console::env::Env;
+use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
@@ -34,9 +36,15 @@ pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u
         out.json(Some("init"), &report)
             .context("print the result")?;
     } else {
-        let lines = render(&report);
-        for line in &lines.stdout {
-            out.line(line).context("print the result")?;
+        let env = out.stdout_env();
+        let lines = render(&report, &env);
+        if report.config.is_some() && env.rich {
+            out.dry_plan(&lines.stdout, "written", "create the antiq collection")
+                .context("print the result")?;
+        } else {
+            for line in &lines.stdout {
+                out.line(line).context("print the result")?;
+            }
         }
         out.notices(&lines.stderr).context("print the notes")?;
     }
@@ -50,17 +58,43 @@ struct Lines {
     stderr: Vec<Notice>,
 }
 
-fn render(report: &InitReport) -> Lines {
+/// The config of a dry run with the line of the ID replaced by a comment.
+/// The ID is minted by the real run, so the one in the report is not the
+/// one the collection will get.
+fn without_id(config: &str) -> impl Iterator<Item = &str> {
+    config.lines().map(|line| {
+        if line.starts_with("id = ") {
+            "# id is minted by the real run"
+        } else {
+            line
+        }
+    })
+}
+
+fn render(report: &InitReport, env: &Env) -> Lines {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     if let Some(config) = &report.config {
-        // The config is the data of a dry run; a shell can redirect it.
-        stdout.extend(config.lines().map(str::to_string));
-        stderr.push(Notice::Line(format!(
-            "Would create a collection at {}",
-            report.path
-        )));
+        if env.rich {
+            let frame = Symbols::for_env(env).frame;
+            stdout.push(format!(
+                "Would create the antiq collection at {}",
+                report.path
+            ));
+            stdout.push(
+                "Would write .antiq/config.toml, the settings of the collection:".to_string(),
+            );
+            stdout.extend(
+                without_id(config).map(|line| format!("{frame} {line}").trim_end().to_string()),
+            );
+        } else {
+            stdout.extend(without_id(config).map(str::to_string));
+            stderr.push(Notice::Line(format!(
+                "Would create a collection at {}",
+                report.path
+            )));
+        }
     } else {
         stdout.push(format!("Created the collection at {}", report.path));
         if let Some(id) = report.id {
@@ -102,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_created_collection_has_a_summary_and_its_id() {
-        let lines = render(&report());
+        let lines = render(&report(), &Env::pipe());
         assert_eq!(
             texts(&lines.stdout),
             [
@@ -117,32 +151,44 @@ mod tests {
 
     #[test]
     fn one_folder_is_singular_and_no_count_prints_no_line() {
-        let one = render(&InitReport {
-            due: Some(1),
-            ..report()
-        });
+        let one = render(
+            &InitReport {
+                due: Some(1),
+                ..report()
+            },
+            &Env::pipe(),
+        );
         assert_eq!(
             one.stdout.last().map(String::as_str),
             Some("The next archive would archive 1 folder.")
         );
-        let none = render(&InitReport {
-            due: None,
-            ..report()
-        });
+        let none = render(
+            &InitReport {
+                due: None,
+                ..report()
+            },
+            &Env::pipe(),
+        );
         assert_eq!(none.stdout.len(), 3);
     }
 
     #[test]
     fn a_dry_run_prints_the_config_and_says_where_it_would_go() {
-        let lines = render(&InitReport {
-            dry_run: true,
-            created: false,
-            id: None,
-            due: None,
-            config: Some("[collection]\nid = \"X\"\n".into()),
-            ..report()
-        });
-        assert_eq!(texts(&lines.stdout), ["[collection]", "id = \"X\""]);
+        let lines = render(
+            &InitReport {
+                dry_run: true,
+                created: false,
+                id: None,
+                due: None,
+                config: Some("[collection]\nid = \"X\"\n".into()),
+                ..report()
+            },
+            &Env::pipe(),
+        );
+        assert_eq!(
+            texts(&lines.stdout),
+            ["[collection]", "# id is minted by the real run"]
+        );
         assert_eq!(
             pipe_lines(&lines.stderr),
             ["Would create a collection at /work", "warning: watch out"]

@@ -19,6 +19,9 @@ pub struct Symbols {
     /// Marks the matching rows of an ambiguity table.
     pub matched: &'static str,
     pub rule: &'static str,
+    /// The line down the left side of text that is quoted, such as a file
+    /// a dry run would write.
+    pub frame: &'static str,
 }
 
 const UNICODE: Symbols = Symbols {
@@ -31,6 +34,7 @@ const UNICODE: Symbols = Symbols {
     dry_run: "○",
     matched: "▸",
     rule: "─",
+    frame: "│",
 };
 
 const ASCII: Symbols = Symbols {
@@ -43,6 +47,7 @@ const ASCII: Symbols = Symbols {
     dry_run: "o",
     matched: ">",
     rule: "-",
+    frame: "|",
 };
 
 impl Symbols {

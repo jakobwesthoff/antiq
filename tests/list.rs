@@ -71,8 +71,11 @@ fn a_terminal_gets_the_table_in_local_time() {
     let world = world(Mode::Text, three_versions);
     let run = world.run_tty(&["list"]);
     run.expect_code(0);
-    let lines: Vec<&str> = run.stdout.lines().collect();
+    let plain = run.plain();
+    let lines: Vec<&str> = plain.lines().collect();
     assert_eq!(lines.len(), 4, "{:?}", run.stdout);
+    // The header is dim, and no rule sits under it.
+    assert!(run.stdout.starts_with("\x1b[2mPIECE"), "{:?}", run.stdout);
     assert!(lines[0].starts_with("PIECE"), "{:?}", lines[0]);
     assert!(lines[0].trim_end().ends_with("FILES"), "{:?}", lines[0]);
     // 09:02:11 UTC is 22:02:11 at +13:00, and the September stamp is at +12:00.

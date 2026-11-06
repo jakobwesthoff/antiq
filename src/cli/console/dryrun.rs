@@ -13,10 +13,26 @@ use super::theme;
 use anstyle::Style;
 use unicode_width::UnicodeWidthStr;
 
+/// Verbs of two words, which `split` keeps together.
+const TWO_WORD_VERBS: &[&str] = &["leave out"];
+
+/// Splits a `Would <verb> <rest>` line, the form the library and the
+/// commands write a dry run's actions in. `None` for any other line.
+pub fn split(line: &str) -> Option<(&str, &str)> {
+    let action = line.strip_prefix("Would ")?;
+    for verb in TWO_WORD_VERBS {
+        if let Some(rest) = action.strip_prefix(verb).and_then(|r| r.strip_prefix(' ')) {
+            return Some((verb, rest));
+        }
+    }
+    Some(action.split_once(' ').unwrap_or((action, "")))
+}
+
 /// One action of a dry run. A terminal gets the magenta tag
-/// `○ would <verb>` and `rest` behind it. A pipe keeps `Would <verb>
-/// <rest>`, the line scripts read.
-pub fn line(env: &Env, verb: &str, rest: &Rich) -> String {
+/// `○ would <verb>` and `rest` behind it, the verb padded to
+/// `verb_width` columns so that the rests of several actions line up. A
+/// pipe keeps `Would <verb> <rest>`, the line scripts read.
+pub fn line(env: &Env, verb: &str, verb_width: usize, rest: &Rich) -> String {
     if !env.rich {
         return format!("Would {verb} {}", rest.to_plain());
     }
@@ -26,8 +42,9 @@ pub fn line(env: &Env, verb: &str, rest: &Rich) -> String {
         theme::MAGENTA.bold(),
         &format!("{} would {verb}", symbols.dry_run),
     );
+    let fill = " ".repeat(verb_width.saturating_sub(verb.width()));
     let rest = flow(env, rest, Style::new(), usize::MAX).join(" ");
-    format!("{tag}  {rest}")
+    format!("{tag}{fill}  {rest}")
 }
 
 /// The closing lines of a dry run: an empty line, then "Dry run: nothing

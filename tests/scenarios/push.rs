@@ -83,6 +83,85 @@ fn expected_marker(world: &World) -> Vec<u8> {
 }
 
 #[test]
+fn a_terminal_gets_the_claim_of_the_target_with_a_table_of_what_was_sent() {
+    let clock = crate::support::scenario::collection::Clock::now();
+    let world = World::new(
+        pushing_setup(&clock),
+        crate::support::scenario::world::Mode::Text,
+    );
+    let shown = world
+        .target()
+        .expect("a target")
+        .path()
+        .display()
+        .to_string();
+    let run = world.run_tty_env(&["push", "--init"], &[("NO_COLOR", "1")]);
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        format!(
+            "\
+✔ Claimed the push target {shown}: 10 created, 0 updated, 0 deleted
+The marker file .antiq-target on the target now records this antiq collection
+and host, so another antiq collection cannot push there by mistake.
+
+PIECE              CREATED   UPDATED   DELETED
+notes/daily              1         0         0
+old/client-site          3         0         0
+projects/scanner         4         0         0
+other files              2         0         0
+"
+        )
+    );
+}
+
+#[test]
+fn a_push_dry_run_on_a_terminal_tags_its_actions_and_ends_with_the_footer() {
+    let clock = crate::support::scenario::collection::Clock::now();
+    let world = World::new(
+        pushing_setup(&clock),
+        crate::support::scenario::world::Mode::Text,
+    );
+    let run = world.run_tty_env(&["push", "--init", "-n"], &[("NO_COLOR", "1")]);
+    run.expect_code(0);
+    let (head, rest) = run
+        .stdout
+        .split_once("\n  ")
+        .expect("a piece line follows the change");
+    assert_eq!(
+        head.split('\n').collect::<Vec<_>>()[..2],
+        [
+            "○ would write   the marker .antiq-target to the target",
+            "○ would mirror  the collection to the target"
+        ]
+    );
+    assert!(
+        rest.ends_with(
+            "\nDry run: nothing was pushed. Run again without -n to push to the target.\n"
+        ),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn the_zeros_of_the_claim_table_are_dim() {
+    let clock = crate::support::scenario::collection::Clock::now();
+    let world = World::new(
+        pushing_setup(&clock),
+        crate::support::scenario::world::Mode::Text,
+    );
+    let run = world.run_tty_env(&["push", "--init"], &[]);
+    run.expect_code(0);
+    assert!(
+        run.stdout
+            .contains("notes/daily              1         \x1b[2m0\x1b[0m"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
 fn push_makes_a_copy_and_a_second_push_removes_what_is_gone() {
     both_modes(pushing_setup, |world| {
         let target = world.target().expect("a target").path();
@@ -105,7 +184,7 @@ fn push_makes_a_copy_and_a_second_push_removes_what_is_gone() {
                 out,
                 format!(
                     "\
-Wrote the marker .antiq-target.
+Claimed the push target {shown} for this antiq collection.
 Changed on {shown}:
   notes/daily: 1 created, 0 updated, 0 deleted
   old/client-site: 3 created, 0 updated, 0 deleted

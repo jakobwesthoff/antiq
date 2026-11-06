@@ -37,9 +37,8 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
             out.json(Some("rebuild"), &plan).context("print the plan")?;
         } else {
             let lines = render_plan(&plan);
-            for line in &lines.stdout {
-                out.line(line).context("print the plan")?;
-            }
+            out.dry_plan(&lines.stdout, "rebuilt", "rebuild the version")
+                .context("print the plan")?;
             out.notices(&lines.stderr).context("print the notes")?;
         }
         return Ok(0);
