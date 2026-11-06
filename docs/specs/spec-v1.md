@@ -59,7 +59,9 @@ Not in version 1:
 - **Version stamp:** the UTC time of a version, written
   `YYYY-MM-DDTHHMMSS`, with a counter `-2`, `-3`, ... when the same piece
   has several versions within one second (`-1` is not a valid spelling).
-  Stamp and piece path together name a version exactly.
+  A stamp names a UTC time from `0001-01-01T000000` to
+  `9999-12-30T215959`; a file name whose stamp lies outside is not a
+  version. Stamp and piece path together name a version exactly.
 - **Archive file:** the `.tar.zst` of a version. The word appears only
   where the files on disk matter.
 - **Listing:** the `.sha256.zst` of a version (see "Listing format").

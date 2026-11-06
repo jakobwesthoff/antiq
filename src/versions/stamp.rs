@@ -7,7 +7,8 @@
 //! A stamp and the piece path together name a version exactly. The stamp is
 //! a UTC second; versions of one piece made within the same second are told
 //! apart by the counter, and no counter counts as 1, so `-1` is no valid
-//! spelling.
+//! spelling. A stamp names a UTC time from `0001-01-01T000000` to
+//! `9999-12-30T215959`; a text outside that range is no stamp.
 
 use super::VersionsError;
 use jiff::Timestamp;
@@ -20,6 +21,13 @@ use std::str::FromStr;
 /// The highest counter a new stamp gets. The cut of a store file name
 /// reserves room for exactly this many digits.
 pub const MAX_COUNTER: u32 = 9999;
+
+/// The first time a stamp may name.
+const FIRST: DateTime = DateTime::constant(1, 1, 1, 0, 0, 0, 0);
+
+/// The last time a stamp may name: the last whole second before the end of
+/// the range `jiff::Timestamp` holds (`9999-12-30T22:00:00Z`).
+const LAST: DateTime = DateTime::constant(9999, 12, 30, 21, 59, 59, 0);
 
 /// The time of a version, to the second in UTC, and its counter.
 ///
@@ -34,13 +42,19 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    /// The stamp of `time` cut to the whole second, without a counter.
-    pub fn at(time: Timestamp) -> Stamp {
-        Stamp {
-            second: Timestamp::from_second(time.as_second())
-                .expect("a whole second of a valid timestamp is valid"),
-            counter: None,
+    /// The stamp of `time` cut to the whole second, without a counter. A
+    /// time outside the range of stamps (`0001-01-01T000000` to
+    /// `9999-12-30T215959`) has none.
+    pub fn at(time: Timestamp) -> Result<Stamp, VersionsError> {
+        let second = Timestamp::from_second(time.as_second())
+            .expect("a whole second of a valid timestamp is valid");
+        if !(FIRST..=LAST).contains(&second.to_zoned(TimeZone::UTC).datetime()) {
+            return Err(VersionsError::InvalidStamp(time.to_string()));
         }
+        Ok(Stamp {
+            second,
+            counter: None,
+        })
     }
 
     /// The stamp of the same second with counter `counter`; 0 and 1 give
@@ -101,8 +115,9 @@ fn read(text: &str) -> Option<Stamp> {
         0,
     )
     .ok()?;
-    // The last day of year 9999 is a valid civil date and lies past the
-    // end of the timestamp range.
+    if !(FIRST..=LAST).contains(&civil) {
+        return None;
+    }
     let second = civil.to_zoned(TimeZone::UTC).ok()?.timestamp();
 
     let counter = match rest {
@@ -165,7 +180,8 @@ mod tests {
             "2026-11-04T090211-2",
             "2026-11-04T090211-10",
             "2026-11-04T090211-9999",
-            "0000-01-01T000000",
+            "0001-01-01T000000",
+            "9999-12-30T215959",
         ] {
             assert_eq!(stamp(text).to_string(), text);
         }
@@ -205,8 +221,32 @@ mod tests {
     #[test]
     fn at_cuts_to_the_second_and_has_no_counter() {
         let time: Timestamp = "2026-11-04T09:02:11.987654321Z".parse().expect("a time");
-        assert_eq!(Stamp::at(time).to_string(), "2026-11-04T090211");
-        assert_eq!(Stamp::at(time), stamp("2026-11-04T090211"));
+        let at = Stamp::at(time).expect("in range");
+        assert_eq!(at.to_string(), "2026-11-04T090211");
+        assert_eq!(at, stamp("2026-11-04T090211"));
+    }
+
+    fn at_text(text: &str) -> Result<Stamp, VersionsError> {
+        Stamp::at(text.parse().expect("a timestamp"))
+    }
+
+    #[test]
+    fn at_refuses_times_outside_the_range_of_stamps() {
+        assert_eq!(
+            at_text("0001-01-01T00:00:00Z").expect("first").to_string(),
+            "0001-01-01T000000"
+        );
+        assert_eq!(
+            at_text("9999-12-30T21:59:59.9Z").expect("last").to_string(),
+            "9999-12-30T215959"
+        );
+        let before = at_text("0000-12-31T23:59:59Z").expect_err("before the first");
+        assert!(
+            matches!(before, VersionsError::InvalidStamp(_)),
+            "{before:?}"
+        );
+        let after = at_text("9999-12-30T22:00:00Z").expect_err("after the last");
+        assert!(matches!(after, VersionsError::InvalidStamp(_)), "{after:?}");
     }
 
     #[test]
@@ -295,7 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn the_last_second_of_year_9999_is_refused_not_a_panic() {
+    fn the_range_of_stamps_is_pinned_at_both_ends() {
+        assert_eq!(stamp("0001-01-01T000000").to_string(), "0001-01-01T000000");
+        assert_eq!(stamp("9999-12-30T215959").to_string(), "9999-12-30T215959");
+        refused("0000-12-31T235959");
+        refused("9999-12-30T220000");
         refused("9999-12-31T235959");
     }
 }
