@@ -1057,6 +1057,105 @@ mod tests {
         .expect("the lock is free after the run");
     }
 
+    // ----- repairs a dry run plans
+
+    /// An unearth that died after the rename: the folder is in place with a
+    /// marker that names the version, and the version is still stored.
+    fn died_unearth(world: &World) {
+        let folder = world.root().join("projects/scanner");
+        fs::create_dir_all(&folder).expect("the folder");
+        fs::write(folder.join("main.rs"), "fn main() {}").expect("file");
+        fs::write(
+            folder.join(".antiq-restored"),
+            format!("restored 2026-11-05T09:00:00Z version {NEW}\n"),
+        )
+        .expect("marker");
+    }
+
+    #[test]
+    fn a_taken_original_path_a_planned_repair_may_free_is_a_warning_in_a_dry_run() {
+        let world = World::new(&[NEW]);
+        died_unearth(&world);
+        let plan = plan(world.plan(None));
+        assert!(
+            plan.warnings.iter().any(|w| w
+                .message
+                .contains("cannot be judged before the repairs run")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    #[test]
+    fn a_taken_name_is_refused_even_when_a_planned_repair_names_the_piece() {
+        let world = World::new(&[NEW]);
+        died_unearth(&world);
+        let error = world.plan(Some("projects/scanner")).expect_err("refused");
+        assert!(
+            matches!(
+                &error,
+                ForkError::Restore(RestoreError::Target {
+                    problem: TargetProblem::Taken,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_choice_a_planned_repair_may_change_is_a_warning_and_names_no_action() {
+        use crate::versions::names::file_name;
+        let world = World::new(&[NEW]);
+        // A died archive: the sidecars are stored, the archive is still
+        // staged, and repair 1 deletes the sidecars.
+        let piece = RelPath::parse("projects/scanner").expect("path");
+        let stamp: Stamp = NEW.parse().expect("stamp");
+        let archive = file_name(&piece, &stamp, VersionFile::Archive);
+        fs::remove_file(
+            world
+                .root()
+                .join(".antiq/pieces/projects/scanner")
+                .join(&archive),
+        )
+        .expect("removes the archive");
+        let staged = world
+            .root()
+            .join(format!(".antiq/tmp/pack/{NEW}/projects/scanner"));
+        fs::create_dir_all(&staged).expect("staging");
+        fs::write(staged.join(&archive), "x").expect("staged archive");
+
+        let plan = plan(world.plan(None));
+
+        assert!(
+            plan.warnings.iter().any(|w| w
+                .message
+                .contains("cannot be judged before the repairs run")),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .all(|a| matches!(a, PlanStep::Repair(_)))
+        );
+    }
+
+    #[test]
+    fn the_action_and_the_report_describe_themselves() {
+        let world = World::new(&[NEW]);
+        let plan = plan(world.plan(Some("tools/copy")));
+        let PlanStep::Command(action) = &plan.actions[0] else {
+            panic!("expected the fork action");
+        };
+        assert_eq!(
+            action.describe(),
+            format!("fork projects/scanner (version {NEW}) to tools/copy")
+        );
+        let report = report(world.fork(Some("tools/copy")));
+        assert!(CommandReport::warnings(&report).is_empty());
+    }
+
     // ----- what is left behind
 
     /// Every entry below `.antiq/tmp/`, relative to it.

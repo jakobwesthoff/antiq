@@ -171,3 +171,102 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
     }
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use antiq::commands::fork::SkippedNote;
+    use antiq::plan::Plan;
+    use antiq::relpath::RelPath;
+    use antiq::repair::Repair;
+    use antiq::report::Warning;
+    use jiff::Timestamp;
+
+    const PIPE: Style = Style {
+        width: 80,
+        color: false,
+        terminal: false,
+    };
+
+    fn report(skipped: Option<SkippedNote>) -> ForkReport {
+        ForkReport {
+            forked: skipped.is_none(),
+            piece: "projects/scanner".to_string(),
+            stamp: "2026-11-04T090211".to_string(),
+            version: Timestamp::UNIX_EPOCH,
+            path: "tools/copy".to_string(),
+            bytes: None,
+            skipped,
+            repairs: Vec::new(),
+            warnings: vec![Warning::new("a warning".to_string())],
+            unfinished: false,
+            siblings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_skip_without_a_known_size_says_the_volume_ran_full() {
+        let lines = done_lines(
+            &report(Some(SkippedNote {
+                reason: "no_space",
+                needed: None,
+                available: 5_000,
+            })),
+            PIPE,
+            &TimeZone::UTC,
+        );
+        assert_eq!(lines.stdout, Vec::<String>::new());
+        assert_eq!(
+            lines.stderr,
+            [
+                "note: a warning",
+                "Skipped projects/scanner: out of space during the extraction, 5.0 kB free"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_a_repair_first_and_says_when_there_is_nothing_to_do() {
+        let repair = Repair::RemoveEmptyFolder {
+            folder: RelPath::parse("projects/old").expect("a path"),
+        };
+        let mut plan = Plan::after_repairs(vec![repair]);
+        let lines = dry_run_lines(
+            &DryRunPlan {
+                dry_run: true,
+                actions: std::mem::take(&mut plan.actions),
+                warnings: Vec::new(),
+            },
+            PIPE,
+            &TimeZone::UTC,
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Would "), "{lines:?}");
+        let empty = DryRunPlan {
+            dry_run: true,
+            actions: Vec::new(),
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            dry_run_lines(&empty, PIPE, &TimeZone::UTC),
+            ["Nothing to do."]
+        );
+    }
+
+    #[test]
+    fn a_check_this_command_does_not_know_is_shown_by_its_name() {
+        let action = ForkAction {
+            action: "fork",
+            piece: "projects/scanner".to_string(),
+            stamp: "2026-11-04T090211".to_string(),
+            version: Timestamp::UNIX_EPOCH,
+            path: "tools/copy".to_string(),
+            bytes: None,
+            checks: Vec::new(),
+            damage: Vec::new(),
+            skipped: None,
+            siblings: Vec::new(),
+        };
+        assert_eq!(check_text("other", &action, PIPE, &TimeZone::UTC), "other");
+    }
+}
