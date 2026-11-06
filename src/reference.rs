@@ -52,7 +52,7 @@ pub enum ReferenceError {
     },
     #[diagnostic(
         code(antiq::reference::unknown),
-        help("Check the spelling, or look for the piece with `antiq list`.")
+        help("Check the spelling, or name the piece by its path.")
     )]
     #[error(
         "no piece matches {}, as none of the pieces has a path that fits it",

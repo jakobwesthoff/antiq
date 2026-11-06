@@ -165,7 +165,7 @@ fn the_json_of_an_unknown_piece_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"code\":\"antiq::reference::unknown\",\"message\":\"cannot find the piece: no piece matches `scnaer`, as none of the pieces has a path that fits it\",\"fix\":\"Check the spelling, or look for the piece with `antiq list`.\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"code\":\"antiq::reference::unknown\",\"message\":\"cannot find the piece: no piece matches `scnaer`, as none of the pieces has a path that fits it\",\"fix\":\"Check the spelling, or name the piece by its path.\"}}\n"
     );
 }
 

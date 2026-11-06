@@ -436,7 +436,7 @@ fn an_error_on_a_stderr_terminal_is_a_block_coloured_unless_no_color_is_set() {
          ▌ No piece matches no-such-piece, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Check the spelling, or look for the piece with antiq list.\n\
+         ▌   Check the spelling, or name the piece by its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to pin.\n\
@@ -454,7 +454,7 @@ fn an_error_on_a_stderr_pipe_stays_plain_while_stdout_is_a_terminal() {
     assert_eq!(
         run.stderr,
         "error: no piece matches `no-such-piece`, as none of the pieces has a path that fits it\n  \
-         fix: Check the spelling, or look for the piece with antiq list.\n  \
+         fix: Check the spelling, or name the piece by its path.\n  \
          while attempting to pin the piece\n"
     );
 }

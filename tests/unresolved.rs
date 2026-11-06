@@ -174,7 +174,7 @@ fn an_unknown_word_offers_the_closest_pieces_and_a_command_to_copy() {
          ▌ No piece matches scnaer, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Check the spelling, or look for the piece with antiq list.\n\
+         ▌   Check the spelling, or name the piece by its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to unearth.\n\
@@ -199,7 +199,7 @@ fn an_unknown_word_with_nothing_near_offers_no_piece() {
          ▌ No piece matches zzzzzzzz, as none of the pieces has a path that fits it\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Check the spelling, or look for the piece with antiq list.\n\
+         ▌   Check the spelling, or name the piece by its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the piece to unearth.\n\
@@ -270,7 +270,7 @@ fn the_json_error_of_an_unresolved_reference_carries_its_code_message_and_fix() 
         );
         assert_eq!(
             error["fix"],
-            "Check the spelling, or look for the piece with `antiq list`."
+            "Check the spelling, or name the piece by its path."
         );
     });
 
@@ -284,4 +284,33 @@ fn the_json_error_of_an_unresolved_reference_carries_its_code_message_and_fix() 
             "Name the piece by more of its path, for example `projects/scanner`."
         );
     });
+}
+
+/// What a word that matches no piece gets as its fix, for each command on
+/// live pieces and on stored ones. `antiq list` shows only stored versions,
+/// so it is no advice for a live piece.
+const UNKNOWN_FIX: &str = "Check the spelling, or name the piece by its path.";
+
+#[test]
+fn the_fix_for_an_unknown_piece_does_not_send_a_live_piece_to_antiq_list() {
+    for mode in [Mode::Json, Mode::Text] {
+        let clock = Clock::now();
+        let mut builder = Collection::build(&clock);
+        builder.patterns(&["projects/*", "tools/*"]);
+        live_pieces(&mut builder);
+        let world = World::new(Setup::new(builder.finish()), mode);
+        for command in ["pin", "archive", "unpin", "unearth"] {
+            let run = world.run(&[command, "zzzzzzzz"]);
+            run.expect_code(1).json_only(|value| {
+                assert_eq!(value["error"]["fix"], UNKNOWN_FIX, "{command}");
+            });
+            if mode == Mode::Text {
+                assert!(
+                    run.stderr.contains(&format!("fix: {UNKNOWN_FIX}")),
+                    "{command}: {}",
+                    run.stderr
+                );
+            }
+        }
+    }
 }

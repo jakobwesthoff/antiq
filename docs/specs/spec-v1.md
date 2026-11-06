@@ -1988,7 +1988,8 @@ terminal by the same info "Nothing was <done>.".
   versions, which is 0 for a live piece without any. `forget` uses that
   table too when a candidate is a folder that holds sidecars only.
 - No piece matches a word. The block says so; its "How to fix it" tells to
-  check the spelling and then to look for the piece with `antiq list`.
+  check the spelling and then to name the piece by its path, the same for
+  every command.
   Pieces whose path or last
   name is within two edits of the word, or within a third of its length
   when that is more, are the closest pieces; a swapped pair of letters
