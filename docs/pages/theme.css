@@ -1,11 +1,22 @@
 :root {
-  --color-primary: #e8b923;
-  --color-primary-hover: #c99a14;
-  --color-primary-rgb: 232, 185, 35;
+  --color-primary: #b49cff;
+  --color-primary-hover: #9a7df0;
+  --color-primary-rgb: 180, 156, 255;
   --color-primary-subtle: rgba(var(--color-primary-rgb), 0.1);
 }
 
-/* The gradient runs through the gold of Archie's face. */
+/* The accents are light enough that the white button text would wash out. */
+.btn-primary,
+.btn-primary:hover {
+  color: #0f0f14;
+}
+
+.hero {
+  background:
+    radial-gradient(640px 360px at 50% 22%, rgba(139, 92, 246, 0.20), transparent 70%),
+    radial-gradient(900px 300px at 85% 0%, rgba(139, 92, 246, 0.08), transparent 70%);
+}
+
 .hero h1 {
-  background-image: linear-gradient(135deg, #fee767 0%, #e8b923 45%, #a8760c 100%);
+  background-image: linear-gradient(135deg, #e6dcff 0%, #b49cff 45%, #6c4fd8 100%);
 }
