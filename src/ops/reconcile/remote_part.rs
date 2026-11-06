@@ -25,7 +25,7 @@ use crate::store::{Current, Source, Store, StoreError};
 use crate::tombstone;
 use crate::tracking::{self, TrackingEntry, VersionTakenOut};
 use jiff::SignedDuration;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What the remote part found and did.
 #[derive(Default)]
@@ -40,6 +40,9 @@ pub(super) struct Part {
     pub actions: Vec<ReconcileAction>,
     /// The remote answered and the marks are as the remote says.
     pub reached: bool,
+    /// The committed versions a real run would pull, by object and number.
+    /// A dry run has them in hand to judge on without storing them.
+    pub would_pull: BTreeMap<ObjectId, BTreeMap<u32, Vec<u8>>>,
     /// Why the part stopped. The local part stands.
     pub stop: Option<Error>,
 }
@@ -120,12 +123,20 @@ fn reach(
 
     let store = Store::new(collection);
     let mut pulled = 0;
-    if let Some(lock) = lock {
-        remote.begin_phase()?;
-        let known = tombstone::known_versions(collection)?;
-        for file in remote.pull_metadata(&known)? {
-            store.store_committed(lock, file.id, file.number, &file.bytes)?;
-            pulled += 1;
+    remote.begin_phase()?;
+    let known = tombstone::known_versions(collection)?;
+    for file in remote.pull_metadata(&known)? {
+        match lock {
+            Some(lock) => {
+                store.store_committed(lock, file.id, file.number, &file.bytes)?;
+                pulled += 1;
+            }
+            None => {
+                part.would_pull
+                    .entry(file.id)
+                    .or_default()
+                    .insert(file.number.get(), file.bytes);
+            }
         }
     }
 
@@ -137,7 +148,8 @@ fn reach(
     // uploads, as `sync` does.
     let mut keep = crate::ops::sync::commit::pending_temp_names(collection, &machine)?;
     for entry in &tracked.entries {
-        let current = match store.current(entry.id) {
+        let extra = part.would_pull.get(&entry.id).cloned().unwrap_or_default();
+        let current = match store.current_with(entry.id, &extra) {
             Ok(Some(current)) => current,
             Ok(None) => continue,
             Err(StoreError::NothingReadable { unreadable }) => {

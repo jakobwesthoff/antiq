@@ -13,6 +13,7 @@ use crate::lock::RunLock;
 use crate::meta::{self, FileName, MetaError, Metadata};
 use crate::pack::hashing::hex;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::num::NonZeroU32;
@@ -200,11 +201,26 @@ impl<'c> Store<'c> {
     /// Committed versions above the one in use that cannot be read are
     /// listed, whichever way the metadata comes.
     pub fn current(&self, id: ObjectId) -> Result<Option<Current>, StoreError> {
+        self.current_with(id, &BTreeMap::new())
+    }
+
+    /// [`Store::current`] as it would be once the committed versions in
+    /// `extra`, by number, were stored. A dry run judges on these.
+    pub fn current_with(
+        &self,
+        id: ObjectId,
+        extra: &BTreeMap<u32, Vec<u8>>,
+    ) -> Result<Option<Current>, StoreError> {
         let mut unreadable = Vec::new();
         let mut committed = None;
-        for number in self.committed_versions(id)?.into_iter().rev() {
+        let mut numbers: BTreeSet<u32> = self.committed_versions(id)?.into_iter().collect();
+        numbers.extend(extra.keys().copied());
+        for number in numbers.into_iter().rev() {
             let path = self.meta_path(id, number);
-            let bytes = fs::read(&path).map_err(io_error("read", &path))?;
+            let bytes = match extra.get(&number) {
+                Some(bytes) if !path.exists() => bytes.clone(),
+                _ => fs::read(&path).map_err(io_error("read", &path))?,
+            };
             match parse_for(id, &bytes) {
                 Ok(metadata) => {
                     committed = Some((number, metadata));

@@ -58,7 +58,10 @@ pub(super) fn plan(collection: &Collection, part: &Part) -> Result<Dropping, Err
     let tracked = tracking::read_all(collection)?;
     let root =
         TreeRoot::open(collection.root()).map_err(|source| open_error(collection, source))?;
+    // The objects a dry run would pull count as stored, as they do after a
+    // real pull.
     let mut set: BTreeSet<ObjectId> = store.objects()?.into_iter().collect();
+    set.extend(part.would_pull.keys().copied());
     let mut pieces = Vec::new();
     let mut notes = Vec::new();
     for entry in &tracked.entries {
@@ -91,7 +94,8 @@ fn droppable(
     part: &Part,
     notes: &mut Vec<Warning>,
 ) -> Result<bool, Error> {
-    let Ok(Some(current)) = store.current(entry.id) else {
+    let pulled = part.would_pull.get(&entry.id).cloned().unwrap_or_default();
+    let Ok(Some(current)) = store.current_with(entry.id, &pulled) else {
         return Ok(false);
     };
     if current.source == Source::Pending
@@ -138,12 +142,14 @@ fn droppable(
     // An archive of an older version that is still in the directory is
     // a copy of the work.
     let directory = collection.object_dir(entry.id);
+    let mut versions: Vec<Option<Vec<u8>>> = Vec::new();
     for number in store.committed_versions(entry.id)? {
+        versions.push(fs::read(store.meta_path(entry.id, number)).ok());
+    }
+    versions.extend(pulled.values().cloned().map(Some));
+    for bytes in versions {
         // A version that cannot be read may name an archive: keep the piece.
-        let Some(metadata) = fs::read(store.meta_path(entry.id, number))
-            .ok()
-            .and_then(|bytes| meta::parse(&bytes).ok())
-        else {
+        let Some(metadata) = bytes.and_then(|bytes| meta::parse(&bytes).ok()) else {
             return Ok(false);
         };
         let kept = metadata

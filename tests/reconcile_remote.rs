@@ -1176,3 +1176,37 @@ fn the_temp_file_of_a_live_package_that_waits_for_its_upload_is_kept() {
         "the temp file of a waiting live-package upload was removed"
     );
 }
+
+// ---------------------------------------------------------
+// A dry run judges against the versions the real run pulls
+// ---------------------------------------------------------
+
+#[test]
+fn a_dry_run_lists_no_drop_that_a_version_from_the_remote_prevents() {
+    let world = World::padded(9);
+    world.gone(10, "alpha");
+    let there = world.remote_dir(10);
+    fs::create_dir_all(&there).expect("the object directory");
+    fs::copy(world.local_dir(10).join("meta.1"), there.join("meta.1")).expect("the version");
+    let mut elsewhere = metadata(
+        10,
+        "alpha",
+        Lifecycle::Live,
+        "01BX5ZZKBKACTAV9WEVGEMMVRY",
+        Vec::new(),
+    );
+    elsewhere.history = Vec::new();
+    fs::write(
+        there.join("meta.2"),
+        antiq::meta::to_bytes(&elsewhere).expect("bytes"),
+    )
+    .expect("the version of another machine");
+
+    let dry = world.reconcile(&["--prune", "--dry-run"]);
+    let real = world.reconcile_json(&["--prune"]);
+
+    succeeded(&dry);
+    succeeded(&real);
+    assert_eq!(real.json()["pruned"], json!([]), "{}", real.stdout);
+    assert!(!dry.stdout.contains("drop alpha"), "{}", dry.stdout);
+}

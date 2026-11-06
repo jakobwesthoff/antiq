@@ -1932,8 +1932,9 @@ back. A remote that cannot be listed ends the remote part with its error
 and leaves the marks as they are. The upload temp files of this machine
 for pieces that are pending upload, and those of every object with a
 recorded change, are kept. A dry run reads the remote
-without pulling, lists the marks and the removals, and writes nothing; a
-removal that depends on the age of a file is listed as such.
+without pulling, lists the marks, the drops and the removals, judging
+them on the metadata versions a real run would pull, and writes nothing;
+a removal that depends on the age of a file is listed as such.
 
 `reconcile --prune` drops a piece from this machine when its entry is
 `gone`, or is `remote_only` and marked while the remote answers. The
