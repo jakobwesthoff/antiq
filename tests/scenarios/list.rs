@@ -107,12 +107,14 @@ fn list_shows_versions_newest_first_in_the_form_each_reader_needs() {
             world.assert_unchanged(|| {
                 let list = world.run(&["list"]);
                 list.expect_code(0);
-                // A damaged version is a note, and exit 0 all the same. The
-                // JSON run carries the fault in the `damage` list of the row.
+                // A damaged version is a note on stderr in the text run and
+                // exit 0 all the same. The JSON run carries the fault in the
+                // `damage` list of the row and prints no note.
                 list.text_only(|_| {
                     assert_eq!(list.stderr.lines().count(), 1, "{:?}", list.stderr);
                     assert!(list.stderr.starts_with(&fault_note), "{:?}", list.stderr);
                 });
+                list.json_only(|_| assert_eq!(list.stderr, ""));
 
                 list.text_only(|out| {
                     let lines: Vec<Vec<&str>> =
