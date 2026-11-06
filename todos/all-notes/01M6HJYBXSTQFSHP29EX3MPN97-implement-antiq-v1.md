@@ -3010,6 +3010,33 @@ Notes for the items that call the strict verify and the listing comparison
   blocked waiters, both wake-up paths, the want-0 clamp and the
   machine's figures.
 
+### I28
+
+- 2026-11-04 (merged, plan review and opus diff review 6, all fixed):
+  the ssh remote lives in `src/remote/ssh/mod.rs` (about 4,400 lines,
+  scripts, the frame reader and the classifier together), and
+  `remote::open` opens ssh URLs, so `RemoteError::Unsupported` has no
+  producer left. Names that reach a script or an rsync path are
+  accepted only from `[A-Za-z0-9._%-]` (not `.`, `..` or a leading
+  `-`) and refused as `RemoteError::InvalidName`. Every operation's
+  script checks on the NAS, before it writes, that the marker names the
+  expected remote (exit 51, broken). A NAS that answers but cannot run
+  the script is broken in `reachability()` and `show()`; operations
+  keep `Io`. A missing file is `Io` with kind `NotFound`, as on the
+  path remote. `remote show` opens no master session; a dry run of
+  `remote add` does. The tests run the real rsync with a loopback ssh
+  shim, so the Linux gate image carries rsync 3.5.
+
+### I36
+
+- 2026-11-04 (merged): the picker of `find` lives in `src/cli/picker/`
+  as a copy of ntropy's picker. Its pty harness is in
+  `tests/support/pty.rs`. With `--print`, Enter prints the piece and
+  keeps the picker open (`EnterStays`), as spec "Command line" says.
+  `find` opens the picker when `--json` is off and a terminal opens.
+  Rows show no pin state. `reference_directory` is `pub(super)` for
+  I40.
+
 ## Relations
 
 - Relates to: [Define the v1 scope and architecture of antiq](01M6E17PET32XD9PC04AJ2PBZY-define-the-v1-scope-and-architecture-of-antiq.md)
