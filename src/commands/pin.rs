@@ -628,6 +628,28 @@ mod tests {
     }
 
     #[test]
+    fn a_collection_root_that_cannot_be_opened_is_reported_with_its_path() {
+        let temp = world("");
+        let collection = found(&temp);
+        let request = PinRequest {
+            collection: &collection,
+            cwd: temp.root(),
+            piece: OsStr::new("alpha"),
+            direction: Direction::Pin,
+        };
+        fs::remove_dir_all(temp.root()).expect("the collection is gone");
+
+        let error = locate(&request, &[]).err().expect("nothing to open");
+
+        assert!(
+            matches!(&error, PinCommandError::Root { path, .. }
+                if *path == collection.root().display().to_string()),
+            "{error:?}"
+        );
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
     fn an_empty_piece_is_a_usage_error_and_nothing_is_locked() {
         let temp = world("");
 
