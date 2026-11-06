@@ -36,6 +36,7 @@ use crossterm::{
 use unicode_width::UnicodeWidthStr;
 
 pub use layout::align_pieces;
+pub use state::{Contents, Members};
 use state::{Page, PickerState, VisibleRow};
 
 /// One picker row split by role: searched, displayed, and display-only.
@@ -127,15 +128,19 @@ fn key_hints<A>(enter: Option<&EnterStays<A>>, keys: &[AcceptKey<A>]) -> String 
 /// chose it, or `None` for the action when Enter did. Returns `Ok(None)` when
 /// there are no items or the user aborts (Esc / Ctrl-C) without selecting.
 ///
+/// With `contents`, a query also matches the member paths of the items, which
+/// the picker asks for lazily (see [`PickerState`]).
+///
 /// An accept key that does not close the picker calls `on_stay` with the
 /// selected item and its action; the returned text replaces the stats line
 /// until the next key. With `enter_stays`, Enter does the same instead of
 /// choosing the item.
-pub fn pick_with_keys<T, A: Copy>(
+pub fn pick_with_keys<'c, T, A: Copy>(
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
     enter_stays: Option<&EnterStays<A>>,
     keys: &[AcceptKey<A>],
+    contents: Option<Box<dyn Contents<T> + 'c>>,
     mut on_stay: impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
     // Nothing to pick: never touch the terminal so non-interactive callers and
@@ -187,6 +192,7 @@ pub fn pick_with_keys<T, A: Copy>(
         render_all,
         enter_stays,
         keys,
+        contents,
         &mut on_stay,
     )
 }
@@ -219,18 +225,22 @@ impl<F: FnMut()> Drop for TerminalGuard<F> {
 
 /// The read-draw-react loop. Returns the selection with the accept key that
 /// chose it (`None` for Enter), or `None` on abort.
-fn run_loop<T, A: Copy>(
+fn run_loop<'c, T, A: Copy>(
     tty: &mut impl Write,
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
     enter_stays: Option<&EnterStays<A>>,
     keys: &[AcceptKey<A>],
+    contents: Option<Box<dyn Contents<T> + 'c>>,
     on_stay: &mut impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
     let (mut cols, rows) = terminal::size().context("while querying the terminal size")?;
     let mut built_row_width = row_width(cols);
     let picker_rows = render_all(&items, built_row_width);
     let mut state = PickerState::new(items, picker_rows, list_height(rows));
+    if let Some(contents) = contents {
+        state = state.with_contents(contents);
+    }
     let hints = key_hints(enter_stays, keys);
 
     // The first frame paints a fresh alternate screen and every later frame
@@ -241,7 +251,18 @@ fn run_loop<T, A: Copy>(
         clear_all = false;
 
         match event::read().context("while reading a key event")? {
-            Event::Key(key) => match step(&mut state, enter_stays, keys, key, on_stay) {
+            Event::Key(key) => match react(
+                Screen {
+                    tty: &mut *tty,
+                    cols,
+                    hints: &hints,
+                },
+                &mut state,
+                enter_stays,
+                keys,
+                key,
+                on_stay,
+            )? {
                 Step::Continue => {}
                 // With nothing matching there is nothing to return, so the
                 // picker ends without a selection, as on abort.
@@ -281,6 +302,45 @@ enum Flow<A> {
     Stay(A),
     /// End without a selection.
     Abort,
+}
+
+/// Where and how a frame is drawn.
+struct Screen<'a, W: Write> {
+    tty: &'a mut W,
+    cols: u16,
+    hints: &'a str,
+}
+
+/// Apply `key` like [`step`], after drawing the notice that contents are being
+/// read when the key starts the first scan of them.
+fn react<T, A: Copy>(
+    screen: Screen<'_, impl Write>,
+    state: &mut PickerState<T>,
+    enter_stays: Option<&EnterStays<A>>,
+    keys: &[AcceptKey<A>],
+    key: KeyEvent,
+    on_stay: &mut impl FnMut(&T, A) -> String,
+) -> Result<Step<A>> {
+    // The first scan reads every listing that is not matched by its row, which
+    // takes long on a large collection. The frame goes out before the scan so
+    // the wait has an explanation.
+    if key.kind == KeyEventKind::Press && edits_query(&key) && state.reading_pending() {
+        state.set_notice("reading contents...".to_string());
+        draw(screen.tty, state, screen.cols, false, screen.hints)
+            .context("while drawing the picker")?;
+    }
+    Ok(step(state, enter_stays, keys, key, on_stay))
+}
+
+/// Whether `key` changes the query: typing, Backspace and Ctrl-W.
+fn edits_query(key: &KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Backspace => true,
+        KeyCode::Char('w') => ctrl,
+        KeyCode::Char(_) => !ctrl && !key.modifiers.contains(KeyModifiers::ALT),
+        _ => false,
+    }
 }
 
 /// What the loop does after a key press.
@@ -969,7 +1029,7 @@ mod tests {
 
     /// A picker over three rows that all contain an `a`, so a typed `a` keeps
     /// every row, with a list `height` rows tall.
-    fn picker(height: usize) -> PickerState<String> {
+    fn picker(height: usize) -> PickerState<'static, String> {
         let items: Vec<String> = ["alpha", "beta", "gamma"]
             .iter()
             .map(|s| s.to_string())
@@ -1305,5 +1365,137 @@ mod tests {
             "⏎ print  ^Y path  ^O other"
         );
         assert_eq!(key_hints(Some(&ENTER_PRINTS), &[]), "⏎ print");
+    }
+
+    // -------------------------------------------------------------------------
+    // The notice before the first scan of contents
+    // -------------------------------------------------------------------------
+
+    /// A frame buffer the test can read while the state holds the contents.
+    #[derive(Clone, Default)]
+    struct Frames(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for Frames {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Frames {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.borrow()).into_owned()
+        }
+    }
+
+    /// Gives the same one member to every piece and records what the frames
+    /// held when it was asked.
+    struct Recording {
+        frames: Frames,
+        seen: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Contents<String> for Recording {
+        fn members(&mut self, item: &String) -> Option<Members> {
+            self.seen.borrow_mut().push(self.frames.text());
+            Some(Members {
+                prefix: format!("{item}/"),
+                paths: vec!["file".to_string()],
+            })
+        }
+    }
+
+    fn react_to(
+        state: &mut PickerState<String>,
+        frames: &mut Frames,
+        key: KeyEvent,
+    ) -> Step<Action> {
+        let mut on_stay = |_: &String, _: Action| -> String { unreachable!("no stay key") };
+        react(
+            Screen {
+                tty: frames,
+                cols: 80,
+                hints: "",
+            },
+            state,
+            None,
+            &KEYS,
+            key,
+            &mut on_stay,
+        )
+        .expect("drawing succeeds")
+    }
+
+    /// A picker whose contents were asked `seen` times so far.
+    fn recording_picker() -> (
+        PickerState<'static, String>,
+        Frames,
+        Rc<RefCell<Vec<String>>>,
+    ) {
+        let frames = Frames::default();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let contents = Recording {
+            frames: frames.clone(),
+            seen: Rc::clone(&seen),
+        };
+        let state = picker(10).with_contents(Box::new(contents));
+        (state, frames, seen)
+    }
+
+    #[test]
+    fn the_notice_frame_is_drawn_before_the_first_scan() {
+        let (mut s, mut frames, seen) = recording_picker();
+        react_to(&mut s, &mut frames, press(KeyCode::Char('z')));
+        let seen = seen.borrow();
+        assert!(!seen.is_empty(), "the scan asked for members");
+        assert!(
+            seen[0].contains("reading contents..."),
+            "frames before the scan: {:?}",
+            seen[0]
+        );
+        assert_eq!(s.notice(), None, "the notice ends with the key");
+    }
+
+    #[test]
+    fn a_key_that_does_not_edit_the_query_draws_no_notice() {
+        let (mut s, mut frames, _) = recording_picker();
+        react_to(&mut s, &mut frames, press(KeyCode::Down));
+        assert_eq!(frames.text(), "");
+    }
+
+    #[test]
+    fn the_notice_is_drawn_once() {
+        let (mut s, mut frames, _) = recording_picker();
+        react_to(&mut s, &mut frames, press(KeyCode::Char('z')));
+        let drawn = frames.text().len();
+        react_to(&mut s, &mut frames, press(KeyCode::Char('y')));
+        assert_eq!(frames.text().len(), drawn);
+    }
+
+    #[test]
+    fn typing_backspace_and_ctrl_w_edit_the_query() {
+        assert!(edits_query(&press(KeyCode::Char('a'))));
+        assert!(edits_query(&press(KeyCode::Backspace)));
+        assert!(edits_query(&ctrl('w')));
+    }
+
+    #[test]
+    fn other_keys_leave_the_query_alone() {
+        assert!(!edits_query(&ctrl('n')));
+        assert!(!edits_query(&press(KeyCode::Enter)));
+        let alt = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        assert!(!edits_query(&alt));
+    }
+
+    #[test]
+    fn a_picker_without_contents_draws_no_notice() {
+        let mut s = picker(10);
+        let mut frames = Frames::default();
+        react_to(&mut s, &mut frames, press(KeyCode::Char('z')));
+        assert_eq!(frames.text(), "");
     }
 }

@@ -13,13 +13,15 @@
 use crate::cli::cmd::status::{Color, WIDE_FROM, mid, pad, pad_left, paint, sanitize};
 use crate::cli::cmd::{fork, pin, unearth};
 use crate::cli::output::{Output, Style};
-use crate::cli::picker::{AcceptKey, EnterStays, align_pieces, pick_with_keys};
+use crate::cli::picker::{AcceptKey, Contents, EnterStays, Members, align_pieces, pick_with_keys};
 use crate::cli::{Context, FindArgs, ForkArgs, UnearthArgs, tty};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
+use antiq::index::Index;
 use antiq::ops::find::{FindReport, FoundPiece, FoundState, find};
 use antiq::ops::pin::{Direction, Pinned, run as pin_piece};
 use anyhow::Context as _;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
@@ -114,6 +116,17 @@ fn interact(
     };
     let enter_stays = args.print.then_some(&enter_prints);
     let cwd = pin::reference_directory(ctx.directory.as_ref())?;
+    let index = Index::compute(collection)
+        .map_err(antiq::Error::from)
+        .context("read the index")?;
+    // Warnings the report holds already: a listing the search could not read
+    // is not reported a second time.
+    let reported: Vec<String> = report
+        .warnings
+        .iter()
+        .map(|warning| format!("note: {}", sanitize(&warning.message)))
+        .collect();
+    let unsearchable = RefCell::new(Vec::new());
 
     // Printed folders wait until the picker has left the alternate screen: a
     // line written to a terminal while it is on would be drawn over and lost.
@@ -123,6 +136,12 @@ fn interact(
         align_pieces,
         enter_stays,
         &KEYS,
+        Some(Box::new(FindContents {
+            collection,
+            index: &index,
+            unsearchable: &unsearchable,
+            reported: &reported,
+        })),
         |found, action| match action {
             Action::Print => {
                 printed.push(found.folder.clone());
@@ -139,7 +158,7 @@ fn interact(
         out.line_os(folder.as_os_str())
             .context("print the result")?;
     }
-    for line in &notes {
+    for line in notes.iter().chain(unsearchable.borrow().iter()) {
         out.note(line).context("print the notes")?;
     }
 
@@ -168,6 +187,42 @@ fn interact(
         if_reachable: false,
     };
     unearth::run(ctx, &args, out)
+}
+
+/// The member paths of the listings, for a query typed in the picker.
+struct FindContents<'a> {
+    collection: &'a Collection,
+    index: &'a Index,
+    /// The notes for listings that could not be read, to print once the
+    /// picker has left the alternate screen.
+    unsearchable: &'a RefCell<Vec<String>>,
+    /// The notes the search printed already.
+    reported: &'a [String],
+}
+
+impl Contents<FoundPiece> for FindContents<'_> {
+    fn members(&mut self, found: &FoundPiece) -> Option<Members> {
+        match self.index.members(self.collection, found.id) {
+            Ok(members) => members.map(|members| Members {
+                prefix: format!("{}/", sanitize(&found.path.to_string())),
+                paths: members
+                    .iter()
+                    .map(|member| sanitize(&member.to_string()))
+                    .collect(),
+            }),
+            Err(error) => {
+                let note = format!(
+                    "note: the contents of {} cannot be searched: {}",
+                    found.id,
+                    sanitize(&error.to_string())
+                );
+                if !self.reported.contains(&note) {
+                    self.unsearchable.borrow_mut().push(note);
+                }
+                None
+            }
+        }
+    }
 }
 
 /// Pin or unpin `found` the way the commands do and say what happened, or

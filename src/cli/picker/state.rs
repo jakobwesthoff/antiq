@@ -12,7 +12,7 @@
 //! directly via [`PickerState::debug_render`].
 
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Matcher, Utf32String};
+use nucleo::{Config, Matcher, Utf32Str, Utf32String};
 
 use super::Row;
 
@@ -39,6 +39,43 @@ struct Scored {
     highlights: Vec<u32>,
 }
 
+/// What the picker knows about the members of one item.
+enum Slot {
+    /// Not asked for yet, or asked for and not retained.
+    Unloaded,
+    /// The item has no members on this machine, or they cannot be read.
+    Absent,
+    /// Retained; the picker does not ask again.
+    Loaded(Members),
+}
+
+/// What the last pass found out about one item, for a query that extends it.
+enum Scan {
+    /// Nothing a narrowing can rely on.
+    Unknown,
+    /// The row text matched, so no member was scored.
+    Row,
+    /// Neither the row nor any member matched; an extended query cannot
+    /// match either.
+    Miss,
+    /// Only these members (indices into a retained [`Members`]) matched.
+    Hits(Vec<u32>),
+}
+
+/// The members the picker keeps in memory at most, summed over all items.
+const MEMBER_BUDGET: usize = 2_000_000;
+
+/// The characters that give a nucleo atom a special meaning. A query holding
+/// one may match differently from a prefix of itself, so it is always scored
+/// in full.
+const ATOM_SYNTAX: [char; 5] = ['!', '^', '\'', '$', '\\'];
+
+/// Whether every match of `previous` is known to include the matches of
+/// `query`, so that scoring the earlier hits is enough.
+fn extends(previous: &str, query: &str) -> bool {
+    query.starts_with(previous) && !previous.contains(ATOM_SYNTAX) && !query.contains(ATOM_SYNTAX)
+}
+
 /// A row currently inside the viewport, handed to the renderer (or a test).
 pub struct VisibleRow<'a> {
     /// The displayed, highlightable text of the row.
@@ -56,8 +93,26 @@ pub enum Page {
     Full,
 }
 
+/// The member paths of one piece, as the picker matches them.
+pub struct Members {
+    /// The text in front of each member: the piece's path and a slash. A
+    /// query is scored against `prefix` and a path together, so it can name
+    /// both.
+    pub prefix: String,
+    /// The members' paths in display form, in listing order.
+    pub paths: Vec<String>,
+}
+
+/// Where the picker reads the member paths of its items from.
+pub trait Contents<T> {
+    /// The members of `item`, or `None` when it has none on this machine or
+    /// they cannot be read. The picker asks at most once per item and
+    /// retains the answer within its budget.
+    fn members(&mut self, item: &T) -> Option<Members>;
+}
+
 /// The picker's interaction state over an owned set of items of type `T`.
-pub struct PickerState<T> {
+pub struct PickerState<'c, T> {
     /// The candidate items, index-aligned with `display`/`detail`/`haystacks`.
     items: Vec<T>,
     /// The displayed, highlightable text per item.
@@ -82,9 +137,26 @@ pub struct PickerState<T> {
     /// A message that replaces the counter in the stats line until the next
     /// key press.
     notice: Option<String>,
+    /// What the picker knows about the members of each item.
+    slots: Vec<Slot>,
+    /// How many members the `Loaded` slots hold together.
+    retained: usize,
+    /// The most members the picker retains.
+    budget: usize,
+    /// What the last pass found out about each item.
+    scans: Vec<Scan>,
+    /// The query the last pass scored, `None` after an empty one.
+    scanned_query: Option<String>,
+    /// Whether any item's members were asked for yet.
+    read_any: bool,
+    /// Members scored over the picker's life.
+    #[cfg(test)]
+    scored_members: usize,
+    /// Where the member paths of a piece come from, when the caller has any.
+    contents: Option<Box<dyn Contents<T> + 'c>>,
 }
 
-impl<T> PickerState<T> {
+impl<'c, T> PickerState<'c, T> {
     /// Build the state from `items` and their pre-rendered `rows`.
     ///
     /// `rows` is index-aligned with `items` (one [`Row`] per item); the renderer
@@ -104,6 +176,7 @@ impl<T> PickerState<T> {
             display.push(row.display);
             detail.push(row.detail);
         }
+        let n = items.len();
         let mut state = Self {
             items,
             display,
@@ -116,6 +189,15 @@ impl<T> PickerState<T> {
             offset: 0,
             height: height.max(1),
             notice: None,
+            slots: std::iter::repeat_with(|| Slot::Unloaded).take(n).collect(),
+            retained: 0,
+            budget: MEMBER_BUDGET,
+            scans: std::iter::repeat_with(|| Scan::Unknown).take(n).collect(),
+            scanned_query: None,
+            read_any: false,
+            #[cfg(test)]
+            scored_members: 0,
+            contents: None,
         };
         state.recompute();
         state
@@ -128,15 +210,19 @@ impl<T> PickerState<T> {
     /// runs over the full `search` content (so a match in truncated-away text
     /// still ranks the row), and a second pass over the `display` text yields the
     /// highlight positions in display coordinates. A row whose only match lives
-    /// in hidden content therefore ranks but shows no highlight. Rows are ordered
-    /// by score descending, ties broken by original index so equal-score rows
-    /// stay newest-first. The cursor and scroll reset to the top because the
-    /// result set has changed underneath them.
+    /// in hidden content therefore ranks but shows no highlight.
+    ///
+    /// An item whose row does not match is tried through its members, each
+    /// scored as `prefix + path`. Row matches rank first, by score; member-only
+    /// matches follow, by their best member's score and show no highlight.
+    /// Ties keep the original index, so equal scores stay newest-first. The
+    /// cursor and scroll reset to the top because the result set has changed
+    /// underneath them.
     fn recompute(&mut self) {
         self.selected = 0;
         self.offset = 0;
 
-        let query = self.query.trim();
+        let query = self.query.trim().to_string();
         if query.is_empty() {
             self.scored = (0..self.items.len())
                 .map(|item| Scored {
@@ -144,26 +230,125 @@ impl<T> PickerState<T> {
                     highlights: Vec::new(),
                 })
                 .collect();
+            self.scans.iter_mut().for_each(|scan| *scan = Scan::Unknown);
+            self.scanned_query = None;
             return;
         }
 
-        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-        let mut ranked: Vec<(u32, usize, Vec<u32>)> = Vec::new();
+        // A query that extends the last one can only lose matches, so what
+        // the last pass ruled out stays out.
+        let narrowing = self
+            .scanned_query
+            .as_deref()
+            .is_some_and(|previous| extends(previous, &query));
+
+        let pattern = Pattern::parse(&query, CaseMatching::Smart, Normalization::Smart);
+        let mut by_row: Vec<(u32, usize, Vec<u32>)> = Vec::new();
+        let mut by_member: Vec<(u32, usize)> = Vec::new();
         let mut buf: Vec<u32> = Vec::new();
+        let mut text = String::new();
+        let mut chars: Vec<char> = Vec::new();
         for (item, haystack) in self.haystacks.iter().enumerate() {
             // The score over the full content decides whether the row matches and
             // how it ranks.
-            let Some(score) = pattern.score(haystack.search.slice(..), &mut self.matcher) else {
+            if let Some(score) = pattern.score(haystack.search.slice(..), &mut self.matcher) {
+                let marks = highlights(&pattern, &haystack.display, &mut self.matcher, &mut buf);
+                by_row.push((score, item, marks));
+                self.scans[item] = Scan::Row;
+                continue;
+            }
+
+            let before = std::mem::replace(&mut self.scans[item], Scan::Unknown);
+            let candidates = match before {
+                Scan::Miss if narrowing => {
+                    self.scans[item] = Scan::Miss;
+                    continue;
+                }
+                Scan::Hits(hits) if narrowing => Some(hits),
+                _ => None,
+            };
+            let Some(contents) = self.contents.as_deref_mut() else {
                 continue;
             };
-            let marks = highlights(&pattern, &haystack.display, &mut self.matcher, &mut buf);
-            ranked.push((score, item, marks));
+
+            // Members are read the first time a scan needs them. One that
+            // does not fit the budget is scanned and let go, so a later scan
+            // reads it again.
+            let slot = &mut self.slots[item];
+            let mut unretained = None;
+            if matches!(slot, Slot::Unloaded) {
+                self.read_any = true;
+                match contents.members(&self.items[item]) {
+                    None => *slot = Slot::Absent,
+                    Some(members) if self.retained + members.paths.len() <= self.budget => {
+                        self.retained += members.paths.len();
+                        *slot = Slot::Loaded(members);
+                    }
+                    Some(members) => unretained = Some(members),
+                }
+            }
+            let retained = matches!(slot, Slot::Loaded(_));
+            let members = match slot {
+                Slot::Loaded(members) => members,
+                Slot::Absent => {
+                    self.scans[item] = Scan::Miss;
+                    continue;
+                }
+                Slot::Unloaded => unretained.as_ref().expect("an unretained read is kept"),
+            };
+
+            let mut best = None;
+            let mut hits: Vec<u32> = Vec::new();
+            let mut score_member = |index: usize| {
+                text.clear();
+                text.push_str(&members.prefix);
+                text.push_str(&members.paths[index]);
+                let haystack = Utf32Str::new(&text, &mut chars);
+                if let Some(score) = pattern.score(haystack, &mut self.matcher) {
+                    best = best.max(Some(score));
+                    hits.push(index as u32);
+                }
+            };
+            match &candidates {
+                Some(candidates) => {
+                    candidates
+                        .iter()
+                        .for_each(|&index| score_member(index as usize));
+                    #[cfg(test)]
+                    {
+                        self.scored_members += candidates.len();
+                    }
+                }
+                None => {
+                    (0..members.paths.len()).for_each(&mut score_member);
+                    #[cfg(test)]
+                    {
+                        self.scored_members += members.paths.len();
+                    }
+                }
+            }
+
+            self.scans[item] = match (best, retained) {
+                (None, _) => Scan::Miss,
+                (Some(_), true) => Scan::Hits(hits),
+                (Some(_), false) => Scan::Unknown,
+            };
+            if let Some(score) = best {
+                by_member.push((score, item));
+            }
         }
+        self.scanned_query = Some(query);
+
         // Best score first; equal scores keep their original newest-first order.
-        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        self.scored = ranked
+        by_row.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        by_member.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.scored = by_row
             .into_iter()
             .map(|(_, item, highlights)| Scored { item, highlights })
+            .chain(by_member.into_iter().map(|(_, item)| Scored {
+                item,
+                highlights: Vec::new(),
+            }))
             .collect();
     }
 
@@ -199,6 +384,30 @@ impl<T> PickerState<T> {
                 &mut buf,
             );
         }
+    }
+
+    /// Let a query match the member paths `contents` gives, too.
+    pub fn with_contents(mut self, contents: Box<dyn Contents<T> + 'c>) -> Self {
+        self.contents = Some(contents);
+        self
+    }
+
+    /// Whether the next query edit may have to read members for the first
+    /// time, which can take a while.
+    pub fn reading_pending(&self) -> bool {
+        self.contents.is_some() && !self.read_any
+    }
+
+    /// The members scored so far.
+    #[cfg(test)]
+    pub fn members_scored(&self) -> usize {
+        self.scored_members
+    }
+
+    /// Lower the number of members the picker retains.
+    #[cfg(test)]
+    pub fn set_member_budget(&mut self, budget: usize) {
+        self.budget = budget;
     }
 
     /// The candidate items, in their original order.
@@ -483,7 +692,7 @@ mod tests {
     ///
     /// `search` mirrors `display`, so these fixtures exercise the common case
     /// where the searched and displayed text coincide.
-    fn state(rows: &[&str], height: usize) -> PickerState<String> {
+    fn state(rows: &[&str], height: usize) -> PickerState<'static, String> {
         let items: Vec<String> = rows.iter().map(|s| s.to_string()).collect();
         let picker_rows = items
             .iter()
@@ -499,7 +708,7 @@ mod tests {
     /// Build a [`PickerState`] over rows with explicit `display`/`search` text,
     /// so tests can drive the case where the searched content extends past what
     /// is displayed.
-    fn state_with_search(rows: &[(&str, &str)], height: usize) -> PickerState<String> {
+    fn state_with_search(rows: &[(&str, &str)], height: usize) -> PickerState<'static, String> {
         let items: Vec<String> = rows
             .iter()
             .map(|(display, _)| display.to_string())
@@ -587,7 +796,7 @@ mod tests {
     }
 
     /// Twenty rows named `r0` to `r19`, best first.
-    fn twenty(height: usize) -> PickerState<String> {
+    fn twenty(height: usize) -> PickerState<'static, String> {
         let names: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         state(&refs, height)
@@ -1163,5 +1372,236 @@ mod tests {
             highlights(&pattern("a a"), &hay, &mut matcher, &mut buf),
             [0]
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Matching member paths
+    // -------------------------------------------------------------------------
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The names of the pieces whose members were asked for, in order.
+    type Asked = Rc<RefCell<Vec<String>>>;
+
+    /// Members by piece name; a piece without an entry has none to give.
+    struct FakeContents {
+        members: Vec<(String, Vec<String>)>,
+        asked: Asked,
+    }
+
+    impl Contents<String> for FakeContents {
+        fn members(&mut self, item: &String) -> Option<Members> {
+            self.asked.borrow_mut().push(item.clone());
+            let (_, paths) = self.members.iter().find(|(name, _)| name == item)?;
+            Some(Members {
+                prefix: format!("{item}/"),
+                paths: paths.clone(),
+            })
+        }
+    }
+
+    /// A picker over `pieces`, each with the member paths listed for it. A
+    /// piece listed with `None` has no members to read.
+    fn with_members(pieces: &[(&str, Option<&[&str]>)]) -> (PickerState<'static, String>, Asked) {
+        let names: Vec<&str> = pieces.iter().map(|(name, _)| *name).collect();
+        let asked = Asked::default();
+        let contents = FakeContents {
+            members: pieces
+                .iter()
+                .filter_map(|(name, paths)| {
+                    paths.map(|paths| {
+                        (
+                            name.to_string(),
+                            paths.iter().map(|p| p.to_string()).collect(),
+                        )
+                    })
+                })
+                .collect(),
+            asked: Rc::clone(&asked),
+        };
+        (state(&names, 10).with_contents(Box::new(contents)), asked)
+    }
+
+    /// How often the members of `piece` were asked for.
+    fn asked_for(asked: &Asked, piece: &str) -> usize {
+        asked.borrow().iter().filter(|name| *name == piece).count()
+    }
+
+    #[test]
+    fn a_piece_matches_through_a_member_path() {
+        let (mut s, _) = with_members(&[
+            ("old-app", Some(&["src/main.txt"])),
+            ("other", Some(&["notes.txt"])),
+        ]);
+        type_query(&mut s, "main");
+        assert_eq!(shown(&s), ["old-app"]);
+    }
+
+    #[test]
+    fn a_member_only_match_ranks_below_a_row_match() {
+        // The member `main` scores far above the scattered letters of the
+        // row, and still ranks below it.
+        let (mut s, _) = with_members(&[("zzz", Some(&["main"])), ("m_a_i_n-notes", Some(&["x"]))]);
+        type_query(&mut s, "main");
+        assert_eq!(shown(&s), ["m_a_i_n-notes", "zzz"]);
+    }
+
+    #[test]
+    fn member_only_matches_rank_by_their_best_member() {
+        let (mut s, _) =
+            with_members(&[("first", Some(&["m-a-i-n"])), ("second", Some(&["main"]))]);
+        type_query(&mut s, "main");
+        assert_eq!(shown(&s), ["second", "first"]);
+    }
+
+    #[test]
+    fn a_member_only_match_has_no_highlight_in_its_row() {
+        let (mut s, _) = with_members(&[("zzz", Some(&["main"]))]);
+        type_query(&mut s, "main");
+        assert!(s.visible()[0].highlights.is_empty());
+    }
+
+    #[test]
+    fn a_piece_is_matched_through_its_path_and_a_member_together() {
+        // `scan.rs` alone lacks `canu`, and the row alone lacks `scan`.
+        let (mut s, _) =
+            with_members(&[("canu", Some(&["scan.rs"])), ("other", Some(&["scan.rs"]))]);
+        type_query(&mut s, "canu scan");
+        assert_eq!(shown(&s), ["canu"]);
+    }
+
+    #[test]
+    fn members_load_only_for_the_pieces_a_scan_needs() {
+        let (mut s, asked) = with_members(&[("main-app", Some(&["a"])), ("other", Some(&["b"]))]);
+        assert!(asked.borrow().is_empty(), "nothing is read at the start");
+        s.push_char('m');
+        assert_eq!(*asked.borrow(), ["other"], "a row match reads nothing");
+        s.push_char('x');
+        assert_eq!(
+            *asked.borrow(),
+            ["other", "main-app"],
+            "a piece that stops matching its row is read then, others stay read"
+        );
+    }
+
+    #[test]
+    fn members_beyond_the_budget_are_scanned_and_dropped() {
+        let (mut s, asked) = with_members(&[
+            ("first", Some(&["q1", "q2", "q3"])),
+            ("second", Some(&["q4", "q5", "q6"])),
+        ]);
+        s.set_member_budget(4);
+        s.push_char('q');
+        s.push_char('q');
+        assert_eq!(asked_for(&asked, "first"), 1, "retained within the budget");
+        assert_eq!(
+            asked_for(&asked, "second"),
+            2,
+            "read again for the narrowing"
+        );
+        s.backspace();
+        assert_eq!(asked_for(&asked, "first"), 1);
+        assert_eq!(asked_for(&asked, "second"), 3);
+    }
+
+    #[test]
+    fn a_query_that_extends_the_last_scores_only_the_previous_hits() {
+        let (mut s, _) = with_members(&[
+            ("one", Some(&["ma", "mb", "mc", "xx"])),
+            ("two", Some(&["xy", "xz"])),
+        ]);
+        s.push_char('m');
+        assert_eq!(s.members_scored(), 6, "the first character scores all");
+        s.push_char('a');
+        assert_eq!(s.members_scored(), 6 + 3, "only the three hits of `m`");
+        assert_eq!(shown(&s), ["one"]);
+    }
+
+    #[test]
+    fn a_piece_that_leaves_row_matching_is_scanned_in_full() {
+        let (mut s, _) = with_members(&[("main", Some(&["a", "b", "c"]))]);
+        s.push_char('m');
+        assert_eq!(s.members_scored(), 0, "a row match scores no member");
+        s.push_char('x');
+        assert_eq!(s.members_scored(), 3);
+    }
+
+    /// The members scored by the second character when the first was `m`
+    /// and the second is `second`, over a piece whose `m` hits are two of
+    /// four members.
+    fn scored_by_second_character(second: char) -> usize {
+        let (mut s, _) = with_members(&[("zzz", Some(&["ma", "mb", "xx", "yy"]))]);
+        s.push_char('m');
+        s.push_char(second);
+        s.members_scored() - 4
+    }
+
+    #[test]
+    fn a_query_with_a_bang_scores_in_full() {
+        assert_eq!(scored_by_second_character('!'), 4);
+    }
+
+    #[test]
+    fn a_query_with_a_caret_scores_in_full() {
+        assert_eq!(scored_by_second_character('^'), 4);
+    }
+
+    #[test]
+    fn a_query_with_a_quote_scores_in_full() {
+        assert_eq!(scored_by_second_character('\''), 4);
+    }
+
+    #[test]
+    fn a_query_with_a_dollar_scores_in_full() {
+        assert_eq!(scored_by_second_character('$'), 4);
+    }
+
+    #[test]
+    fn a_query_with_a_backslash_scores_in_full() {
+        assert_eq!(scored_by_second_character('\\'), 4);
+    }
+
+    #[test]
+    fn an_ordinary_second_character_scores_the_hits_only() {
+        assert_eq!(scored_by_second_character('a'), 2);
+    }
+
+    #[test]
+    fn backspace_scores_in_full_and_widens_the_set() {
+        let (mut s, _) = with_members(&[("one", Some(&["ma", "mb"])), ("two", Some(&["mc"]))]);
+        type_query(&mut s, "ma");
+        assert_eq!(shown(&s), ["one"]);
+        let before = s.members_scored();
+        s.backspace();
+        assert_eq!(s.members_scored() - before, 3);
+        assert_eq!(shown(&s), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_row_match_scans_no_members() {
+        let (mut s, asked) = with_members(&[("alpha", Some(&["x"])), ("alpine", Some(&["y"]))]);
+        s.push_char('a');
+        assert_eq!(s.members_scored(), 0);
+        assert!(asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_piece_without_members_is_left_out_and_asked_once() {
+        let (mut s, asked) = with_members(&[("gone", None), ("zzz", Some(&["main"]))]);
+        s.push_char('m');
+        s.push_char('a');
+        assert_eq!(shown(&s), ["zzz"]);
+        assert_eq!(asked_for(&asked, "gone"), 1);
+    }
+
+    #[test]
+    fn clearing_the_query_forgets_what_the_last_one_found() {
+        let (mut s, _) = with_members(&[("one", Some(&["ma", "xx"]))]);
+        s.push_char('m');
+        s.backspace();
+        let before = s.members_scored();
+        s.push_char('m');
+        assert_eq!(s.members_scored() - before, 2);
     }
 }

@@ -303,3 +303,49 @@ fn nothing_found_says_so_without_opening_the_picker() {
         finished.stderr
     );
 }
+
+#[test]
+fn a_member_path_finds_the_piece() {
+    let temp = collection();
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("main");
+    pty.wait_for("the piece found through its member", |screen| {
+        screen.contains("1/1 · 3 total") && screen.contains("old-app")
+    });
+    pty.send(ENTER);
+    let finished = pty.finish();
+    assert_eq!(finished.code(), 0, "stderr: {}", finished.stderr);
+    assert!(temp.root().join("old-app/main.txt").exists());
+}
+
+#[test]
+fn a_corrupt_listing_is_noted_once() {
+    let temp = collection();
+    let objects = temp.root().join(".antiq/objects");
+    let listing = fs::read_dir(&objects)
+        .expect("the objects directory")
+        .flat_map(|object| fs::read_dir(object.expect("an object").path()).expect("lists"))
+        .map(|item| item.expect("an item").path())
+        .find(|path| path.to_string_lossy().ends_with(".listing.zst"))
+        .expect("the listing file");
+    fs::write(&listing, "damaged").expect("a file");
+    // The member cache would answer without the listing.
+    let cache = temp.root().join(".antiq/index");
+    assert!(cache.is_dir(), "the archive left a member cache");
+    fs::remove_dir_all(&cache).expect("the cache is removed");
+
+    let mut pty = open_picker(&temp, &[], Options::piped());
+    pty.type_text("main");
+    pty.wait_for("nothing found", |screen| {
+        screen.contains("no matches · 3 total")
+    });
+    pty.send(ESC);
+    let finished = pty.finish();
+    assert_eq!(finished.code(), 0, "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.stderr.matches("cannot be searched").count(),
+        1,
+        "stderr: {}",
+        finished.stderr
+    );
+}
