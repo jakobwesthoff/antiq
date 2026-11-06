@@ -391,6 +391,65 @@ impl<W: Write> TarWriter<W> {
     }
 }
 
+/// Bytes in a tar block. Headers, record data and the end of the stream
+/// are whole blocks.
+const BLOCK: u64 = 512;
+
+/// Bytes the tar stream of `entries` has once `TarWriter` has written them
+/// below `container`, so that a bar can show how far the compressor is
+/// through it before the last entry is read.
+pub fn stream_bytes<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container: &Name) -> u64 {
+    // The end of the stream is two zero blocks.
+    let mut bytes = 2 * BLOCK;
+    // The length of the archive path of the first name of each file with
+    // several links, which later names point to.
+    let mut first_link: HashMap<(u64, u64), u64> = HashMap::new();
+    let archive_len = |path: &RelPath| {
+        let separator = u64::from(!path.is_root());
+        container.as_bytes().len() as u64 + separator * (1 + path.as_bytes().len() as u64)
+    };
+    for entry in entries {
+        let member = archive_len(&entry.path);
+        match entry.kind {
+            // The trailing slash is how tar spells a directory.
+            EntryKind::Directory => bytes += BLOCK + long_record(member + 1),
+            EntryKind::File => {
+                let first = (entry.nlink > 1)
+                    .then(|| first_link.get(&(entry.device, entry.inode)).copied())
+                    .flatten();
+                match first {
+                    Some(target) => bytes += BLOCK + long_record(member) + long_record(target),
+                    None => {
+                        if entry.nlink > 1 {
+                            first_link.insert((entry.device, entry.inode), member);
+                        }
+                        bytes += BLOCK + long_record(member) + entry.size.next_multiple_of(BLOCK);
+                    }
+                }
+            }
+            EntryKind::Symlink => {
+                if let Some(target) = &entry.link_target {
+                    bytes += BLOCK + long_record(member) + long_record(target.len() as u64);
+                }
+            }
+            _ => {}
+        }
+    }
+    bytes
+}
+
+/// The bytes of the GNU long-name or long-link record that precedes a
+/// header when the name has `len` bytes: a header block and the name with
+/// its terminating zero, padded to whole blocks. A name of up to
+/// [`LINK_NAME_FIELD`] bytes fits in the header and needs none.
+fn long_record(len: u64) -> u64 {
+    if len > LINK_NAME_FIELD as u64 {
+        BLOCK + (len + 1).next_multiple_of(BLOCK)
+    } else {
+        0
+    }
+}
+
 /// Opens the files of a piece through the directory handles of the path
 /// being walked. Entries come in path order, so the handles of the
 /// directories above one file are mostly those of the file before it, and
@@ -616,6 +675,79 @@ mod tests {
 
     fn plain(entry: TreeEntry) -> (TreeEntry, Vec<u8>) {
         (entry, Vec::new())
+    }
+
+    /// The decompressed-size check below needs real streams, so a test
+    /// writes the entries with the writer and compares with the estimate.
+    fn estimate(entries: &[(TreeEntry, Vec<u8>)]) -> u64 {
+        stream_bytes(entries.iter().map(|(entry, _)| entry), &container())
+    }
+
+    #[test]
+    fn the_estimate_of_the_stream_is_the_length_the_writer_gives() {
+        let hard = |name: &str, content: &[u8]| {
+            let (mut linked, data) = file(name, content);
+            linked.nlink = 2;
+            linked.inode = 7;
+            (linked, data)
+        };
+        let entries = vec![
+            plain(entry("", EntryKind::Directory)),
+            plain(entry("dir", EntryKind::Directory)),
+            file("empty", b""),
+            file("one", b"x"),
+            file("block", &[7u8; 512]),
+            file("past-block", &[7u8; 513]),
+            hard("first", b"shared"),
+            hard("second", b"shared"),
+            plain(symlink("short-link", b"target")),
+            plain(symlink("long-target", &[b't'; 101])),
+            plain(entry("fifo", EntryKind::Fifo)),
+        ];
+        let (tar, _, _) = pack(&entries);
+        assert_eq!(estimate(&entries), tar.len() as u64);
+    }
+
+    /// Member paths are `proj/<path>`, so a path of `n` bytes makes a
+    /// member of `n + 5` bytes. The `tar` crate keeps 100 bytes in the
+    /// header and writes a long-name record for more.
+    #[test]
+    fn the_estimate_adds_a_record_exactly_where_a_name_outgrows_the_header() {
+        for member_len in [99usize, 100, 101, 102] {
+            let name = "n".repeat(member_len - "proj/".len());
+            let entries = vec![
+                plain(entry("", EntryKind::Directory)),
+                file(&name, b"data"),
+                plain(symlink("link", "t".repeat(member_len).as_bytes())),
+            ];
+            let (tar, _, _) = pack(&entries);
+            assert_eq!(
+                estimate(&entries),
+                tar.len() as u64,
+                "member of {member_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_estimate_covers_directories_with_their_trailing_slash_and_hard_link_targets() {
+        // `proj/` + 94 bytes is 99 bytes, and the slash of a directory
+        // makes 100. One byte more makes 101.
+        let mut entries = vec![plain(entry("", EntryKind::Directory))];
+        for name_len in [94usize, 95] {
+            entries.push(plain(entry(&"d".repeat(name_len), EntryKind::Directory)));
+        }
+        let long_first = "f".repeat(96);
+        let mut first = file(&long_first, b"abc");
+        first.0.nlink = 2;
+        first.0.inode = 9;
+        let mut second = file("second", b"abc");
+        second.0.nlink = 2;
+        second.0.inode = 9;
+        entries.push(first);
+        entries.push(second);
+        let (tar, _, _) = pack(&entries);
+        assert_eq!(estimate(&entries), tar.len() as u64);
     }
 
     #[test]

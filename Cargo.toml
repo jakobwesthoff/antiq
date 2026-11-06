@@ -33,7 +33,10 @@ ulid = "3.0.0"
 unicode-normalization = "0.1.26"
 unicode-width = "0.2.3"
 whoami = "2.1.3"
-zstd = { version = "0.14.3", default-features = false, features = ["zstdmt"] }
+# `experimental` exposes `ZSTD_getFrameProgression`, which reports the bytes the
+# compressor has consumed. The call is an experimental libzstd API, and the
+# `zstd-sys` crate bundles its own libzstd, so the version in Cargo.lock pins it.
+zstd = { version = "0.14.3", default-features = false, features = ["experimental", "zstdmt"] }
 
 [dev-dependencies]
 filetime = "0.2.29"

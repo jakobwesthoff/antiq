@@ -249,24 +249,19 @@ impl Packager for TarZstd {
         let container =
             Name::from_bytes(folder.to_vec()).expect("a component of a valid path is a valid name");
 
+        // The bar follows the bytes the compressor has consumed of the tar
+        // stream, whose exact length is known before the first byte.
+        if let Some(counter) = settings.counter {
+            counter.set_total(tar_write::stream_bytes(tree.packed_entries(), &container));
+        }
         let compressed = HashingWriter::new(out);
-        let encoder = zstd::encoder(compressed, &settings.zstd).map_err(PackError::Write)?;
+        let encoder = zstd::encoder_counted(compressed, &settings.zstd, settings.counter)
+            .map_err(PackError::Write)?;
         let mut writer = TarWriter::new(encoder, container);
         let mut directories = DirectoryStack::new(root);
         let mut content = |entry: &TreeEntry| directories.open(entry);
-        let counted =
-            |entry: &TreeEntry| matches!(entry.kind, EntryKind::File | EntryKind::Symlink);
-        if let Some(counter) = settings.counter {
-            let files = tree.packed_entries().filter(|entry| counted(entry)).count();
-            counter.set_total(files as u64);
-        }
         for entry in tree.packed_entries() {
             writer.add(entry, &mut content)?;
-            if let Some(counter) = settings.counter
-                && counted(entry)
-            {
-                counter.add(1);
-            }
         }
         let (encoder, listing, notes) = writer.finish()?;
         let mut compressed = encoder.finish().map_err(PackError::Write)?;
@@ -511,6 +506,36 @@ mod pack_tests {
         let mut reader = HashingReader::new(bytes);
         std::io::copy(&mut reader, &mut std::io::sink()).expect("hashes");
         reader.sha256()
+    }
+
+    #[test]
+    fn packing_sets_the_total_to_the_tar_stream_and_ends_at_it() {
+        let mut tree = Tree::new();
+        tree.file("proj/a.txt", "alpha");
+        tree.file("proj/src/big.bin", "0123456789".repeat(5_000));
+        tree.symlink("proj/link", "a.txt");
+        tree.hard_link("proj/a.txt", "proj/src/a-copy.txt");
+        let root = TreeRoot::open(tree.root()).expect("the tree opens");
+        let walked = walk(&root, "proj");
+        let counter = Counter::new();
+        let settings = PackSettings {
+            zstd: ZstdSettings::fast(),
+            counter: Some(&counter),
+        };
+        let mut out = Vec::new();
+        TarZstd
+            .pack(&root, &walked, &settings, &mut out)
+            .expect("the piece packs");
+
+        let mut stream = Vec::new();
+        zstd::decoder(&out[..])
+            .expect("a zstd stream")
+            .read_to_end(&mut stream)
+            .expect("the stream decodes");
+        assert_eq!(
+            (counter.done(), counter.total()),
+            (stream.len() as u64, stream.len() as u64)
+        );
     }
 
     #[test]
