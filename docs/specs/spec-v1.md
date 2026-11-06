@@ -560,8 +560,17 @@ The index is derived from metadata and listings, kept as plain files,
 rebuildable, and behind a module interface. Listings are fetched
 incrementally: `sync` fetches the listings it does not have when it
 pulls metadata, and `unearth` fetches one together with its archive.
-Read-only commands that find the index missing compute it in memory and
-do not write it.
+The index holds, in `.antiq/index/<ULID>.json`, the member paths of the
+current payload's listing together with that listing's file name, for
+every object whose listing is stored here. Which objects exist, their
+paths, names, sizes and states come from the metadata and the tracking
+entries on every call. A file counts for an object only while it names
+the object's current listing; a listing's file name follows from its
+payload's checksum, so such a file is up to date. Commands that change
+state bring the files in line with the store, and `reconcile` rebuilds
+them from nothing; an index rebuilt this way equals one that was kept
+up to date. Read-only commands that find a file missing, outdated or
+unreadable read the listing instead and do not write the file.
 
 ### Config
 

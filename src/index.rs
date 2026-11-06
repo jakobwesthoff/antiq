@@ -11,14 +11,20 @@
 
 use crate::collection::Collection;
 use crate::fsx::FsxError;
+use crate::fsx::atomic::{flush_dir, write_atomic};
 use crate::id::ObjectId;
-use crate::listing::ListingError;
+use crate::listing::{self, ListingError};
+use crate::lock::RunLock;
 use crate::meta::{FileName, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::relpath::{Name, RelPath};
 use crate::store::{Store, StoreError};
 use crate::tracking::{self, EntryState, TrackingError};
 use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fs::{self, File};
 use std::io;
+use std::path::Path;
 
 /// Errors of the index.
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +119,18 @@ pub struct AtPath {
     pub claimant: Option<ObjectId>,
     /// Every other object recorded at the path, such as archived ones.
     pub others: Vec<ObjectId>,
+}
+
+/// What [`update`] and [`rebuild`] did to the member cache.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Updated {
+    /// Cache files written.
+    pub written: usize,
+    /// Items removed from the cache directory.
+    pub removed: usize,
+    /// Objects whose listing could not be read, with the reason. They get
+    /// no cache file.
+    pub skipped: Vec<(ObjectId, String)>,
 }
 
 /// The objects this machine knows, sorted by ID.
@@ -248,6 +266,26 @@ impl Index {
         AtPath { claimant, others }
     }
 
+    /// The member paths of the object's current listing, in listing order.
+    /// `None` when the object has no listing or its listing is not stored
+    /// on this machine.
+    ///
+    /// The cache file is used when it names the object's current listing.
+    /// Otherwise the listing itself is read; nothing is written.
+    pub fn members(
+        &self,
+        collection: &Collection,
+        id: ObjectId,
+    ) -> Result<Option<Vec<RelPath>>, IndexError> {
+        let Some(listing) = self.get(id).and_then(|entry| entry.listing.as_ref()) else {
+            return Ok(None);
+        };
+        if let Some(members) = read_cache(collection, id, listing) {
+            return Ok(Some(members));
+        }
+        read_listing(collection, id, listing)
+    }
+
     /// The known IDs that start with `prefix`, compared in upper case.
     pub fn ids_with_prefix(&self, prefix: &str) -> Vec<ObjectId> {
         let prefix = prefix.to_ascii_uppercase();
@@ -258,14 +296,190 @@ impl Index {
     }
 }
 
+/// Brings the member cache in line with the store: a file for every
+/// object whose current listing is stored here and readable, and nothing
+/// else.
+///
+/// ```compile_fail,E0061
+/// use antiq::collection::Collection;
+/// use antiq::index::update;
+///
+/// // The lock proof is a parameter, and `RunLock` cannot be built outside
+/// // the `lock` module (see its own doctest, E0451), so an update without
+/// // a lock does not compile.
+/// fn refresh(collection: &Collection) {
+///     let _ = update(collection);
+/// }
+/// ```
+pub fn update(collection: &Collection, _lock: &RunLock) -> Result<Updated, IndexError> {
+    let index = Index::compute(collection)?;
+    let dir = collection.index_dir();
+    let created = !dir.is_dir();
+    fs::create_dir_all(&dir).map_err(io_error("create", &dir))?;
+    if created {
+        flush_dir(&collection.antiq_dir())?;
+    }
+
+    let store = Store::new(collection);
+    let mut updated = Updated::default();
+    let mut wanted = BTreeSet::new();
+    for entry in index.entries() {
+        let Some(listing) = &entry.listing else {
+            continue;
+        };
+        // A listing that is not stored here gives no members. A cache file
+        // for it would answer for a listing the store cannot show.
+        let Some(file) = open_listing(&store, entry.id, listing)? else {
+            continue;
+        };
+        let name = cache_name(entry.id);
+        if read_cache(collection, entry.id, listing).is_some() {
+            wanted.insert(name);
+            continue;
+        }
+        match read_members(entry.id, file) {
+            Ok(members) => {
+                let file = CacheFile {
+                    format: CACHE_FORMAT,
+                    listing: listing.as_str().to_string(),
+                    members,
+                };
+                let mut bytes =
+                    serde_json::to_vec(&file).expect("paths and names are plain strings");
+                bytes.push(b'\n');
+                write_atomic(&dir.join(&name), &bytes)?;
+                wanted.insert(name);
+                updated.written += 1;
+            }
+            Err(error) => updated.skipped.push((entry.id, error.to_string())),
+        }
+    }
+
+    // Removing comes after writing, so an interrupted run leaves every
+    // file a correct state would have, and possibly some more.
+    for item in fs::read_dir(&dir).map_err(io_error("list", &dir))? {
+        let item = item.map_err(io_error("list", &dir))?;
+        if item
+            .file_name()
+            .to_str()
+            .is_some_and(|name| wanted.contains(name))
+        {
+            continue;
+        }
+        remove_item(&item.path())?;
+        updated.removed += 1;
+    }
+    flush_dir(&dir)?;
+    Ok(updated)
+}
+
+/// Empties the member cache and builds it again.
+pub fn rebuild(collection: &Collection, lock: &RunLock) -> Result<Updated, IndexError> {
+    let dir = collection.index_dir();
+    let mut cleared = 0;
+    if dir.is_dir() {
+        for item in fs::read_dir(&dir).map_err(io_error("list", &dir))? {
+            let item = item.map_err(io_error("list", &dir))?;
+            remove_item(&item.path())?;
+            cleared += 1;
+        }
+    }
+    let mut updated = update(collection, lock)?;
+    updated.removed += cleared;
+    Ok(updated)
+}
+
+// =========================================================
+// The member cache
+// =========================================================
+
+const CACHE_FORMAT: u32 = 1;
+
+/// The members of one listing, as `.antiq/index/<ULID>.json` holds them.
+/// A listing's file name follows from its payload's checksum and never
+/// refers to other content, so a file that names the object's current
+/// listing needs no further check.
+#[derive(Serialize, Deserialize)]
+struct CacheFile {
+    format: u32,
+    listing: String,
+    members: Vec<RelPath>,
+}
+
+fn cache_name(id: ObjectId) -> String {
+    format!("{id}.json")
+}
+
+/// The members from the cache file, if it exists, parses, has the format
+/// this version writes and names `listing`.
+fn read_cache(collection: &Collection, id: ObjectId, listing: &FileName) -> Option<Vec<RelPath>> {
+    let bytes = fs::read(collection.index_dir().join(cache_name(id))).ok()?;
+    let file: CacheFile = serde_json::from_slice(&bytes).ok()?;
+    (file.format == CACHE_FORMAT && file.listing == listing.as_str()).then_some(file.members)
+}
+
+/// The paths of the stored listing; `None` when this machine does not
+/// have the file.
+fn read_listing(
+    collection: &Collection,
+    id: ObjectId,
+    listing: &FileName,
+) -> Result<Option<Vec<RelPath>>, IndexError> {
+    match open_listing(&Store::new(collection), id, listing)? {
+        Some(file) => read_members(id, file).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn open_listing(
+    store: &Store<'_>,
+    id: ObjectId,
+    listing: &FileName,
+) -> Result<Option<File>, IndexError> {
+    let path = store.file_path(id, listing);
+    match File::open(&path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error("open", &path)(error)),
+    }
+}
+
+fn read_members(id: ObjectId, file: File) -> Result<Vec<RelPath>, IndexError> {
+    let entries = listing::read_all(file).map_err(|source| IndexError::Listing { id, source })?;
+    Ok(entries.into_iter().map(|entry| entry.path).collect())
+}
+
+fn remove_item(path: &Path) -> Result<(), IndexError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error("stat", path))?;
+    let removed = if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    removed.map_err(io_error("remove", path))
+}
+
+fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> IndexError {
+    let path = path.display().to_string();
+    move |source| IndexError::Io {
+        action,
+        path,
+        source,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clock::FixedClock;
+    use crate::listing::{self, ListingEntry, ListingType};
     use crate::lock::{self, RunLock};
     use crate::testing::tree::TempCollection;
     use crate::tracking::{self, TrackingEntry, VersionTakenOut};
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
     const A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -623,6 +837,426 @@ mod tests {
         let before = snapshot(&fx.index_dir());
         let _ = fx.compute();
         assert_eq!(snapshot(&fx.index_dir()), before);
+    }
+
+    // ---------------------------------------------------------
+    // The member cache
+    // ---------------------------------------------------------
+
+    impl Fixture {
+        /// Stores the listing of archive `version` of `object`, with one
+        /// file entry for every path.
+        fn listing(&mut self, object: &str, version: u32, paths: &[&[u8]]) {
+            let entries: Vec<ListingEntry> = paths
+                .iter()
+                .map(|bytes| ListingEntry {
+                    path: RelPath::from_bytes(bytes.to_vec()).expect("a path"),
+                    kind: ListingType::File,
+                    size: 1,
+                    mtime: 0,
+                    mode: 0o644,
+                    link: None,
+                    sha256: Some("0".repeat(64)),
+                })
+                .collect();
+            let name = format!("{version:016x}.listing.zst");
+            let target = self.collection.object_dir(id(object)).join(name);
+            fs::create_dir_all(target.parent().expect("in an object directory")).expect("dir");
+            let file = fs::File::create(target).expect("creates");
+            listing::write(&entries, file).expect("writes");
+        }
+
+        fn update(&self) -> Updated {
+            update(&self.collection, &self.lock).expect("updates")
+        }
+
+        fn rebuild(&self) -> Updated {
+            rebuild(&self.collection, &self.lock).expect("rebuilds")
+        }
+
+        fn cache_file(&self, object: &str) -> std::path::PathBuf {
+            self.index_dir().join(format!("{object}.json"))
+        }
+
+        fn cache(&self, object: &str) -> serde_json::Value {
+            let bytes = fs::read(self.cache_file(object)).expect("the cache file exists");
+            serde_json::from_slice(&bytes).expect("the cache file is JSON")
+        }
+
+        fn members(&self, object: &str) -> Option<Vec<String>> {
+            self.compute()
+                .members(&self.collection, id(object))
+                .expect("members")
+                .map(|paths| paths.iter().map(RelPath::to_string).collect())
+        }
+
+        /// The content of every file of the index directory.
+        fn content(&self) -> BTreeMap<String, Vec<u8>> {
+            let mut files = BTreeMap::new();
+            for entry in fs::read_dir(self.index_dir()).expect("lists") {
+                let entry = entry.expect("entry");
+                files.insert(
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).expect("reads"),
+                );
+            }
+            files
+        }
+
+        fn content_names(&self) -> Vec<String> {
+            self.content().into_keys().collect()
+        }
+
+        /// Puts `files` into the index directory, which is emptied first.
+        fn restore(&self, files: &BTreeMap<String, Vec<u8>>) {
+            let dir = self.index_dir();
+            for entry in fs::read_dir(&dir).expect("lists") {
+                fs::remove_file(entry.expect("entry").path()).expect("removes");
+            }
+            for (name, bytes) in files {
+                fs::write(dir.join(name), bytes).expect("writes");
+            }
+        }
+    }
+
+    #[test]
+    fn update_writes_a_member_file_per_listing_in_listing_order() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"src", b"src/main.rs", b"d\xff"]);
+        let updated = fx.update();
+        assert_eq!(updated.written, 1);
+        assert_eq!(
+            fx.cache(A),
+            json!({
+                "format": 1,
+                "listing": "0000000000000001.listing.zst",
+                "members": ["src", "src/main.rs", "d%FF"],
+            })
+        );
+        assert_eq!(fx.content().len(), 1, "one file and nothing else");
+    }
+
+    #[test]
+    fn members_come_from_the_cache_file_when_it_names_the_current_listing() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"from-the-listing"]);
+        fx.update();
+        fs::write(
+            fx.cache_file(A),
+            r#"{"format":1,"listing":"0000000000000001.listing.zst","members":["from-the-cache"]}"#,
+        )
+        .expect("writes");
+        assert_eq!(fx.members(A), Some(vec!["from-the-cache".to_string()]));
+    }
+
+    #[test]
+    fn members_fall_back_to_the_listing_when_there_is_no_cache_file() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"from-the-listing"]);
+        assert_eq!(fx.members(A), Some(vec!["from-the-listing".to_string()]));
+        assert!(fx.content().is_empty(), "reading must not write the cache");
+    }
+
+    #[test]
+    fn members_fall_back_to_the_listing_when_the_cache_names_another_listing() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(2, 5)]);
+        fx.listing(A, 2, &[b"from-the-listing"]);
+        fs::write(
+            fx.cache_file(A),
+            r#"{"format":1,"listing":"0000000000000001.listing.zst","members":["old"]}"#,
+        )
+        .expect("writes");
+        assert_eq!(fx.members(A), Some(vec!["from-the-listing".to_string()]));
+    }
+
+    #[test]
+    fn members_fall_back_to_the_listing_when_the_cache_file_is_not_json() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"from-the-listing"]);
+        fs::write(fx.cache_file(A), "not json").expect("writes");
+        assert_eq!(fx.members(A), Some(vec!["from-the-listing".to_string()]));
+    }
+
+    #[test]
+    fn members_fall_back_to_the_listing_when_the_cache_has_another_format() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"from-the-listing"]);
+        fs::write(
+            fx.cache_file(A),
+            r#"{"format":2,"listing":"0000000000000001.listing.zst","members":["new"]}"#,
+        )
+        .expect("writes");
+        assert_eq!(fx.members(A), Some(vec!["from-the-listing".to_string()]));
+    }
+
+    #[test]
+    fn an_object_without_a_listing_has_no_members() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "live", &[PayloadSpec::live(1, 5)]);
+        assert_eq!(fx.members(A), None);
+        assert_eq!(fx.update(), Updated::default());
+    }
+
+    #[test]
+    fn a_listing_that_is_not_stored_here_gives_no_members_and_no_file() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        assert_eq!(fx.members(A), None);
+        assert_eq!(fx.update(), Updated::default());
+        assert!(fx.content().is_empty());
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_read_is_skipped_and_reported() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.temp.tree().file(
+            &format!(".antiq/objects/{A}/0000000000000001.listing.zst"),
+            "garbage",
+        );
+        let updated = fx.update();
+        assert_eq!(updated.written, 0);
+        assert_eq!(updated.skipped.len(), 1);
+        assert_eq!(updated.skipped[0].0, id(A));
+        let error = fx
+            .compute()
+            .members(&fx.collection, id(A))
+            .expect_err("garbage is not a listing");
+        assert!(matches!(error, IndexError::Listing { .. }), "{error:?}");
+        assert!(error.to_string().contains(A), "{error}");
+    }
+
+    #[test]
+    fn update_replaces_a_file_whose_listing_changed() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fx.update();
+        fx.object(
+            A,
+            "a",
+            "archived",
+            &[PayloadSpec::archive(1, 5), PayloadSpec::archive(2, 6)],
+        );
+        fx.listing(A, 2, &[b"two"]);
+        let updated = fx.update();
+        assert_eq!(updated.written, 1);
+        assert_eq!(
+            fx.cache(A)["listing"],
+            json!("0000000000000002.listing.zst")
+        );
+        assert_eq!(fx.cache(A)["members"], json!(["two"]));
+    }
+
+    #[test]
+    fn update_leaves_a_current_file_untouched() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fx.update();
+        let before = fs::metadata(fx.cache_file(A)).expect("exists");
+        let updated = fx.update();
+        assert_eq!(updated, Updated::default());
+        let after = fs::metadata(fx.cache_file(A)).expect("exists");
+        assert_eq!(before.ino(), after.ino(), "the file was written again");
+    }
+
+    #[test]
+    fn update_removes_files_of_vanished_objects_and_stray_items() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fx.temp.tree().file(&format!(".antiq/index/{B}.json"), "{}");
+        fx.temp.tree().file(".antiq/index/.leftover.1.2.tmp", "x");
+        fx.temp.tree().file(".antiq/index/sub/inner", "x");
+        let updated = fx.update();
+        assert_eq!(updated.written, 1);
+        assert_eq!(updated.removed, 3);
+        assert_eq!(fx.content_names(), vec![format!("{A}.json")]);
+    }
+
+    #[test]
+    fn update_removes_a_file_whose_listing_is_no_longer_stored() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fx.update();
+        fs::remove_file(
+            fx.collection
+                .object_dir(id(A))
+                .join("0000000000000001.listing.zst"),
+        )
+        .expect("removes");
+        let updated = fx.update();
+        assert_eq!(updated.removed, 1);
+        assert!(!fx.cache_file(A).exists());
+    }
+
+    #[test]
+    fn update_creates_the_index_directory() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fs::remove_dir(fx.index_dir()).expect("the fixture's index directory is empty");
+        assert!(!fx.index_dir().exists(), "the precondition: no directory");
+        fx.update();
+        assert!(fx.cache_file(A).exists());
+    }
+
+    #[test]
+    fn update_without_objects_and_without_a_directory_creates_an_empty_one() {
+        let fx = Fixture::new();
+        fs::remove_dir(fx.index_dir()).expect("the fixture's index directory is empty");
+        assert_eq!(fx.update(), Updated::default());
+        assert!(fx.index_dir().is_dir());
+    }
+
+    #[test]
+    fn rebuild_repairs_a_cache_file_with_the_right_name_and_wrong_members() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"right"]);
+        fx.update();
+        fs::write(
+            fx.cache_file(A),
+            r#"{"format":1,"listing":"0000000000000001.listing.zst","members":["wrong"]}"#,
+        )
+        .expect("writes");
+        assert_eq!(fx.update(), Updated::default(), "update trusts the name");
+        let rebuilt = fx.rebuild();
+        assert_eq!(rebuilt.written, 1);
+        assert_eq!(fx.cache(A)["members"], json!(["right"]));
+    }
+
+    #[test]
+    fn a_rebuilt_index_equals_the_one_updated_step_by_step() {
+        let mut fx = Fixture::new();
+        // After every step the updated directory is compared with a
+        // rebuild, which is then undone so the next step still starts from
+        // the incrementally maintained directory.
+        let check = |fx: &Fixture, step: &str| {
+            let updated = fx.content();
+            fx.rebuild();
+            let rebuilt = fx.content();
+            assert_eq!(updated, rebuilt, "after: {step}");
+            fx.restore(&updated);
+        };
+
+        fx.object(A, "alpha", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one", b"two"]);
+        fx.update();
+        check(&fx, "an archived object");
+
+        fx.object(B, "beta", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(B, 1, &[b"three"]);
+        fx.update();
+        check(&fx, "a second archived object");
+
+        fx.object(
+            A,
+            "alpha",
+            "archived",
+            &[PayloadSpec::archive(1, 5), PayloadSpec::archive(2, 6)],
+        );
+        fx.listing(A, 2, &[b"one", b"two", b"four"]);
+        fx.update();
+        check(&fx, "a newer archive of the first object");
+
+        fs::remove_dir_all(fx.collection.object_dir(id(B))).expect("removes");
+        fx.update();
+        check(&fx, "the second object is gone");
+
+        fx.object(C, "gamma", "live", &[PayloadSpec::live(1, 7)]);
+        fx.update();
+        check(&fx, "a live object without a listing");
+
+        fs::remove_file(
+            fx.collection
+                .object_dir(id(A))
+                .join("0000000000000002.listing.zst"),
+        )
+        .expect("removes");
+        fx.update();
+        check(&fx, "the listing of the first object is deleted");
+
+        fx.object(B, "beta", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(B, 1, &[b"three"]);
+        fx.update();
+        check(&fx, "the second object is back");
+        assert_eq!(fx.content_names(), vec![format!("{B}.json")]);
+    }
+
+    #[test]
+    fn rebuild_clears_items_that_are_not_cache_files() {
+        let mut fx = Fixture::new();
+        fx.temp.tree().file(".antiq/index/stray", "x");
+        let rebuilt = fx.rebuild();
+        assert_eq!(rebuilt.removed, 1);
+        assert!(fx.content().is_empty());
+    }
+
+    #[test]
+    fn rebuild_creates_the_directory_when_there_is_none() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        fs::remove_dir(fx.index_dir()).expect("the fixture's index directory is empty");
+        let rebuilt = fx.rebuild();
+        assert_eq!(rebuilt.written, 1);
+        assert!(fx.cache_file(A).exists());
+    }
+
+    /// Takes away all access to `path` until the guard drops, and checks
+    /// that this holds for the running user.
+    fn deny(path: &Path) -> crate::fsx::RestoreModes {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let guard = crate::fsx::RestoreModes(vec![path.to_path_buf()]);
+        assert!(
+            fs::File::open(path).is_err(),
+            "the precondition: a 0000 path cannot be opened, so run as a non-root user"
+        );
+        guard
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_opened_is_an_error_naming_it() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"one"]);
+        let listing = fx
+            .collection
+            .object_dir(id(A))
+            .join("0000000000000001.listing.zst");
+        let _restore = deny(&listing);
+        let error = update(&fx.collection, &fx.lock).expect_err("not readable");
+        assert!(
+            matches!(error, IndexError::Io { action: "open", .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("listing.zst"), "{error}");
+    }
+
+    #[test]
+    fn a_cache_directory_that_cannot_be_listed_is_an_error_naming_it() {
+        let fx = Fixture::new();
+        let _restore = deny(&fx.index_dir());
+        let error = update(&fx.collection, &fx.lock).expect_err("not listable");
+        assert!(
+            matches!(error, IndexError::Io { action: "list", .. }),
+            "{error:?}"
+        );
+        let error = rebuild(&fx.collection, &fx.lock).expect_err("not listable");
+        assert!(
+            matches!(error, IndexError::Io { action: "list", .. }),
+            "{error:?}"
+        );
     }
 
     /// Names, sizes and modification times of the files in `dir`.
