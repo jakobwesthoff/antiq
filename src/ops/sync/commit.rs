@@ -1146,6 +1146,65 @@ mod tests {
         );
     }
 
+    /// Removes the payload of `id` from the shared remote, as another
+    /// machine's cleanup would.
+    fn remove_payload(dir: &std::path::Path) {
+        for entry in fs::read_dir(dir).expect("lists") {
+            let path = entry.expect("entry").path();
+            if path.to_string_lossy().ends_with(".tar.zst") {
+                fs::remove_file(path).expect("removed");
+            }
+        }
+    }
+
+    #[test]
+    fn a_payload_that_vanishes_during_the_commit_is_put_again_and_the_version_commits() {
+        let (shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        let dir = shared.objects().join(id.to_string());
+        // The third listing of the object is the one after the claim.
+        remote.before(Op::ListDir, 3, {
+            let dir = dir.clone();
+            move |_| remove_payload(&dir)
+        });
+
+        let report = anna.sync_with(&remote);
+
+        assert_eq!(report.committed, [CommittedVersion { id, version: 1 }]);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(remote.count(Op::PutPayload), 3, "the payload is put again");
+        assert!(
+            shared
+                .names(id)
+                .iter()
+                .any(|name| name.ends_with(".tar.zst")),
+            "the payload is on the remote"
+        );
+    }
+
+    #[test]
+    fn a_payload_that_vanishes_again_after_the_second_put_refuses_the_commit() {
+        let (shared, anna, _) = anna_and_ben();
+        let id = anna.import_piece("notes", "hello");
+        let remote = anna.remote();
+        let dir = shared.objects().join(id.to_string());
+        for call in [3, 4] {
+            remote.before(Op::ListDir, call, {
+                let dir = dir.clone();
+                move |_| remove_payload(&dir)
+            });
+        }
+
+        let report = anna.sync_with(&remote);
+
+        assert!(report.committed.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::Refused);
+        assert!(has_pending(&anna, id));
+        assert_payload_kept(&anna, id);
+    }
+
     #[test]
     fn a_retry_that_finds_a_higher_version_naming_its_files_is_settled_after_a_pull() {
         let (shared, anna, _) = anna_and_ben();
