@@ -17,6 +17,102 @@
     radial-gradient(900px 300px at 85% 0%, rgba(139, 92, 246, 0.08), transparent 70%);
 }
 
+/* The wordmark is "antique" with only "antiq" solid. The "ue" is a ghost: an
+   opaque fill plus a stroke, because a bare stroke shows the letters'
+   overlapping contours. The gradient sits on the solid span, so the heading
+   itself paints no background. */
 .hero h1 {
+  background: none;
+  -webkit-text-fill-color: initial;
+  margin: 0 0 var(--space-md);
+  font-size: 6.5rem;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.wordmark-solid {
   background-image: linear-gradient(135deg, #e6dcff 0%, #b49cff 45%, #6c4fd8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  /* The negative letter-spacing shrinks the span box, so the padding keeps the
+     last glyph inside the gradient clip. */
+  padding-right: 0.04em;
+}
+
+.wordmark-ghost {
+  -webkit-text-fill-color: #17142a;
+  -webkit-text-stroke: 3px rgba(180, 156, 255, 0.55);
+  paint-order: stroke fill;
+}
+
+.hero .container {
+  max-width: 1100px;
+}
+
+.hero-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3rem;
+  text-align: left;
+}
+
+.hero-mascot {
+  flex: none;
+  width: 330px;
+  height: auto;
+  filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 40px rgba(139, 92, 246, 0.45));
+}
+
+.hero-row .hero-tagline {
+  margin: 0 0 var(--space-md);
+  color: var(--color-text-bright);
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.hero-description {
+  margin: 0 0 var(--space-xl);
+  max-width: 600px;
+  color: var(--color-text-muted);
+  font-size: 1.05rem;
+}
+
+.hero-row .hero-actions {
+  justify-content: flex-start;
+}
+
+@media (max-width: 860px) {
+  .hero-row {
+    flex-direction: column;
+    gap: 1.5rem;
+    text-align: center;
+  }
+
+  .hero-mascot {
+    width: 220px;
+  }
+
+  .hero .hero-copy h1 {
+    font-size: 4.25rem;
+  }
+
+  .hero-row .hero-tagline,
+  .hero-description {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .hero-row .hero-tagline {
+    font-size: 1.2rem;
+  }
+
+  .hero-description {
+    margin-bottom: var(--space-lg);
+  }
+
+  .hero-row .hero-actions {
+    justify-content: center;
+  }
 }
