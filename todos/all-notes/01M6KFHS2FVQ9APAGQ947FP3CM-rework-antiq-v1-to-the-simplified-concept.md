@@ -1760,6 +1760,21 @@ before the rename; **C on Linux** (one `syncfs` on an fd opened before
 extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
 `syncfs` is refused. C6 states the method in the spec section "unearth".
 
+### 8.7 Lead notes from delivered items (2026-11-04)
+
+- From S1 (cef1a2b): a command error that wraps a `LockError` or a
+  `RunError` is never `#[error(transparent)]`, since `find_held_lock`
+  in `src/error.rs` walks the source chain and a transparent wrapper
+  hides the lock (pinned by a test). Every C item follows this.
+- C4 adds the end-to-end test that a wrapped `lock_held` keeps `pid`
+  and `started` in the JSON envelope (PO15); S1 tests only the walker.
+- F8 changes the `ambiguous_reference` candidates to a list of
+  `{path}` as the spec says; the code still emits `{id, path}`.
+- C2 removes `init --yes` (the spec's `init` has none).
+- `forget --force` conflicts with `<version>` in clap (a `requires` on a
+  bool flag is not enforced); the usage errors of 4.1 hold and are
+  pinned case by case in `tests/cli.rs`.
+
 ### 8.5 User decisions after the plan review (2026-11-04)
 
 - `--take-over` goes. `push --force` pushes despite a host or path
