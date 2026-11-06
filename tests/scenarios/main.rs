@@ -17,6 +17,7 @@ mod init;
 mod list;
 mod pin;
 mod push;
+mod restore_from_target;
 mod status;
 mod unearth;
 mod verify;
