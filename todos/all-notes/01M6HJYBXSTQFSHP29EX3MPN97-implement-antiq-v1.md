@@ -2057,8 +2057,12 @@ its finishing commit. Acceptance lines in an entry add to this.
 #### I45 Fast contents search in the picker
 
 - Content: the remedies the picker search investigation
-  (`docs/research/picker-search.md`) measures, chosen with the user;
-  responses in the low milliseconds while typing.
+  (`docs/research/picker-search.md`) measures; responses in the low
+  milliseconds while typing. Before it is planned, the lead puts the
+  measurements and the proposals to the user in asqr, and the user
+  chooses. Without an answer by the time the item is due, the lead
+  chooses by best judgement, and the user may revise it later
+  (user, 2026-11-04).
 - Depends on: I40 and the investigation.
 - Size: M to L.
 
