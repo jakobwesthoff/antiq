@@ -739,9 +739,15 @@ away, broken), bulk metadata pull and push, payload put, get and delete,
 and exclusive creation. A run does at most `remote_jobs` remote
 operations at a time; compression may run ahead of uploads.
 
-When the remote has been away for longer than `away_warn_days` while
-remote work is pending, `status` warns and `--if-reachable` no longer
-turns away into exit 0.
+The remote has been away for longer than `away_warn_days` when more than
+that many days of 24 hours have passed since `last_reachable`, or since
+`away_first_seen` while `last_reachable` is missing, and neither is in
+the future. With neither recorded, or with a state file that cannot be
+used, it has not. Remote work is pending while a piece is
+`pending_upload` or `stale_backup`. When the remote has been away for
+longer than `away_warn_days` and remote work is pending, `status` warns
+and `--if-reachable` no longer turns away into exit 0: the run exits 4. A
+dry run decides the same way, and no dry run writes the state file.
 
 `.antiq/remote-state.json` is a JSON object. Only a run that holds the
 lock writes it. A run that finds the remote reachable sets

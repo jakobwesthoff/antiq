@@ -7,12 +7,13 @@
 
 use crate::clock::whole_seconds;
 use crate::collection::Collection;
+use crate::error::Error;
 use crate::fsx::FsxError;
 use crate::fsx::atomic::write_atomic;
 use crate::lock::RunLock;
-use crate::remote::RemoteState;
+use crate::remote::{RemoteError, RemoteState};
 use crate::report::Warning;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Map, Value};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -147,15 +148,65 @@ fn time_at(
         })
 }
 
+/// Gives an away error the `overdue` mark when the remote has been out of
+/// reach for longer than `away_warn_days` while remote work is pending, which
+/// `--if-reachable` does not turn into exit code 0. Every other result
+/// passes unchanged.
+///
+/// `pending_remote_work` is only asked once an away error is there and the
+/// time is over. A dry run applies this as well, so that its exit code is
+/// the one the real run would get.
+pub fn with_overdue<T>(
+    result: Result<T, Error>,
+    collection: &Collection,
+    pending_remote_work: impl FnOnce() -> bool,
+    now: Timestamp,
+) -> Result<T, Error> {
+    match result {
+        Err(Error::Remote(RemoteError::Away {
+            message,
+            overdue: false,
+        })) => {
+            let overdue = overdue_since(collection, pending_remote_work, now).is_some();
+            Err(RemoteError::Away { message, overdue }.into())
+        }
+        other => other,
+    }
+}
+
 /// The warning `status` shows when the remote has been away for too long
 /// while remote work is pending.
 pub fn status_warning(
-    _collection: &Collection,
-    _state: RemoteState,
-    _pending_remote_work: bool,
-    _now: Timestamp,
+    collection: &Collection,
+    state: RemoteState,
+    pending_remote_work: bool,
+    now: Timestamp,
 ) -> Option<Warning> {
-    None
+    if state != RemoteState::Away {
+        return None;
+    }
+    let since = overdue_since(collection, || pending_remote_work, now)?;
+    let limit = collection.config().collection.away_warn_days;
+    Some(Warning::new(format!(
+        "The remote has been away since {since}, longer than away_warn_days ({limit}), \
+         and work is waiting for it."
+    )))
+}
+
+/// When the away period began, if it is longer than `away_warn_days` and
+/// remote work is pending. A period with no recorded start, one that starts
+/// in the future (the clock was set back) and a state file that cannot be
+/// used give `None`, since then nothing says how long the remote has been
+/// away.
+fn overdue_since(
+    collection: &Collection,
+    pending_remote_work: impl FnOnce() -> bool,
+    now: Timestamp,
+) -> Option<Timestamp> {
+    let since = away_since(collection).ok().flatten()?;
+    let limit =
+        SignedDuration::from_hours(24 * i64::from(collection.config().collection.away_warn_days));
+    (now.duration_since(since) > limit && pending_remote_work()).then_some(since)
 }
 
 #[cfg(test)]
@@ -163,7 +214,7 @@ mod tests {
     use super::*;
     use crate::clock::FixedClock;
     use crate::lock;
-    use crate::testing::tree::TempCollection;
+    use crate::testing::tree::{COLLECTION_ID, TempCollection};
     use serde_json::Value;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -181,7 +232,16 @@ mod tests {
 
     impl Fixture {
         fn new() -> Fixture {
-            let temp = TempCollection::minimal();
+            Fixture::with_config("")
+        }
+
+        /// `config` is added to the `[collection]` table.
+        fn with_config(config: &str) -> Fixture {
+            let mut temp = TempCollection::minimal();
+            temp.tree().file(
+                ".antiq/config.toml",
+                format!("[collection]\nid = \"{COLLECTION_ID}\"\n{config}\n"),
+            );
             let collection = Collection::find(temp.root()).expect("a collection");
             let clock = FixedClock::new(time("2026-01-02T03:04:05Z"));
             let lock = lock::acquire(&collection.lock_path(), "imperius", &clock).expect("free");
@@ -406,13 +466,253 @@ mod tests {
         assert!(fixture.state().get("last_reachable").is_none());
     }
 
+    // =========================================================
+    // The warning of `status`
+    // =========================================================
+
+    /// A collection whose remote was last reachable at `last_reachable`
+    /// and whose config has `config` below `[collection]`.
+    fn away_for(last_reachable: &str, config: &str) -> Fixture {
+        let fixture = Fixture::with_config(config);
+        fixture.write_state(&format!(r#"{{"last_reachable": "{last_reachable}"}}"#));
+        fixture
+    }
+
+    fn warning(fixture: &Fixture, state: RemoteState, pending: bool, now: &str) -> Option<Warning> {
+        status_warning(&fixture.collection, state, pending, time(now))
+    }
+
     #[test]
-    fn no_warning_is_given_yet() {
-        let collection = Collection::for_tests();
-        let now = Timestamp::now();
+    fn eight_days_away_with_pending_work_warns() {
+        let fixture = away_for("2026-10-24T00:00:00Z", "");
+        let warning = warning(&fixture, RemoteState::Away, true, "2026-11-01T00:00:00Z");
         assert_eq!(
-            status_warning(&collection, RemoteState::Away, true, now),
+            warning.expect("a warning").message,
+            "The remote has been away since 2026-10-24T00:00:00Z, \
+             longer than away_warn_days (7), and work is waiting for it."
+        );
+    }
+
+    #[test]
+    fn seven_days_and_twelve_hours_away_warn() {
+        let fixture = away_for("2026-10-24T00:00:00Z", "");
+        let now = "2026-10-31T12:00:00Z";
+        assert!(warning(&fixture, RemoteState::Away, true, now).is_some());
+    }
+
+    #[test]
+    fn exactly_the_limit_does_not_warn() {
+        let fixture = away_for("2026-10-25T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, true, now), None);
+    }
+
+    #[test]
+    fn a_short_time_away_does_not_warn() {
+        let fixture = away_for("2026-10-30T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, true, now), None);
+    }
+
+    #[test]
+    fn without_pending_work_nothing_warns() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, false, now), None);
+    }
+
+    #[test]
+    fn a_reachable_remote_does_not_warn() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Reachable, true, now), None);
+    }
+
+    #[test]
+    fn a_broken_remote_does_not_warn() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Broken, true, now), None);
+    }
+
+    #[test]
+    fn without_a_remote_nothing_warns() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::None, true, now), None);
+    }
+
+    #[test]
+    fn the_limit_comes_from_the_config() {
+        let fixture = away_for("2026-10-29T00:00:00Z", "away_warn_days = 2");
+        let now = "2026-11-01T00:00:00Z";
+        let message = warning(&fixture, RemoteState::Away, true, now)
+            .expect("three days is more than two")
+            .message;
+        assert!(message.contains("away_warn_days (2)"), "{message}");
+    }
+
+    #[test]
+    fn a_limit_of_zero_warns_for_any_time_away() {
+        let fixture = away_for("2026-11-01T00:00:00Z", "away_warn_days = 0");
+        assert!(warning(&fixture, RemoteState::Away, true, "2026-11-01T00:00:01Z").is_some());
+        assert_eq!(
+            warning(&fixture, RemoteState::Away, true, "2026-11-01T00:00:00Z"),
             None
         );
+    }
+
+    #[test]
+    fn no_recorded_time_does_not_warn() {
+        let fixture = Fixture::with_config("");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, true, now), None);
+    }
+
+    #[test]
+    fn a_time_in_the_future_does_not_warn() {
+        let fixture = away_for("2026-12-01T00:00:00Z", "");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, true, now), None);
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_used_does_not_warn() {
+        let fixture = Fixture::with_config("");
+        fixture.write_state("{not json");
+        let now = "2026-11-01T00:00:00Z";
+        assert_eq!(warning(&fixture, RemoteState::Away, true, now), None);
+    }
+
+    #[test]
+    fn the_first_time_found_away_counts_when_no_reachable_time_is_recorded() {
+        let fixture = Fixture::with_config("");
+        fixture.write_state(r#"{"away_first_seen": "2026-10-20T00:00:00Z"}"#);
+        let message = warning(&fixture, RemoteState::Away, true, "2026-11-01T00:00:00Z")
+            .expect("twelve days is more than seven")
+            .message;
+        assert!(message.contains("since 2026-10-20T00:00:00Z"), "{message}");
+    }
+
+    // =========================================================
+    // The mark on an away error
+    // =========================================================
+
+    fn away_error() -> Error {
+        RemoteError::Away {
+            message: "no route to host".into(),
+            overdue: false,
+        }
+        .into()
+    }
+
+    fn is_overdue(result: Result<(), Error>) -> bool {
+        match result {
+            Err(Error::Remote(RemoteError::Away { overdue, .. })) => overdue,
+            other => panic!("expected an away error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_away_error_after_eight_days_with_pending_work_is_marked() {
+        let fixture = away_for("2026-10-24T00:00:00Z", "");
+        let result = with_overdue(
+            Err(away_error()),
+            &fixture.collection,
+            || true,
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert!(is_overdue(result));
+    }
+
+    #[test]
+    fn an_away_error_after_a_short_time_is_not_marked() {
+        let fixture = away_for("2026-10-30T00:00:00Z", "");
+        let result = with_overdue(
+            Err(away_error()),
+            &fixture.collection,
+            || true,
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert!(!is_overdue(result));
+    }
+
+    #[test]
+    fn an_away_error_without_pending_work_is_not_marked() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let result = with_overdue(
+            Err(away_error()),
+            &fixture.collection,
+            || false,
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert!(!is_overdue(result));
+    }
+
+    #[test]
+    fn pending_work_is_only_looked_up_when_the_time_is_over() {
+        let fixture = away_for("2026-10-30T00:00:00Z", "");
+        let result = with_overdue(
+            Err(away_error()),
+            &fixture.collection,
+            || panic!("the pending work is not needed"),
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert!(!is_overdue(result));
+    }
+
+    #[test]
+    fn a_broken_error_passes_unchanged() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let result: Result<(), Error> = with_overdue(
+            Err(RemoteError::Broken("wrong marker".into()).into()),
+            &fixture.collection,
+            || panic!("no lookup for an error that is not away"),
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Remote(RemoteError::Broken(ref message))) if message == "wrong marker"
+        ));
+    }
+
+    #[test]
+    fn a_success_passes_unchanged() {
+        let fixture = away_for("2026-10-01T00:00:00Z", "");
+        let result = with_overdue(
+            Ok(7),
+            &fixture.collection,
+            || panic!("no lookup without an error"),
+            time("2026-11-01T00:00:00Z"),
+        );
+        assert_eq!(result.expect("still ok"), 7);
+    }
+
+    #[test]
+    fn the_message_of_a_marked_error_stays() {
+        let fixture = away_for("2026-10-24T00:00:00Z", "");
+        let error = with_overdue::<()>(
+            Err(away_error()),
+            &fixture.collection,
+            || true,
+            time("2026-11-01T00:00:00Z"),
+        )
+        .expect_err("still an error");
+        assert_eq!(error.to_string(), "no route to host");
+    }
+
+    #[test]
+    fn if_reachable_ends_a_fresh_away_run_with_zero_and_an_overdue_one_with_four() {
+        use crate::remote::policy::{Outcome, outcome};
+        let fresh = away_for("2026-10-30T00:00:00Z", "");
+        let now = time("2026-11-01T00:00:00Z");
+        let error = with_overdue::<()>(Err(away_error()), &fresh.collection, || true, now)
+            .expect_err("away");
+        assert_eq!(outcome(true, &error), Outcome::TreatAsSuccess);
+        let overdue = away_for("2026-10-24T00:00:00Z", "");
+        let error = with_overdue::<()>(Err(away_error()), &overdue.collection, || true, now)
+            .expect_err("away");
+        assert_eq!(outcome(true, &error), Outcome::Fail);
+        assert_eq!(error.kind().exit_code(), 4);
     }
 }

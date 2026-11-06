@@ -619,9 +619,7 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     let recovered = recovered_names(collection, &mut warnings);
     let counts = count(&pieces);
     let remote_state = request.probes.remote_state(collection);
-    let pending_remote_work = pieces.iter().any(|piece| {
-        piece.flags.contains(&Flag::PendingUpload) || piece.flags.contains(&Flag::StaleBackup)
-    });
+    let pending_remote_work = has_pending_remote_work(&pieces);
     warnings.extend(request.probes.away_warning(
         collection,
         remote_state,
@@ -845,6 +843,15 @@ fn note_fields(piece: &mut Piece, entry: Option<&TrackingEntry>, current: &Curre
     if current.source == Source::Pending || (held && unconfirmed) {
         piece.flags.push(Flag::PendingUpload);
     }
+}
+
+/// Whether remote work waits for any piece: an upload that has not
+/// happened or a backup that is stale. The commands that take
+/// `--if-reachable` ask this through `remote::away::with_overdue`.
+pub(crate) fn has_pending_remote_work(pieces: &[Piece]) -> bool {
+    pieces.iter().any(|piece| {
+        piece.flags.contains(&Flag::PendingUpload) || piece.flags.contains(&Flag::StaleBackup)
+    })
 }
 
 /// When the last `sync` finished, from `.antiq/remote-state.json`. The file
