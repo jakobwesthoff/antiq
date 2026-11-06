@@ -20,6 +20,7 @@ use crate::id::ObjectId;
 use crate::lock::RunLock;
 use crate::meta::{self, PayloadKind};
 use crate::reference::Candidate;
+use crate::report::Warning;
 use crate::store::{Source, Store, StoreError};
 use crate::tombstone::Tombstones;
 use crate::tracking::{self, PieceState, TrackingEntry};
@@ -33,6 +34,8 @@ pub(super) struct Dropping {
     pub pieces: Vec<PieceRef>,
     /// Every entry this machine tracks and every object in the store.
     pub set_size: usize,
+    /// Pieces kept because their folder could not be looked at.
+    pub notes: Vec<Warning>,
 }
 
 impl Dropping {
@@ -57,9 +60,10 @@ pub(super) fn plan(collection: &Collection, part: &Part) -> Result<Dropping, Err
         TreeRoot::open(collection.root()).map_err(|source| open_error(collection, source))?;
     let mut set: BTreeSet<ObjectId> = store.objects()?.into_iter().collect();
     let mut pieces = Vec::new();
+    let mut notes = Vec::new();
     for entry in &tracked.entries {
         set.insert(entry.id);
-        if droppable(collection, &root, &store, entry, part)? {
+        if droppable(collection, &root, &store, entry, part, &mut notes)? {
             pieces.push(PieceRef {
                 id: entry.id,
                 path: entry.path.to_string(),
@@ -69,6 +73,7 @@ pub(super) fn plan(collection: &Collection, part: &Part) -> Result<Dropping, Err
     Ok(Dropping {
         pieces,
         set_size: set.len(),
+        notes,
     })
 }
 
@@ -84,6 +89,7 @@ fn droppable(
     store: &Store,
     entry: &TrackingEntry,
     part: &Part,
+    notes: &mut Vec<Warning>,
 ) -> Result<bool, Error> {
     let Ok(Some(current)) = store.current(entry.id) else {
         return Ok(false);
@@ -97,9 +103,27 @@ fn droppable(
     {
         return Ok(false);
     }
-    let folder_present = root
-        .lstat(&entry.path)
-        .is_ok_and(|found| found.kind == EntryKind::Directory);
+    // Only a missing path means the folder is gone. Any other failure, such
+    // as a parent nobody may enter, leaves it unknown whether the folder
+    // holds the work, so the piece stays.
+    let folder_present = match root.lstat(&entry.path) {
+        Ok(found) => found.kind == EntryKind::Directory,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            false
+        }
+        Err(error) => {
+            notes.push(Warning::new(format!(
+                "{} was kept: its folder could not be looked at ({error})",
+                entry.path
+            )));
+            return Ok(false);
+        }
+    };
     let state = tracking::derive_state(
         Some(entry),
         Some(&current.metadata),
@@ -151,7 +175,7 @@ pub(super) fn execute(
         let Some(entry) = tracking::read(collection, piece.id)? else {
             continue;
         };
-        if !droppable(collection, &root, &store, &entry, part)? {
+        if !droppable(collection, &root, &store, &entry, part, &mut Vec::new())? {
             continue;
         }
         let highest = store

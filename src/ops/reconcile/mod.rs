@@ -250,6 +250,7 @@ pub fn reconcile(
                 .filter(|(id, listing)| collection.object_dir(*id).join(listing.as_str()).is_file())
                 .count();
             let mut plan = Plan::new();
+            let mut kept_notes = Vec::new();
             plan.push(ReconcileAction::RebuildIndex { member_lists });
             let part = remote_part::run(collection, clock, opener, None);
             for action in &part.actions {
@@ -259,6 +260,7 @@ pub fn reconcile(
                 let dropping = prune::plan(collection, &part)?;
                 let hold = brake::evaluate(percent, dropping.candidates(), dropping.set_size);
                 plan.brake = hold.filter(|_| !brake.force);
+                kept_notes = dropping.notes;
                 for piece in dropping.pieces {
                     plan.push(ReconcileAction::Drop {
                         id: piece.id,
@@ -268,6 +270,7 @@ pub fn reconcile(
             }
             let mut notes = collection_notes(collection);
             notes.extend(part.warnings);
+            notes.extend(kept_notes);
             Ok(Reconciled::Planned {
                 plan,
                 notes,
@@ -279,6 +282,7 @@ pub fn reconcile(
             let rebuilt = index::rebuild(collection, guard.lock())?;
             let part = remote_part::run(collection, clock, opener, Some(guard.lock()));
             let mut pruned = Vec::new();
+            let mut kept_notes = Vec::new();
             if prune {
                 let dropping = prune::plan(collection, &part)?;
                 let hold = brake::evaluate(percent, dropping.candidates(), dropping.set_size);
@@ -294,10 +298,12 @@ pub fn reconcile(
                     brake.interaction,
                 )?;
                 pruned = prune::execute(collection, guard.lock(), &part, &dropping.pieces)?;
+                kept_notes = dropping.notes;
             }
             let mut warnings = collection_notes(collection);
             warnings.extend_from_slice(guard.warnings());
             warnings.extend(part.warnings);
+            warnings.extend(kept_notes);
             Ok(Reconciled::Done(ReconcileReport {
                 index: IndexReport {
                     written: rebuilt.written,

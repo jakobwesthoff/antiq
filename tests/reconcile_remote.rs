@@ -1082,3 +1082,32 @@ fn only_a_recorded_change_names_no_version_elsewhere() {
     succeeded(&run);
     assert_eq!(run.json()["changed_elsewhere"], json!([]));
 }
+
+// ---------------------------------------------------------
+// A folder that cannot be looked at
+// ---------------------------------------------------------
+
+#[test]
+fn a_piece_whose_folder_cannot_be_looked_at_is_kept_with_a_note() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::padded(9);
+    world.gone(10, "dir/alpha");
+    fs::create_dir_all(world.root().join("dir/alpha")).expect("the folder");
+    let parent = world.root().join("dir");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let blocked =
+        fs::symlink_metadata(parent.join("alpha")).expect_err("a parent nobody may enter");
+    assert_eq!(blocked.kind(), std::io::ErrorKind::PermissionDenied);
+
+    let run = world.reconcile_json(&["--prune", "--force"]);
+
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("chmod back");
+    succeeded(&run);
+    assert!(
+        world.tracked(10),
+        "dropped a piece whose folder is in place"
+    );
+    assert_eq!(run.json()["pruned"], json!([]));
+    let warnings = run.json()["warnings"].to_string();
+    assert!(warnings.contains("dir/alpha"), "{warnings}");
+}

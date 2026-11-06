@@ -1939,7 +1939,10 @@ removal that depends on the age of a file is listed as such.
 piece must also hold no archive here (neither in the entry nor as a file
 named by an archive payload of any committed version in its object
 directory), have no recorded change that is not committed, no open
-decision and no folder in place. It is checked once for the plan and
+decision and no folder in place. A folder counts as absent only when
+looking at its path says that nothing is there; a path that cannot be
+looked at, such as one below a directory nobody may enter, keeps the
+piece and is named in a warning. It is checked once for the plan and
 again when the piece is dropped. Without a remote, or with one that is
 away or broken, only gone pieces are dropped, never an entry that an
 earlier run marked. The drop goes through the brake ("Safety"): the
