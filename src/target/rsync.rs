@@ -412,44 +412,9 @@ fn scrub_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::fake::Fake;
     use std::fs;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-    use tempfile::TempDir;
-
-    /// A directory holding a `rsync` that is the fixture script, with the
-    /// answers the script reads beside it. The fixture is linked, never
-    /// copied: a test process that writes an executable can see it fail to
-    /// start with "text file busy" while another test forks.
-    struct Fake {
-        dir: TempDir,
-    }
-
-    impl Fake {
-        fn new(version: &str) -> Fake {
-            let dir = tempfile::tempdir().expect("a temporary directory");
-            let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-rsync.sh");
-            symlink(fixture, dir.path().join("rsync")).expect("the link is new");
-            fs::write(dir.path().join("version"), version).expect("the directory is writable");
-            Fake { dir }
-        }
-
-        fn dir(&self) -> PathBuf {
-            self.dir.path().to_path_buf()
-        }
-
-        fn path(&self) -> PathBuf {
-            self.dir.path().join("rsync")
-        }
-
-        fn version_exit(&self, code: i32) {
-            fs::write(self.dir.path().join("version_exit"), code.to_string())
-                .expect("the directory is writable");
-        }
-
-        fn read(&self, name: &str) -> Vec<u8> {
-            fs::read(self.dir.path().join(name)).expect("the fixture logged the call")
-        }
-    }
+    use std::os::unix::fs::PermissionsExt;
 
     const RSYNC_3_5_1: &str =
         "rsync  version 3.5.1  protocol version 33\nCopyright (C) 1996-2026\n";
@@ -578,7 +543,7 @@ mod tests {
     fn probe_runs_version_with_one_argument_in_a_scrubbed_environment() {
         let fake = Fake::new(RSYNC_3_5_1);
         Rsync::probe(&fake.path()).expect("3.5.1 passes");
-        assert_eq!(fake.read("calls.log"), b"version\0--version\0");
+        assert_eq!(fake.calls(), [["version", "--version"]]);
         let env = String::from_utf8(fake.read("env.log")).expect("text");
         assert_eq!(env, "LC_ALL=C\n");
     }
@@ -1105,12 +1070,8 @@ total size is 2568  speedup is 0.96\n";
     fn the_fake_receives_the_argv_and_lc_all_c() {
         let (fake, result) = run_fake(|_| ());
         result.expect("exit 0 succeeds");
-        let log = fake.read("calls.log");
-        let mut recorded: Vec<&str> = std::str::from_utf8(&log)
-            .expect("text")
-            .split('\0')
-            .collect();
-        recorded.pop();
+        let calls = fake.calls().concat();
+        let recorded: Vec<&str> = calls.iter().map(String::as_str).collect();
         assert_eq!(
             recorded,
             [

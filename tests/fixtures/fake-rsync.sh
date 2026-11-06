@@ -14,10 +14,16 @@
 #   exit          exit status of a transfer (default 0)
 #   signal        when present, a transfer kills itself with SIGKILL
 #
+# A run with several transfers answers each differently: the Nth transfer
+# (counted from 1, versions not counted) reads stdout.N, stderr.N, exit.N
+# and signal.N, and falls back to the plain file of that name when the
+# numbered one is absent. The counter lives in the file count.
+#
 # Every call appends a record to calls.log: the mode ("version" or
-# "transfer"), then each argument, all NUL-separated. env.log gets one line
-# per RSYNC_* or CVSIGNORE variable the call received, and the value of
-# LC_ALL.
+# "transfer"), then each argument, each followed by a NUL, and the record
+# ends with the byte 0x1e so that the log splits into calls. env.log gets
+# one line per RSYNC_* or CVSIGNORE variable the call received, and the
+# value of LC_ALL.
 #
 # A test can also hand the script to rsync as its remote shell (-e), where
 # it records the arguments rsync passes and fails the connection.
@@ -33,6 +39,7 @@ else
 fi
 
 printf '%s\0' "$mode" "$@" >>"$dir/calls.log"
+printf '\036' >>"$dir/calls.log"
 
 {
     env | grep -E '^(RSYNC_|CVSIGNORE=)' || true
@@ -47,16 +54,35 @@ if [ "$mode" = version ]; then
     exit 0
 fi
 
-if [ -f "$dir/signal" ]; then
+call=0
+if [ -f "$dir/count" ]; then
+    call=$(cat "$dir/count")
+fi
+call=$((call + 1))
+printf '%s' "$call" >"$dir/count"
+
+# answer NAME prints the file of the Nth call, else the plain one.
+answer() {
+    if [ -f "$dir/$1.$call" ]; then
+        echo "$dir/$1.$call"
+    elif [ -f "$dir/$1" ]; then
+        echo "$dir/$1"
+    fi
+}
+
+if [ -n "$(answer signal)" ]; then
     kill -KILL $$
 fi
-if [ -f "$dir/stdout" ]; then
-    cat "$dir/stdout"
+file=$(answer stdout)
+if [ -n "$file" ]; then
+    cat "$file"
 fi
-if [ -f "$dir/stderr" ]; then
-    cat "$dir/stderr" >&2
+file=$(answer stderr)
+if [ -n "$file" ]; then
+    cat "$file" >&2
 fi
-if [ -f "$dir/exit" ]; then
-    exit "$(cat "$dir/exit")"
+file=$(answer exit)
+if [ -n "$file" ]; then
+    exit "$(cat "$file")"
 fi
 exit 0

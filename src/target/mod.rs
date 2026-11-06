@@ -8,3 +8,6 @@
 pub mod marker;
 pub mod rsync;
 pub mod url;
+
+#[cfg(test)]
+pub(crate) mod fake;
