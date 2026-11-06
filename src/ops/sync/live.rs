@@ -687,10 +687,16 @@ fn unbacked_by(piece: &RelPath, problem: &Problem) -> (UnbackedReason, String) {
 /// out. A piece whose live package is out of date is listed with the
 /// commit that records the new one, unless a recorded change has that
 /// commit listed already.
+///
+/// `would_pull` holds the versions the run would pull, judged as the run
+/// judges them: a piece is packed only on metadata it has the committed
+/// state of, and a recorded change only when it would be committed. `None`
+/// means the pull would fail, which leaves only the new IDs.
 pub(super) fn plan(
     collection: &Collection,
     clock: &dyn Clock,
     machine: &str,
+    would_pull: Option<&BTreeMap<ObjectId, Versions>>,
     plan: &mut Plan<SyncAction>,
 ) -> Result<(), SyncError> {
     const KEEPS_OUT: [Flag; 4] = [
@@ -718,12 +724,34 @@ pub(super) fn plan(
         {
             continue;
         }
+        let Some(would_pull) = would_pull else {
+            continue;
+        };
         let Ok(Some(current)) = store.current(id) else {
             continue;
         };
         if current.metadata.collection != collection.id()
             || current.metadata.lifecycle != Lifecycle::Live
         {
+            continue;
+        }
+        let Ok(Some(entry)) = tracking::read(collection, id) else {
+            continue;
+        };
+        let nothing = Versions::new();
+        let extra = would_pull.get(&id).unwrap_or(&nothing);
+        let built_on = match current.source {
+            Source::Pending => matches!(
+                commit::classify(collection, id, extra),
+                Ok(Class::Commit { .. })
+            ),
+            Source::Committed(number) => {
+                let newest = extra.keys().next_back().copied().unwrap_or(0).max(number);
+                entry.version_taken_out == VersionTakenOut::Committed(newest)
+                    || entry.committed_versions.contains(&newest)
+            }
+        };
+        if !built_on {
             continue;
         }
         let Ok(tree) = walking.walk(&piece.path) else {
@@ -740,7 +768,10 @@ pub(super) fn plan(
             plan.push(SyncAction::Commit { id });
         }
     }
-    plan_removals(collection, machine, plan)
+    if would_pull.is_some() {
+        plan_removals(collection, machine, plan)?;
+    }
+    Ok(())
 }
 
 /// The live packages a real run would delete, and the commit that a
@@ -1660,6 +1691,109 @@ mod tests {
         assert!(actions.contains(&SyncAction::Commit { id }), "{actions:?}");
         assert!(!anna.collection.meta_pending_path(id).exists());
         assert_eq!(anna.store().committed_versions(id).expect("lists"), vec![1]);
+    }
+
+    /// Puts version `number` on the remote as another machine's commit: the
+    /// version before it with one more history entry.
+    fn ben_commits(machine: &Machine, shared: &Shared, id: ObjectId, number: u32) {
+        let mut document = crate::meta::parse(&shared.read(id, &format!("meta.{}", number - 1)))
+            .expect("the version parses");
+        document.history.push(crate::meta::HistoryEntry::new(
+            machine.clock.now(),
+            "ben",
+            HistoryAction::Sync,
+        ));
+        fs::write(
+            shared
+                .objects()
+                .join(id.to_string())
+                .join(format!("meta.{number}")),
+            crate::meta::to_bytes(&document).expect("serialises"),
+        )
+        .expect("written");
+    }
+
+    #[test]
+    fn a_dry_run_after_a_failed_pull_lists_mint_id_and_no_pack() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        change(&folder, "a.txt", "hello again");
+        anna.folder("fresh", "b.txt", "new");
+        let remote = anna.remote();
+        remote.fail(Op::PullMetadata, 1, Fault::Io);
+        remote.fail(Op::PullMetadata, 2, Fault::Io);
+
+        let actions = match anna.sync_request(&remote, true).expect("the dry run works") {
+            crate::ops::sync::Synced::Planned { plan, .. } => plan.actions,
+            other => panic!("{other:?}"),
+        };
+
+        assert!(
+            actions.contains(&SyncAction::MintId {
+                path: path("fresh")
+            }),
+            "{actions:?}"
+        );
+        assert!(
+            !actions.contains(&SyncAction::PackLive {
+                id,
+                path: path("proj")
+            }),
+            "{actions:?}"
+        );
+        assert!(!actions.contains(&SyncAction::Commit { id }), "{actions:?}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_pack_for_a_piece_whose_newer_version_it_would_pull() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        change(&folder, "a.txt", "hello again");
+        ben_commits(&anna, &shared, id, 2);
+
+        let actions = anna.plan();
+
+        assert!(
+            actions.contains(&SyncAction::PullMetadata { id, version: 2 }),
+            "{actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SyncAction::PackLive { .. })),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_no_pack_for_a_recorded_change_that_would_conflict() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        let folder = anna.folder("proj", "a.txt", "hello");
+        anna.sync();
+        let id = only_object(&anna);
+        anna.record_history(id, HistoryAction::Unearth);
+        change(&folder, "a.txt", "hello again");
+        ben_commits(&anna, &shared, id, 2);
+
+        let actions = anna.plan();
+
+        assert!(
+            actions.contains(&SyncAction::Conflict { id }),
+            "{actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SyncAction::PackLive { .. })),
+            "{actions:?}"
+        );
     }
 
     #[test]

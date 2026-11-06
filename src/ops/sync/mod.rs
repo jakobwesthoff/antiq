@@ -487,7 +487,7 @@ pub fn sync_using(request: &SyncRequest<'_>) -> Result<Synced, Error> {
                 let mut plan = Plan::new();
                 let mut notes = report::setting_notes(collection);
                 let would_pull = pull::plan_pull(collection, remote, &mut plan, &mut notes)?;
-                live::plan(collection, clock, &machine, &mut plan)?;
+                live::plan(collection, clock, &machine, would_pull.as_ref(), &mut plan)?;
                 if let Some(would_pull) = would_pull {
                     commit::plan_changes(collection, &machine, &would_pull, &mut plan)?;
                 }
