@@ -35,6 +35,10 @@ coverage base:
 shots:
     scripts/render.sh
 
+# Render Archie's emblem as terminal text, one file per cell shape and glyph set.
+emblem-ansi:
+    scripts/emblem-ansi.sh
+
 # Test the builder of the demo world that the images are rendered from.
 shots-test:
     cargo build --release
