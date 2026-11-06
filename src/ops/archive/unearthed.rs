@@ -23,14 +23,17 @@ use super::durable::{self, Matched};
 use super::new::finish::Finished;
 use super::new::{Flow, Piece, PieceOutcome, Stop, chain};
 use super::{ArchiveAction, Candidate, Forked, Lost, NeedsDecision, Reclaimed, SkipReason, Step};
+use crate::clock::Clock;
 use crate::clock::whole_seconds;
 use crate::collection::Collection;
 use crate::fsx::tree::TreeRoot;
+use crate::id::IdSource;
 use crate::id::ObjectId;
 use crate::interact::{Choice, Question};
 use crate::listing::{self, ListingEntry};
+use crate::lock::RunLock;
 use crate::meta::{HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload, PayloadKind};
-use crate::ops::fork::{self, ForkRequest, RealSteps};
+use crate::ops::fork::{self, ForkError, ForkReport, ForkRequest, RealSteps};
 use crate::pack::WalkRules;
 use crate::pack::live::check_stream;
 use crate::pack::verify::{Compared, Difference, changes, compare_with_listing};
@@ -337,6 +340,27 @@ pub(super) fn plan_action(
 // Reclaiming
 // =========================================================
 
+/// Forks the unearthed piece `id`: its folder stays where it is and gets
+/// a new ID, and the archive keeps the old one.
+pub(crate) fn fork_unearthed(
+    collection: &Collection,
+    lock: &RunLock,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+    id: ObjectId,
+) -> Result<ForkReport, ForkError> {
+    let planned = fork::plan(collection, &ForkRequest { id, name: None })?;
+    fork::apply_with(
+        collection,
+        &planned,
+        lock,
+        clock,
+        ids,
+        &RealSteps,
+        Vec::new(),
+    )
+}
+
 /// How many times the folder may change between the question and the
 /// package before the piece is left for the next run.
 const MAX_CHANGES: usize = 3;
@@ -482,7 +506,7 @@ impl Piece<'_, '_> {
                 Verdict::Reclaim => return self.reclaim(classified, size),
                 Verdict::Replace if classified.loss.is_empty() => Bound::Nothing,
                 Verdict::Replace => Bound::Any,
-                Verdict::Ask => match self.ask(&classified) {
+                Verdict::Ask => match self.answer.or_else(|| self.ask(&classified)) {
                     Some(Answer::Replace) => {
                         // The folder may have changed while the user
                         // thought, and the package is made from a walk.
@@ -557,18 +581,7 @@ impl Piece<'_, '_> {
     fn fork(&mut self) -> Flow<PieceOutcome> {
         let cx = self.cx;
         let id = self.known.expect("an unearthed piece has an ID");
-        let report = fork::plan(cx.collection, &ForkRequest { id, name: None })
-            .and_then(|planned| {
-                fork::apply_with(
-                    cx.collection,
-                    &planned,
-                    cx.lock,
-                    cx.clock,
-                    cx.ids,
-                    &RealSteps,
-                    Vec::new(),
-                )
-            })
+        let report = fork_unearthed(cx.collection, cx.lock, cx.clock, cx.ids, id)
             .map_err(|error| Stop::error(chain(&error)))?;
         self.warnings.extend(report.warnings);
         Ok(PieceOutcome::Forked(Forked {
@@ -707,21 +720,23 @@ fn is_reclaim_recorded(metadata: &Metadata, machine: &str, since: Timestamp) -> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::clock::{Clock, FixedClock};
     use crate::id::{IdSource, SeqIds};
     use crate::interact::{Choice, Interaction, Question, ScriptedInteraction};
+    use crate::lock::LockError;
     use crate::meta::PayloadKind;
     use crate::ops::archive::{
-        ArchiveAction, ArchiveReport, ArchiveRequest, Asker, RealSeams, Seams, archive_with,
-        plan_with,
+        ArchiveAction, ArchiveError, ArchiveReport, ArchiveRequest, Asker, RealSeams, Seams,
+        archive_with, plan_with,
     };
     use crate::ops::archive::{Forked, Lost, NeedsDecision};
     use crate::ops::status;
     use crate::ops::unearth::tests::{FILES, Fixture, ID, id, path, time};
     use crate::pack::verify::Field;
     use crate::relpath::RelPath;
+    use crate::run::RunError;
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
     use crate::tracking::{Answer, PendingDecision};
@@ -733,28 +748,28 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const PIECE: &str = "projects/work";
+    pub(crate) const PIECE: &str = "projects/work";
     /// The modification time `Fixture::archived` gives the files it packs.
-    const FILE_TIME: i64 = 1_000_000_000;
+    pub(crate) const FILE_TIME: i64 = 1_000_000_000;
 
     /// An unearthed piece at [`PIECE`] that was unearthed 30 days before
     /// the clock, with nobody holding the run lock.
-    struct Scene {
-        temp: TempCollection,
-        collection: Collection,
-        clock: FixedClock,
+    pub(crate) struct Scene {
+        pub(crate) temp: TempCollection,
+        pub(crate) collection: Collection,
+        pub(crate) clock: FixedClock,
     }
 
     /// A piece archived with `archived` and unearthed again with
     /// `restored`; the same files make the folder equal its archive.
-    fn scene_of(archived: &[(&str, &str)], restored: &[(&str, &str)]) -> Scene {
+    pub(crate) fn scene_of(archived: &[(&str, &str)], restored: &[(&str, &str)]) -> Scene {
         scene_built(|_| {}, archived, &|_| {}, restored)
     }
 
     /// [`scene_of`] with more in the piece than plain files: `prepare`
     /// adds it to the archived piece and again to the restored folder. The
     /// collection is configured by `configure`.
-    fn scene_built(
+    pub(crate) fn scene_built(
         configure: impl FnOnce(&mut crate::config::Config),
         archived: &[(&str, &str)],
         prepare: &dyn Fn(&mut crate::testing::tree::Tree),
@@ -787,12 +802,12 @@ mod tests {
         }
     }
 
-    fn scene() -> Scene {
+    pub(crate) fn scene() -> Scene {
         scene_of(FILES, FILES)
     }
 
     /// Seams that call `at` before each step.
-    struct At<F>(F);
+    pub(crate) struct At<F>(pub(crate) F);
 
     impl<F: Fn(Step) -> io::Result<()> + Sync> Seams for At<F> {
         fn at(&self, step: Step, _: &RelPath) -> io::Result<()> {
@@ -801,15 +816,20 @@ mod tests {
     }
 
     impl Scene {
-        fn run(&self, seams: &dyn Seams) -> ArchiveReport {
+        pub(crate) fn run(&self, seams: &dyn Seams) -> ArchiveReport {
             self.run_asking(seams, crate::ops::archive::nobody())
         }
 
-        fn run_asking(&self, seams: &dyn Seams, asker: &Asker) -> ArchiveReport {
+        pub(crate) fn run_asking(&self, seams: &dyn Seams, asker: &Asker) -> ArchiveReport {
             self.run_at(seams, asker, &self.clock)
         }
 
-        fn run_at(&self, seams: &dyn Seams, asker: &Asker, clock: &FixedClock) -> ArchiveReport {
+        pub(crate) fn run_at(
+            &self,
+            seams: &dyn Seams,
+            asker: &Asker,
+            clock: &FixedClock,
+        ) -> ArchiveReport {
             let ids = SeqIds::new(1);
             archive_with(
                 &ArchiveRequest {
@@ -828,7 +848,7 @@ mod tests {
 
         /// A run that dies before `step`, as a process that is killed
         /// there, followed by the repairs of the next run.
-        fn crash_before_then_repair(&self, step: Step) {
+        pub(crate) fn crash_before_then_repair(&self, step: Step) {
             let fired = Arc::new(AtomicBool::new(false));
             let seen = Arc::clone(&fired);
             let seams = At(move |at| {
@@ -846,17 +866,17 @@ mod tests {
             self.repair();
         }
 
-        fn repair(&self) {
+        pub(crate) fn repair(&self) {
             drop(crate::run::start(&self.collection, &self.clock, false).expect("the repairs run"));
         }
 
-        fn entry(&self) -> TrackingEntry {
+        pub(crate) fn entry(&self) -> TrackingEntry {
             tracking::read(&self.collection, id(ID))
                 .expect("the entry reads")
                 .expect("the entry exists")
         }
 
-        fn metadata(&self) -> Metadata {
+        pub(crate) fn metadata(&self) -> Metadata {
             Store::new(&self.collection)
                 .current(id(ID))
                 .expect("the metadata reads")
@@ -864,20 +884,20 @@ mod tests {
                 .metadata
         }
 
-        fn folder(&self) -> std::path::PathBuf {
+        pub(crate) fn folder(&self) -> std::path::PathBuf {
             self.temp.root().join(PIECE)
         }
 
-        fn object_file(&self, name: &str) -> std::path::PathBuf {
+        pub(crate) fn object_file(&self, name: &str) -> std::path::PathBuf {
             self.collection.object_dir(id(ID)).join(name)
         }
 
         /// The first payload's file name.
-        fn payload_file(&self) -> String {
+        pub(crate) fn payload_file(&self) -> String {
             self.metadata().payloads[0].file.as_str().to_string()
         }
 
-        fn edit_meta(&self, edit: impl FnOnce(&mut Value)) {
+        pub(crate) fn edit_meta(&self, edit: impl FnOnce(&mut Value)) {
             let path = self.object_file("meta.1");
             let mut document: Value =
                 serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
@@ -885,7 +905,7 @@ mod tests {
             fs::write(&path, serde_json::to_vec(&document).expect("json")).expect("written");
         }
 
-        fn edit_entry(&self, edit: impl FnOnce(&mut TrackingEntry)) {
+        pub(crate) fn edit_entry(&self, edit: impl FnOnce(&mut TrackingEntry)) {
             let mut entry = self.entry();
             edit(&mut entry);
             let path = self.collection.tracking_path(id(ID));
@@ -894,7 +914,7 @@ mod tests {
 
         /// A further archive payload of `version` whose listing is `lines`.
         /// Its file holds the bytes of the first payload.
-        fn add_payload(&self, version: u32, lines: &[ListingEntry]) -> String {
+        pub(crate) fn add_payload(&self, version: u32, lines: &[ListingEntry]) -> String {
             let file = format!("{version:016x}-b.tar.zst");
             let listing_name = listing_file_for(u64::from(version));
             let out = fs::File::create(self.object_file(&listing_name)).expect("a file");
@@ -919,7 +939,7 @@ mod tests {
         }
 
         /// The listing of the first payload.
-        fn listing(&self) -> Vec<ListingEntry> {
+        pub(crate) fn listing(&self) -> Vec<ListingEntry> {
             let name = self.metadata().payloads[0]
                 .listing
                 .clone()
@@ -942,7 +962,7 @@ mod tests {
         format!("{:016x}.listing.zst", 0xa000 + number)
     }
 
-    fn reclaimed(report: &ArchiveReport) -> usize {
+    pub(crate) fn reclaimed(report: &ArchiveReport) -> usize {
         report
             .reclaimed
             .as_deref()
@@ -950,11 +970,11 @@ mod tests {
             .len()
     }
 
-    fn skipped(report: &ArchiveReport) -> &[crate::ops::archive::Skipped] {
+    pub(crate) fn skipped(report: &ArchiveReport) -> &[crate::ops::archive::Skipped] {
         report.skipped.as_deref().expect("a real run lists them")
     }
 
-    fn reclaim_entries(metadata: &Metadata) -> usize {
+    pub(crate) fn reclaim_entries(metadata: &Metadata) -> usize {
         metadata
             .history
             .iter()
@@ -1229,7 +1249,7 @@ mod tests {
     // The gate
     // =========================================================
 
-    fn damage_payload(scene: &Scene) {
+    pub(crate) fn damage_payload(scene: &Scene) {
         let file = scene.object_file(&scene.payload_file());
         let mut bytes = fs::read(&file).expect("reads");
         let last = bytes.len() - 1;
@@ -1237,7 +1257,7 @@ mod tests {
         fs::write(file, bytes).expect("written");
     }
 
-    fn record_remote_check(scene: &Scene) {
+    pub(crate) fn record_remote_check(scene: &Scene) {
         scene.edit_meta(|document| {
             document["payloads"][0]["verified"] = json!("2026-11-03T12:00:00Z");
         });
@@ -1520,31 +1540,31 @@ mod tests {
     // Replacing and asking
     // =========================================================
 
-    const TITLE: &str = "Replace the archive of projects/work?";
+    pub(crate) const TITLE: &str = "Replace the archive of projects/work?";
 
-    fn archived_rows(report: &ArchiveReport) -> &[crate::ops::archive::Archived] {
+    pub(crate) fn archived_rows(report: &ArchiveReport) -> &[crate::ops::archive::Archived] {
         report.archived.as_deref().expect("a real run lists them")
     }
 
-    fn undecided(report: &ArchiveReport) -> &[NeedsDecision] {
+    pub(crate) fn undecided(report: &ArchiveReport) -> &[NeedsDecision] {
         report
             .needs_decision
             .as_deref()
             .expect("a real run lists them")
     }
 
-    fn forked(report: &ArchiveReport) -> &[Forked] {
+    pub(crate) fn forked(report: &ArchiveReport) -> &[Forked] {
         report.forked.as_deref().expect("a real run lists them")
     }
 
-    fn lost(path: &str, change: &'static str) -> Lost {
+    pub(crate) fn lost(path: &str, change: &'static str) -> Lost {
         Lost {
             path: self::path(path),
             change,
         }
     }
 
-    fn history_actions(metadata: &Metadata) -> Vec<String> {
+    pub(crate) fn history_actions(metadata: &Metadata) -> Vec<String> {
         metadata
             .history
             .iter()
@@ -1552,25 +1572,25 @@ mod tests {
             .collect()
     }
 
-    fn pending(entry: &TrackingEntry) -> Vec<PendingDecision> {
+    pub(crate) fn pending(entry: &TrackingEntry) -> Vec<PendingDecision> {
         entry.pending_decisions.clone()
     }
 
-    fn replacing() -> Vec<PendingDecision> {
+    pub(crate) fn replacing() -> Vec<PendingDecision> {
         vec![PendingDecision {
             kind: DecisionKind::ReplacingWithLoss,
         }]
     }
 
-    fn asker(interaction: impl Interaction + 'static) -> Asker {
+    pub(crate) fn asker(interaction: impl Interaction + 'static) -> Asker {
         Mutex::new(Box::new(interaction))
     }
 
     /// Answers by the position of the question, records every question,
     /// and runs `before` with the position first so a test can change the
     /// folder while the user thinks.
-    struct Hook {
-        asked: Arc<Mutex<Vec<Question>>>,
+    pub(crate) struct Hook {
+        pub(crate) asked: Arc<Mutex<Vec<Question>>>,
         answers: Vec<Option<&'static str>>,
         before: Box<dyn FnMut(usize) + Send>,
     }
@@ -1610,7 +1630,7 @@ mod tests {
     /// Puts the old time back on the folder and its `src` directory, which
     /// removing a file below them has touched: a piece with a recent
     /// directory time is not idle.
-    fn settle(folder: &std::path::Path) {
+    pub(crate) fn settle(folder: &std::path::Path) {
         for directory in [folder.to_path_buf(), folder.join("src")] {
             if directory.exists() {
                 filetime::set_file_mtime(
@@ -1622,19 +1642,19 @@ mod tests {
         }
     }
 
-    fn replace_without_asking(config: &mut crate::config::Config) {
+    pub(crate) fn replace_without_asking(config: &mut crate::config::Config) {
         config.collection.replace_without_asking = true;
     }
 
     impl Scene {
         /// Writes a file with an old modification time, so the piece stays
         /// idle.
-        fn write_in_folder(&self, relative: &str, content: &str) {
+        pub(crate) fn write_in_folder(&self, relative: &str, content: &str) {
             fs::write(self.folder().join(relative), content).expect("a file is written");
             self.set_time(relative, FILE_TIME);
         }
 
-        fn set_time(&self, relative: &str, seconds: i64) {
+        pub(crate) fn set_time(&self, relative: &str, seconds: i64) {
             filetime::set_file_mtime(
                 self.folder().join(relative),
                 filetime::FileTime::from_unix_time(seconds, 0),
@@ -1642,7 +1662,7 @@ mod tests {
             .expect("the time is set");
         }
 
-        fn set_mode(&self, relative: &str, mode: u32) {
+        pub(crate) fn set_mode(&self, relative: &str, mode: u32) {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(
                 self.folder().join(relative),
@@ -1652,7 +1672,7 @@ mod tests {
         }
 
         /// The state of the piece as a run that leaves it alone keeps it.
-        fn untouched(&self) -> (Metadata, bool) {
+        pub(crate) fn untouched(&self) -> (Metadata, bool) {
             (self.metadata(), self.folder().exists())
         }
     }
@@ -2227,19 +2247,26 @@ mod tests {
             let ids = SeqIds::new(1);
             let asker = asker(counting);
 
-            let report = archive_with(
-                &ArchiveRequest {
-                    collection: &scene.collection,
-                    clock: &scene.clock,
-                    ids: &ids,
-                    pool: shared_pool(),
-                    interaction: &asker,
-                    workers: 4,
-                    dry_run: false,
-                },
-                &RealSeams,
-            )
-            .expect("the run finishes");
+            let request = ArchiveRequest {
+                collection: &scene.collection,
+                clock: &scene.clock,
+                ids: &ids,
+                pool: shared_pool(),
+                interaction: &asker,
+                workers: 4,
+                dry_run: false,
+            };
+            // A run that finds the lock held without a holder has done
+            // nothing, so it is tried again. The lock the fixture released
+            // was found held in full test runs under load.
+            let report = loop {
+                match archive_with(&request, &RealSeams) {
+                    Err(ArchiveError::Run(RunError::Lock(LockError::HeldUnknown))) => {
+                        std::thread::yield_now();
+                    }
+                    other => break other.unwrap_or_else(|error| panic!("round {round}: {error}")),
+                }
+            };
 
             assert_eq!(most.load(Ordering::SeqCst), 1, "round {round}");
             let archived: Vec<String> = archived_rows(&report)

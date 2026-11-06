@@ -27,7 +27,7 @@ pub(super) mod finish;
 use super::durable::{self, Matched};
 use super::{
     ArchiveError, Archived, Asker, Candidate, Forked, Kept, NeedsDecision, Reclaimed, Seams,
-    SkipReason, Skipped, Step, Unfinished, UnfinishedWhere, apparent_size, size_text,
+    SkipReason, Skipped, Step, Unfinished, UnfinishedWhere, apparent_size, open_root, size_text,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -41,7 +41,7 @@ use crate::meta::{
     Checksum, CreatedSource, FileName, HistoryAction, HistoryEntry, Lifecycle, Metadata, Payload,
     PayloadKind,
 };
-use crate::ops::status::PieceKind;
+use crate::ops::status::{self, PieceKind};
 use crate::pack::names::{MemberKind, MemberName, portability_warnings};
 use crate::pack::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Pool, workers_for_piece,
@@ -54,7 +54,7 @@ use crate::report::Warning;
 use crate::select::Rules;
 use crate::store::{Put, Source, Store};
 use crate::tracking::{
-    self, DecisionKind, EntryState, LocalPayload, TrackingEntry, VersionTakenOut,
+    self, Answer, DecisionKind, EntryState, LocalPayload, TrackingEntry, VersionTakenOut,
 };
 use crate::tree::{EntryKind, PieceTree, Problem};
 use crate::walk;
@@ -86,6 +86,53 @@ pub(super) struct Context<'a> {
     pub space: SpaceLedger,
     /// Objects a crashed run left behind, for new pieces to adopt.
     pub orphans: Vec<Orphan>,
+}
+
+/// What a command that archives pieces brings to a run.
+pub(crate) struct Run<'a> {
+    pub collection: &'a Collection,
+    pub lock: &'a RunLock,
+    pub clock: &'a dyn Clock,
+    pub ids: &'a dyn IdSource,
+    pub pool: &'a Pool,
+    pub interaction: &'a Asker,
+}
+
+impl<'a> Context<'a> {
+    /// The context of a run under the lock `run` holds. Orphans are looked
+    /// for only when a new piece is among the candidates to adopt them.
+    pub(super) fn for_run(
+        run: &Run<'a>,
+        seams: &'a dyn Seams,
+        with_orphans: bool,
+    ) -> Result<Context<'a>, ArchiveError> {
+        let collection = run.collection;
+        let config = &collection.config().collection;
+        let root = open_root(collection)?;
+        let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
+        // `status` has warned about the junk list already.
+        let junk = status::junk_names(&config.junk, &mut Vec::new());
+        Ok(Context {
+            collection,
+            lock: run.lock,
+            clock: run.clock,
+            ids: run.ids,
+            pool: run.pool,
+            interaction: run.interaction,
+            seams,
+            junk,
+            rules,
+            idle: idle::Settings::new(config.idle_days, &config.ignore)?,
+            root,
+            machine: collection.machine_name()?,
+            space: SpaceLedger::new(),
+            orphans: if with_orphans {
+                find_orphans(collection)?
+            } else {
+                Vec::new()
+            },
+        })
+    }
 }
 
 /// An object with archived metadata of this collection and no tracking
@@ -131,7 +178,7 @@ pub(super) fn find_orphans(collection: &Collection) -> Result<Vec<Orphan>, Archi
 }
 
 /// How archiving one piece ended.
-pub(super) enum PieceOutcome {
+pub(crate) enum PieceOutcome {
     /// The piece is not idle any more; there is nothing to report.
     Dropped,
     Skipped(Skipped),
@@ -143,7 +190,7 @@ pub(super) enum PieceOutcome {
     NeedsDecision(NeedsDecision),
 }
 
-pub(super) struct PieceResult {
+pub(crate) struct PieceResult {
     pub outcome: PieceOutcome,
     pub warnings: Vec<Warning>,
     /// A listing reached the object store, so the index has to learn of it.
@@ -235,9 +282,27 @@ fn is_out_of_space(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
+/// Why a piece is archived: by `archive`, which asks when it must, or by
+/// `resolve`, which may bring the answer.
+#[derive(Clone, Copy)]
+pub(crate) struct Mode {
+    /// The history entry a new archive gets.
+    pub history: HistoryAction,
+    /// The answer to the question about a replacement, when it is known.
+    pub answer: Option<Answer>,
+}
+
+impl Mode {
+    pub(crate) const ARCHIVE: Mode = Mode {
+        history: HistoryAction::Archive,
+        answer: None,
+    };
+}
+
 pub(super) fn archive_piece(
     cx: &Context<'_>,
     candidate: &Candidate,
+    mode: Mode,
 ) -> Result<PieceResult, ArchiveError> {
     let mut piece = Piece {
         cx,
@@ -245,7 +310,8 @@ pub(super) fn archive_piece(
         known: candidate.id,
         is_unearthed: candidate.kind == PieceKind::Unearthed,
         unearthed: candidate.unearthed,
-        history: HistoryAction::Archive,
+        history: mode.history,
+        answer: mode.answer,
         warnings: Vec::new(),
         listing_stored: false,
     };
@@ -321,6 +387,8 @@ pub(super) struct Piece<'a, 'c> {
     unearthed: Option<Timestamp>,
     /// The history entry a new archive of the piece gets.
     pub(super) history: HistoryAction,
+    /// The answer to the question about a replacement, when it is known.
+    pub(super) answer: Option<Answer>,
     pub(super) warnings: Vec<Warning>,
     pub(super) listing_stored: bool,
 }

@@ -8,6 +8,7 @@
 
 pub mod cmd;
 pub mod objects;
+pub mod pieces;
 pub mod pty;
 pub mod sshd;
 pub mod tree;

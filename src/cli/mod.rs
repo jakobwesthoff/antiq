@@ -304,13 +304,19 @@ impl Context {
     /// terminal answers, also when the output is redirected; without one
     /// nobody does.
     pub fn interaction(&self) -> Box<dyn Interaction> {
+        self.terminal().unwrap_or_else(|| Box::new(NonInteractive))
+    }
+
+    /// The controlling terminal as an interaction, for a command that
+    /// does something else when nobody can be asked. `None` under
+    /// `--json` and without a terminal.
+    pub fn terminal(&self) -> Option<Box<dyn Interaction>> {
         if self.json {
-            return Box::new(NonInteractive);
+            return None;
         }
-        match TtyInteraction::open() {
-            Ok(tty) => Box::new(tty),
-            Err(_) => Box::new(NonInteractive),
-        }
+        TtyInteraction::open()
+            .ok()
+            .map(|tty| Box::new(tty) as Box<dyn Interaction>)
     }
 }
 

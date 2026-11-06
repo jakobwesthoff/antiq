@@ -3,3 +3,14 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Diverged folders.
+
+use super::ResolveError;
+use crate::tracking::Answer;
+
+/// This version does not answer a diverged folder; the answer is refused.
+pub(super) fn answer(answer: Answer) -> ResolveError {
+    ResolveError::Unsupported(format!(
+        "answering a diverged folder with {}",
+        super::flag(answer)
+    ))
+}

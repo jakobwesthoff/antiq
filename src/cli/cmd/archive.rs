@@ -228,7 +228,7 @@ fn rows(report: &ArchiveReport) -> Vec<Row> {
     rows
 }
 
-fn finished_lines(report: &ArchiveReport, style: Style) -> Vec<String> {
+pub(super) fn finished_lines(report: &ArchiveReport, style: Style) -> Vec<String> {
     let rows = rows(report);
     if rows.is_empty() {
         return vec!["Nothing to do.".to_string()];

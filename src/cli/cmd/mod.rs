@@ -18,11 +18,3 @@ pub mod status;
 pub mod sync;
 pub mod unearth;
 pub mod unpin;
-
-/// What a command without an implementation answers.
-fn not_implemented(command: &str) -> anyhow::Result<u8> {
-    Err(antiq::Error::NotImplemented {
-        command: command.to_string(),
-    }
-    .into())
-}

@@ -17,7 +17,7 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::fsx::FsxError;
 use crate::fsx::device::{self, FsKind};
-use crate::fsx::space::{SpaceLedger, available_space};
+use crate::fsx::space::available_space;
 use crate::fsx::tree::TreeRoot;
 use crate::id::{IdSource, ObjectId};
 use crate::index;
@@ -27,7 +27,7 @@ use crate::ops::status::{self, Flag, PieceKind, StatusError, StatusRequest};
 use crate::pack::pool::Pool;
 use crate::pack::{PackError, Packager, TarZstd};
 use crate::plan::{Plan, PlanAction};
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use crate::remote::RemoteState;
 use crate::repair::{Effects, RealEffects};
 use crate::report::{CommandReport, Warning};
@@ -150,7 +150,7 @@ pub(crate) trait Seams: Sync {
     }
 }
 
-struct RealSeams;
+pub(crate) struct RealSeams;
 
 impl Seams for RealSeams {}
 
@@ -451,13 +451,13 @@ pub fn size_text(bytes: u64) -> String {
 // =========================================================
 
 /// A piece the next real run archives.
-struct Candidate {
-    path: RelPath,
-    id: Option<ObjectId>,
+pub(crate) struct Candidate {
+    pub(crate) path: RelPath,
+    pub(crate) id: Option<ObjectId>,
     /// `New`, `Live` or `Unearthed`.
-    kind: PieceKind,
+    pub(crate) kind: PieceKind,
     /// When the piece was last unearthed.
-    unearthed: Option<Timestamp>,
+    pub(crate) unearthed: Option<Timestamp>,
 }
 
 /// The idle, unpinned pieces in state `new`, `live` or `unearthed`, in path
@@ -536,16 +536,11 @@ pub(crate) fn plan_with(
             });
             continue;
         }
-        match unearthed::plan_action(collection, &junk, &root, &candidate, size) {
-            Ok((action, warning)) => {
-                plan.push(action);
-                warnings.extend(warning);
-            }
-            Err(refusal) => warnings.push(Warning::new(format!(
-                "`{}` would be skipped: {}",
-                candidate.path, refusal.message
-            ))),
+        let (action, found) = plan_unearthed(collection, &junk, &root, &candidate, size);
+        if let Some(action) = action {
+            plan.push(action);
         }
+        warnings.extend(found);
     }
     Ok(ArchiveReport {
         dry_run: true,
@@ -561,6 +556,48 @@ pub(crate) fn plan_with(
     })
 }
 
+/// What a run would do with the unearthed piece `candidate` of `size`
+/// bytes: the action, or the warning that it would be skipped.
+fn plan_unearthed(
+    collection: &Collection,
+    junk: &[Name],
+    root: &TreeRoot,
+    candidate: &Candidate,
+    size: u64,
+) -> (Option<ArchiveAction>, Vec<Warning>) {
+    match unearthed::plan_action(collection, junk, root, candidate, size) {
+        Ok((action, warning)) => (Some(action), warning.into_iter().collect()),
+        Err(refusal) => (
+            None,
+            vec![Warning::new(format!(
+                "`{}` would be skipped: {}",
+                candidate.path, refusal.message
+            ))],
+        ),
+    }
+}
+
+/// What a run would do with the one unearthed piece `candidate`, as
+/// `resolve` plans it. Nothing is locked and nothing is written.
+pub(crate) fn plan_one(
+    collection: &Collection,
+    seams: &dyn Seams,
+    candidate: &Candidate,
+) -> Result<(Option<ArchiveAction>, Vec<Warning>), ArchiveError> {
+    let config = &collection.config().collection;
+    let root = open_root(collection)?;
+    let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
+    let junk = status::junk_names(&config.junk, &mut Vec::new());
+    let tree = walk::walk_piece_with(&root, &candidate.path, &junk, &rules, seams.walk_hooks())?;
+    Ok(plan_unearthed(
+        collection,
+        &junk,
+        &root,
+        candidate,
+        apparent_size(&tree),
+    ))
+}
+
 // =========================================================
 // The run
 // =========================================================
@@ -571,7 +608,6 @@ pub(crate) fn plan_with(
 pub type Asker = Mutex<Box<dyn Interaction>>;
 
 /// An answerer that answers nothing, as a run without a terminal has.
-#[cfg(test)]
 pub(crate) fn nobody() -> &'static Asker {
     static NOBODY: std::sync::LazyLock<Asker> =
         std::sync::LazyLock::new(|| Mutex::new(Box::new(crate::interact::NonInteractive)));
@@ -619,31 +655,19 @@ pub(crate) fn archive_with(
     let mut forked = Vec::new();
     let mut needs_decision = Vec::new();
     if !candidates.is_empty() {
-        let config = &collection.config().collection;
-        let root = open_root(collection)?;
-        let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
-        // `status` has warned about the junk list already.
-        let junk = status::junk_names(&config.junk, &mut Vec::new());
-        let cx = new::Context {
+        let run = new::Run {
             collection,
             lock: guard.lock(),
             clock: request.clock,
             ids: request.ids,
             pool: request.pool,
             interaction: request.interaction,
-            seams,
-            junk,
-            rules,
-            idle: crate::idle::Settings::new(config.idle_days, &config.ignore)?,
-            root,
-            machine: collection.machine_name()?,
-            space: SpaceLedger::new(),
-            orphans: if candidates.iter().any(|candidate| candidate.id.is_none()) {
-                new::find_orphans(collection)?
-            } else {
-                Vec::new()
-            },
         };
+        let cx = new::Context::for_run(
+            &run,
+            seams,
+            candidates.iter().any(|candidate| candidate.id.is_none()),
+        )?;
         let mut listing_stored = false;
         let slots = run_pieces(&cx, &candidates, request.workers);
         // The pieces that did not finish are skipped rows named after the
@@ -711,6 +735,18 @@ pub(crate) fn archive_with(
     })
 }
 
+/// Archives the one piece `candidate` under the lock `run` holds, the way
+/// `archive` does, but as `mode` says and without `status` having picked it.
+pub(crate) fn archive_one(
+    run: &new::Run<'_>,
+    seams: &dyn Seams,
+    candidate: &Candidate,
+    mode: new::Mode,
+) -> Result<new::PieceResult, ArchiveError> {
+    let cx = new::Context::for_run(run, seams, false)?;
+    new::archive_piece(&cx, candidate, mode)
+}
+
 /// What became of one candidate.
 enum Slot {
     Done(new::PieceResult),
@@ -737,7 +773,7 @@ fn run_pieces(cx: &new::Context<'_>, candidates: &[Candidate], workers: usize) -
                         let Some(candidate) = candidates.get(index) else {
                             break;
                         };
-                        let result = new::archive_piece(cx, candidate);
+                        let result = new::archive_piece(cx, candidate, new::Mode::ARCHIVE);
                         if result.is_err() {
                             failed.store(true, Ordering::SeqCst);
                         }

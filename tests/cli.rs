@@ -135,18 +135,6 @@ fn resolve_takes_one_answer_at_most() {
     );
 }
 
-macro_rules! accepts {
-    ($name:ident, $command:expr, [$($arg:expr),*]) => {
-        #[test]
-        fn $name() {
-            let run = json_run(&[$($arg),*]);
-            assert_eq!(run.code(), 1, "stdout: {}, stderr: {}", run.stdout, run.stderr);
-            assert_eq!(run.error_kind(), "not_implemented");
-            assert_eq!(run.json()["command"], $command);
-        }
-    };
-}
-
 /// For a command that is implemented: its options parse, and outside a
 /// collection it fails with the kind `not_a_collection`.
 macro_rules! accepts_and_needs_a_collection {
@@ -221,34 +209,34 @@ accepts_and_needs_a_collection!(
     "sync",
     ["sync", "--dry-run", "--if-reachable"]
 );
-accepts!(resolve_takes_nothing, "resolve", ["resolve"]);
-accepts!(resolve_takes_a_piece, "resolve", ["resolve", "piece"]);
-accepts!(
+accepts_and_needs_a_collection!(resolve_takes_nothing, "resolve", ["resolve"]);
+accepts_and_needs_a_collection!(resolve_takes_a_piece, "resolve", ["resolve", "piece"]);
+accepts_and_needs_a_collection!(
     resolve_takes_mine,
     "resolve",
     ["resolve", "piece", "--mine", "--force", "--dry-run"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     resolve_takes_theirs,
     "resolve",
     ["resolve", "piece", "--theirs"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     resolve_takes_fork,
     "resolve",
     ["resolve", "piece", "--fork"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     resolve_takes_replace,
     "resolve",
     ["resolve", "piece", "--replace"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     resolve_takes_skip,
     "resolve",
     ["resolve", "piece", "--skip"]
 );
-accepts!(
+accepts_and_needs_a_collection!(
     resolve_takes_drop_superseded,
     "resolve",
     ["resolve", "piece", "--drop-superseded"]

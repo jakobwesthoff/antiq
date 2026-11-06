@@ -501,7 +501,7 @@ read or has a higher `format`.
 | `fork` | old ID: lifecycle `archived`, live payload removed, history; new ID created with source `fork`, lifecycle `live`, no payload, history |
 | `sync` | live payload replaced, `verified` times, history |
 | `import` | new ID with its archive payload |
-| `resolve` | as the decision table under Command line says |
+| `resolve` | replacing with loss: as `archive`, with the history action `resolve`; the other decisions are not answerable yet |
 
 `pin` and `unpin` change no metadata.
 
@@ -2096,6 +2096,25 @@ pending decisions and exits 3 when there are any. `resolve <piece>`
 without an answer goes through that piece's pending decisions
 interactively; without a terminal it lists them and exits 3.
 
+Only the decision "replacing with loss" can be answered in this version;
+an answer to one of the other three is refused with the error kind
+`unsupported`. An answer that fits several pending decisions of the piece
+goes to the first of them in the order of the table below. An answer that
+fits none, or a piece that waits on nothing, is a usage error that names
+what the piece waits on and the answers that fit.
+
+For "replacing with loss", `--replace` runs the archive step for the piece
+at once, as `archive` would: a piece that equals its archive is reclaimed
+after the checks of a reclaim, and a changed one is archived with the
+loss it has at that moment, its new archive getting the history action
+`resolve`. A piece that is in use is not touched: a note says that the
+next archive takes it, the decision stays pending and the command exits
+0. A pinned piece is refused. `--fork` forks the piece, and `--skip`
+removes the pending decision and exits 0, while the skip of a question
+`archive` asks leaves the run at exit 3. Every executed answer removes the
+pending decision. Interactively, each pending decision is asked through
+the question `archive` asks.
+
 | Decision | Answers |
 |----------|---------|
 | version conflict | `--mine`, `--theirs`, `--fork` (see "Several machines") |
@@ -2325,9 +2344,21 @@ and `warnings`. The plan of a `--dry-run` has `pull_metadata` actions
 `version`), `conflict` (`id`), `upload` (`id`, `file`, `size`), `commit`
 (`id`) and `remove_leftover` (`id`, `name`, `what`, `age_unknown`).
 
-`resolve` has no payload defined yet. Without a piece and without a
-terminal, or with `--json`, it lists the pending decisions and exits 3
-when there are any.
+`resolve` adds, for an answer that was executed, `resolved` (`{kind,
+answer}`: `kind` is `replacing_with_loss`, `answer` is `replace`, `fork`
+or `skip`), then the lists of `archive`
+that the archive step fills: `archived`, `reclaimed`, `skipped`, `kept`,
+`unfinished` and `forked`, each as there, and `warnings`. `resolved` is
+left out when nothing was executed, as for a piece that is in use. The run
+exits 3 when `skipped` or `unfinished` is not empty. Without a piece and
+without a terminal, or with `--json`, `resolve` lists the pending
+decisions instead: `pending`, a list of `{id, path, decision, options}`
+for each decision in path order, and `warnings`. It exits 3 when
+`pending` is not empty. Interactively it adds `pending` to the lists
+above for the decisions that stayed open. A `--dry-run` of an answer has
+one action: `{action: "reclaim", path, id, size}` or `{action: "replace",
+path, id, size, lost_count}` for `replace`, `{action: "fork", path, id}`
+for `fork` and `{action: "skip", path, id}` for `skip`.
 
 `remote add` adds `kind` (`path` or `ssh`), `url` (as given), `id` (the remote's
 ULID; a dry run of `--init` has none yet), `attached`, `created` (whether
