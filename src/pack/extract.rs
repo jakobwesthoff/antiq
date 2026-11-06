@@ -1038,6 +1038,40 @@ mod tests {
         assert_eq!(read(&staged, &file.to_string()), b"deep");
     }
 
+    #[test]
+    fn a_directory_that_blocks_its_owner_holds_a_subdirectory_with_its_own_mode_and_time() {
+        // The inner directory is finished before the outer one takes the
+        // owner's access away; the other order cannot reach it.
+        let mut archive = RawArchive::new();
+        archive
+            .dir("proj/", 0o755, 1_100_000_000)
+            .dir("proj/outer/", 0o000, 1_200_000_000)
+            .dir("proj/outer/inner/", 0o750, 1_300_000_000)
+            .file("proj/outer/inner/file", 0o644, 1_400_000_000, b"x");
+        let (dir, staged) = staging();
+        let _restore = RestoreModes(vec![dir.path().join("outer")]);
+        unpack_bytes(&archive.finish(), &staged).expect("the package unpacks");
+        assert_eq!(mode_of(&staged, "outer"), 0o000);
+        std::fs::set_permissions(dir.path().join("outer"), Permissions::from_mode(0o755))
+            .expect("the mode can be set");
+        assert_eq!(mode_of(&staged, "outer/inner"), 0o750);
+        assert_eq!(seconds_of(&staged, &rel("outer/inner")), 1_300_000_000);
+    }
+
+    #[test]
+    fn a_symlink_gets_its_stored_modification_time() {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_100_000_000).symlink(
+            "proj/link",
+            "target",
+            0o777,
+            1_000_000_000,
+        );
+        let (_dir, staged) = staging();
+        unpack_bytes(&archive.finish(), &staged).expect("the package unpacks");
+        assert_eq!(seconds_of(&staged, &rel("link")), 1_000_000_000);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_symlink_gets_its_stored_mode_on_macos() {
@@ -1622,6 +1656,17 @@ mod tests {
             header.as_old_mut().mtime = field;
         });
         sandbox.assert_refused_before_any_write(&archive, Refusal::Malformed("mtime"));
+    }
+
+    #[test]
+    fn a_long_link_record_above_the_cap_is_refused() {
+        let sandbox = sandbox();
+        let mut archive = container();
+        archive
+            .file("proj/f", 0o644, 1_000_000_000, b"x")
+            .long_link(&vec![b'a'; 70_000])
+            .member(b"proj/h", b'1', 0o644, 1_000_000_000, b"proj/f", b"");
+        sandbox.assert_refused_before_any_write(&archive, Refusal::OversizedRecord);
     }
 
     #[test]
