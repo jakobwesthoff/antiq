@@ -395,6 +395,21 @@ mod tests {
     }
 
     #[test]
+    fn a_single_line_beyond_the_shown_ones_is_counted_in_the_singular() {
+        let error = PushError::TargetRefusesModes {
+            shown: vec![
+                "rsync: [receiver] chmod \"/t\" failed: Operation not permitted (1)".into(),
+            ],
+            more: 1,
+        };
+        let lines = rich(error, &[]);
+        assert!(
+            lines.iter().any(|line| line == "▌     and 1 more line"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn the_commands_of_a_damaged_store_are_pasteable_from_another_directory() {
         let piece = RelPath::parse("my docs/scan").expect("a path");
         let stamp = Stamp::parse("2026-11-05T120211").expect("a stamp");
