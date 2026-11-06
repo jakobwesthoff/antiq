@@ -1,6 +1,8 @@
 name: antiq
-tagline: Archive what you no longer touch, find it when you need it
+tagline: Your idle folders, kept like antiques
 github: jakobwesthoff/antiq
+url: https://antiq.westhoffswelt.de
+og_image: assets/og.png
 
 author:
   name: Jakob Westhoff
