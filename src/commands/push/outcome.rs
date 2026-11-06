@@ -5,7 +5,8 @@
 //! What a push tells: its report and the dry-run plan.
 
 use super::summary::{Changes, Counts};
-use crate::plan::{HeldDryRun, Plan, PlanAction, Step};
+use crate::plan::{HeldDryRun, Plan, PlanAction, Step, serialize_repairs};
+use crate::repair::Repair;
 use crate::report::Warning;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
@@ -58,6 +59,8 @@ pub struct PushReport {
     pub second_pass: bool,
     /// How the push was cleared, such as a forced push.
     pub notes: Vec<String>,
+    /// The repairs at the start of a real run that were done.
+    pub repairs: Vec<Repair>,
     pub warnings: Vec<Warning>,
     /// The repairs and the actions of a dry run.
     pub plan: Option<Plan<Step<PushAction>>>,
@@ -102,6 +105,13 @@ impl PushReport {
             object.insert("vanished".into(), json!(self.vanished));
             object.insert("second_pass".into(), json!(self.second_pass));
             object.insert("notes".into(), json!(self.notes));
+        }
+        if !self.dry_run {
+            object.insert(
+                "repairs".into(),
+                serialize_repairs(&self.repairs, serde_json::value::Serializer)
+                    .expect("repairs serialise"),
+            );
         }
         object.insert(
             "warnings".into(),
@@ -211,6 +221,7 @@ mod tests {
             vanished: vec!["/c/x".into()],
             second_pass: true,
             notes: vec!["be careful".into()],
+            repairs: Vec::new(),
             warnings: vec![Warning::new("w")],
             plan: None,
         }
@@ -240,6 +251,7 @@ mod tests {
                 "vanished",
                 "second_pass",
                 "notes",
+                "repairs",
                 "warnings"
             ]
         );
@@ -260,7 +272,10 @@ mod tests {
         let mut unreachable = report();
         unreachable.reason = Some("share gone".into());
         let value = serde_json::to_value(unreachable).expect("serialises");
-        assert_eq!(keys(&value), ["result", "target", "reason", "warnings"]);
+        assert_eq!(
+            keys(&value),
+            ["result", "target", "reason", "repairs", "warnings"]
+        );
         assert_eq!(value["result"], "unreachable");
         assert_eq!(value["reason"], "share gone");
     }

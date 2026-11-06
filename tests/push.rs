@@ -233,6 +233,51 @@ fn a_real_run_repairs_before_it_goes_on() {
     assert!(!Path::new(&stale).exists(), "repair 2 removes the entry");
 }
 
+/// A leftover in `tmp/` that repair 2 removes.
+fn leave_stale_entry(collection: &Collection) {
+    let stale = collection.path(".antiq/tmp/stale-entry");
+    fs::create_dir_all(stale.parent().expect("has a parent")).expect("tmp exists");
+    fs::write(&stale, "left behind").expect("the entry is written");
+}
+
+#[test]
+fn a_real_run_lists_its_repairs_in_json_and_on_stderr() {
+    let collection = stored(&[]);
+    leave_stale_entry(&collection);
+    let run = push(&collection, &[]);
+    goes_on(&run);
+    let repairs = run.json()["repairs"].clone();
+    assert_eq!(repairs.as_array().map(Vec::len), Some(1), "{}", run.stdout);
+    assert_eq!(repairs[0]["kind"], "repair", "{repairs}");
+
+    leave_stale_entry(&collection);
+    let text = push_text(&collection, &[]);
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert!(text.stderr.contains("note: repaired: "), "{}", text.stderr);
+}
+
+#[test]
+fn an_unreachable_target_under_if_reachable_still_lists_the_repairs() {
+    let gone = Target::new();
+    let (collection, _fake) = targeted(&gone.path().join("not-there"));
+    leave_stale_entry(&collection);
+    let run = push(&collection, &["--if-reachable"]);
+    assert_eq!(run.code(), 0, "{} {}", run.stdout, run.stderr);
+    assert_eq!(run.json()["result"], "unreachable");
+    assert_eq!(
+        run.json()["repairs"].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        run.stdout
+    );
+
+    leave_stale_entry(&collection);
+    let text = push_text(&collection, &["--if-reachable"]);
+    assert!(text.stderr.starts_with("note: "), "{}", text.stderr);
+    assert!(text.stderr.contains("not-there"), "{}", text.stderr);
+    assert!(text.stderr.contains("note: repaired: "), "{}", text.stderr);
+}
+
 #[test]
 fn the_help_of_init_names_the_empty_directory_and_the_last_missing_level_over_ssh() {
     let run = Antiq::new().arg("push").arg("--help").run();

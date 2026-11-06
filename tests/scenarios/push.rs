@@ -19,7 +19,7 @@ const STORED: &str = "2025-02-11T184007";
 /// collection, which `push` excludes.
 const NOT_MIRRORED: [&str; 3] = [".antiq/tmp", ".antiq/trash", ".antiq/doomed"];
 
-const REAL_KEYS: [&str; 12] = [
+const REAL_KEYS: [&str; 13] = [
     "format",
     "command",
     "result",
@@ -31,6 +31,7 @@ const REAL_KEYS: [&str; 12] = [
     "vanished",
     "second_pass",
     "notes",
+    "repairs",
     "warnings",
 ];
 
@@ -320,7 +321,7 @@ fn a_scheduled_run_with_the_target_missing_archives_and_exits_0() {
                 );
             });
             pushed.keys(&[
-                "format", "command", "result", "target", "reason", "warnings",
+                "format", "command", "result", "target", "reason", "repairs", "warnings",
             ]);
             pushed.json_only(|json| {
                 assert_eq!(json["result"], "unreachable");

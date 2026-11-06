@@ -189,7 +189,8 @@ pub fn push(
                     warnings: &warnings,
                 },
             )?;
-            (Some(guard), Vec::new(), warnings, folders)
+            let done = guard.repaired().to_vec();
+            (Some(guard), done, warnings, folders)
         }
     };
 
@@ -244,6 +245,13 @@ pub fn push(
         second_pass: false,
         notes: Vec::new(),
         warnings,
+        // A dry run lists the repairs as actions of its plan, a real run
+        // reports the ones it did.
+        repairs: if request.dry_run {
+            Vec::new()
+        } else {
+            repairs.clone()
+        },
         plan: request.dry_run.then(|| Plan::after_repairs(repairs)),
     };
     let proceed = match precheck::decide(probe, ssh, &identity, flags, &shown) {

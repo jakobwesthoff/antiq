@@ -1870,14 +1870,17 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 marker was written), `forced`, `pieces` (each `{piece, created, updated,
 deleted}`, only pieces that changed, by path), `other` (the same counts for
 paths outside every piece), `vanished` (the paths of the `file has vanished`
-lines), `second_pass` and `notes` come between `target` and `warnings`. A
-dry run has `actions` after `dry_run`: the repairs, then `{"kind":
+lines), `second_pass` and `notes` come between `target` and `warnings`,
+followed by `repairs` (the repairs of the start of the run, each as
+`{"kind": "repair", "repair": ...}`) before `warnings`. A dry run has `actions` after `dry_run`: the repairs, then `{"kind":
 "write_marker"}` where `--init` would write it, then `{"kind": "mirror",
 "pieces": ..., "other": ...}`. A target that cannot be reached under
 `--if-reachable` exits 0 with `result` `"unreachable"` and `reason` in place
-of the counts, and the console prints `note: <reason>` on stderr and
-nothing on stdout. Without `--if-reachable` it is the error kind
-`target_unreachable`.
+of the counts, with `repairs` and `warnings` after them, and the console
+prints `note: <reason>` on stderr and nothing on stdout. Without `--if-reachable` it is the error kind
+`target_unreachable`. In text the repairs that were done go to stderr as
+`note: repaired: <repair>` lines, after the `note: <reason>` of an
+unreachable target.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
 collection, as `{message}` objects) and, while a run holds the lock, `note`
