@@ -69,7 +69,7 @@ pub fn run(ctx: &Context, args: &ResolveArgs, out: &mut Output) -> anyhow::Resul
                     .context("print the notes")?;
             }
             if let Some(holder) = holder {
-                out.note(&lock_note(&holder).message)
+                out.note(&format!("note: {}", sanitize(&lock_note(&holder).message)))
                     .context("print the notes")?;
             }
             Ok(0)

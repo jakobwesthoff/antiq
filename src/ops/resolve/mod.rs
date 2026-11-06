@@ -388,7 +388,7 @@ fn fit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::SeqIds;
+    use crate::id::{IdSource, SeqIds};
     use crate::interact::ScriptedInteraction;
     use crate::ops::archive::unearthed::tests::{At, FILE_TIME, PIECE, Scene, TITLE, asker, scene};
     use crate::ops::archive::{RealSeams, SkipReason, Step};
@@ -900,6 +900,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_walk_leaves_a_pinned_piece_pending_with_a_note() {
+        let scene = undecided();
+        let root = crate::fsx::tree::TreeRoot::open(scene.temp.root()).expect("opens");
+        crate::pin::create(&root, &path(PIECE)).expect("pinned");
+        let asked = asker(ScriptedInteraction::new());
+
+        let report = done(walked(&scene, None, Some(&asked), false));
+
+        assert_eq!(pending_paths(&report), [PIECE]);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("is pinned")),
+            "{:?}",
+            report.warnings
+        );
+        assert_eq!(scene.entry().pending_decisions.len(), 1);
+    }
+
     // =========================================================
     // The dry run of an answer
     // =========================================================
@@ -986,6 +1007,68 @@ mod tests {
             }]
         );
         assert_eq!(scene.entry().pending_decisions.len(), 1);
+    }
+
+    #[test]
+    fn a_walk_answered_with_fork_forks_the_piece() {
+        let scene = undecided();
+        let mut script = ScriptedInteraction::new();
+        script.expect(TITLE, "fork");
+        let asked = asker(script);
+
+        let report = done(walked(&scene, None, Some(&asked), false));
+
+        assert_eq!(
+            report.resolved,
+            resolution(DecisionKind::ReplacingWithLoss, Answer::Fork)
+        );
+        assert_eq!(rows(&report.forked).len(), 1, "{report:?}");
+        assert!(scene.folder().exists());
+    }
+
+    #[test]
+    fn a_fork_that_fails_is_an_error_and_changes_nothing() {
+        let scene = undecided();
+        // The ID the fork would mint is taken.
+        let taken = SeqIds::new(1).mint(crate::clock::Clock::now(&scene.clock));
+        fs::create_dir_all(scene.collection.object_dir(taken)).expect("an object directory");
+        let before = (scene.entry(), scene.metadata());
+
+        let error = answer_with(&scene, Answer::Fork, &RealSeams).expect_err("the fork fails");
+
+        assert!(error.to_string().contains(&taken.to_string()), "{error}");
+        assert_eq!((scene.entry(), scene.metadata()), before);
+    }
+
+    #[test]
+    fn a_dry_run_replace_of_a_piece_that_lost_nothing_names_no_loss() {
+        let scene = undecided();
+        fs::write(scene.folder().join("notes.txt"), "hello").expect("restored");
+        fs::write(scene.folder().join("added.txt"), "x").expect("added");
+        for name in ["notes.txt", "added.txt"] {
+            filetime::set_file_mtime(
+                scene.folder().join(name),
+                filetime::FileTime::from_unix_time(FILE_TIME, 0),
+            )
+            .expect("the time is set");
+        }
+        filetime::set_file_mtime(
+            scene.folder(),
+            filetime::FileTime::from_unix_time(FILE_TIME, 0),
+        )
+        .expect("the time is set");
+
+        let actions = planned(&scene, Answer::Replace);
+
+        assert_eq!(
+            actions,
+            [ResolveAction::Replace {
+                path: path(PIECE),
+                id: id(ID),
+                size: 18,
+                lost_count: 0,
+            }]
+        );
     }
 
     #[test]

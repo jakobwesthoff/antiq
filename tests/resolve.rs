@@ -229,3 +229,63 @@ fn a_dry_run_in_json_has_an_action() {
         json!({"dry_run": true, "actions": [{"action": "fork", "path": "a", "id": id}]})
     );
 }
+
+#[test]
+fn a_piece_in_use_is_left_for_the_next_archive_with_a_note() {
+    let (temp, _) = undecided();
+    fs::write(temp.root().join("a/b.txt"), "touched").expect("written");
+
+    let run = antiq(&temp, &["resolve", "a", "--replace"]);
+
+    assert_eq!(
+        run.code(),
+        0,
+        "stdout: {} stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(run.stdout, "Nothing to do.\n");
+    assert_eq!(
+        run.stderr,
+        "note: the piece is in use; the next archive takes it\n"
+    );
+    assert_eq!(antiq(&temp, &["resolve"]).code(), 3, "still pending");
+}
+
+#[test]
+fn a_dry_run_says_why_a_piece_would_be_skipped() {
+    let (temp, id) = undecided();
+    let object = temp.root().join(".antiq/objects").join(&id);
+    for entry in fs::read_dir(&object).expect("lists") {
+        let path = entry.expect("an entry").path();
+        if path.to_string_lossy().ends_with(".listing.zst") {
+            fs::remove_file(path).expect("removed");
+        }
+    }
+
+    let run = antiq(&temp, &["resolve", "a", "--replace", "--dry-run"]);
+
+    assert_eq!(run.code(), 0, "stdout: {}", run.stdout);
+    assert_eq!(run.stdout, "Nothing to do.\n");
+    assert!(
+        run.stderr.starts_with("note: `a` would be skipped"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_dry_run_while_another_run_holds_the_lock_prints_the_note() {
+    let (temp, _) = undecided();
+    let _held = support::objects::hold_lock(temp.root());
+
+    let run = antiq(&temp, &["resolve", "a", "--fork", "--dry-run"]);
+
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    assert!(
+        run.stderr
+            .starts_with("note: another run holds the lock (pid "),
+        "{}",
+        run.stderr
+    );
+}
