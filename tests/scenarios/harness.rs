@@ -300,3 +300,228 @@ fn a_failing_rsync_is_named() {
     let clock = Clock::now();
     Target::new().copy_back_using("false", &clock);
 }
+
+// =========================================================
+// The JSON envelope
+// =========================================================
+
+use crate::support::scenario::envelope::{check, command_of};
+
+fn args(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| item.to_string()).collect()
+}
+
+fn accepted(items: &[&str], stdout: &str, code: i32) {
+    if let Err(reason) = check(&args(items), stdout, code) {
+        panic!("rejected {stdout:?}: {reason}");
+    }
+}
+
+fn rejected(items: &[&str], stdout: &str, code: i32, reason: &str) {
+    match check(&args(items), stdout, code) {
+        Ok(()) => panic!("accepted {stdout:?}, expected a rejection for {reason}"),
+        Err(message) => assert!(message.contains(reason), "{message:?} lacks {reason:?}"),
+    }
+}
+
+#[test]
+fn the_command_is_the_first_argument_that_is_no_option() {
+    assert_eq!(
+        command_of(&args(&["-C", "/x", "--json", "archive", "-n"])).as_deref(),
+        Some("archive")
+    );
+    assert_eq!(command_of(&args(&["--json", "--bogus"])), None);
+}
+
+#[test]
+fn a_success_object_is_accepted() {
+    accepted(
+        &["--json", "pin", "a"],
+        "{\"format\":1,\"command\":\"pin\",\"x\":2}\n",
+        0,
+    );
+    accepted(
+        &["--json", "archive"],
+        "{\"format\":1,\"command\":\"archive\"}\n",
+        3,
+    );
+}
+
+#[test]
+fn a_usage_error_has_a_null_command_and_exit_2() {
+    accepted(
+        &["--json", "bogus"],
+        "{\"format\":1,\"command\":null,\"error\":{\"kind\":\"usage\",\"message\":\"m\"}}\n",
+        2,
+    );
+}
+
+#[test]
+fn help_and_version_are_text() {
+    accepted(&["--json", "--help"], "Usage: antiq\n", 0);
+    accepted(&["--json", "--version"], "antiq 0.1.0\n", 0);
+}
+
+#[test]
+fn an_unreachable_target_may_exit_0_under_if_reachable() {
+    accepted(
+        &["--json", "push", "--if-reachable"],
+        "{\"format\":1,\"command\":\"push\",\"error\":{\"kind\":\"target_unreachable\",\"message\":\"m\"}}\n",
+        0,
+    );
+}
+
+#[test]
+fn text_instead_of_json_is_rejected() {
+    rejected(&["--json", "pin"], "pinned a\n", 0, "not JSON");
+}
+
+#[test]
+fn more_than_one_line_is_rejected() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":\"pin\"}\n{\"format\":1,\"command\":\"pin\"}\n",
+        0,
+        "one line",
+    );
+}
+
+#[test]
+fn a_missing_or_wrong_format_is_rejected() {
+    rejected(&["--json", "pin"], "{\"command\":\"pin\"}\n", 0, "format");
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":2,\"command\":\"pin\"}\n",
+        0,
+        "format",
+    );
+}
+
+#[test]
+fn command_must_be_the_second_key() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"x\":1,\"command\":\"pin\"}\n",
+        0,
+        "second key",
+    );
+}
+
+#[test]
+fn the_command_must_be_the_one_that_ran() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":\"unpin\"}\n",
+        0,
+        "command",
+    );
+}
+
+#[test]
+fn a_null_command_is_only_for_a_usage_error() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":null}\n",
+        0,
+        "null command",
+    );
+}
+
+#[test]
+fn an_unknown_error_kind_is_rejected() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"weird\",\"message\":\"m\"}}\n",
+        1,
+        "kind",
+    );
+}
+
+#[test]
+fn an_error_needs_a_message() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"other\"}}\n",
+        1,
+        "message",
+    );
+}
+
+#[test]
+fn an_error_kind_has_its_exit_code() {
+    let usage =
+        "{\"format\":1,\"command\":null,\"error\":{\"kind\":\"usage\",\"message\":\"m\"}}\n";
+    rejected(&["--json", "bogus"], usage, 1, "exit");
+    let other =
+        "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"other\",\"message\":\"m\"}}\n";
+    rejected(&["--json", "pin"], other, 0, "exit");
+    let unreachable = "{\"format\":1,\"command\":\"push\",\"error\":{\"kind\":\"target_unreachable\",\"message\":\"m\"}}\n";
+    rejected(&["--json", "push"], unreachable, 1, "exit");
+}
+
+#[test]
+fn exits_1_2_and_4_need_an_error() {
+    for code in [1, 2, 4] {
+        rejected(
+            &["--json", "pin"],
+            "{\"format\":1,\"command\":\"pin\"}\n",
+            code,
+            "error",
+        );
+    }
+}
+
+#[test]
+fn lock_held_carries_pid_and_started_together_or_neither() {
+    let only_pid = "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"lock_held\",\"message\":\"m\",\"pid\":1}}\n";
+    rejected(&["--json", "pin"], only_pid, 1, "pid and started");
+    let neither =
+        "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"lock_held\",\"message\":\"m\"}}\n";
+    accepted(&["--json", "pin"], neither, 1);
+}
+
+#[test]
+fn candidates_are_a_list_of_paths() {
+    let bad = "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"ambiguous_reference\",\"message\":\"m\",\"candidates\":[\"a\"]}}\n";
+    rejected(&["--json", "pin"], bad, 1, "candidates");
+    let good = "{\"format\":1,\"command\":\"pin\",\"error\":{\"kind\":\"ambiguous_reference\",\"message\":\"m\",\"candidates\":[{\"path\":\"a\"}]}}\n";
+    accepted(&["--json", "pin"], good, 1);
+}
+
+#[test]
+fn a_dry_run_has_actions_right_after_dry_run_true() {
+    accepted(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"actions\":[]}\n",
+        0,
+    );
+    rejected(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true}\n",
+        0,
+        "actions",
+    );
+    rejected(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"x\":1,\"actions\":[]}\n",
+        0,
+        "actions",
+    );
+    rejected(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":false,\"actions\":[]}\n",
+        0,
+        "dry_run",
+    );
+}
+
+#[test]
+fn output_must_end_in_a_newline_and_be_an_object() {
+    rejected(
+        &["--json", "pin"],
+        "{\"format\":1,\"command\":\"pin\"}",
+        0,
+        "newline",
+    );
+    rejected(&["--json", "pin"], "[1]\n", 0, "object");
+}
