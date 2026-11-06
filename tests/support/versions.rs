@@ -20,33 +20,49 @@ use antiq::listing::{self, Header};
 use antiq::relpath::RelPath;
 use antiq::rules::PieceRules;
 use antiq::select::Rules;
+use antiq::versions::damage::Places;
 use antiq::versions::names::{VersionFile, VersionFileNames};
 use antiq::versions::stamp::Stamp;
 use antiq::versions::store::{StoreScan, scan};
 use antiq::walk::walk_piece;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 
 /// A store: `pieces/` for the versions and `tmp/pack/` for archives that
 /// are staged on their way in.
 pub struct Store {
     root: Tree,
+    pieces: PathBuf,
+    tmp_pack: PathBuf,
 }
 
 impl Store {
     pub fn new() -> Store {
         let mut root = Tree::new();
-        root.dir("pieces");
-        root.dir("tmp/pack");
-        Store { root }
+        let pieces = root.dir("pieces");
+        let tmp_pack = root.dir("tmp/pack");
+        Store {
+            root,
+            pieces,
+            tmp_pack,
+        }
     }
 
     pub fn pieces_dir(&self) -> PathBuf {
-        self.root.path("pieces")
+        self.pieces.clone()
     }
 
     pub fn tmp_pack_dir(&self) -> PathBuf {
-        self.root.path("tmp/pack")
+        self.tmp_pack.clone()
+    }
+
+    /// The two places `damage::inspect` looks in.
+    pub fn places(&self) -> Places<'_> {
+        Places {
+            pieces_dir: &self.pieces,
+            tmp_pack_dir: &self.tmp_pack,
+        }
     }
 
     /// What `versions::store::scan` finds in the store now.
@@ -131,6 +147,48 @@ impl StoredVersion {
         fs::write(self.path(kind), bytes).expect("the file is written");
     }
 
+    /// Replaces the listing with `text`, compressed the way listings are.
+    pub fn listing_from_text(&self, text: &[u8]) {
+        let bytes = encode_listing(&[text]).0;
+        fs::write(self.path(VersionFile::Listing), bytes).expect("the listing is written");
+    }
+
+    /// The listing without the head line `# <key> ...`, compressed anew.
+    pub fn listing_without(&self, key: &str) {
+        let text = self.listing_text();
+        let prefix = format!("# {key} ");
+        let kept: Vec<u8> = text
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| !line.starts_with(prefix.as_bytes()))
+            .flatten()
+            .copied()
+            .collect();
+        assert!(kept.len() < text.len(), "the listing has no `{key}` line");
+        self.listing_from_text(&kept);
+    }
+
+    /// Cuts the listing inside the entries and leaves the head readable:
+    /// the head ends a zstd block of its own, and the file stops a few
+    /// bytes into the next one. A head-only read still finds the head; a
+    /// read in full fails.
+    pub fn cut_listing(&self) {
+        let text = self.listing_text();
+        let end_of_head = text
+            .windows(3)
+            .position(|window| window == b"\n#\n")
+            .expect("the listing has a closed head")
+            + 3;
+        let (bytes, head_len) = encode_listing(&[&text[..end_of_head], &text[end_of_head..]]);
+        let cut = head_len + 3;
+        assert!(cut < bytes.len(), "the entries need a block of their own");
+        fs::write(self.path(VersionFile::Listing), &bytes[..cut]).expect("the listing is cut");
+    }
+
+    fn listing_text(&self) -> Vec<u8> {
+        let bytes = fs::read(self.path(VersionFile::Listing)).expect("the listing exists");
+        zstd::stream::decode_all(&bytes[..]).expect("the listing decodes")
+    }
+
     /// Appends a second line to the checksum file.
     pub fn checksum_with_two_lines(&self) {
         let mut bytes = fs::read(self.path(VersionFile::Checksum)).expect("the file exists");
@@ -161,4 +219,23 @@ impl StoredVersion {
         fs::copy(self.path(VersionFile::Archive), &copy).expect("the archive is copied");
         copy
     }
+}
+
+/// `parts` as one zstd frame at level 3 with the content checksum, each
+/// part ending a block of its own. Returns the frame and the bytes up to
+/// the end of the first part's block.
+fn encode_listing(parts: &[&[u8]]) -> (Vec<u8>, usize) {
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).expect("the encoder starts");
+    encoder
+        .include_checksum(true)
+        .expect("the checksum is switched on");
+    let mut first = 0;
+    for (index, part) in parts.iter().enumerate() {
+        encoder.write_all(part).expect("the part is written");
+        encoder.flush().expect("the block ends");
+        if index == 0 {
+            first = encoder.get_ref().len();
+        }
+    }
+    (encoder.finish().expect("the frame ends"), first)
 }
