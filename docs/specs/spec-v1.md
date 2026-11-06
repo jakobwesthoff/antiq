@@ -1035,8 +1035,24 @@ saying that the version was incomplete. Deleting every version of a piece
 takes `--all-versions --force`, which also removes the piece's incomplete
 versions and says so for each. A crash inside `forget` can leave an
 incomplete version; running the same `forget` again removes it. The next
-`push` mirrors the deletion to the target. `-n` names the files it would
-delete.
+`push` mirrors the deletion to the target.
+
+A version that cannot be deleted is reported, `forget` goes on with the
+next version and ends with exit 3. What the failed deletion had removed
+stays removed, the `.tar.zst` first, so the same `forget` finds the rest as
+an incomplete version. A store folder whose sidecars belong to a version
+that is still being moved into the store (its archive is staged in
+`tmp/pack/`) is not a piece to forget. An empty piece or an empty version
+is a usage error.
+
+On the console `forget` prints one line on stdout for each deleted
+version, `Deleted version <time> of <piece>` or `Deleted incomplete version
+<stamp> of <piece>`. A complete version is named by its local time on a
+terminal and by its stamp otherwise; an incomplete version is always named
+by its stamp. The repairs that were done, the warnings and the failed
+deletions go to stderr. `-n` lists the repairs as `Would ...` lines, then
+for each version `Would delete version <time> of <piece>: <file>, ...`,
+naming the files in the order they are deleted.
 
 ### rebuild
 
@@ -1606,8 +1622,9 @@ fails to parse before naming a command has `"command": null`. An error is
 `{"format": 1, "command": ..., "error": {"kind": ..., "message": ...}}`,
 where `message` is the text of the error without the context lines a
 console shows. Some kinds add keys to the error object. A `--dry-run` plan
-carries `"dry_run": true` and an `actions` list, in that order; repairs
-come first in it, as actions of kind `repair`. Paths are in the escaped
+carries `"dry_run": true` and an `actions` list after it (`lock_held`
+stands between the two while another run holds the lock); repairs come
+first in it, as actions of kind `repair`. Paths are in the escaped
 form.
 
 A repair action is `{"kind": "repair", "repair": "<name>", ...}` and the
@@ -1633,7 +1650,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` is not a path, the piece or the version of `forget` is empty, a pattern of `grep` is not a valid regular expression, or `--init` or `--force` is given with `--if-reachable` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
@@ -1666,6 +1683,16 @@ it as stamps, newest first; it is empty for a piece whose name matches.
 `stamp` and `reason`, and is empty when there are none. Under `--json` a
 skipped version and the lock note appear only in the object, while the note
 that nothing matched is on stderr as in text output.
+
+`forget` adds `forgotten`, `failed`, `repairs` and `warnings` (as for
+`list`, plus the repairs that failed). Each forgotten version is `piece`, `stamp` (the version stamp),
+`version` (its time as RFC 3339 in UTC), `incomplete` and `files`, the bare
+names of its files in the order they were deleted. Each failed version is
+`piece`, `stamp` and `reason`. `repairs` lists the repairs that were done,
+each as `{"kind": "repair", "repair": ...}`. A dry run has `actions` and
+`warnings`: the repair actions first, then one action
+`{"kind": "forget_version", ...}` for each version, with the keys of a
+forgotten version.
 
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
 collection root), `patterns`, `due` (the number of folders the next `archive`
