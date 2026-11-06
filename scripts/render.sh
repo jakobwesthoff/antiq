@@ -142,7 +142,7 @@ if [ "$mode" = all ]; then
 
     # A Screenshot that vhs could not take is no error for vhs, so every image
     # that the README and the page use has to be there.
-    for image in init status keep dry-run archive-live archive-done find fork versions push error-damaged rebuild; do
+    for image in init status keep dry-run archive-live archive-done list grep unearth fork versions push error-damaged import rebuild; do
         if [ ! -s "$shots/$image.png" ]; then
             echo "render.sh: the tapes wrote no $image.png" >&2
             exit 1

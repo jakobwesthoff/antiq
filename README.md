@@ -67,8 +67,8 @@ cargo install --path .
 ```
 
 `antiq push` needs rsync 3.2.4 or newer on the machine that runs it.
-The `rsync` that macOS ships is openrsync and is passed over; install the
-real one, for example with `brew install rsync`. antiq takes the first
+The `rsync` that macOS ships is openrsync, which antiq passes over. Install
+the real one, for example with `brew install rsync`. antiq takes the first
 `rsync` that is new enough from `PATH`, then `/opt/homebrew/bin` and
 `/usr/local/bin`. `[target] rsync` names one by its absolute path.
 
@@ -77,7 +77,7 @@ real one, for example with `brew install rsync`. antiq takes the first
 
 A **collection** is a folder that antiq looks after, such as the folder where
 your experiments pile up. Each folder inside it that antiq archives as one
-unit is a **piece**. Make the folder a collection; `--pattern '*'` makes
+unit is a **piece**. Make the folder a collection. `--pattern '*'` makes
 every folder directly inside it a piece
 ([more on patterns](#which-folders-are-pieces)):
 
@@ -94,7 +94,7 @@ first real run, the [dry run](#archiving-idle-folders) shows what
 
 > [!NOTE]
 > The collection keeps its settings in `.antiq/config.toml`. `init` writes
-> every setting there with a comment and its default, ready to change;
+> every setting there with a comment and its default, ready to change.
 > [Configuration](#configuration) lists them all. antiq finds the
 > collection from any folder inside it, or from the path given with `-C`.
 
@@ -146,20 +146,22 @@ antiq status
 `pin` creates a `.antiq-pin` file in the piece. A **pinned** piece is never
 archived, and `push` still mirrors it. `unpin` removes the file.
 
-Other ways to keep files out of the way are in the configuration, which
-`init` wrote with a comment for every key:
+More settings in `.antiq/config.toml` keep files out of the way:
 
-- `collection.ignore` lists gitignore lines for paths that are not packed,
-  not listed and not counted for the idle check. The default is
-  `[".DS_Store"]`.
-- `collection.timeless` lists gitignore lines for paths that are packed but
-  not counted for the idle check, such as `.git/`. A piece whose only
-  recent change is in `.git/` stays due.
-- `collection.exclude` lists literal paths that are never pieces.
-- `idle_days` and `soon_days` change the 30 and 3 days.
+| Setting | What it does |
+|---|---|
+| `collection.ignore` | paths that are neither packed nor counted for the idle check, and `archive` deletes them with the folder (default `[".DS_Store"]`, typical `node_modules/`) |
+| `collection.timeless` | paths that are packed but not counted for the idle check, such as `.git/` |
+| `collection.exclude` | paths that are never pieces |
+| `collection.idle_days`, `collection.soon_days` | the 30 and 3 days |
 
-A piece can also carry `.antiqignore` and `.antiq-timeless` files with the
-same gitignore lines. [Configuration](#configuration) has the whole table.
+`ignore` and `timeless` take gitignore lines, `exclude` takes literal
+paths. [Configuration](#configuration) lists every setting.
+
+> [!TIP]
+> A piece can carry the same gitignore lines in `.antiqignore` and
+> `.antiq-timeless` files inside it, the way `.gitignore` files work, for
+> rules that concern only that piece.
 
 ## Archiving idle folders
 
@@ -173,8 +175,10 @@ antiq archive -n
 ![antiq archive -n lists the three would archive lines in magenta and ends with a DRY RUN badge saying that nothing was archived](docs/pages/assets/shots/dry-run.png)
 *the dry run lists what the next run would archive*
 
-Now archive. On a terminal each piece that is working has a card with a
-progress bar, and a line stays behind for each piece that finished:
+Now archive. `archive` packs each due piece into an archive, checks that
+the archive holds exactly what the folder held, and only then removes the
+folder. From then on the piece lives in the archive until you
+[bring it back](#bringing-a-version-back):
 
 ```bash
 antiq archive
@@ -186,11 +190,16 @@ antiq archive
 ![the finished lines of the three pieces and the closing line](docs/pages/assets/shots/archive-done.png)
 *the finished lines and the closing line*
 
-For each due piece `archive` packs a `tar.zst` **version**, reads the archive
-back and compares it with the folder, and only then moves the folder away
-and deletes it. A folder that changed in the meantime is skipped and its
-files are kept. `archive <piece>` archives one piece now, however recently
-it changed.
+A folder that changed while it was packed is skipped and stays as it is.
+`archive <piece>` archives one piece now, however recently it changed.
+
+> [!NOTE]
+> Each archive of a piece is a **version**, named by the time it was
+> packed. Most pieces have just one. A second one appears only when the
+> same path is archived again while the first is still stored, for
+> example after you [forked](#bringing-a-version-back) the piece, worked
+> on the copy and archived that. The versions then sit side by side, and
+> `unearth` and `fork` take the newest unless you name another.
 
 A piece is **refused** and never archived when its folder holds a mount point,
 a nested collection, an unreadable or locked entry, an exclude entry, or a
@@ -200,40 +209,75 @@ either.
 
 ## Finding a version
 
-The folders are gone from `experiments`, and every piece has a version.
-`list` prints one row per version, and `grep` matches a regular expression
-against the paths of all archived files:
+### What is in the archive
+
+The folders are gone from `experiments`, and their pieces live in the
+archive now. `list` shows every archived piece with its versions. Once the
+archive has grown, a search word narrows the list down: `list scan` shows
+only the pieces whose path fits `scan`.
 
 ```bash
+antiq list
 antiq list scan
+```
+
+![antiq list shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq list scan shows only scan-old and scanner](docs/pages/assets/shots/list.png)
+*`list` shows the whole archive, a search word narrows it*
+
+### Searching inside the archives
+
+You remember a file, but not which folder it was in. `grep` searches the
+paths of the files in all archives at once, with a regular expression,
+and shows the piece and the version that hold each match:
+
+```bash
 antiq grep 'main\.rs'
 ```
 
-![antiq list scan shows the versions of scan-old and scanner; antiq grep lists the main.rs files with the version they are in](docs/pages/assets/shots/find.png)
-*`list` finds versions by name, `grep` by the files they hold*
+![antiq grep lists the main.rs files of scan-old and scanner with the version they are in](docs/pages/assets/shots/grep.png)
+*`grep` finds a file without knowing its folder*
 
 `grep` reads the **listings**, the checksum lists antiq keeps beside each
-archive, so nothing is unpacked. A piece is named by its
-path or by a **search word**, and a search word has to match exactly one piece.
-`scan` matches two, so `list` shows both. Commands that take one piece fail
-when the word matches none, and when it matches several they also list the
-candidates. `unearth` and `forget` remove a version, so they act only on a
-path: a word that fits one piece lists that piece and does nothing.
+archive, so nothing is unpacked.
 
 ## Bringing a version back
 
-`fork` extracts a working copy of a version and keeps the version:
+You archived a folder a while ago and need it again. `unearth` takes it
+out of the archive: it unpacks the version to the piece's path, checks
+that every file arrived, and then removes the version from the archive.
+The folder is live again, as if it had never been archived:
+
+```bash
+antiq unearth recipe-api
+```
+
+![antiq unearth recipe-api prints the version it brought back and the path of the folder](docs/pages/assets/shots/unearth.png)
+*`unearth` brings `recipe-api` back as a folder*
+
+`unearth` takes the newest version of the piece. `--version` names another
+one by a prefix of its time, such as `2026-11-05` or `2026-11-05T00`.
+
+> [!NOTE]
+> `unearth` needs the exact path of the piece, since it removes the
+> version from the archive. Typed only in part, such as `recipe`, it does
+> nothing and lists the pieces that fit, so you can copy the path.
+
+### Working on a copy
+
+To work on an archived folder and keep the archived state as well, use
+`fork`. It unpacks a working copy and leaves the version in the archive,
+at the piece's path or with `--name <new path>` at another one:
 
 ```bash
 antiq fork scanner
 ```
 
 ![antiq fork scanner prints the version it extracted and the path it wrote to](docs/pages/assets/shots/fork.png)
-*`fork` extracts a working copy and keeps the version*
+*`fork` unpacks a copy and keeps the version*
 
-Change a file in the copy and archive the piece again. `archive <piece>`
-works on a piece that is not due, and a piece can have several versions
-side by side:
+Change a file in the copy and archive it again. `archive <piece>` works on
+a piece that is not due, and the piece then has two versions side by
+side, each taking its own space:
 
 ```bash
 echo '// edited' >> scanner/src/main.rs
@@ -244,27 +288,94 @@ antiq list scanner
 ![antiq list scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
 *the two versions of `scanner`*
 
-`unearth <piece> [--version <version>]` brings a version back as a folder
-at the piece's path and **removes that version** once the folder is
-complete and verified. Without `--version` the newest version is taken. A
-version is named by a prefix of its time, such as `2026-11-05` or
-`2026-11-05T00`. `fork [--name <new path>]` writes the copy to another path
-instead.
+> [!TIP]
+> `fork` does not need the whole path. A part that fits exactly one piece
+> is enough, such as `fork recipe` for `recipe-api`. When it fits several,
+> antiq lists them. The same goes for every command that deletes no
+> version: `archive`, `pin`, `unpin`, `rebuild` and `list`.
+
+### Deleting versions
 
 `forget <piece> <version>` deletes one version, and `forget <piece>
---all-versions --force` deletes all of them.
+--all-versions --force` deletes all of them. Like `unearth`, `forget` takes
+only the exact path of the piece, never just a part of it.
 
-`import <folder> [--as <path>]` packs a folder from outside the collection
-directly as a version and leaves the source in place.
+> [!WARNING]
+> A forgotten version is gone. antiq deletes its archive from the
+> collection, and the next `push` deletes it on the target as well.
+> Nothing brings it back.
+
+### Archiving a folder from elsewhere
+
+Old projects also lie outside the collection: on another disk, in a
+downloads folder, or packed in archive files from years ago. `import`
+puts such a folder into the archive without moving it into the collection
+first. It packs the folder as a version, checks the archive the way
+`archive` does, and leaves the source folder where it is:
+
+```bash
+antiq import ~/old-disk/pixel-clock
+antiq list pixel-clock
+```
+
+![antiq import packs pixel-clock as a version from March 2025, and antiq list pixel-clock shows that version](docs/pages/assets/shots/import.png)
+*`import` names the version by the newest file, here from March 2025*
+
+The piece takes the folder's name, or the path given with `--as`, such as
+`--as games/pixel-clock`. The [patterns](#which-folders-are-pieces) of the
+collection have to select that path. The version is named by the time of
+the newest file in the folder, so a project last changed in March 2025
+becomes a version from March 2025. `--time` gives it another time. The
+collection's ignore and timeless rules apply to the folder as they do to
+a piece.
+
+> [!TIP]
+> Old archive files go in the same way. Unpack each one into a temporary
+> folder with the files' original times, as `tar` and `unzip` keep them,
+> and import the folder that comes out.
 
 ## Mirroring
 
-Everything in the collection, the live folders and the versions, can be
-mirrored to one **target**. Add a `[target]` block to `.antiq/config.toml`,
-create an empty folder for it, and let `push --init` claim it. The target
-is an absolute path, such as a mounted disk or share, or `[user@]host:path`
-reached over ssh. For a backup disk mounted at `/Volumes/Backup`, with an
-empty folder `antiq` on it:
+The archive lives in the collection's `.antiq/` folder, on the same disk
+as the live folders. When that disk dies, both are gone. `push` copies the
+whole collection, the live folders and the versions, to one **target** on
+another disk or a NAS, and on every later run brings the target to the
+state of the collection again.
+
+### Two ways to mirror
+
+`push` copies with rsync, and it can reach the target in two ways.
+
+**To a folder on this machine.** The target is a path, such as
+`/Volumes/Backup/antiq`: a folder on an external disk, or on a network
+share that is mounted here. rsync runs on this machine alone and writes
+into the folder as into any other.
+
+**To another machine over ssh.** The target is an ssh address, such as
+`backup@nas.local:/volume1/antiq`. rsync logs in to the NAS or server
+over ssh and starts a second rsync there, which writes to that machine's
+own disk.
+
+For a NAS, ssh is the better choice. A share mounted over SMB or NFS
+handles many small files slowly, and the live folders are full of them.
+
+> [!NOTE]
+> Both ways need rsync 3.2.4 or newer on this machine, as
+> [Installation](#installation) describes. Over ssh the other machine needs
+> rsync too, ideally 3.2.4 or newer as well: with its `--fsync`, every file
+> is on the target's disk before rsync counts it as written. If the first
+> `rsync` on that machine's `PATH` is an older one, name the newer one with
+> `rsync_path` in the `[target]` block. Only where no such rsync can be
+> installed, such as on a Mac with its openrsync, set `fsync = false`.
+> A power loss on the target during a push can then leave files empty or
+> missing there, and antiq does not read the target back to notice.
+
+### Setting up a target
+
+Create an empty folder on the target, add a `[target]` block with its
+`url` to `.antiq/config.toml`, and let `push --init` claim the folder.
+For a disk mounted at `/Volumes/Backup`, with an empty folder `antiq` on
+it:
 
 ```toml
 [target]
@@ -278,65 +389,100 @@ antiq push --init
 ![antiq push --init claims the target and prints a table of what was created for each piece, then a closing line that starts with Claimed](docs/pages/assets/shots/push.png)
 *the first push claims the target*
 
-`--init` wrote the **marker** `.antiq-target` at the target's root. It holds
-the collection ID, the machine name and the collection path, and keeps
-another collection from pushing there by mistake. Later runs are `antiq
-push`. `push -n` lists what would change, per piece, and changes nothing.
+`--init` wrote the **marker** `.antiq-target` at the target's root. It
+holds the collection ID, the machine name and the collection path, and
+keeps another collection from pushing there by mistake. From then on,
+`antiq push` mirrors the collection, and `push -n` lists what would change
+without changing anything.
 
-For an ssh target, `url = "backup@nas.local:/volume1/antiq/projects"`, the
-ssh options such as a port go into `~/.ssh/config`. ssh is the recommended
-way to reach a NAS.
+An ssh target is set up the same way, with its address as the `url`:
+
+```toml
+[target]
+url = "backup@nas.local:/volume1/antiq"
+```
+
+ssh options such as a port or a key go into `~/.ssh/config`.
 
 > [!TIP]
-> A NAS share that does not let rsync set file modes makes `push` fail
-> with "the target does not let rsync set file modes". Tell rsync to leave
-> the modes alone in `.antiq/config.toml`:
+> Some mounted shares do not let rsync set file modes, and `push` then
+> fails with "the target does not let rsync set file modes". Only in that
+> case, tell rsync to leave the modes alone:
 >
 > ```toml
 > [target]
 > rsync_args = ["--no-perms"]
 > ```
 >
-> Files in the live folders on the target then get the share's own modes,
-> while the archived versions keep theirs.
-
-A push that fails names the log of the run, a compressed file with
-everything rsync printed. On macOS the logs are in `~/Library/Logs/antiq`,
-elsewhere in `antiq` in the state directory, and the error shows the
-command that reads one: `zstd -dc <path> | less`. antiq keeps the 10 newest
-logs of a collection, and the newest log of a failed push beyond them.
+> The files in the live folders on the target then get the share's own
+> modes instead of their real ones, while the archived versions keep
+> theirs. Leave the setting out as long as `push` works without it.
 
 > [!WARNING]
 > The target is a mirror, not a backup: whatever is deleted in the
 > collection is deleted on the target by the next push.
-> [Good to know](#good-to-know) says more.
+> The [FAQ](#faq) says more.
+
+### When a push fails
+
+A push that fails names the log of the run, a compressed file with
+everything rsync printed. On macOS the logs are in `~/Library/Logs/antiq`,
+elsewhere in `antiq` in the state directory, and the error shows the
+command that reads one: `zstd -dc <path> | less`. antiq keeps the 10
+newest logs of a collection, and the newest log of a failed push beyond
+them.
 
 ## Running unattended
 
-Run the two commands one after the other from a scheduler:
+antiq does nothing on its own. Folders move into the archive when you run
+`archive`, and the target catches up when you run `push`. Running both now
+and then by hand is enough. If you would rather not think about it, let a
+scheduler such as cron, launchd or a systemd timer run them, every night
+for example. Idle folders then go into the archive by themselves, and the
+mirror stays current. No command asks a question, so nobody has to sit at
+the keyboard:
 
 ```bash
-antiq archive; antiq push --if-reachable
+antiq -C ~/experiments archive; antiq -C ~/experiments push --if-reachable
 ```
 
-The push runs after a partial archive too. The scheduler sees only the
-push's exit status. `--if-reachable` makes an unreachable target exit 0
-instead of 4. A held lock, a damaged version or any failure after the
-target was reached still exits 1. [Exit codes](#exit-codes) lists them all.
+`--if-reachable` is for a laptop that is not always near its target. When
+the backup disk is not plugged in or the NAS is out of reach, the push is
+skipped and exits 0 instead of 4, so the run counts as a success. A held
+lock, a damaged version or any failure after the target was reached still
+exits 1, so real problems still show. The push runs even when the archive
+skipped some pieces, and the scheduler sees only the push's exit status.
+[Exit codes](#exit-codes) lists them all.
 
 ## Damaged versions
 
-A version is **damaged** when, among other causes, its archive lacks its
-listing or checksum file. Files deleted by hand and incomplete copies from
-the target cause this. Here the listing of `scan-old` is missing, and
-`antiq push` refuses to run:
+Normally you never run into this. Each version is three
+files in `.antiq/pieces/<piece>/`: the archive, its listing and its
+checksum file. When one of them goes missing or is changed from outside
+antiq, the version is **damaged**. That happens when a file is deleted by
+hand, when a copy back from the [mirror](#mirroring) stops halfway, or after a disk
+error. antiq's own crashes do not cause it, because the next run cleans
+up after them.
+
+You notice a damaged version in three places: `status` reports it, `list`
+marks it, and `push` refuses to run until it is repaired. Here the listing
+of `scan-old` is missing:
 
 ![antiq push is refused: the collection holds damaged versions, and the error names antiq rebuild with the version](docs/pages/assets/shots/error-damaged.png)
-*a damaged version stops `push`*
+*a damaged version stops `push`, and the error names the repair*
 
-`push` is stopped by a damaged or incomplete version until you repair it,
-and the error names the command. `rebuild` writes the missing listing after
-checking the archive against what survives:
+What helps depends on what is missing, and the error names the command:
+
+- **The listing or the checksum file is missing.** `rebuild` writes it
+  again after checking the archive against what survives.
+- **The archive is missing**, and only its listing or checksum file is
+  left. The version is **incomplete**, and nothing can rebuild its files.
+  Copy the archive back from the mirror if it is there, or let `forget`
+  remove the version.
+- **A file is there but broken.** Copy it back from the mirror, or let
+  `forget` remove the version.
+
+Here `rebuild` repairs `scan-old`:
 
 ```bash
 antiq rebuild scan-old 20
@@ -346,43 +492,64 @@ antiq rebuild scan-old 20
 *`rebuild` writes the missing listing*
 
 The version argument is a prefix of the version's time, so `20` is the one
-version here. [Damaged and incomplete versions](#damaged-and-incomplete-versions)
-lists what makes a version damaged or incomplete, and `forget` removes an
-incomplete one.
+version here.
 
 ## Reading archives without antiq
 
-Everything antiq writes can be read without it. The files of a version are
-in `.antiq/pieces/<piece>/`. Unpack the archive into a scratch directory,
-go into the unpacked folder and check it against the listing. The names carry
-the stamp of your version in place of the one shown:
+Everything antiq stores is in plain formats that standard tools read. Your
+versions do not depend on antiq: without it, `tar`, `zstd` and `shasum`
+get every file back and check it.
 
-```console
-$ store=experiments/.antiq/pieces/scan-old
-$ mkdir /tmp/check && cd /tmp/check
-$ zstd -dc $store/scan-old--2026-11-05T150201.tar.zst | tar -x
-$ cd scan-old
-$ zstd -dc $store/scan-old--2026-11-05T150201.sha256.zst | shasum -a 256 -c -
-cli/main.rs: OK
+Each piece has a folder in `.antiq/pieces/`, named by the piece's path.
+Each version in it is three files that share one name, made of the
+piece's name and the version's time in UTC:
+
+```text
+.antiq/pieces/scan-old/
+  scan-old--2026-11-05T150201.tar.zst          the archive
+  scan-old--2026-11-05T150201.tar.zst.sha256   the checksum file
+  scan-old--2026-11-05T150201.sha256.zst       the listing
 ```
 
-Use `shasum`: the `sha256sum` that macOS ships is not GNU's and fails on a
+**The archive** is a tar file compressed with zstd. It holds one folder,
+named like the piece's folder when it was packed, with the files inside.
+`zstd -dc <archive> | tar -x` unpacks it.
+
+**The checksum file** holds one line, the SHA-256 of the archive and its
+file name, in the format `shasum` reads. `shasum -a 256 -c <checksum
+file>`, run in the piece's folder, checks that the archive is unchanged.
+
+**The listing** is a checksum list of every file in the archive,
+compressed with zstd. antiq's details about the version and about each
+entry (type, mode, time and size) are comment lines starting with `#`,
+which `shasum` skips. `zstd -dc <listing>` shows it. Piped into `shasum -a
+256 -c -` inside the unpacked folder, it checks every file. Use `shasum`
+for this: the `sha256sum` that macOS ships is not GNU's and fails on a
 listing.
 
+## Using antiq in scripts
+
+On a terminal antiq draws progress cards and colours, as in the images
+above. When its output goes into a pipe or a file, it prints plain lines
+instead, such as one line per piece and a summary for `archive`. `list` and `grep`
+print one tab-separated line per version or match, ready for `cut` or
+`sort`.
+
+For a script that must know exactly what happened, every command takes
+`--json` and then prints its whole result as one JSON object, errors
+included. No command ever asks a question, so nothing waits for input.
+
+### Exit codes
+
+| Exit | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | error, a held lock included |
+| 2 | usage error |
+| 3 | partial: a step failed for some pieces, or an `unearth` or `fork` that did not finish |
+| 4 | target unreachable (`push` only) |
+
 ## Reference
-
-### Concepts
-
-- **Collection:** a directory with a `.antiq/` folder. Commands find it
-  by searching upwards from the current directory, or from the path
-  given with `-C`.
-- **Piece:** a folder of the collection that antiq manages. The
-  [`patterns`](#which-folders-are-pieces) of the configuration select pieces; its path relative to
-  the collection is its identity.
-- **Version:** one archived state of a piece. A piece can have several
-  versions side by side.
-- **Target:** the mirror location, an absolute path (a mounted disk or
-  share) or `[user@]host:path` reached over ssh by rsync.
 
 ### Commands
 
@@ -416,44 +583,8 @@ Options:
 
 Every command takes `-C <path>` and `--json`. Commands that change
 something take `-n` / `--dry-run`, which prints the plan and changes
-nothing. No command asks a question. `antiq --version` prints the version
-on one line, and on a terminal with 24-bit colour it draws Archie beside it.
-
-A piece is named by its path or by a search word. A search word must
-match exactly one piece. The command fails when it matches none, and
-when it matches several it also lists the candidates. `unearth` and
-`forget` act only on a path: a word that fits one piece lists that piece
-and does nothing.
-
-### Output in a pipe
-
-The images above are the output on a terminal. Into a pipe or a file
-antiq prints plain lines, which scripts can read. `archive` prints one line
-for each piece and a summary:
-
-```console
-$ antiq archive | cat
-archived recipe-api
-archived scan-old
-archived scanner
-Archived 3, skipped 0, refused 0.
-```
-
-`unearth` prints one line:
-
-```console
-$ antiq unearth scan-old | cat
-Unearthed scan-old (version 2026-11-05T214151)
-```
-
-On a terminal `unearth` shows a card, leaves the line of the piece and ends
-with `✔ Unearthed to ./scan-old   took 0:00` instead. The progress cards of `archive`,
-`push`, `unearth`, `fork` and `rebuild` appear only on a terminal. A dry
-run and a stdout that is not a terminal print the plain lines, and
-`--json` prints its JSON object; none of them shows cards.
-
-`list` and `grep` print one tab-separated line per version or hit when they
-do not write to a terminal.
+nothing. `antiq --version` prints the version on one line, and on a
+terminal with 24-bit colour it draws Archie beside it.
 
 ### Configuration
 
@@ -464,7 +595,7 @@ comment for every key, and with every key but the collection ID (and
 | Key | Default | Content |
 |-----|---------|---------|
 | `collection.id` | minted at `init` | collection ULID, also written to the target's marker |
-| `collection.patterns` | `["*"]` | glob patterns that select pieces; the shallowest match wins ([examples](#which-folders-are-pieces)) |
+| `collection.patterns` | `["*"]` | glob patterns that select pieces, the shallowest match wins ([examples](#which-folders-are-pieces)) |
 | `collection.exclude` | `[]` | literal paths that are never pieces |
 | `collection.ignore` | `[".DS_Store"]` | gitignore lines for paths that are not packed, not listed and not counted for the idle check |
 | `collection.timeless` | `[]` | gitignore lines for paths that are packed but not counted for the idle check, such as `.git/` |
@@ -476,183 +607,67 @@ comment for every key, and with every key but the collection ID (and
 | `target.fsync` | `true` | pass `--fsync` to rsync |
 | `target.rsync_args` | `[]` | extra rsync options, one string each |
 
-A folder whose name starts with a dot is a piece only if a pattern names
-the dot. Symlinks are never pieces. Besides the configuration, a piece
-can carry `.antiqignore` and `.antiq-timeless` files with the same
-gitignore lines as `ignore` and `timeless`.
+## FAQ
 
-### Archiving
+**Is the mirror a backup?** No. `push` makes the target a copy of the
+collection as it is now, and keeps no history. Whatever is deleted in the
+collection, by antiq or by hand, is deleted on the target by the next
+push.
 
-A piece is due when its idle clock is older than `idle_days`. The idle
-clock is the newest modification time of the piece's regular files,
-leaving out ignored and timeless paths and antiq's own control files,
-or the time `unearth` or `fork` wrote into the piece, if that is later.
-`status` lists the pieces that are `due`, `soon`, `pinned` or `refused`
-with the reason.
+**What does `push` copy?** The whole collection: the live folders, pinned
+ones included, the versions and everything else in it. Left out are
+antiq's temporary folders and its lock, and the folders macOS keeps at
+the root of a volume.
 
-`archive` packs each due piece into a `tar.zst` version, reads the
-archive back and compares it with the folder, and only then moves the
-folder away and deletes it. A folder that changed meanwhile is skipped
-and its files are kept. `archive <piece>` archives one piece now, however
-recently it changed.
+**Why is a folder I unearthed not archived again right away?** `unearth`
+and `fork` write the time into the folder they create, and the idle clock
+counts from the later of that time and the newest file. The folder gets
+the full 30 days again, even when its files are years old.
 
-`pin <piece>` creates a `.antiq-pin` file in the piece, which keeps it
-from being archived while `push` still mirrors it. `unpin` removes it.
-`import <folder> [--as <path>]` packs a folder from outside the
-collection directly as a version and leaves the source in place.
-
-A piece is refused, and never archived, when its folder holds a mount
-point, a nested collection, an unreadable or locked entry, an exclude
-entry, or a control file that is not a regular file. `status` names the
-reason. A piece without a file that counts for the idle check is empty and
-is not archived either.
-
-### Finding and bringing back
-
-`list [<query>]` prints one row per version, newest first within a
-piece. `grep <pattern>` matches a regular expression against the paths
-of all archived files, read from the listings, so nothing is unpacked.
-Without a terminal both print one tab-separated line per version or
-hit.
-
-`unearth <piece> [--version <version>]` brings a version back as a
-folder at the piece's path and **removes that version** once the folder
-is complete and verified. `fork <piece> [--version <version>] [--name
-<new path>]` extracts a working copy and keeps the version. Without
-`--version`, the newest version is taken. A version is named by a
-prefix of its time, such as `2026-11-05` or `2026-11-05T00`.
-
-`forget <piece> <version>` deletes one version; `forget <piece>
---all-versions --force` deletes all of them.
-
-### Damaged and incomplete versions
-
-A version is incomplete when its listing or checksum file exists without
-the archive. It is damaged when the archive lacks its listing or
-checksum file, when its size differs from the one the listing records,
-or when a sidecar does not parse. Files deleted by hand and incomplete
-copies from the target cause this. `list` marks such versions and
-`status` reports them.
-
-`rebuild <piece> <version>` writes the missing sidecar of a damaged
-version after checking the archive against what survives, and
-`forget` removes an incomplete one. A damaged or incomplete version
-stops `push`, scheduled runs included, until you run `rebuild` or
-`forget` or copy the missing file back from the target. The error names
-the command.
-
-### Setting up a target
-
-Put `[target] url` into the configuration, create an empty folder on the
-target, and run `antiq push --init`. It writes the marker
-`.antiq-target` at the target's root and mirrors the collection. A path
-target must be a folder on a volume, not the volume's root, and must not
-lie inside the collection. `push` without a `url` fails with the error
-kind `no_target`.
-
-A path target that does not exist, or is an empty folder without a
-marker, counts as unreachable: `push` exits 4, or 0 with
-`--if-reachable`, and says why. A missing folder of a path target is
-never created by antiq. Over ssh, `push --init` creates the last
-missing level.
-
-For an ssh target, `url = "backup@nas.local:/volume1/antiq/projects"`,
-the ssh options such as a port go into `~/.ssh/config`. ssh is the
-recommended way to reach a NAS.
-
-### Pushing
-
-`push` mirrors with one rsync run of `-a -H -x --delete --delete-delay`
-(and one more pass when the first one deleted something and changes
-remain), so the target ends up as a copy of the collection: live folders, versions and
-everything else in it. Left out are antiq's temporary folders and lock
-and the macOS volume-root folders. Over ssh the run uses `BatchMode`.
-`push -n` lists what would change, per piece, and changes nothing.
-`push --init` and `push --force` cannot be combined with
-`--if-reachable`.
-
-The marker `.antiq-target` holds the collection ID, the machine name and
-the collection path. Before every push antiq compares it with the
-collection:
-
-- A target with a marker of another collection is refused.
-- A marker that names another machine or another collection path is
-  refused, and the message names both. `push --force` pushes anyway,
-  leaves the marker as it is and prints a note naming its host and path.
-- A non-empty folder without a marker is refused, and `--init` is
-  refused there too, as it is wherever a marker exists.
-
-antiq never rewrites the marker. After renaming the machine or moving
-the collection, edit the marker's `host` or `path` by hand, or push with
-`--force` each time.
-
-### Good to know
-
-**The target is a mirror, not a backup.** `push` has no brake: whatever
-is deleted in the collection, by antiq or by hand, is deleted on the
-target by the next push, and the target keeps no history.
-
-**What is not kept.** Extended attributes, ACLs, access times and
-creation times are kept neither in versions nor on the target. Hard
+**What does a version not keep?** Extended attributes, ACLs, access times
+and creation times are kept neither in versions nor on the target. Hard
 links are kept in versions and in the mirror. Copying the target back
-keeps them only with `rsync -aH`. Sparse files are stored in full in
-versions and come back fully allocated.
+keeps them only with `rsync -aH`. Sparse files are stored in full and
+come back fully allocated.
 
-**Symlinks on the target.** A symlink in a piece is copied as a symlink
-and points to whatever its path names on the target.
+**What happens to symlinks?** A symlink is archived and restored as it is,
+whatever it points to. On the target it is copied as a symlink and points
+to whatever its path names there.
 
-**Checking a version by hand.**
-[Reading archives without antiq](#reading-archives-without-antiq) shows the
-commands. Use `shasum`: the `sha256sum` that macOS ships is not GNU's and
-fails on a listing.
+**Does `push` notice damage on the target?** No. rsync checks a
+whole-file checksum of each file it sends. A file whose size and
+modification time match is not sent and not compared, so damage on the
+target stays unseen. antiq reads nothing back from the target.
 
-**rsync compares only what it transfers.** rsync checks a whole-file
-checksum of each file it sends. A file whose size and modification time
-match is not sent and not compared, so damage on the target stays
-unseen. antiq reads nothing back from the target.
+**`push` says the target is unreachable, but the disk is mounted.** A path
+target that does not exist, or an empty folder without a marker, counts
+as unreachable. Create the folder and run `push --init` once. antiq never
+creates the folder of a path target; over ssh `push --init` creates the
+last missing level. A path target must be a folder on the volume, not the
+volume's root, and must not lie inside the collection.
 
-**`fsync`, macOS and other targets.** With `--fsync` the target flushes
-each file before it is renamed into place, so a power loss can at most
-lose the newest names, which the next push sends again. Without it,
-files that rsync reported as written can be empty or missing. A target
-whose rsync is openrsync, which is every macOS machine, lacks `--fsync`
-and needs `fsync = false`. Either set `rsync_path` to a 3.2.4 or newer
-rsync there, or turn it off. Extra rsync options go into `rsync_args`
-and override antiq's own: `rsync_args = ["--no-perms"]` follows `-a` and
-stops the permissions from being set. `rsync_args` must not hold `-q` or
-`--quiet`.
+**`push` refuses after I renamed the machine or moved the collection.**
+The marker on the target records the machine name and the collection
+path, and `push` refuses when either differs, naming both. Edit `host` or
+`path` in the target's `.antiq-target` by hand, or push with `--force`
+each time, which leaves the marker as it is. A target whose marker
+belongs to another collection is refused.
 
-**Case-only renames and strict targets.** A folder renamed only in
-case is copied in a second pass on a case-insensitive target. The
-target must be as strict about names as the collection's volume. `push`
-refuses while two piece paths of the collection differ only in case or
-Unicode normalization. File names inside one live folder that differ
-only in case are not checked.
+**I renamed a folder only in case.** On a case-insensitive target the
+renamed folder is copied in a second pass. The target must be as strict
+about names as the collection's volume. `push` refuses while two piece
+paths differ only in case or Unicode normalization. File names inside one
+live folder that differ only in case are not checked.
 
-**Mount points.** `push` stays on the collection's device (`-x`). A
-directory that held files and later became the mount point of another
-device arrives on the target as an empty directory, and its former
-files are deleted from the target.
+**A directory in the collection became a mount point.** `push` stays on
+the collection's device. The directory arrives on the target empty, and
+the files it held before are deleted from the target.
 
-**Unreadable directories stop deletions.** When rsync cannot open a
-directory of the collection, it deletes nothing on the target at all
-until the directory is readable. `push` says that no deletion reached
-the target and names the directories.
+**`push` says no deletion reached the target.** rsync could not open a
+directory of the collection, and then it deletes nothing on the target at
+all. `push` names the directories. Once they are readable, the next push
+deletes again.
 
-**Scheduling.** See [Running unattended](#running-unattended).
-
-### Exit codes
-
-| Exit | Meaning |
-|------|---------|
-| 0 | success |
-| 1 | error, a held lock included |
-| 2 | usage error |
-| 3 | partial: a step failed for some pieces, or an `unearth` or `fork` that did not finish |
-| 4 | target unreachable (`push` only) |
-
-`--json` prints the result as one JSON object, errors included, and
-never asks a question.
 <!-- docs:end -->
 
 ## Development
@@ -664,7 +679,7 @@ with a message naming the missing tool.
 
 The tasks live in the `Justfile` (`just --list` shows them). `just check`
 runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-`cargo test`; every commit has to pass it.
+`cargo test`. Every commit has to pass it.
 
 Coverage needs `cargo-llvm-cov`. After a change, `just coverage
 <base-commit>` lists the changed lines under `src/` that no test runs.
@@ -675,7 +690,7 @@ in the todo vault at `todos/`.
 
 The images of this README and of the project page are rendered from real
 runs of antiq in a demo world. `just shots` renders them again into
-`docs/pages/assets/shots/`; it needs `vhs`, `ttyd`, `ffmpeg`, `oxipng`, an
+`docs/pages/assets/shots/`. It needs `vhs`, `ttyd`, `ffmpeg`, `oxipng`, an
 rsync of 3.2.4 or newer and the font Victor Mono installed (the file is
 `assets/social/fonts/VictorMono-Variable.ttf`). `just demo-video` renders
 only the demo video (`docs/pages/assets/demo.webm` and `demo.mp4`) and the
