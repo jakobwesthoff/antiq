@@ -212,3 +212,158 @@ fn every_flag_combination_parses_and_needs_a_collection() {
         assert_eq!(run.json()["command"], "push", "{args:?}");
     }
 }
+
+// =========================================================
+// Step 2: the store
+// =========================================================
+
+const STAMP: &str = "2024-06-30T081245";
+const OTHER_STAMP: &str = "2024-07-01T081245";
+
+/// A collection with `projects/a` and one stored version of it per stamp.
+fn stored(stamps: &[&str]) -> Collection {
+    let mut builder = Collection::build(&Clock::now());
+    builder.piece("projects/a", |piece| {
+        piece.age_days(3).file("a.txt", "a");
+    });
+    for stamp in stamps {
+        builder.version("projects/a", stamp, &[("a.txt", "a")]);
+    }
+    let collection = builder.finish();
+    set_url(&collection, "/nonexistent/target");
+    collection
+}
+
+/// The message of a refused push.
+fn refusal(collection: &Collection) -> String {
+    let run = push(collection, &[]);
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "other", "{}", run.stdout);
+    run.error_message()
+}
+
+#[test]
+fn a_sound_store_goes_on_to_the_next_step() {
+    let collection = stored(&[STAMP]);
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+}
+
+#[test]
+fn a_version_without_its_listing_is_mended_by_rebuild() {
+    let collection = stored(&[STAMP]);
+    collection.damage_remove_listing("projects/a", STAMP);
+
+    let message = refusal(&collection);
+
+    assert!(
+        message.contains(&format!("`antiq rebuild projects/a {STAMP}`")),
+        "{message}"
+    );
+    assert!(!message.contains("antiq forget"), "{message}");
+}
+
+#[test]
+fn an_archive_of_the_wrong_size_is_forgotten_or_copied_back() {
+    let collection = stored(&[STAMP]);
+    collection.damage_truncate_archive("projects/a", STAMP);
+
+    let message = refusal(&collection);
+
+    assert!(
+        message.contains(&format!("`antiq forget projects/a {STAMP}`")),
+        "{message}"
+    );
+    assert!(message.contains("copy the version back"), "{message}");
+}
+
+#[test]
+fn a_damaged_checksum_file_may_be_deleted_and_rebuilt() {
+    let collection = stored(&[STAMP]);
+    collection.damage_corrupt_checksum("projects/a", STAMP);
+
+    let message = refusal(&collection);
+
+    assert!(
+        message.contains(&format!("`antiq forget projects/a {STAMP}`")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("and run `antiq rebuild projects/a {STAMP}`")),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_incomplete_version_is_forgotten_or_copied_back() {
+    let collection = stored(&[STAMP]);
+    collection.damage_remove_archive("projects/a", STAMP);
+
+    let message = refusal(&collection);
+
+    assert!(
+        message.contains(&format!("`antiq forget projects/a {STAMP}`")),
+        "{message}"
+    );
+}
+
+#[test]
+fn every_damaged_version_is_named() {
+    let collection = stored(&[STAMP, OTHER_STAMP]);
+    collection.damage_remove_listing("projects/a", STAMP);
+    collection.damage_remove_archive("projects/a", OTHER_STAMP);
+
+    let message = refusal(&collection);
+
+    assert!(message.contains(STAMP), "{message}");
+    assert!(message.contains(OTHER_STAMP), "{message}");
+}
+
+#[test]
+fn a_version_of_a_newer_format_does_not_refuse() {
+    let collection = stored(&[STAMP]);
+    let listing = collection.version_files("projects/a", STAMP).listing;
+    let newer = zstd::stream::encode_all(&b"# antiq listing 2\n"[..], 3).expect("encodes");
+    fs::write(listing, newer).expect("the listing is written");
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+}
+
+#[test]
+fn a_tree_that_trash_cannot_give_back_refuses() {
+    use std::os::unix::fs::PermissionsExt;
+    let collection = stored(&[]);
+    // `projects` is taken, so the tree cannot go back, and `recovered/`
+    // refuses it too.
+    let tree = collection.path(&format!(".antiq/trash/{STAMP}/projects/a"));
+    fs::create_dir_all(&tree).expect("the tree's folder is made");
+    fs::write(tree.join("kept.txt"), "kept").expect("the file is written");
+    let recovered = collection.path(".antiq/recovered");
+    fs::set_permissions(&recovered, fs::Permissions::from_mode(0o555))
+        .expect("recovered/ is locked");
+    assert!(
+        fs::File::create(recovered.join("probe")).is_err(),
+        "the test runs as a user who cannot write into a 0555 directory"
+    );
+
+    let message = refusal(&collection);
+
+    fs::set_permissions(&recovered, fs::Permissions::from_mode(0o755))
+        .expect("recovered/ is unlocked");
+    assert!(message.contains(".antiq/trash/"), "{message}");
+    assert!(message.contains("kept.txt"), "{message}");
+}
+
+#[test]
+fn trash_that_holds_only_empty_folders_does_not_refuse() {
+    let collection = stored(&[]);
+    fs::create_dir_all(collection.path(".antiq/trash/chain/of/folders")).expect("made");
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+}

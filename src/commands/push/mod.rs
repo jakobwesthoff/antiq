@@ -8,9 +8,14 @@ use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::plan::HeldDryRun;
+use crate::relpath::RelPath;
 use crate::run::{self, RunError, Started};
+use crate::select::SelectError;
 use crate::target::url::{TargetUrl, UrlError};
+use crate::versions::VersionsError;
 use std::path::{Path, PathBuf};
+
+mod store;
 
 /// Why push failed.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +35,30 @@ pub enum PushError {
     // holder of a held lock stays visible to the error details.
     #[error("cannot start the run")]
     Run(#[source] RunError),
+    #[error("cannot read the store")]
+    Versions(#[source] VersionsError),
+    #[error("cannot select the pieces")]
+    Select(#[source] SelectError),
+    #[error("cannot open the collection {}", .path.display())]
+    Root {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot read {}", .path.display())]
+    Trash {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the store holds versions that are damaged or incomplete:\n{}", .lines.join("\n"))]
+    DamagedStore { lines: Vec<String> },
+    #[error(
+        "`{first}` and `{second}` differ only in case or Unicode normalization, which the target's volume treats as one name"
+    )]
+    NameClash { first: RelPath, second: RelPath },
+    #[error(".antiq/trash/ still holds {}, which a repair could not put back", .path.display())]
+    TrashNotEmpty { path: PathBuf },
     /// The steps after the ones built so far.
     #[error("push is not implemented beyond its first checks")]
     Unfinished,
@@ -41,7 +70,15 @@ impl HasKind for PushError {
             PushError::NoTarget => ErrorKind::NoTarget,
             PushError::Run(error) => error.kind(),
             PushError::Unfinished => ErrorKind::NotImplemented,
-            PushError::Url(_) | PushError::RootNotUtf8 { .. } => ErrorKind::Other,
+            PushError::Url(_)
+            | PushError::RootNotUtf8 { .. }
+            | PushError::Versions(_)
+            | PushError::Select(_)
+            | PushError::Root { .. }
+            | PushError::Trash { .. }
+            | PushError::DamagedStore { .. }
+            | PushError::NameClash { .. }
+            | PushError::TrashNotEmpty { .. } => ErrorKind::Other,
         }
     }
 }
@@ -76,7 +113,11 @@ pub fn push(
             holder: Some(holder),
             ..
         } => Ok(PushOutcome::HeldDryRun(HeldDryRun::new(&holder))),
-        Started::DryRun { holder: None, .. } | Started::Guarded(_) => Err(PushError::Unfinished),
+        Started::DryRun { holder: None, .. } => Err(PushError::Unfinished),
+        Started::Guarded(guard) => {
+            store::check(collection, guard.warnings())?;
+            Err(PushError::Unfinished)
+        }
     }
 }
 
