@@ -16,7 +16,7 @@ I/O error, reads as "the folder is not there", so the piece derives as
 
 ## Problem
 
-`src/ops/status.rs`, `presence` (around line 1005) falls through to
+`src/commands/status.rs`, `presence` (around line 1005) falls through to
 `exists_exact` (around line 1037), which turns every lstat error into
 `Missing`. Shown by the reviewer in a scratch copy: a tracked piece
 `dir/alpha` with its folder in place, `chmod 000 dir`; `status` shows

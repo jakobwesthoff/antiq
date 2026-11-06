@@ -40,7 +40,7 @@ drivers may refuse symlinks.
 
 ## Already handled
 
-The volume probe in `src/pack/names.rs` (I13) checks for hard links and
+The volume probe in `src/archive/names.rs` (I13) checks for hard links and
 symlinks. A version holding members of a kind the volume cannot create
 is refused before anything is written, together with the name problems.
 

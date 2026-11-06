@@ -110,30 +110,30 @@ that are themselves deleted are not listed as refs.
 | `src/tombstone.rs` | removed | none outside deleted files |
 | `src/brake.rs` | "Rules for every command" (brake keys go), "push" (no brake) | `error.rs` (`Brake` variant and kind, `insert_brake_hold` error.rs:276-298), `plan.rs:7,16` and its brake tests (126+), `cli/mod.rs:15, 436-440` |
 | `src/repair.rs` (content) | rewritten (concept "Repairs") | `run.rs` imports `repair::{self, Effects, RealEffects, RepairError}` (run.rs:16) and passes `&dyn Effects` through `begin_with` (run.rs:51-65). R1 replaces the file by a stub with `run(collection, lock, clock) -> Result<Vec<Warning>, RepairError>` that returns no warnings and an empty `RepairError`; in `run.rs` it drops the `effects` parameter of `begin_with` and the two tests that need the old repairs, `a_repair_that_fails_is_an_error_of_the_run` (run.rs:173-181) and `a_real_run_empties_the_run_directories_before_it_starts` (run.rs:264-279). Every other user of `Effects` is a file R1 deletes (PO6, PH1). F6 writes the new file and the new run tests. |
-| `src/ops/archive/` (mod, new, new/finish, durable, unearthed) | rewritten; reclaim removed (concept "unearth", "There is no reclaim") | `error.rs` (`Archive`), `testing/mod.rs` (`LockHeldWithoutHolder` impl for `ArchiveError`, testing/mod.rs:37-60) |
-| `src/ops/unearth/` (mod, local, live, remote) | rewritten; live and remote go | `error.rs` (`Unearth`) |
-| `src/ops/fork.rs` | rewritten | `error.rs` (`Fork`) |
-| `src/ops/import.rs` | rewritten (folders, not archive files) | `error.rs` (`Import`) |
-| `src/ops/status.rs` | rewritten | `error.rs` (`Status`) |
-| `src/ops/pin.rs` | rewritten | `error.rs` (`PinOp`) |
-| `src/ops/find.rs` | removed (`find` goes) | `error.rs` (`Find`) |
-| `src/ops/sync/` | removed | `error.rs` (`Sync`) |
-| `src/ops/reconcile/` | removed ("There is no `reconcile` command") | `error.rs` (`Reconcile`), `cli/mod.rs` (`pruned`) |
-| `src/ops/resolve/` | removed (no conflicts) | `error.rs` (`Resolve`) |
-| `src/ops/remote.rs` | removed | `error.rs` (`RemoteOp`, custom `From` error.rs:211-219) |
+| `src/commands/archive/` (mod, new, new/finish, durable, unearthed) | rewritten; reclaim removed (concept "unearth", "There is no reclaim") | `error.rs` (`Archive`), `testing/mod.rs` (`LockHeldWithoutHolder` impl for `ArchiveError`, testing/mod.rs:37-60) |
+| `src/commands/unearth/` (mod, local, live, remote) | rewritten; live and remote go | `error.rs` (`Unearth`) |
+| `src/commands/fork.rs` | rewritten | `error.rs` (`Fork`) |
+| `src/commands/import.rs` | rewritten (folders, not archive files) | `error.rs` (`Import`) |
+| `src/commands/status.rs` | rewritten | `error.rs` (`Status`) |
+| `src/commands/pin.rs` | rewritten | `error.rs` (`PinOp`) |
+| `src/commands/find.rs` | removed (`find` goes) | `error.rs` (`Find`) |
+| `src/commands/sync/` | removed | `error.rs` (`Sync`) |
+| `src/commands/reconcile/` | removed ("There is no `reconcile` command") | `error.rs` (`Reconcile`), `cli/mod.rs` (`pruned`) |
+| `src/commands/resolve/` | removed (no conflicts) | `error.rs` (`Resolve`) |
+| `src/commands/remote.rs` | removed | `error.rs` (`RemoteOp`, custom `From` error.rs:211-219) |
 | `src/remote/{away,cleanup,commit,path,policy,testing}.rs`, `src/remote/ssh/` | removed (rsync replaces the remote layer) | `cli/mod.rs` (`policy::outcome`, `RemoteStop`, cli/mod.rs:422-429, 457-470), `error.rs` (`Remote`) |
 | `src/remote/mod.rs` (all but the module lines of `rsync`, `marker`, `url`) | shrinks | `marker.rs` uses `Durable`, `RealDurable`, `recording` only for `write_marker` (marker.rs:12, 109-154). R1 deletes `write_marker`, `Durable`, `RealDurable`, `recording` and the marker write tests (marker.rs:253-389), and keeps the format tests (marker.rs:156-250) (PO3). |
-| `src/pack/live.rs`, `src/pack/manifest.rs` | "What remains": `pack/` without them | none outside deleted files |
-| `src/pack/frames.rs` | not in the concept table; its only user is the old `import` of archive files (`src/ops/import.rs:30, 273, 434`) | none outside deleted files. Flagged in section 8 (O3). |
+| `src/archive/live.rs`, `src/archive/manifest.rs` | "What remains": `archive/` without them | none outside deleted files |
+| `src/archive/frames.rs` | not in the concept table; its only user is the old `import` of archive files (`src/commands/import.rs:30, 273, 434`) | none outside deleted files. Flagged in section 8 (O3). |
 | `src/cli/picker/` with `snapshots/` | removed | `cli/mod.rs:10` |
 | `src/cli/cmd/{find,resolve,reconcile,remote}.rs`, `src/cli/cmd/sync/` | removed commands | `cli/mod.rs` (`Command` variants :41-71, `dispatch` :336, `name` :76, `if_reachable` :95, `guess_command` :515), `cli/cmd/mod.rs` |
 
-Module declarations of deleted files also go from `src/pack/mod.rs`
-(pack/mod.rs:8-11: `frames`, `live`, `manifest`) and from
+Module declarations of deleted files also go from `src/archive/mod.rs`
+(archive/mod.rs:8-11: `frames`, `live`, `manifest`) and from
 `tests/support/mod.rs` (`objects`, `pieces`, `pty`) (PH10).
 
 `src/interact.rs` and `src/cli/tty.rs` are removed by the concept too,
-but `init` still asks through them (`src/ops/init.rs:14, 321-406`,
+but `init` still asks through them (`src/commands/init.rs:14, 321-406`,
 `cli/cmd/init.rs:29-30`). R1 leaves them; C2 (the new `init`) deletes
 both, together with `Context::interaction` and `terminal`
 (`cli/mod.rs:307-321`) and the `--json` help text "never ask a
@@ -143,7 +143,7 @@ question" (`cli/mod.rs:32`).
 
 | File | What goes | Why |
 |---|---|---|
-| `src/id.rs` | `id_time`, `IdTime`, `EntryTimes`, `ID_TIME_FLOOR` and their tests (id.rs:74-165 area) | object-ID time minting. `ObjectId`, `IdSource`, `RandomIds` and `SeqIds` stay, since `init` mints the collection ID through them (`ops/init.rs:13, 263, 414`, `cli/cmd/init.rs:10`); C2 decides whether the minting trait outlives the old `init` (PH11) |
+| `src/id.rs` | `id_time`, `IdTime`, `EntryTimes`, `ID_TIME_FLOOR` and their tests (id.rs:74-165 area) | object-ID time minting. `ObjectId`, `IdSource`, `RandomIds` and `SeqIds` stay, since `init` mints the collection ID through them (`commands/init.rs:13, 263, 414`, `cli/cmd/init.rs:10`); C2 decides whether the minting trait outlives the old `init` (PH11) |
 | `src/relpath.rs` | `name_part`, `machine_part`, `temp_name`, `escape_part` (relpath.rs:208-250) and tests | payload and upload temp names; their callers are all deleted |
 | `src/reference.rs` | `resolve` (index-based), the ULID prefix logic (`PREFIX_LENGTHS`, `is_prefix`, reference.rs:62-135), `ReferenceError::Index`, the index/tracking fixtures of its tests (reference.rs:254-278) | F8 rewrites references; `resolve_path` (reference.rs:149-190: `.`/`..` folding, root found by device and inode, no symlink followed) stays as it is |
 | `src/plan.rs` | the `brake` field, its JSON, its lines, and its brake tests (plan.rs:101-171), which hold the file's only use of `reference::Candidate` (plan.rs:102, 132, 167, 171) (PO19) | concept "Rules for every command" |
@@ -162,16 +162,16 @@ such an item gets `#[allow(dead_code, reason = "used again by <item>")]`
 naming the consumer item; it is never made `pub` to hide the warning;
 the consumer removes the allowance; Z greps `allow(dead_code` under
 `src/` and finds only the allowances that exist on beb748f
-(`cli/mod.rs:293`, `cli/output.rs:211, 223`, `fsx/device.rs:9`,
+(`cli/mod.rs:293`, `cli/output.rs:211, 223`, `filesystem/device.rs:9`,
 `testing/mod.rs:8`). Known cases and their consumers:
 
 | Item | Consumer |
 |---|---|
-| `fsx::space::{available_space, SpaceLedger, Reservation}` (space.rs:13-61) | C4 (`store_version`), C6 |
-| `pack::extract::check_structure` (extract.rs:538) | C6 |
-| `fsx::remove::remove_tree_at` (remove.rs:48) | F6 (repair 3) |
-| `fsx::moves::move_dir` | F6 (repair 4, `give_back`) |
-| `fsx::device::is_mount_point` | P2 |
+| `filesystem::space::{available_space, SpaceLedger, Reservation}` (space.rs:13-61) | C4 (`store_version`), C6 |
+| `archive::extract::check_structure` (extract.rs:538) | C6 |
+| `filesystem::remove::remove_tree_at` (remove.rs:48) | F6 (repair 3) |
+| `filesystem::moves::move_dir` | F6 (repair 4, `give_back`) |
+| `filesystem::device::is_mount_point` | P2 |
 | `cli::output::Output::line_os` (output.rs:218) | C11 (raw paths in a pipe) |
 | `cli::output::Output::stdout_style` (output.rs:176) | C1 |
 | table helpers in `cli/table.rs` | C1, C3 to C11 (whichever uses each) |
@@ -228,7 +228,7 @@ S1 then replaces the surface with the new one (section 4.1).
 | `unicode-segmentation` | R1 | only `src/cli/picker/layout.rs:19` |
 | `rustix` feature `pty` | R1 | only `tests/support/pty.rs:363-371`; `termios` stays for `cli/output.rs:116, 129` |
 | `nucleo` | kept | its users (`src/index.rs:23-24`, the picker) go, but F8 ports the query of `index.rs:500-540` into `src/query.rs` for the search-word references and `list` (O1, PO12). R1 keeps the dependency without users; cargo does not lint unused dependencies. |
-| zstd feature `experimental` | F3 | needed only for `RSyncable` and `JobSize` of the live preset (`src/pack/zstd.rs:78-84`), which F3 removes |
+| zstd feature `experimental` | F3 | needed only for `RSyncable` and `JobSize` of the live preset (`src/archive/zstd.rs:78-84`), which F3 removes |
 | `zstd-sys` (`=2.1.2`, Cargo.toml:35-37) | F3 | the exact pin served byte-stable live packages (ADR 0052); lead decision O4 (8.4): pin and ADR go (PH4) |
 | `regex` | added by C11 | `grep` (concept "grep"), with `cargo add` |
 
@@ -250,9 +250,9 @@ clippy --all-targets -- -D warnings`, `cargo test`).
    remote layer, `pty.rs`, the ssh test files and the unused ssh texts; stub
    `archive`, `unearth`, `fork`, `import`, `status`, `pin`, `unpin`;
    remove `meta`, `store`, `tracking`, `index`, `tombstone`, the old
-   `repair`, `pack/{live,manifest,frames}` and the parts of 2.2. These
+   `repair`, `archive/{live,manifest,frames}` and the parts of 2.2. These
    cannot be split further without keeping the stubbed commands alive
-   on the old store, since `ops/archive`, `ops/unearth` and `ops/status`
+   on the old store, since `commands/archive`, `commands/unearth` and `commands/status`
    reach into the remote layer and live packages (Appendix A.1, A.2).
 
 The diff is almost all deletion. The reviewable part is the edits to
@@ -277,16 +277,16 @@ change or go; new tests are in the items (section 7).
 | `src/rules.rs` (new, from `src/idle.rs`) | F4 | The gitignore matcher (idle.rs:11, 103-140, 272-337) moves here and serves two rule kinds: ignore (`ignore`, `.antiqignore`) and timeless (`timeless`, `.antiq-timeless`). Precedence, anchoring and the refusal of a broken rule file stay as built (idle.rs:288-316). | the ignore tests of idle.rs move with it |
 | `src/idle.rs` | F5 | Idle clock of concept "Idle clock": later of the newest counted mtime and the `.antiq-restored` time; no one-day tolerance and no `OnlyFuture` (idle.rs:161, 184-212); future files and a future marker time are listed; control files at the top only; a marker that cannot be read or parsed refuses the piece; `soon` from `soon_days`. The `unearthed` parameter (idle.rs:144) becomes the parsed marker. | tolerance and `OnlyFuture` tests change; marker tests new |
 | `src/pin.rs` | F5 | A pin is a regular file or a symlink named `.antiq-pin` at the top (pin.rs:56-62 today takes any non-directory). `create` writes through `.antiq/tmp/` and a rename, `remove` unlinks; both grant owner write to a top without it and put the mode back, then flush the top (concept "Markers"). A top on another device than `.antiq/tmp/` would make the rename fail with `EXDEV`; the marker write checks the device first and refuses with the reason "mount point" (PF3). | `is_pinned` tests for fifo/socket change (now a refusal, decided in the walk) |
-| `src/fsx/tree.rs` | F4 | `TreeEntry` gains the immutable/append-only flags: macOS `st_flags` `UF_IMMUTABLE`, `SF_IMMUTABLE`, `UF_APPEND`, `SF_APPEND`; Linux `statx` `STATX_ATTR_IMMUTABLE`, `STATX_ATTR_APPEND` from the call that already reads `STATX_ATTR_MOUNT_ROOT` (fsx/tree.rs:584-640). | new |
-| `src/fsx/remove.rs`, `src/fsx/moves.rs` | F4 | Refuse an entry with those flags with their own `FsxError` variant, before touching it (concept "What remains": `fsx/`). `remove_tree` checks every entry it would delete. `move_dir` checks only what a rename touches: the moved directory and the parents it leaves and enters; the tree's contents are the walk's job (PF12). | new |
-| `src/fsx/atomic.rs`, `src/fsx/space.rs` | F2 | A helper that creates a missing directory chain and flushes each new directory with its parent (concept "Store layout", flush rule). `is_out_of_space` (ENOSPC through the error chain, ported from `src/ops/archive/new.rs:271-283`) moves into `fsx/space.rs` for C4, C5, C6, C7 (PO8); F4 alone edits `fsx/mod.rs`. | new |
-| `src/fsx/space.rs` | F2 | `available_space`, `SpaceLedger` stay (concept "Free space"); `is_out_of_space` joins them (row above). | |
+| `src/filesystem/tree.rs` | F4 | `TreeEntry` gains the immutable/append-only flags: macOS `st_flags` `UF_IMMUTABLE`, `SF_IMMUTABLE`, `UF_APPEND`, `SF_APPEND`; Linux `statx` `STATX_ATTR_IMMUTABLE`, `STATX_ATTR_APPEND` from the call that already reads `STATX_ATTR_MOUNT_ROOT` (filesystem/tree.rs:584-640). | new |
+| `src/filesystem/remove.rs`, `src/filesystem/moves.rs` | F4 | Refuse an entry with those flags with their own `FilesystemError` variant, before touching it (concept "What remains": `filesystem/`). `remove_tree` checks every entry it would delete. `move_dir` checks only what a rename touches: the moved directory and the parents it leaves and enters; the tree's contents are the walk's job (PF12). | new |
+| `src/filesystem/atomic.rs`, `src/filesystem/space.rs` | F2 | A helper that creates a missing directory chain and flushes each new directory with its parent (concept "Store layout", flush rule). `is_out_of_space` (ENOSPC through the error chain, ported from `src/commands/archive/new.rs:271-283`) moves into `filesystem/space.rs` for C4, C5, C6, C7 (PO8); F4 alone edits `filesystem/mod.rs`. | new |
+| `src/filesystem/space.rs` | F2 | `available_space`, `SpaceLedger` stay (concept "Free space"); `is_out_of_space` joins them (row above). | |
 | `src/listing.rs` | F3 | Rewritten to concept "Listing format" (Appendix A.2: today zstd JSON lines). The in-memory `ListingEntry` stays, with `hard` entries carrying the SHA-256 of the file they link to. | almost all of listing.rs:306-908 replaced |
-| `src/pack/tar_write.rs`, `read.rs`, `verify.rs`, `mod.rs` | F3, F4 | F3: hard-link entries carry the target's hash (tar_write.rs:334 sets none today); `read::list` yields the same entries from a tar alone (the listing `rebuild` regenerates); `files` and `bytes` counted once per stored file. F3 also owns the shared verification that C6 and C9 build on (PS5, PO8): the whole-file hash (`file_sha256`, ported from `src/ops/archive/new.rs:1063`, and the check against a checksum file, after `check_archive`, `src/ops/unearth/local.rs:243-267`), and the comparison of a tar's members with a listing without a folder (model `Arrived::check_listing`, `src/ops/unearth/remote.rs:110-134`). F4: `WalkRules.junk` becomes the ignore rules for a user's folder; staged trees are verified with no rules. | tar_write.rs:792-809, 871-892 (exact JSON) change |
-| `src/pack/zstd.rs`, `src/testing/package.rs`, `Cargo.toml` | F3 | Live preset and constants go (zstd.rs:20-51, 78-84); a public `ZstdSettings::fast` (a low level, one worker) serves tests and the version fixture, so fixtures never run the level-19 encoder with its memory cost (pool.rs:22-27) (PO16); Cargo feature `experimental` and the `zstd-sys` pin go (O4, PH4). | zstd.rs ~176-186 and the `ZstdSettings::live(1)` call sites of Appendix A.2 change to `fast` |
-| `src/pack/pool.rs`, `src/testing/pool.rs` | F3 | `Pool::for_machine()` takes no percentage; a constant of 25 % (concept "What remains": `pack/`). | pool tests with explicit percentages stay (they call `for_machine_with`) |
-| `src/pack/names.rs` | none | Probe, folding, member checks and portability warnings carry over (ADR 0054). | unchanged |
-| `src/pack/extract.rs` | C6 | A flush hook for every extracted file and directory, by the method of section 5.1. A file is flushed before it is closed (extract.rs:441). A directory is flushed after `finish` has set its final mode and times (extract.rs:460-471), since those changes dirty it again, and through the handle the extraction holds, since a final mode may keep the owner from opening it again (PF2). | new |
+| `src/archive/tar_write.rs`, `read.rs`, `verify.rs`, `mod.rs` | F3, F4 | F3: hard-link entries carry the target's hash (tar_write.rs:334 sets none today); `read::list` yields the same entries from a tar alone (the listing `rebuild` regenerates); `files` and `bytes` counted once per stored file. F3 also owns the shared verification that C6 and C9 build on (PS5, PO8): the whole-file hash (`file_sha256`, ported from `src/commands/archive/new.rs:1063`, and the check against a checksum file, after `check_archive`, `src/commands/unearth/local.rs:243-267`), and the comparison of a tar's members with a listing without a folder (model `Arrived::check_listing`, `src/commands/unearth/remote.rs:110-134`). F4: `WalkRules.junk` becomes the ignore rules for a user's folder; staged trees are verified with no rules. | tar_write.rs:792-809, 871-892 (exact JSON) change |
+| `src/archive/zstd.rs`, `src/testing/package.rs`, `Cargo.toml` | F3 | Live preset and constants go (zstd.rs:20-51, 78-84); a public `ZstdSettings::fast` (a low level, one worker) serves tests and the version fixture, so fixtures never run the level-19 encoder with its memory cost (pool.rs:22-27) (PO16); Cargo feature `experimental` and the `zstd-sys` pin go (O4, PH4). | zstd.rs ~176-186 and the `ZstdSettings::live(1)` call sites of Appendix A.2 change to `fast` |
+| `src/archive/pool.rs`, `src/testing/pool.rs` | F3 | `Pool::for_machine()` takes no percentage; a constant of 25 % (concept "What remains": `archive/`). | pool tests with explicit percentages stay (they call `for_machine_with`) |
+| `src/archive/names.rs` | none | Probe, folding, member checks and portability warnings carry over (ADR 0054). | unchanged |
+| `src/archive/extract.rs` | C6 | A flush hook for every extracted file and directory, by the method of section 5.1. A file is flushed before it is closed (extract.rs:441). A directory is flushed after `finish` has set its final mode and times (extract.rs:460-471), since those changes dirty it again, and through the handle the extraction holds, since a final mode may keep the owner from opening it again (PF2). | new |
 | `src/reference.rs`, `src/query.rs` (new) | F8 | New resolution against live pieces and store pieces (section 4.7). `resolve_path` stays. The nucleo query of `src/index.rs:500-540` (beb748f) is ported into `src/query.rs`, which `list` uses too (PO12, PH5). | rewritten |
 | `src/remote/{rsync,marker,url}.rs` | P1 | Move to `src/target/`. rsync: floor 3.2.4 with patch compare (rsync.rs:88-93, 374-410), `[target] rsync`, argv of concept "push" steps 4 to 7, exit status, stdout and stderr returned for every status; `--ignore-times`, `--no-whole-file`, `--partial-dir`, `--stats` parsing go (rsync.rs:165-197, 282-299). marker: `.antiq-target`, `{format, id, host, path}`, rewrite allowed. url: absolute path (any characters a TOML string holds) or `[user@]host:path` (PF10). | rsync argv and stats tests go (rsync.rs:850-995 partly, 1065-1118, 1344); probe, env, resolve, failure tests stay; url tests mostly replaced (the marker write tests already went in R1) |
 | `src/error.rs` | S1, then items | S1 creates the error enum of every new module and command, wires each into `error::Error` and adds the kinds `target_unreachable` (exit 4; O8) and `no_target` (exit 1; PS3); items fill their own enum and never edit `error.rs` (PH6). `details` finds a `LockError::Held` anywhere in the source chain, so a command error that wraps `RunError` still carries `pid` and `started` in its JSON (error.rs:275-283 matches only two shapes today) (PO15). | kind table test changes; a wrapped held-lock test |
@@ -311,7 +311,7 @@ changing command takes `-n`/`--dry-run` (concept "Dry runs"). clap's
 
 | Command | Arguments |
 |---|---|
-| `init` | `[--pattern <glob>]... [--yes] [-n]`; `--yes` stays only until C2, since the old `init` still asks (`src/ops/init.rs:327-344`) and `tests/init.rs` relies on it; C2 removes it and adds a test that `--yes` is a usage error (PH2, PO11) |
+| `init` | `[--pattern <glob>]... [--yes] [-n]`; `--yes` stays only until C2, since the old `init` still asks (`src/commands/init.rs:327-344`) and `tests/init.rs` relies on it; C2 removes it and adds a test that `--yes` is a usage error (PH2, PO11) |
 | `status` | none |
 | `archive` | `[<piece>] [-n]` |
 | `unearth` | `<piece> [--version <version>] [-n]` (`--to` goes) |
@@ -330,7 +330,7 @@ every command (find the collection, then `not_implemented`; `init`
 keeps working), and the new library files, each with its module doc
 and nothing else: `src/versions/{mod,stamp,names,store,damage,naming}.rs`,
 `src/rules.rs`, `src/markers.rs`, `src/query.rs`,
-`src/ops/{archive,unearth,fork,forget,rebuild,import,list,grep,status,
+`src/commands/{archive,unearth,fork,forget,rebuild,import,list,grep,status,
 pin,push,survey,restore}.rs`. `src/cli/table.rs` exists since R1. S1
 also creates `tests/support/versions.rs` as a stub and its `#[path]`
 line in `src/testing/mod.rs` and its line in `tests/support/mod.rs`, so
@@ -384,7 +384,7 @@ Concept "Concepts" (version stamp), "Store layout".
 - Exact lookup (PO8): F2 owns the lookup of a piece path with the
   volume's own name equality, an `lstat` through the path, then the
   stored spelling read from the directory listing (port `lists_exactly`,
-  `src/ops/unearth/mod.rs:871-883`). C1, C6, F6 and F8 build on it. No
+  `src/commands/unearth/mod.rs:871-883`). C1, C6, F6 and F8 build on it. No
   probe is used, so dry runs stay read-only.
 - Operations, each flushing as concept "Store layout" says:
   `move_in` (listing, then checksum file, then `.tar.zst`, each flushed,
@@ -393,10 +393,10 @@ Concept "Concepts" (version stamp), "Store layout".
   then listing and checksum file, flushing between; used by `unearth`,
   `forget`, repair 5); removal of a store folder and its parents that
   became empty. Store folders and parents are created through the new
-  `fsx::atomic` chain helper. `is_out_of_space` moves into `fsx/space.rs`
+  `filesystem::atomic` chain helper. `is_out_of_space` moves into `filesystem/space.rs`
   (section 3).
 - Builds on: F1 (the `pieces/` accessor and the new fixture layout,
-  PO5), `fsx::atomic::{flush_file, flush_dir}`, `TreeRoot`,
+  PO5), `filesystem::atomic::{flush_file, flush_dir}`, `TreeRoot`,
   `relpath::RelPath`.
 - Test fixture `tests/support/versions.rs`, built by F7 (it needs F3's
   listing writer and F4's walk) and included by S1 in `src/testing/mod.rs`
@@ -434,11 +434,11 @@ Concept "Listing format", "Store layout" (checksum file).
   reader accepts exactly that.
 - Shared verification (PS5, PO8), which C4, C6 and C9 build on instead
   of each porting it: the whole-file hash of an archive (`file_sha256`,
-  `src/ops/archive/new.rs:1063`) and its check against the checksum
+  `src/commands/archive/new.rs:1063`) and its check against the checksum
   file and the listing's `archive-bytes` (after `check_archive`,
-  `src/ops/unearth/local.rs:243-267`); the comparison of a tar's members
+  `src/commands/unearth/local.rs:243-267`); the comparison of a tar's members
   (`read::list`) with a listing, without a folder (model
-  `Arrived::check_listing`, `src/ops/unearth/remote.rs:110-134`).
+  `Arrived::check_listing`, `src/commands/unearth/remote.rs:110-134`).
 - Tests first: the concept:264 test, a listing with tab, backslash,
   newline and carriage return in names passes
   `shasum -a 256 --strict -c` and GNU `sha256sum --strict -c` with exit
@@ -477,7 +477,7 @@ version).
 
 Concept "Selection, walk and idle check", "Markers".
 
-- F4 (section 3 rows for `tree.rs`, `walk.rs`, `rules.rs`, `fsx`): the
+- F4 (section 3 rows for `tree.rs`, `walk.rs`, `rules.rs`, `filesystem`): the
   walk reads `.antiqignore` and `.antiq-timeless` as it descends (as
   `idle.rs` reads `.antiqignore` today), classifies every entry, and
   keeps checking ignored subtrees for mount points, nested collections,
@@ -527,7 +527,7 @@ Concept "Repairs at the start of a run", "Rules for every command".
   rewrite the marker to the time alone; name the deleted version.
 - Repair 6: remove empty store folders and their empty parents.
 - Giving a tree back (PO13): F6 owns `give_back` (rename back, else to
-  `recovered/`), ported from `src/ops/archive/new/finish.rs:362-473` and
+  `recovered/`), ported from `src/commands/archive/new/finish.rs:362-473` and
   `src/repair.rs:355-376` (beb748f), and exposes it; repair 4 and
   `archive` step 6 (C4) both call it.
 - Builds on: F1, F2, F5.
@@ -558,10 +558,10 @@ defined by the item and written into the spec section "JSON output" in
 the same commit. A held lock in a real run is `lock_held` with `pid` and
 `started` in the JSON (PO15).
 
-- **status (C1)**: new `ops/survey.rs` judges every live piece (port the
-  select, walk and judge loop of `src/ops/status.rs:385-395, 602-622` at
+- **status (C1)**: new `commands/survey.rs` judges every live piece (port the
+  select, walk and judge loop of `src/commands/status.rs:385-395, 602-622` at
   beb748f) into `due`, `soon`, `pinned`, `refused` with every refusal of
-  the walk as its reason (O14, decided), or plain; `ops/status.rs` adds
+  the walk as its reason (O14, decided), or plain; `commands/status.rs` adds
   the header (folder count, version count and the sum of
   `archive-bytes`, `idle_days`), the table sorted by path, and the notes
   of concept "status" (future times, damaged and incomplete versions with
@@ -575,14 +575,14 @@ the same commit. A held lock in a real run is `lock_held` with `pid` and
   01M6JNH5VD0MD4MVP0M9A97MA7). `soon` comes from `soon_days`. No lock;
   a held lock is a note.
 - **init (C2)**: no question, no `archive.sh` detection
-  (`has_archive_sh_layout`, `src/ops/init.rs:215-232`, goes), refusals
+  (`has_archive_sh_layout`, `src/commands/init.rs:215-232`, goes), refusals
   as concept "init", the new layout and config, `-n` prints the config.
   After creating, it prints how many folders the next `archive` would
   archive, counted with C1's survey (PH7, decided; section 5.2).
   Deletes `interact.rs`, `cli/tty.rs`, `--yes`.
 - **pin, unpin (C3)**: F8 reference to a live piece, F5 marker write,
   lock and repairs, `-n` says which. Port `PinAction`, `PinReport`,
-  `Pinned`, `current_pin`, `folder_exists` (`src/ops/pin.rs` at beb748f,
+  `Pinned`, `current_pin`, `folder_exists` (`src/commands/pin.rs` at beb748f,
   :48-62, 195, 287).
 - **archive (C4)**: steps 1 to 8 of concept "archive", the crash notes,
   `archive <piece>`, `-n`. C4 exposes `store_version` (steps 2 to 4:
@@ -590,10 +590,10 @@ the same commit. A held lock in a real run is `lock_held` with `pid` and
   also holds the free-space check and reservation against the apparent
   size of the entries that are packed (O25, decided), so `import` gets
   the same rule (PS4, PO23). Builds on: F2 (stamp, `move_in`,
-  `move_back`, exact lookup, `is_out_of_space` in `fsx`), F3 (listing,
+  `move_back`, exact lookup, `is_out_of_space` in `filesystem`), F3 (listing,
   checksum file, `file_sha256`), F4/F5 (walk, idle), F6 (run,
   `give_back`), F8 (reference), C1 (survey). Ports from beb748f: the
-  parallel runner (`src/ops/archive/mod.rs:710-836`), `walk_and_judge`
+  parallel runner (`src/commands/archive/mod.rs:710-836`), `walk_and_judge`
   and `refused_by` (new.rs:466-525), `SpaceLedger` use (new.rs:631-644),
   `pack`/`write_package` (new.rs:730-774, 1031-1050), the trash re-walk
   (`differs`, `difference`, `walk_trashed`, finish.rs:48-305), and the
@@ -604,22 +604,22 @@ the same commit. A held lock in a real run is `lock_held` with `pid` and
   walked with the collection's rules and its own rule files, with the
   walk refusals; `# imported <time>`; `--time` (O11, decided); version
   time in the future refused naming the file. Ports `check_path`
-  (`src/ops/import.rs:513-543`).
-- **unearth (C6)** with the shared `ops/restore.rs`: concept "unearth"
+  (`src/commands/import.rs:513-543`).
+- **unearth (C6)** with the shared `commands/restore.rs`: concept "unearth"
   order, the flush method of section 5.1 (with the directory rule of
-  section 3, `pack/extract.rs`), damaged refused through F3's shared
+  section 3, `archive/extract.rs`), damaged refused through F3's shared
   verification, marker refusal, target refusals (port
   `check_target_on_disk`, `look_at`, `ancestors`, `TargetProblem`,
-  `src/ops/unearth/mod.rs:146-167, 753-870`, with F2's exact lookup in
+  `src/commands/unearth/mod.rs:146-167, 753-870`, with F2's exact lookup in
   place of `lists_exactly`; `check_target_names`, `make_parents`,
   `remove_created`, `move_into_place`,
-  `src/ops/unearth/local.rs:437-573` without the tracking-bound
+  `src/commands/unearth/local.rs:437-573` without the tracking-bound
   `check_entries_on_volume` at 494-528), names per ADR 0054, free space for
   the listing's `bytes`, `.antiq-restored` with the stamp, version
   deletion, marker rewrite. Staging under `tmp/extract/<n>/` (plan
   decision; repair 2 empties it).
-- **fork (C7)**: concept "fork" on `ops/restore.rs`; `--name <new
-  path>` (a path now, not one name as in `src/ops/fork.rs:294-310`);
+- **fork (C7)**: concept "fork" on `commands/restore.rs`; `--name <new
+  path>` (a path now, not one name as in `src/commands/fork.rs:294-310`);
   refusal of a taken original path names `--name`; damaged version with
   a warning; without a usable listing the space check is skipped with a
   warning and the ENOSPC rule applies (O5, decided).
@@ -636,7 +636,7 @@ the same commit. A held lock in a real run is `lock_held` with `pid` and
   is a note on stderr, and a `note` field under `--json`, exit 0.
 - **grep (C11)**: concept "grep"; `regex::bytes` over each decoded
   listing, files in parallel on all cores but two (`std::thread::scope`
-  with an atomic index, as `src/ops/archive/mod.rs:806-818` does);
+  with an atomic index, as `src/commands/archive/mod.rs:806-818` does);
   incomplete versions skipped; a listing that does not decode is skipped
   with a warning naming the version (O10, decided); terminal grouping,
   pipe lines, `--json`; unescaped matching, escaped display, raw pipe
@@ -661,12 +661,12 @@ Concept "push", "Configuration".
   options; `LC_ALL=C` and the scrubbed environment of
   rsync.rs:422-434). `fake-rsync.sh` gains per-call answers (by call
   number) for multi-run tests.
-- P2 (`src/ops/push.rs`): steps 1 to 9 of concept "push": repairs
+- P2 (`src/commands/push.rs`): steps 1 to 9 of concept "push": repairs
   (lock for the whole run); store check (full damage scan, case and
   normalization clashes via `names::fold_path`, `trash/` not empty);
   rsync check; pre-check table (path target: canonicalize, refuse at or
   below the collection root by (device, inode) of its ancestors, refuse a
-  mount root via `fsx::device::is_mount_point`, errno classes of
+  mount root via `filesystem::device::is_mount_point`, errno classes of
   `src/remote/path.rs:145-163` at beb748f; ssh target: `--list-only`,
   exit 255 and 23 rules); marker read, compare, `--init`,
   `--force` (marker untouched); mirror with `-H`; second pass on `*deleting`; result codes 0,
@@ -700,16 +700,16 @@ Concept "push", "Configuration".
 
 Concept "unearth" (Order): no version is deleted before the folder that
 replaces it is durable; the method is measured here. Today nothing
-flushes the extracted tree (`src/pack/extract.rs:397-481`,
-`src/ops/unearth/local.rs` `place`; Appendix A.4). `flush_file` is
+flushes the extracted tree (`src/archive/extract.rs:397-481`,
+`src/commands/unearth/local.rs` `place`; Appendix A.4). `flush_file` is
 `File::sync_all`, which is `F_FULLFSYNC` on macOS, with a plain `fsync`
-where the filesystem answers `ENOTSUP` (`src/fsx/atomic.rs:20-46`).
+where the filesystem answers `ENOTSUP` (`src/filesystem/atomic.rs:20-46`).
 
 Candidates on macOS:
 
 - **A, per file**: `sync_all` on every extracted file before it is
   closed (hook at `extract.rs:441`), every directory flushed after
-  `finish` set its mode and times (section 3, `pack/extract.rs`), then
+  `finish` set its mode and times (section 3, `archive/extract.rs`), then
   the parent after the rename.
 - **B, one full flush**: plain `fsync` per file and directory, then one
   `F_FULLFSYNC` on a file of the staging volume before the rename. This
@@ -760,7 +760,7 @@ Decided by the lead (PH7, 8.4): after creating the collection, `init`
 prints how many folders the next `archive` would archive. Concept
 "init" asked for it when it takes no more than a few lines on top of the
 code `status` and `archive -n` run; in this plan both build on
-`ops/survey.rs` (C1, section 4.8), so `init` opens the collection it
+`commands/survey.rs` (C1, section 4.8), so `init` opens the collection it
 just wrote, calls the survey, counts `due`, prints one line and adds one
 JSON field. C2 therefore depends on C1. The spec states the one
 behaviour (concept "init", last paragraph).
@@ -1057,8 +1057,8 @@ beside F6; it must be done before C4. M1 must have reported before C6.
 
 Ownership moves by the review, which the table reflects: F3 owns the
 shared verification and `file_sha256` (PS5, PO8); F2 owns the exact
-lookup and `is_out_of_space`, which goes into `fsx/space.rs` so that F4
-alone edits `fsx/mod.rs` (`FsxError`); F6 owns `give_back` (PO13); F8
+lookup and `is_out_of_space`, which goes into `filesystem/space.rs` so that F4
+alone edits `filesystem/mod.rs` (`FilesystemError`); F6 owns `give_back` (PO13); F8
 owns `src/query.rs` (PO12); C4 owns `store_version` (PS4); S1 adds the
 `#[path]` lines for `tests/support/versions.rs` to `src/testing/mod.rs`
 and `tests/support/mod.rs`, with the file as a stub, so F6 and F7 do not
@@ -1102,8 +1102,8 @@ neighbouring-hunk conflicts.
 
 - Scope: section 2 complete, in the two commits of 2.6, with the
   dead-code rule of 2.2.
-- Files: everything in 2.1 to 2.5; `src/lib.rs`, `src/ops/mod.rs`,
-  `src/pack/mod.rs` (module lines), `src/error.rs`, `src/run.rs`
+- Files: everything in 2.1 to 2.5; `src/lib.rs`, `src/commands/mod.rs`,
+  `src/archive/mod.rs` (module lines), `src/error.rs`, `src/run.rs`
   (repair call and two tests, 2.1), `src/cli/mod.rs`,
   `src/cli/cmd/mod.rs`, `src/cli/table.rs` (new, moved helpers),
   `tests/support/mod.rs` (module lines), `Cargo.toml`, `Cargo.lock`
@@ -1125,7 +1125,7 @@ neighbouring-hunk conflicts.
 
 - Scope: section 4.1.
 - Files: `src/cli/mod.rs`, `src/cli/cmd/*.rs`, `src/lib.rs` (module
-  lines, `extern crate self as antiq;`), `src/ops/mod.rs`, every new
+  lines, `extern crate self as antiq;`), `src/commands/mod.rs`, every new
   module file of 4.1 (stubs with their empty error enums),
   `tests/support/versions.rs` (stub) with its lines in
   `src/testing/mod.rs` and `tests/support/mod.rs`, `src/error.rs`,
@@ -1148,7 +1148,7 @@ neighbouring-hunk conflicts.
 #### F1 Config, collection layout and machine name
 
 - Scope: section 3 rows `config.rs`, `collection.rs`, `machine.rs`,
-  `run.rs` (machine name), `tests/support/tree.rs`; `ops/init.rs` call of
+  `run.rs` (machine name), `tests/support/tree.rs`; `commands/init.rs` call of
   `ConfigDoc::new` and its `LAYOUT` (init.rs:123-131) so `init` writes
   the new layout and config. Shared edit in `src/remote/rsync.rs`:
   delete `Rsync::from_machine`, `TransferSettings::for_machine`, the
@@ -1177,8 +1177,8 @@ neighbouring-hunk conflicts.
 
 - Scope: section 4.2 without the real-version fixture (F7 fills it); the
   exact lookup and `is_out_of_space` (PO8).
-- Files: `src/versions/{mod,stamp,names,store}.rs`, `src/fsx/atomic.rs`
-  (chain helper), `src/fsx/space.rs` (`is_out_of_space`).
+- Files: `src/versions/{mod,stamp,names,store}.rs`, `src/filesystem/atomic.rs`
+  (chain helper), `src/filesystem/space.rs` (`is_out_of_space`).
 - Depends on: F1 (the `pieces/` accessor and the fixture layout, PO5).
 - Tests first: stamps `2026-11-04T090211`, `-2`, `-10` parse and order
   (`-10` after `-9`); `-1`, `-0`, `-02` refused; a second version in the
@@ -1199,7 +1199,7 @@ neighbouring-hunk conflicts.
 
 #### F3 Listing format, checksum file, packing and shared verification
 
-- Scope: section 4.3; section 3 rows for `listing.rs`, `pack/*`,
+- Scope: section 4.3; section 3 rows for `listing.rs`, `archive/*`,
   `zstd.rs`, `pool.rs`, `testing/package.rs`, `testing/pool.rs`;
   Cargo feature `experimental` and the `zstd-sys` pin removed (O4,
   PH4); the shared verification and `file_sha256` (PS5, PO8).
@@ -1222,8 +1222,8 @@ neighbouring-hunk conflicts.
 
 #### F4 Rules and the walk
 
-- Scope: section 3 rows `tree.rs`, `walk.rs`, `rules.rs`, `fsx/mod.rs`,
-  `fsx/tree.rs`, `fsx/remove.rs`, `fsx/moves.rs`, `pack/mod.rs` and
+- Scope: section 3 rows `tree.rs`, `walk.rs`, `rules.rs`, `filesystem/mod.rs`,
+  `filesystem/tree.rs`, `filesystem/remove.rs`, `filesystem/moves.rs`, `archive/mod.rs` and
   `verify.rs` (`WalkRules`); section 4.5 F4 part.
 - Depends on: F1 (keys), F3 (pack files).
 - Tests first: `node_modules/` ignored is not packed, not listed, still
@@ -1334,7 +1334,7 @@ neighbouring-hunk conflicts.
 
 #### C1 status
 
-- Scope: section 4.8 status; `ops/survey.rs`, `ops/status.rs`,
+- Scope: section 4.8 status; `commands/survey.rs`, `commands/status.rs`,
   `cli/cmd/status.rs`, `tests/status.rs` (new); removes the allowance on
   `stdout_style`.
 - Depends on: F5, F7.
@@ -1379,9 +1379,9 @@ neighbouring-hunk conflicts.
 #### C4 archive
 
 - Scope: section 4.8 archive, `store_version` for C5 (PS4, PO23).
-- Files: `src/ops/archive.rs` (may become `src/ops/archive/` with
+- Files: `src/commands/archive.rs` (may become `src/commands/archive/` with
   submodules declared inside it), `src/cli/cmd/archive.rs`,
-  `tests/archive.rs`; removes the allowance in `fsx/space.rs`.
+  `tests/archive.rs`; removes the allowance in `filesystem/space.rs`.
 - Depends on: C1, F6, F8.
 - Tests first: an idle piece ends as three files in
   `pieces/<path>/`, its folder gone, `trash/` and `doomed/` empty; step 4
@@ -1426,8 +1426,8 @@ neighbouring-hunk conflicts.
 #### C6 unearth and the restore core
 
 - Scope: section 4.8 unearth, the M1 decision.
-- Files: `src/ops/restore.rs`, `src/ops/unearth.rs`,
-  `src/pack/extract.rs` (flush hook), `src/cli/cmd/unearth.rs`,
+- Files: `src/commands/restore.rs`, `src/commands/unearth.rs`,
+  `src/archive/extract.rs` (flush hook), `src/cli/cmd/unearth.rs`,
   `tests/unearth.rs`.
 - Depends on: F6, F7, F8, M1.
 - Tests first: unearth restores the tree, deletes the version (archive
@@ -1515,7 +1515,7 @@ neighbouring-hunk conflicts.
 
 - Scope: section 4.9 P2; `tests/fixtures/ssh-shim.sh` trimmed of the
   master handling; removes the allowance on `is_mount_point`.
-- Files: `src/ops/push.rs`, `src/cli/cmd/push.rs`, `tests/push.rs`,
+- Files: `src/commands/push.rs`, `src/cli/cmd/push.rs`, `tests/push.rs`,
   fixtures.
 - Depends on: P1, F6, F7.
 - Tests first: one test per pre-check row (concept:646-655); a damaged
@@ -1593,7 +1593,7 @@ the record of what was open and why.
   by C7.
 - **O6 gap: "parent directory is not writable".** Concept "Locked
   entries". `remove_tree` gives itself owner access to directories it
-  owns (old spec "Walks"; `src/fsx/remove.rs`), so a `0555` directory
+  owns (old spec "Walks"; `src/filesystem/remove.rs`), so a `0555` directory
   owned by the user is no obstacle today. Decided as proposed: locked means a flag
   of the list, or a directory (the top's parent included) that the user
   does not own and cannot write (`faccessat` `W_OK` fails and the owner
@@ -1644,7 +1644,7 @@ the record of what was open and why.
   repository today (`git cat-file -t` answers `commit` for both); if gc
   has pruned them by then, `git fetch <bundle> i42:refs/tmp/i42` first.
   f0fc5ec does not apply: it changes the loss rule of reclaim
-  (`src/ops/archive/unearthed.rs`, old spec "archive"), and reclaim is
+  (`src/commands/archive/unearthed.rs`, old spec "archive"), and reclaim is
   gone. The lookup fix is carried as the rule of section 4.10 and
   closes its todo in C1.
 - **O27 gap: `list` and `grep` without a result, and a bad pattern.**
@@ -1652,10 +1652,10 @@ the record of what was open and why.
   a pattern `regex` refuses. Decided by the lead (review, PS7): no hit
   or no version is exit 0 with a note on stderr; an invalid pattern is a
   usage error, exit 2. Needed by C10, C11.
-- **O3 refinement: `pack/frames.rs` goes.** The concept's table keeps
-  `pack/` "without `pack/live.rs`, `pack/manifest.rs`". `frames.rs`
+- **O3 refinement: `archive/frames.rs` goes.** The concept's table keeps
+  `archive/` "without `archive/live.rs`, `archive/manifest.rs`". `frames.rs`
   inspects zstd frames of archive files given to the old `import`
-  (`src/ops/import.rs:30, 273, 434`, its only user); the new `import`
+  (`src/commands/import.rs:30, 273, 434`, its only user); the new `import`
   takes folders, so R1 deletes it.
 - **O21 refinement: `listing.rs` file-name helpers.** The concept's table
   says the listing's "file-name helpers move out of `meta.rs`". Those
@@ -1945,7 +1945,7 @@ those of beb748f.
   marker.rs and path.rs; `RemoteState`, `Reachability`, `Assessment`,
   `Remote` trait, `open`, `probe_state` (mod.rs:171-491), `RemoteError`
   (mod.rs:688-745). `RemoteState` is used by kept-but-rewritten code:
-  `src/ops/status.rs:21-22`, `src/ops/archive/mod.rs:32`.
+  `src/commands/status.rs:21-22`, `src/commands/archive/mod.rs:32`.
 - Unreachable errno classification exists only in `src/remote/path.rs`
   `root_error_state` (path.rs:145-163: NotFound -> missing; NOTCONN,
   HOSTDOWN, HOSTUNREACH, NETUNREACH, TIMEDOUT -> away). It moves into
@@ -1969,10 +1969,10 @@ those of beb748f.
   `-e`; its `fault` files print an `ssh-texts/*.txt` and exit 255; its
   master/mux handling is dead weight. `tests/support/sshd.rs` (184
   lines) starts a real sshd for opt-in tests.
-- `src/ops/remote.rs` (2565 lines) `remote add --init` checks: parent
+- `src/commands/remote.rs` (2565 lines) `remote add --init` checks: parent
   must exist, only the last component is made, a non-empty foreign
   directory is accepted unless it holds `objects` or `.antiq-clock.*`
-  (ops/remote.rs:825-893). None of it matches the concept's table; the
+  (commands/remote.rs:825-893). None of it matches the concept's table; the
   file goes whole.
 
 ### A.2 pack and listing
@@ -1988,42 +1988,42 @@ those of beb748f.
   Tests listing.rs:306-908 are almost all format tests. So `listing.rs`
   is a rewrite; the in-memory `ListingEntry`/`ListingType` model can
   stay (Hardlink maps to `hard`, Symlink to `link`).
-- `Packager` trait and `TarZstd` (`src/pack/mod.rs:187-292`); `pack`
+- `Packager` trait and `TarZstd` (`src/archive/mod.rs:187-292`); `pack`
   takes a walked `PieceTree`, container name = last component of the top
   (mod.rs:233-261); `Packed{size, sha256, listing, notes}`
-  (mod.rs:97-107). Tar headers `src/pack/tar_write.rs:80-114`; hard
+  (mod.rs:97-107). Tar headers `src/archive/tar_write.rs:80-114`; hard
   links become tar link members to the first path by (dev, inode)
   (tar_write.rs:170-177, 224-237, 319-335) and today a listing entry of
   type `hardlink` without sha256 (tar_write.rs:334). The concept wants a
   checksum line for `hard` entries too, so the packer must carry the
   first path's hash to its links. Special files skipped with
   `PackNote::SpecialFileSkipped` (tar_write.rs:239-245). Sparse warning
-  tar_write.rs:450-496, used by `src/ops/archive/new.rs:49, 1133`.
+  tar_write.rs:450-496, used by `src/commands/archive/new.rs:49, 1133`.
 - zstd: archive `ARCHIVE_LEVEL` 19, window log 27, decoder max 27
-  (`src/pack/zstd.rs:11-26`); live-only `LIVE_LEVEL`, `LIVE_JOB_SIZE`,
+  (`src/archive/zstd.rs:11-26`); live-only `LIVE_LEVEL`, `LIVE_JOB_SIZE`,
   `Preset::Live`, `ZstdSettings::live`, live branches of `encoder()`
   (zstd.rs:20-51, 78-84). `ZstdSettings::live(1)` is also the cheap
   level of test helpers: `src/testing/package.rs:36, 57`,
-  `src/pack/mod.rs:425`, `src/pack/extract.rs:686, 872`,
-  `src/pack/frames.rs:444-446, 1077`, `src/ops/archive/new.rs:2363`.
+  `src/archive/mod.rs:425`, `src/archive/extract.rs:686, 872`,
+  `src/archive/frames.rs:444-446, 1077`, `src/commands/archive/new.rs:2363`.
   These move to a public `ZstdSettings::fast` (F3, PO16) before `live` goes.
 - Pool: `Pool::for_machine(memory_percent)` -> `budget_for(ram, pct)`
-  (`src/pack/pool.rs:123-129, 325-348`); archive costs pool.rs:20-28;
-  live costs `src/pack/live.rs:28-39`. `memory_percent`:
+  (`src/archive/pool.rs:123-129, 325-348`); archive costs pool.rs:20-28;
+  live costs `src/archive/live.rs:28-39`. `memory_percent`:
   `src/config.rs:118-120, 142, 173-187, 299-300`, callers
   `src/cli/cmd/archive.rs:33`, `src/cli/cmd/resolve.rs:33`,
-  `src/ops/sync/mod.rs:391`, `src/testing/pool.rs:20` (hard 25).
-- `src/pack/frames.rs` is a zstd frame inspector used only by
-  `src/ops/import.rs:30, 273, 434` (import of archive files). The new
+  `src/commands/sync/mod.rs:391`, `src/testing/pool.rs:20` (hard 25).
+- `src/archive/frames.rs` is a zstd frame inspector used only by
+  `src/commands/import.rs:30, 273, 434` (import of archive files). The new
   `import` takes folders, so frames.rs goes with the old import.
-- `src/pack/manifest.rs` users: `src/ops/sync/live.rs:30, 1271`,
-  `src/ops/sync/mod.rs:27`, `src/pack/live.rs:7`. `src/pack/live.rs`
-  users: `src/ops/sync/live.rs`, `src/ops/unearth/mod.rs:27`,
-  `src/ops/unearth/live.rs:157`, `src/ops/unearth/remote.rs:28`,
-  `src/ops/archive/unearthed.rs:38` (`check_stream`, live.rs:224).
+- `src/archive/manifest.rs` users: `src/commands/sync/live.rs:30, 1271`,
+  `src/commands/sync/mod.rs:27`, `src/archive/live.rs:7`. `src/archive/live.rs`
+  users: `src/commands/sync/live.rs`, `src/commands/unearth/mod.rs:27`,
+  `src/commands/unearth/live.rs:157`, `src/commands/unearth/remote.rs:28`,
+  `src/commands/archive/unearthed.rs:38` (`check_stream`, live.rs:224).
 - Old payload names: `meta::FileName`, `is_payload_file_name`,
   `is_listing_file_name`, `check_file_names` (`src/meta.rs:80-139,
-  260-276`); the payload name is built in `src/ops/archive/new.rs:795-802`.
+  260-276`); the payload name is built in `src/commands/archive/new.rs:795-802`.
   All obsolete under `<name>--<stamp>` naming.
 - `src/testing/package.rs`: `pack_piece`, `pack_piece_without`,
   `on_disk`, `compress`, `raw_tar`/`RawMember` (package.rs:19-127);
@@ -2031,24 +2031,24 @@ those of beb748f.
 
 ### A.3 archive flow, repairs, run
 
-- Sizes: `src/ops/archive/new.rs` 4171 lines (production about 1140,
-  tests from 1143), `src/ops/archive/unearthed.rs` 2431,
-  `src/repair.rs` 4563 (production about 1290), `src/ops/archive/mod.rs`
+- Sizes: `src/commands/archive/new.rs` 4171 lines (production about 1140,
+  tests from 1143), `src/commands/archive/unearthed.rs` 2431,
+  `src/repair.rs` 4563 (production about 1290), `src/commands/archive/mod.rs`
   1275.
 - Parallelism: `thread::scope` workers take candidates by an atomic
-  counter (`src/ops/archive/mod.rs:800-836`); a hard failure stops new
+  counter (`src/commands/archive/mod.rs:800-836`); a hard failure stops new
   pieces (mod.rs:710-756). Candidates come from `status::status_with`
   (mod.rs:466-497).
 - Per piece (`Piece::run`, new.rs:413-433): walk and idle re-check
   (`walk_and_judge`, new.rs:466-525, store-free); adoption of a crashed
   object (new.rs:534-598, store-bound); free space against
-  `.antiq/tmp` with `SpaceLedger` (new.rs:631-644; `src/fsx/space.rs:29-80`);
+  `.antiq/tmp` with `SpaceLedger` (new.rs:631-644; `src/filesystem/space.rs:29-80`);
   pack to `tmp/<ULID>.tar.zst` with `sync_all` and a rehash
   (`write_package`, `file_sha256`, new.rs:730-774, 1031-1063); strict
   verify plus `Matched::of_packing` (new.rs:778-823,
-  `src/ops/archive/durable.rs:94`); store via `store.put_file`, metadata,
+  `src/commands/archive/durable.rs:94`); store via `store.put_file`, metadata,
   tracking `removing`, `durable::seal` (new.rs:665-940, durable.rs:137,
-  all store-bound); removal in `src/ops/archive/new/finish.rs`:
+  all store-bound); removal in `src/commands/archive/new/finish.rs`:
   `move_to_trash` (finish.rs:200-221), refused rename handled in place by
   `remove_in_place` (finish.rs:225-274, which the concept replaces by
   undoing step 4), `rewalk`/`walk_trashed` (finish.rs:281-305),
@@ -2091,42 +2091,42 @@ those of beb748f.
   `DryRun`, `lines()` with brake lines (plan.rs:12-96, tests 126+).
 - `src/report.rs`: `Warning`, `CommandReport`, notes (unknown keys,
   SMB/NFS, lock holder); store-free.
-- `src/ops/archive/unearthed.rs` users outside itself: new.rs:415,
+- `src/commands/archive/unearthed.rs` users outside itself: new.rs:415,
   mod.rs:566, 580 (`junk_of_piece`, `plan_action`),
-  `src/ops/resolve/replace.rs:18`, `src/ops/resolve/mod.rs:393`.
+  `src/commands/resolve/replace.rs:18`, `src/commands/resolve/mod.rs:393`.
 
 ### A.4 unearth, fork, import
 
-- Nothing flushes the extracted tree today: `src/pack/extract.rs`
+- Nothing flushes the extracted tree today: `src/archive/extract.rs`
   (`Extraction`, 397-481; `drop(file)` at 441, directory modes in
-  `finish` 460) and `src/ops/unearth/local.rs` `place`/`move_into_place`
+  `finish` 460) and `src/commands/unearth/local.rs` `place`/`move_into_place`
   call no flush. `Environment` (local.rs:54-61) has seams for packager,
   probe, free space and rename, none for flushing.
-- Reusable, store-free: `pack::extract::unpack`, `verify::verify_strict`,
+- Reusable, store-free: `archive::extract::unpack`, `verify::verify_strict`,
   `verify::compare_with_listing` (folder vs listing, verify.rs:331),
   `read::list`/`read_package`/`read_package_from` (read.rs:39-111, the
   tar-derived listing that `rebuild` needs), `names::*`
   (`TargetRules::probe` names.rs:463, `fold_path` 228, `check_members`
   267, `portability_warnings` 316), `check_target_on_disk`, `look_at`,
-  `lists_exactly`, `ancestors` (`src/ops/unearth/mod.rs:753-883`),
+  `lists_exactly`, `ancestors` (`src/commands/unearth/mod.rs:753-883`),
   `TargetProblem` (mod.rs:146-167), `check_target_names`,
   `make_parents`/`remove_created`, `move_into_place`, `check_archive`
   (whole-file hash, local.rs:243-267), `is_out_of_space`.
 - Index- or tracking-bound: `check_planned_target` (mod.rs:766-809,
   claimant via `Index`), `check_entries_on_volume` (local.rs:494-528),
   `carry_out`/`place`/`Subject`/`Arrived` and most of `UnearthError`.
-  `src/ops/unearth/live.rs` (1085) and `remote.rs` (2303) go whole.
+  `src/commands/unearth/live.rs` (1085) and `remote.rs` (2303) go whole.
 - Store-free unearth tests worth porting (local.rs): name checks
   1220-1474, verify/recheck 1488-1560, parents and moves 870,
   1606-1732, archive checks 1147-1184, 989, space 1754-1832.
   `tests/unearth.rs` target refusals 346-422, damaged 475, dry runs
   521-593 carry over in spirit.
-- `src/ops/fork.rs` (2377 lines, production about 650) renames a live
+- `src/commands/fork.rs` (2377 lines, production about 650) renames a live
   unearthed folder and mints a new ID; nothing of it extracts. Only the
   `--name` parsing (fork.rs:294-310) and refusal texts survive. It and
-  `src/ops/unearth/` import each other (`forked_new`, `mint`,
+  `src/commands/unearth/` import each other (`forked_new`, `mint`,
   `UnearthError::Fork`).
-- `src/ops/import.rs` (2449 lines, production about 1050) imports
+- `src/commands/import.rs` (2449 lines, production about 1050) imports
   `.tar.zst` files (`prepare_file` 407-510, `import_one` 921-1044); only
   `check_path` (513-543) and the `Hooks` seam idea survive.
 
@@ -2145,19 +2145,19 @@ those of beb748f.
   non-directory (`src/pin.rs:56-62`); no `.antiq-restored`.
 - Idle clock: `idle::check(.., unearthed: Option<Timestamp>, ..)`
   (idle.rs:141-216), unearth time from tracking
-  (`src/ops/status.rs:492`, `src/ops/archive/new.rs:312, 388`); one-day
+  (`src/commands/status.rs:492`, `src/commands/archive/new.rs:312, 388`); one-day
   future tolerance and `OnlyFuture` verdict (idle.rs:161, 184-212); due
   boundary `>` (idle.rs:200); default `idle_days` 14 (config.rs:154);
   no `soon_days`.
 - Walk problems `Problem{Unreadable, MountPoint, Excluded,
   NestedCollection}` (`src/tree.rs:76-90`); mount detection
-  walk.rs:162-186, 341-353 and `src/fsx/tree.rs:584-690`; depth 512
+  walk.rs:162-186, 341-353 and `src/filesystem/tree.rs:584-690`; depth 512
   (walk.rs:73, 354-357); exclude by path or (dev, inode)
   (walk.rs:346-352, `src/select.rs:94-131`). No immutable/append or
   parent-writable check anywhere; Linux `statx` already returns
-  `stx_attributes` but asks only for basic stats (fsx/tree.rs:584-640),
+  `stx_attributes` but asks only for basic stats (filesystem/tree.rs:584-640),
   macOS `statat` gives `st_flags`.
-- `src/fsx/`: `remove_tree`/`remove_tree_at` (remove.rs:34-48, no flag
+- `src/filesystem/`: `remove_tree`/`remove_tree_at` (remove.rs:34-48, no flag
   handling), `move_dir` (moves.rs:36-60, owner write grant, no replace),
   `flush_file`/`flush_dir`/`write_atomic` (atomic.rs:44-70; `flush_file`
   is `sync_all` = `F_FULLFSYNC` on macOS, plain `fsync` on ENOTSUP),
@@ -2194,14 +2194,14 @@ those of beb748f.
   stderr (output.rs:212-241); broken pipe swallowed (output.rs:51).
   Dry runs are rendered per command today (`plan.rs` `Plan::dry_run`,
   `lines`; `cmd/pin.rs:70-88`, `cmd/import.rs:72-75`,
-  `cmd/archive.rs:80-83`, `ops/init.rs:60-96`).
+  `cmd/archive.rs:80-83`, `commands/init.rs:60-96`).
 - `ErrorKind` (`src/error.rs:52-71`): usage (2), not_implemented,
   not_a_collection, ambiguous_reference, unknown_reference,
   outside_collection, brake, lock_held, no_remote, remote_away (4),
   remote_broken, format_too_new, unsupported, other; `exit_code`
   error.rs:113-119; exit 3 comes from reports (`cmd/archive.rs:68`).
   `Error` variants error.rs:132-209; `details` error.rs:266-288.
-- `src/interact.rs` users: brake, ops/init (14, 321-406), ops/archive
+- `src/interact.rs` users: brake, commands/init (14, 321-406), commands/archive
   (mod.rs:25, 650; unearthed.rs:32, 754), resolve, remote, reconcile,
   cli/mod.rs (14, 17, 307-321, 578-582), cli/tty.rs, cmd/init.rs:29-30,
   cmd/archive.rs:36. `src/cli/tty.rs` is question code only (`open`,
@@ -2210,13 +2210,13 @@ those of beb748f.
   `resolve_path` (149-190), ULID prefixes (62, 104-135); no fuzzy
   matching. nucleo is used in `src/index.rs:23-24, 509-518` and the
   picker.
-- `src/ops/init.rs`: `plan` (144-211; refusals 236-255; `archive.sh`
+- `src/commands/init.rs`: `plan` (144-211; refusals 236-255; `archive.sh`
   detection 215-232), `apply` (260-314; `LAYOUT` 123-131), questions
   (321-406). `machine::detect` from `cmd/init.rs:19`.
-- `src/ops/pin.rs`: `holder_of`, `require_folder`, `target` read
+- `src/commands/pin.rs`: `holder_of`, `require_folder`, `target` read
   tracking, store and index (165-282); `PinAction` 48-62,
   `folder_exists` 195, `current_pin` 287 are store-free.
-- `src/ops/status.rs` (3126 lines): the live part is `select` (385-395),
+- `src/commands/status.rs` (3126 lines): the live part is `select` (385-395),
   `walk_piece_with` plus `judge` (602-622, 684), `recovered_names` (972),
   `presence`/`exists_exact` (1011-1043); the rest reads store, tracking,
   remote state.
