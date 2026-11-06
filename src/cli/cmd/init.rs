@@ -8,8 +8,9 @@ use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
 use antiq::id::RandomIds;
-use antiq::ops::init::{InitReport, InitRequest, init};
+use antiq::ops::init::{InitError, InitReport, InitRequest, init};
 use antiq::report::CommandReport;
+use antiq::select::SelectError;
 use anyhow::Context as _;
 use std::path::PathBuf;
 
@@ -27,7 +28,14 @@ pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u
     };
     let mut interaction = ctx.interaction();
     let report = init(&request, interaction.as_mut(), &SystemClock, &RandomIds)
-        .map_err(antiq::Error::from)
+        .map_err(|error| match error {
+            // A `--pattern` that does not parse is a flaw of the command
+            // line, unlike the same pattern read from a config file.
+            error @ InitError::Select(SelectError::InvalidPattern { .. }) => {
+                antiq::Error::Usage(error.to_string())
+            }
+            error => error.into(),
+        })
         .context("make the directory a collection")?;
 
     if ctx.json {

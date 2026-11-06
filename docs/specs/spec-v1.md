@@ -67,6 +67,8 @@ answering it, ends the same way. `--yes` accepts the plan, the proposed
 exclude included. `--dry-run` prints the plan, asks nothing, creates
 nothing and exits 0. `--pattern` (repeatable) sets the patterns; every
 other setting starts at its default and is changed in the config file.
+A `--pattern` that is invalid (see "Selection") is a usage error: kind
+`usage`, exit 2.
 `init` creates `.antiq/` with the directories of the local layout and
 the config in one step, so it exists complete or not at all. It refuses,
 also under `--dry-run`, where `.antiq/` already exists and inside a
@@ -1152,7 +1154,7 @@ kinds add keys to the error object. A `--dry-run` plan carries
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, or an answer does not fit the pending decision | |
+| `usage` | 2 | the command line does not parse, an answer does not fit the pending decision, or a `--pattern` of `init` is invalid | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several objects | `candidates`: list of `{id, path}` |
 | `unknown_reference` | 1 | a piece reference matches no object | |

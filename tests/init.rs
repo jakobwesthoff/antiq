@@ -178,11 +178,11 @@ fn the_directory_defaults_to_the_current_one() {
 }
 
 #[test]
-fn an_invalid_pattern_fails() {
+fn an_invalid_pattern_is_a_usage_error() {
     let tree = Tree::new();
     let run = init_in(&tree, &["--json", "--yes", "--pattern", "a//b"]);
-    assert_eq!(run.code(), 1);
-    assert_eq!(run.error_kind(), "other");
+    assert_eq!(run.code(), 2);
+    assert_eq!(run.error_kind(), "usage");
     assert!(
         run.error_message().contains("pattern a//b is invalid"),
         "{}",
