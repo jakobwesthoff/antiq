@@ -44,7 +44,6 @@ them back, and mirrors the whole collection to one backup target.
   projects/scanner/                     a live piece (a plain folder)
   .antiq/
     config.toml
-    state.json                          local state: last push, pins seen
     pieces/
       old/client-site/
         old-client-site--2026-09-03T101500.tar.zst
@@ -61,8 +60,8 @@ them back, and mirrors the whole collection to one backup target.
 - `.tar.zst.sha256` holds the SHA-256 of the archive file in
   `shasum -c` format.
 - `.sha256.zst` is the listing (below), zstd-compressed.
-- **Proposal:** `state.json` holds only what cannot be derived from
-  the files: the time and the result of the last push.
+- There is no state file: everything antiq needs follows from the
+  folders, the archive files and the `.antiq-pin` files.
 
 ## Listing format
 
@@ -91,8 +90,8 @@ does not work: both tools read it as part of the file name.
 - A regular file's comment line is followed by its standard checksum
   line. Directories end in `/`; links show `-> target`.
 - Paths with characters that the checksum format cannot carry are
-  escaped as GNU `sha256sum` does. **Proposal:** the same escaping in
-  the comment lines.
+  escaped as GNU `sha256sum` does, in the checksum lines and in the
+  comment lines alike.
 
 ## Commands
 
@@ -134,9 +133,8 @@ live folder again. Archiving it later creates a new version.
   piece; anything else is an error that lists the candidates. Without
   `--version` the newest version is taken; `--version` takes a
   timestamp or a unique prefix of one.
-- **Open:** whether a folder that is unchanged since unearthing is
-  removed again without a new archive. That reclaim exists today; the
-  move-out model may not need it, since the archive is gone.
+- There is no reclaim: an unearthed folder that is archived again,
+  changed or not, becomes a new version.
 
 ### `fork <piece> [--version <time>] [--name <new path>]`
 
@@ -206,13 +204,13 @@ state coloured in the first column: `due` (archived on the next run),
 folders are only counted in the header.
 
 ```text
-13 folders · 214 archived (38.2 GB) · archive after 90 days idle
+13 folders · 214 archived (38.2 GB) · archive after 30 days idle
 
 STATE  PIECE                                 IDLE  WHAT
-due    experiments/rust-gpu                   93d  archives next run
+due    experiments/rust-gpu                   33d  archives next run
 due    old/client-site                       141d  archives next run
 pinned projects/antiq                        120d  kept by .antiq-pin
-soon   tools/scan-old                         88d  archives in 2 days
+soon   tools/scan-old                         28d  archives in 2 days
 ```
 
 ### `pin <piece>` / `unpin <piece>`
@@ -231,14 +229,14 @@ Mirrors the collection to the target. **Proposal for the flow:**
    `--delete-delay`, deletions happen only at the end, so an
    interrupted run removes nothing that was on the target before.
 3. `-n` summarizes rsync's `--itemize-changes` per piece.
-4. Record the time and the result in `.antiq/state.json`.
 
 The name is `push` and not `backup`: the target is an exact mirror, so
 what is deleted locally is deleted there too.
 
 ## Configuration
 
-**Proposal:**
+The configuration is per collection, in `.antiq/config.toml`.
+**Proposal** for its keys:
 
 ```toml
 [collection]
@@ -246,13 +244,24 @@ id = "01JBX…"                  # written at init, also in the target marker
 patterns = ["*"]
 exclude = []
 ignore = ["node_modules/", "target/"]
-idle_days = 90
+idle_days = 30
 soon_days = 3
 
 [target]
 url = "nas.local:/volume1/antiq/projects"
 rsync = "/opt/homebrew/bin/rsync"   # optional, else from PATH
 ```
+
+## Repairs at the start of a run
+
+There is no `reconcile` command. Every run that changes something first
+cleans up what an interrupted `archive` or `unearth` left behind:
+temporary files in `.antiq/tmp/` and folders in the trash.
+
+## Existing stores
+
+Stores in the old layout (`.antiq/objects/`) are not converted; they
+exist only in test collections, since v1 is unreleased.
 
 ## What remains from the built code
 
@@ -288,15 +297,17 @@ The modules named below exist on main today (`src/`). How each fares,
 
 ## Open questions
 
-1. `idle_days` default: 90 (proposal) or 30 or 14 (the spec today).
-2. Verification of the target: checking only newly sent archives
-   during `push`, a separate `antiq verify` (locally and/or the
-   target), both, or neither.
-3. Whether `unearth` keeps the reclaim of an unchanged folder.
-4. Whether `reconcile` (rebuilding local state, start-of-run repairs)
-   is still needed, and which repairs remain once there is no
-   versioned metadata.
-5. What `state.json` holds, if anything beyond the last push.
-6. The escaping of unusual characters in the listing's comment lines.
-7. Migration of an existing `.antiq/objects/` store (present in test
-   collections only, as v1 is unreleased): convert or start over.
+1. How `push` makes sure the archives arrived intact: whether rsync's
+   own whole-file check (with `--fsync`) is enough, or whether antiq
+   reads anything back.
+2. How an unearthed folder keeps from being archived again on the next
+   run, since its files keep their old mtimes and there is no state
+   file to hold the time of the unearth.
+3. Whether `push` stops before deleting much on the target.
+4. Whether anything warns when the last push is long ago, and where its
+   time is kept without a state file.
+5. How scheduled runs work: `archive` and `push` separately, or one
+   command.
+6. Which detail rules of the walk and the idle check stay
+   (`.antiqignore` files, the junk list, future mtimes, empty pieces,
+   mount points, symlinks, dot entries).
