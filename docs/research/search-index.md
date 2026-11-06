@@ -215,3 +215,103 @@ column of the word index was 62.6 ms for `c` and 506 to 529 ms for `ct`,
 The substring queries `ct`, `ctr`, `ctrl` and `qxz` on the word index
 went from 2 to 17 ms to 289 to 315 ms. Prefix queries (`scan`, `c`)
 and whole-word queries did not change.
+
+## SQLite FTS5 with the trigram tokenizer
+
+SQLite from `rusqlite` 0.41.1 with the `bundled` feature. One contentless
+table:
+
+    CREATE VIRTUAL TABLE f USING fts5(path, content='', contentless_delete=1,
+                                      tokenize='trigram', detail=<level>);
+
+The row id is `piece << 16 | member index`, so the piece of a hit is
+`rowid >> 16` and a piece is removed with `DELETE ... WHERE rowid BETWEEN`.
+The path itself is not stored. WAL journal, `synchronous=NORMAL`, one
+transaction per piece, then `INSERT INTO f(f) VALUES('optimize')`. A match
+is case-insensitive and finds the needle anywhere in the path.
+
+`detail=full` is the only level that accepts a phrase, and the trigram
+tokenizer turns a needle of more than 3 characters into a phrase of
+trigrams. With `detail=none` and `detail=column` SQLite returned
+"phrase queries are not supported (detail!=full)", and `detail=none` also
+"column queries are not supported (detail=none)" for `path MATCH`. For
+`detail=none` the queries below therefore use `f MATCH` with the AND of
+the needle's 3-character grams (`"sca" AND "can" AND ...`), which can
+return more rows than the substring matches. A needle of fewer than 3
+characters has no gram and cannot be asked.
+
+| Figure | `detail=full` | `detail=none` |
+| --- | ---: | ---: |
+| Insert 15 000 000 rows (includes about 6 s of path generation) | 125.9 s | 81.8 s |
+| `optimize` afterwards | 20.7 s | 10.5 s |
+| Database file after `wal_checkpoint(TRUNCATE)` | 2398.6 MB | 979.3 MB |
+| Peak memory of the build, maximum resident set size / footprint | 22 MB / 16 MB | 20 MB / 16 MB |
+| Peak memory of the query process, maximum resident set size / footprint | 7.3 MB / 5.0 MB | 7.2 MB / 4.9 MB |
+
+Queries, one thread, best of 5, second of two runs (the first agreed
+within 13 %; 119.96 against 134.98 ms was the largest gap). `count` is
+`SELECT count(*)`, `per piece` iterates all row ids and counts by piece,
+`first 50` is `LIMIT 50` without an order, so it returns the lowest row
+ids and no ranking.
+
+| Query | Hits (full) | count ms | per piece ms | first 50 ms | Hits (none) | count ms | per piece ms | first 50 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ctr` | 312 790 | 4.63 | 9.40 | 0.00 | 312 790 | 4.65 | 9.34 | 0.00 |
+| `ctrl` | 306 125 | 13.52 | 18.53 | 0.01 | 306 125 | 11.23 | 15.47 | 0.01 |
+| `scan` | 2 387 420 | 110.04 | 147.94 | 0.01 | 2 387 420 | 88.94 | 123.26 | 0.01 |
+| `scanner` | 1 244 345 | 185.46 | 208.31 | 0.02 | 1 265 190 | 134.98 | 159.22 | 0.01 |
+| `scanner/src` | 7 050 | 83.24 | 83.42 | 0.51 | 12 770 | 87.00 | 89.52 | 0.32 |
+| `.tif` | 762 365 | 32.45 | 45.02 | 0.01 | 762 365 | 23.50 | 34.17 | 0.01 |
+| `report` | 1 246 065 | 125.64 | 148.36 | 0.01 | 1 246 065 | 100.18 | 118.96 | 0.01 |
+| `qxz` | 0 | 0.00 | 0.00 | 0.00 | 0 | 0.01 | 0.00 | 0.00 |
+
+The `detail=none` hit counts are the same as the hit counts of the tantivy
+trigram index for all eight queries. The `detail=full` counts are the
+substring matches (`scanner` and `scanner/src` are smaller).
+
+Incremental update, three rounds on pieces 42 to 44 in the same
+database, one transaction per step:
+
+| Step | `detail=full` | `detail=none` |
+| --- | ---: | ---: |
+| delete 50 000 rows | 69.0, 60.9, 115.2 ms | 67.3, 62.4, 115.9 ms |
+| insert 50 000 rows | 215.1, 347.0, 301.8 ms | 171.6, 176.9, 167.4 ms |
+| delete and insert in one transaction (includes generating the paths) | 294.3, 372.3, 440.9 ms | 262.2, 289.7, 331.9 ms |
+| `ctr` count before / after the three rounds | 4.63 / 20.96 ms | 4.65 / 20.37 ms |
+| database file after the rounds | 2414.7 MB | 982.5 MB |
+
+## fst: one set per piece, searched with a subsequence automaton
+
+`fst` 0.4.7. Each piece has its own `fst::Set` of its sorted member paths
+(case as written, no prefix), in a file `<piece>.fst`, opened with
+`memmap2`. A query is a custom `fst::Automaton` that accepts a path when
+the lower-cased needle's bytes occur in it in order, ignoring ASCII case:
+the candidate set of a subsequence matcher such as nucleo. Non-ASCII
+bytes never advance it. Every set is searched and its matches counted.
+
+| Figure | Value |
+| --- | ---: |
+| Build 300 sets of 50 000 keys (includes about 6 s of path generation) | 31.2 s |
+| Size on disk | 569.1 MB (1897 KB per piece) |
+| Peak memory of the build, maximum resident set size / footprint | 16.5 MB / 15.5 MB |
+| Map the 300 files | 5.8 to 6.3 ms |
+| Peak memory of the query process, maximum resident set size / footprint | 575 MB / 2.9 MB |
+
+Best of 3 runs per cell, from the first of two passes (the
+second pass was stopped after its first row, `c`, which took 6099.1 ms on
+one thread and 666.4 ms on ten):
+
+| Query | Matches | Pieces | 1 thread ms | 10 threads ms |
+| --- | ---: | ---: | ---: | ---: |
+| `c` | 13 034 540 | 300 | 6227.9 | 681.9 |
+| `ct` | 11 442 745 | 300 | 6260.4 | 683.8 |
+| `ctr` | 9 096 605 | 300 | 6241.8 | 692.2 |
+| `ctrl` | 4 792 810 | 300 | 6188.6 | 696.9 |
+| `scan` | 6 553 865 | 300 | 6149.3 | 664.0 |
+| `scanner/src` | 375 875 | 300 | 5966.2 | 653.2 |
+| `.tif` | 762 365 | 300 | 5968.3 | 686.9 |
+| `qxz` | 0 | 0 | 6088.2 | 676.4 |
+
+The ten threads take the pieces one at a time from a shared counter. The
+resident set size of the query process is the 569 MB of mapped file
+pages that the pass touched.
