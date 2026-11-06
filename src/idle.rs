@@ -7,17 +7,12 @@
 use crate::fsx::tree::TreeRoot;
 use crate::pin::{self, PinError};
 use crate::relpath::{Name, RelPath};
+use crate::rules::{self, IGNORE_FILE, RulesError, Scope};
 use crate::tree::{EntryKind, PieceTree};
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::gitignore::Gitignore;
 use jiff::Timestamp;
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::collections::HashSet;
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
-
-/// The ignore files of a piece.
-const IGNORE_FILE: &[u8] = b".antiqignore";
 
 /// Names whose changes are no activity, at any level of a piece.
 const MARKER_NAMES: [&[u8]; 2] = [IGNORE_FILE, pin::PIN_FILE.as_bytes()];
@@ -101,7 +96,8 @@ impl Settings {
     /// `ignore_lines` are the lines of `collection.ignore`, in gitignore
     /// syntax. A line that is no valid rule is an error.
     pub fn new(idle_days: u32, ignore_lines: &[String]) -> Result<Settings, IdleError> {
-        let config_rules = compile(None, ignore_lines.iter().map(String::as_str))?;
+        let config_rules = rules::compile(ignore_lines.iter().map(String::as_str))
+            .map_err(|error| rule_error(None, error))?;
         Ok(Settings {
             idle_days,
             config_rules,
@@ -109,25 +105,23 @@ impl Settings {
     }
 }
 
-/// Builds one matcher from rule lines. Paths are matched relative to the
-/// directory the rules belong to, so the builder's root is `.`: any other
-/// root makes the matcher cut a byte prefix off the path it is given.
-fn compile<'a>(
-    file: Option<&RelPath>,
-    lines: impl Iterator<Item = &'a str>,
-) -> Result<Gitignore, IdleError> {
-    let bad_rule = |line: usize, error: ignore::Error| IdleError::BadRule {
-        file: file.cloned(),
-        line,
-        message: error.to_string(),
-    };
-    let mut builder = GitignoreBuilder::new(".");
-    for (index, line) in lines.enumerate() {
-        builder
-            .add_line(None, line)
-            .map_err(|error| bad_rule(index + 1, error))?;
+/// Maps a failure of a rule file, or of the config when `file` is `None`.
+fn rule_error(file: Option<&RelPath>, error: RulesError) -> IdleError {
+    match (error, file) {
+        (RulesError::BadLine { line, message }, _) => IdleError::BadRule {
+            file: file.cloned(),
+            line,
+            message,
+        },
+        (RulesError::Unreadable(source), Some(path)) => IdleError::IgnoreFile {
+            path: path.clone(),
+            source,
+        },
+        (RulesError::NotUtf8, Some(path)) => IdleError::NotUtf8 { path: path.clone() },
+        (RulesError::Unreadable(_) | RulesError::NotUtf8, None) => {
+            unreachable!("config lines are text and are not read from disk")
+        }
     }
-    builder.build().map_err(|error| bad_rule(0, error))
 }
 
 /// Decides whether the piece in `tree` is pinned, empty, active or idle at
@@ -235,12 +229,9 @@ fn timestamp(ns: i128) -> Timestamp {
 struct Rules<'a> {
     collection: &'a TreeRoot,
     top: &'a RelPath,
-    config: &'a Gitignore,
+    scope: Scope,
     /// Directories, as path bytes, that hold a regular `.antiqignore`.
     with_ignore_file: HashSet<&'a [u8]>,
-    /// The rules read so far, by the directory they belong to.
-    loaded: HashMap<&'a [u8], Gitignore>,
-    ignored_directories: HashSet<Vec<u8>>,
 }
 
 impl<'a> Rules<'a> {
@@ -250,18 +241,15 @@ impl<'a> Rules<'a> {
             .iter()
             .filter(|entry| entry.kind == EntryKind::File)
             .filter_map(|entry| {
-                let bytes = entry.path.as_bytes();
-                let (parent, name) = split_last(bytes);
+                let (parent, name) = rules::split_last(entry.path.as_bytes());
                 (name == IGNORE_FILE).then_some(parent)
             })
             .collect();
         Rules {
             collection,
             top: tree.top(),
-            config: &settings.config_rules,
+            scope: Scope::new(settings.config_rules.clone()),
             with_ignore_file,
-            loaded: HashMap::new(),
-            ignored_directories: HashSet::new(),
         }
     }
 
@@ -269,50 +257,18 @@ impl<'a> Rules<'a> {
     /// reads its `.antiqignore`.
     fn enter_directory(&mut self, path: &'a RelPath) -> Result<(), IdleError> {
         // The top of the piece is never ignored.
-        if !path.is_root() && self.ignores(path, true) {
-            self.ignored_directories.insert(path.as_bytes().to_vec());
+        if !path.is_root() && self.scope.decide(path, true) {
             return Ok(());
         }
-        let bytes = path.as_bytes();
-        if let Some(&directory) = self.with_ignore_file.get(bytes) {
+        if self.with_ignore_file.contains(path.as_bytes()) {
             let rules = self.read_ignore_file(path)?;
-            self.loaded.insert(directory, rules);
+            self.scope.add_file(path, rules);
         }
         Ok(())
     }
 
-    /// Whether the entry at `path` is ignored: by an ignored directory above
-    /// it, else by the first rule that has a say, looking at the
-    /// `.antiqignore` files from the nearest directory outwards and last at
-    /// the config.
-    fn ignores(&self, path: &RelPath, is_dir: bool) -> bool {
-        let bytes = path.as_bytes();
-        let (parent, _) = split_last(bytes);
-        if self.ignored_directories.contains(parent) {
-            return true;
-        }
-        let mut directory = parent;
-        loop {
-            if let Some(rules) = self.loaded.get(directory) {
-                let below = if directory.is_empty() {
-                    bytes
-                } else {
-                    &bytes[directory.len() + 1..]
-                };
-                match rules.matched(Path::new(OsStr::from_bytes(below)), is_dir) {
-                    ignore::Match::Ignore(_) => return true,
-                    ignore::Match::Whitelist(_) => return false,
-                    ignore::Match::None => {}
-                }
-            }
-            if directory.is_empty() {
-                break;
-            }
-            directory = split_last(directory).0;
-        }
-        self.config
-            .matched(Path::new(OsStr::from_bytes(bytes)), is_dir)
-            .is_ignore()
+    fn ignores(&mut self, path: &RelPath, is_dir: bool) -> bool {
+        self.scope.decide(path, is_dir)
     }
 
     /// Reads and compiles the `.antiqignore` in the directory at `directory`.
@@ -327,25 +283,9 @@ impl<'a> Rules<'a> {
                 .read_to_end(&mut content)?;
             Ok(content)
         };
-        let content = read().map_err(|source| IdleError::IgnoreFile {
-            path: path.clone(),
-            source,
-        })?;
-        let text =
-            String::from_utf8(content).map_err(|_| IdleError::NotUtf8 { path: path.clone() })?;
-        // Editors on some systems put a byte order mark in front of the first
-        // rule, which would turn that rule into one that matches nothing.
-        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-        compile(Some(&path), text.split('\n'))
-    }
-}
-
-/// The part of `bytes` before its last `/`, and the part after it. A path
-/// without a `/` has the top of the piece, the empty path, as its parent.
-fn split_last(bytes: &[u8]) -> (&[u8], &[u8]) {
-    match bytes.iter().rposition(|byte| *byte == b'/') {
-        Some(slash) => (&bytes[..slash], &bytes[slash + 1..]),
-        None => (&bytes[..0], bytes),
+        let content =
+            read().map_err(|source| rule_error(Some(&path), RulesError::Unreadable(source)))?;
+        rules::parse_rule_file(content).map_err(|error| rule_error(Some(&path), error))
     }
 }
 
