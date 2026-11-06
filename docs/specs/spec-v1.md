@@ -1389,9 +1389,15 @@ otherwise the fork is refused and nothing has changed. An archived
 object recorded at the new path does not make it taken. A name equal to
 the folder's current name renames nothing and the fork goes ahead.
 
-A fork that stops after the rename leaves the old ID unchanged and the
-folder under its new name, a new piece as after any rename; `unearth` of
-the old ID restores its archive to the old path. A fork that stops after
+If writing the old ID's metadata fails and `meta.pending` shows that
+nothing was written, the folder is renamed back and the fork fails with
+that error. When the folder cannot be renamed back, or `meta.pending`
+cannot be read or holds the write, and for every failure of a later
+step, the fork fails with an error that names the new path and the
+folder stays there. A fork that stops after the rename and before the
+old ID's metadata is written leaves the old ID unchanged and the folder
+under its new name, a new piece as after any rename; `unearth` of the
+old ID restores its archive to the old path. A fork that stops after
 the old ID's metadata is written is finished by running `fork` again,
 which records one `fork` history entry. A fork that stops after the old
 ID's entry is written, before the new ID's metadata, leaves the old ID

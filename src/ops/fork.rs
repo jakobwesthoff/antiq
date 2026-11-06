@@ -44,6 +44,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -82,6 +83,11 @@ pub enum ForkError {
     },
     #[error("the new ID {id} exists already")]
     IdTaken { id: ObjectId },
+    #[error("the folder was renamed to `{path}` and the fork stopped there: {source}")]
+    AfterRename {
+        path: RelPath,
+        source: Box<ForkError>,
+    },
 }
 
 impl crate::error::HasKind for ForkError {
@@ -89,6 +95,7 @@ impl crate::error::HasKind for ForkError {
         match self {
             ForkError::Store(error) => error.kind(),
             ForkError::InvalidName { .. } => ErrorKind::Usage,
+            ForkError::AfterRename { source, .. } => source.kind(),
             _ => ErrorKind::Other,
         }
     }
@@ -446,9 +453,9 @@ pub(crate) fn apply_with(
     let time = resumed.unwrap_or_else(|| whole_seconds(clock.now()));
     let new_id = mint(ids, collection, time)?;
 
-    if plan.to != plan.from {
-        let root =
-            TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
+    let renamed = plan.to != plan.from;
+    let root = TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
+    if renamed {
         let rules = bound_rules(collection, &root)?;
         // The world may have changed since planning: this is the check that
         // the name is free right before the rename.
@@ -464,9 +471,77 @@ pub(crate) fn apply_with(
 
     let store = Store::new(collection);
     if resumed.is_none() {
-        steps.write_metadata(&store, lock, &forked_old(old, &machine, time))?;
+        let archived = forked_old(old, &machine, time);
+        if let Err(error) = steps.write_metadata(&store, lock, &archived) {
+            let error = ForkError::from(error);
+            if !renamed {
+                return Err(error);
+            }
+            // Only a recorded change that is not the one just written
+            // shows that the write left nothing behind. The rename is
+            // taken back then, so that the folder stays with the ID it
+            // belongs to.
+            if nothing_was_written(collection, &archived)
+                && steps.rename(&root, &plan.to, &plan.from).is_ok()
+            {
+                return Err(error);
+            }
+            return Err(stopped_after_rename(plan, error));
+        }
     }
 
+    if let Err(error) = write_rest(
+        collection,
+        plan,
+        lock,
+        clock,
+        steps,
+        (new_id, &machine, time),
+    ) {
+        return Err(if renamed {
+            stopped_after_rename(plan, error)
+        } else {
+            error
+        });
+    }
+
+    Ok(ForkReport {
+        id: new_id,
+        from: plan.id,
+        abs_path: absolute(collection, &plan.to),
+        path: plan.to.clone(),
+        old_path: plan.from.clone(),
+        warnings,
+    })
+}
+
+fn stopped_after_rename(plan: &ForkPlan, error: ForkError) -> ForkError {
+    ForkError::AfterRename {
+        path: plan.to.clone(),
+        source: Box::new(error),
+    }
+}
+
+/// Whether `meta.pending` is readable and differs from what a write of
+/// `written` leaves there, so that the failed write put nothing down.
+fn nothing_was_written(collection: &Collection, written: &Metadata) -> bool {
+    let expected = meta::to_bytes(written).ok();
+    match fs::read(collection.meta_pending_path(written.id)) {
+        Ok(found) => expected.is_some_and(|expected| expected != found),
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+/// The writes that follow the old ID's metadata: its entry, then the new
+/// ID's metadata and entry.
+fn write_rest(
+    collection: &Collection,
+    plan: &ForkPlan,
+    lock: &RunLock,
+    clock: &dyn Clock,
+    steps: &dyn Steps,
+    (new_id, machine, time): (ObjectId, &str, Timestamp),
+) -> Result<(), ForkError> {
     // The folder belongs to the new ID now, so what the old entry knew
     // about the folder goes with it. A version conflict and a superseded
     // archive are about the old ID's metadata and payloads and stay.
@@ -480,7 +555,8 @@ pub(crate) fn apply_with(
     old_entry.resolve_decision(DecisionKind::ReplacingWithLoss);
     steps.write_entry(collection, lock, clock, &mut old_entry)?;
 
-    let forked = forked_new(new_id, collection.id(), &plan.to, &machine, time);
+    let store = Store::new(collection);
+    let forked = forked_new(new_id, collection.id(), &plan.to, machine, time);
     steps.write_metadata(&store, lock, &forked)?;
 
     // The folder keeps the time it was unearthed, which the idle clock
@@ -494,15 +570,7 @@ pub(crate) fn apply_with(
     );
     new_entry.unearthed = plan.entry.unearthed;
     steps.write_entry(collection, lock, clock, &mut new_entry)?;
-
-    Ok(ForkReport {
-        id: new_id,
-        from: plan.id,
-        abs_path: absolute(collection, &plan.to),
-        path: plan.to.clone(),
-        old_path: plan.from.clone(),
-        warnings,
-    })
+    Ok(())
 }
 
 /// The time of the `fork` that archived `metadata` on `machine`, when its
@@ -595,7 +663,7 @@ mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     const PIECE: &str = "projects/a";
 
@@ -774,6 +842,14 @@ mod tests {
         fail: Option<Step>,
         log: RefCell<Vec<&'static str>>,
         mode_problem: bool,
+        /// The failing metadata step writes before it fails, as a flush
+        /// that reports an error after the data went out.
+        writes_before_failing: bool,
+        /// The failing metadata step leaves a directory where
+        /// `meta.pending` would be, so that it cannot be read back.
+        blocks_read_back: Option<PathBuf>,
+        /// The second rename, which puts the folder back, fails.
+        put_back_fails: bool,
     }
 
     impl Recorder {
@@ -783,6 +859,9 @@ mod tests {
                 fail,
                 log: RefCell::new(Vec::new()),
                 mode_problem: false,
+                writes_before_failing: false,
+                blocks_read_back: None,
+                put_back_fails: false,
             }
         }
 
@@ -803,7 +882,8 @@ mod tests {
 
     impl Steps for Recorder {
         fn rename(&self, root: &TreeRoot, from: &RelPath, to: &RelPath) -> Result<Moved, FsxError> {
-            if self.enter(Step::Rename) {
+            let put_back = self.log.borrow().contains(&Step::Rename.label());
+            if self.enter(Step::Rename) || (put_back && self.put_back_fails) {
                 return Err(FsxError::Io {
                     action: "rename",
                     path: from.to_string(),
@@ -833,6 +913,12 @@ mod tests {
                 Step::NewMetadata
             };
             if self.enter(step) {
+                if self.writes_before_failing {
+                    RealSteps.write_metadata(store, lock, metadata)?;
+                }
+                if let Some(pending) = &self.blocks_read_back {
+                    fs::create_dir_all(pending).expect("the directory is created");
+                }
                 return Err(StoreError::Io {
                     action: "write",
                     path: metadata.id.to_string(),
@@ -866,11 +952,31 @@ mod tests {
     }
 
     /// Runs the fork with `step` failing and checks that it failed there.
-    fn crash_at(fx: &Fixture, name: Option<&str>, step: Step) {
-        let recorder = Recorder::new(Some(step));
+    fn crash_at(fx: &Fixture, name: Option<&str>, step: Step) -> ForkError {
+        crash_with(fx, name, Recorder::new(Some(step)), step)
+    }
+
+    fn crash_with(fx: &Fixture, name: Option<&str>, recorder: Recorder, step: Step) -> ForkError {
         let error = fork_with(fx, name, &recorder).expect_err("the step fails");
         assert!(error.to_string().contains("injected"), "{error}");
-        assert_eq!(recorder.log().last(), Some(&step.label()));
+        // A rename that puts the folder back follows the step that failed.
+        let log = recorder.log();
+        let stopped = if step == Step::Rename {
+            log.last()
+        } else {
+            log.iter().rfind(|label| **label != "rename")
+        };
+        assert_eq!(stopped, Some(&step.label()));
+        error
+    }
+
+    /// The path the folder was renamed to, when `error` says the fork
+    /// stopped after the rename.
+    fn stopped_at(error: &ForkError) -> Option<&RelPath> {
+        match error {
+            ForkError::AfterRename { path, .. } => Some(path),
+            _ => None,
+        }
     }
 
     /// The repairs of the next run.
@@ -2082,14 +2188,17 @@ mod tests {
     }
 
     #[test]
-    fn with_a_name_a_crash_after_the_rename_leaves_a_live_entry_without_a_folder() {
+    fn with_a_name_a_stop_after_the_old_metadata_leaves_the_folder_renamed() {
         let fx = unearthed();
-        crash_at(&fx, Some("b"), Step::OldMetadata);
-        assert_eq!(state_of(&fx, id(ID)), PieceState::Gone);
+        let mut recorder = Recorder::new(Some(Step::OldMetadata));
+        recorder.writes_before_failing = true;
+        let error = crash_with(&fx, Some("b"), recorder, Step::OldMetadata);
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
+        assert_eq!(state_of(&fx, id(ID)), PieceState::Archived);
 
         next_run(&fx);
 
-        assert_eq!(state_of(&fx, id(ID)), PieceState::Gone);
+        assert_eq!(state_of(&fx, id(ID)), PieceState::Archived);
         assert!(fx.at("projects/b/notes.txt").exists());
         let restore = unearth::plan(&fx.collection, &fx.request(ID)).expect("planned");
         match restore {
@@ -2099,9 +2208,90 @@ mod tests {
     }
 
     #[test]
+    fn with_a_name_a_failing_old_metadata_write_puts_the_folder_back() {
+        let fx = unearthed();
+        let before = snapshot(&fx);
+
+        let error = crash_at(&fx, Some("b"), Step::OldMetadata);
+
+        assert_eq!(stopped_at(&error), None);
+        assert_eq!(snapshot(&fx), before);
+    }
+
+    #[test]
+    fn with_a_name_a_failing_write_next_to_another_recorded_change_puts_the_folder_back() {
+        let fx = unearthed();
+        Store::new(&fx.collection)
+            .write_pending(&fx.lock, &current(&fx, id(ID)).metadata)
+            .expect("a change is recorded");
+        let before = snapshot(&fx);
+
+        let error = crash_at(&fx, Some("b"), Step::OldMetadata);
+
+        assert_eq!(stopped_at(&error), None);
+        assert_eq!(snapshot(&fx), before);
+    }
+
+    #[test]
+    fn with_a_name_a_write_that_cannot_be_read_back_leaves_the_folder_renamed() {
+        let fx = unearthed();
+        let mut recorder = Recorder::new(Some(Step::OldMetadata));
+        recorder.blocks_read_back = Some(fx.collection.meta_pending_path(id(ID)));
+
+        let error = crash_with(&fx, Some("b"), recorder, Step::OldMetadata);
+
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
+        assert!(fx.at("projects/b/notes.txt").exists());
+    }
+
+    #[test]
+    fn with_a_name_a_folder_that_cannot_be_put_back_stays_renamed() {
+        let fx = unearthed();
+        let mut recorder = Recorder::new(Some(Step::OldMetadata));
+        recorder.put_back_fails = true;
+
+        let error = crash_with(&fx, Some("b"), recorder, Step::OldMetadata);
+
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
+        assert!(fx.at("projects/b/notes.txt").exists());
+    }
+
+    #[test]
+    fn without_a_name_a_failing_step_is_the_bare_error() {
+        let fx = unearthed();
+
+        let error = crash_at(&fx, None, Step::OldEntry);
+
+        assert_eq!(stopped_at(&error), None);
+    }
+
+    #[test]
+    fn a_stop_after_the_rename_names_the_new_path() {
+        let fx = unearthed();
+
+        let error = crash_at(&fx, Some("b"), Step::OldEntry);
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("the folder was renamed to `projects/b` and the fork stopped there: "),
+            "{error}"
+        );
+        assert!(error.to_string().contains("injected"), "{error}");
+        let wrapped = ForkError::AfterRename {
+            path: path("projects/b"),
+            source: Box::new(ForkError::Store(StoreError::Meta(
+                MetaError::FormatTooNew { found: 2 },
+            ))),
+        };
+        assert_eq!(wrapped.kind(), ErrorKind::FormatTooNew);
+    }
+
+    #[test]
     fn with_a_name_a_crash_before_the_old_entry_leaves_the_old_id_archived() {
         let fx = unearthed();
-        crash_at(&fx, Some("b"), Step::OldEntry);
+        let error = crash_at(&fx, Some("b"), Step::OldEntry);
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
         assert_eq!(state_of(&fx, id(ID)), PieceState::Archived);
 
         next_run(&fx);
@@ -2114,7 +2304,8 @@ mod tests {
     #[test]
     fn with_a_name_a_crash_before_the_new_metadata_leaves_the_old_id_archived() {
         let fx = unearthed();
-        crash_at(&fx, Some("b"), Step::NewMetadata);
+        let error = crash_at(&fx, Some("b"), Step::NewMetadata);
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
 
         next_run(&fx);
 
@@ -2126,7 +2317,8 @@ mod tests {
     #[test]
     fn with_a_name_a_crash_before_the_new_entry_is_repaired_at_the_new_path() {
         let fx = unearthed();
-        crash_at(&fx, Some("b"), Step::NewEntry);
+        let error = crash_at(&fx, Some("b"), Step::NewEntry);
+        assert_eq!(stopped_at(&error), Some(&path("projects/b")));
 
         next_run(&fx);
 
