@@ -395,6 +395,21 @@ mod tests {
     }
 
     #[test]
+    fn no_line_beyond_the_shown_ones_adds_no_count() {
+        let error = PushError::TargetRefusesModes {
+            shown: vec![
+                "rsync: [receiver] chmod \"/t\" failed: Operation not permitted (1)".into(),
+            ],
+            more: 0,
+        };
+        let lines = rich(error, &[]);
+        assert!(
+            lines.iter().all(|line| !line.contains(" more line")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn a_single_line_beyond_the_shown_ones_is_counted_in_the_singular() {
         let error = PushError::TargetRefusesModes {
             shown: vec![
