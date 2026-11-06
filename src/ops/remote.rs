@@ -19,10 +19,12 @@ use crate::reference::Candidate;
 use crate::relpath::machine_part;
 use crate::remote::marker::{self, MarkerError, write_marker};
 use crate::remote::path::{PathRemote, RootState, Seams, assess, inspect, probe_exclusive};
+use crate::remote::rsync::Rsync;
+use crate::remote::ssh::{RootFound, SshRemote, SshSeams, SshTarget, Unproven};
 use crate::remote::url::{RemoteUrl, UrlError};
 use crate::remote::{KnownVersions, Remote, RemoteError, RemoteState};
 use crate::report::{CommandReport, Warning};
-use crate::run::Started;
+use crate::run::{RunGuard, Started};
 use crate::store::{Store, StoreError};
 use crate::tracking::{self, PieceState, TrackingError};
 use serde::Serialize;
@@ -59,6 +61,8 @@ pub enum RemoteOpError {
     ParentMissing { root: PathBuf, parent: PathBuf },
     #[error("exclusive creation does not work in {}: {reason}", root.display())]
     ExclusiveCreate { root: PathBuf, reason: String },
+    #[error("hard links do not work in {}: {reason}", root.display())]
+    HardLink { root: PathBuf, reason: String },
     #[error(
         "the remote was initialised at {} but the config could not be written: {source}; `remote add {url}` without --init attaches it",
         root.display()
@@ -227,8 +231,19 @@ pub(crate) fn show_with(
     };
     let root = match RemoteUrl::parse(&config.url)? {
         RemoteUrl::Path { root } => root,
-        RemoteUrl::Ssh { .. } => {
-            return Err(RemoteError::Unsupported("an ssh remote".into()).into());
+        RemoteUrl::Ssh {
+            user,
+            host,
+            port,
+            root,
+        } => {
+            let target = SshTarget {
+                user,
+                host,
+                port,
+                root,
+            };
+            return show_ssh(collection, config, &target, SshSeams::default());
         }
     };
     let state = inspect(&root, seams);
@@ -247,6 +262,28 @@ pub(crate) fn show_with(
         reason: Some(assessment.reason).filter(|reason| !reason.is_empty()),
         probed: Some(serde_json::Map::new()),
         warnings,
+    })
+}
+
+/// `remote show` for an ssh remote: one read-only script over a connection
+/// of its own, since a master would be started for a single call.
+pub(crate) fn show_ssh(
+    collection: &Collection,
+    config: &RemoteConfig,
+    target: &SshTarget,
+    seams: SshSeams,
+) -> Result<ShowReport, RemoteOpError> {
+    let remote = SshRemote::connect_with(target, config, &collection.config().machine, seams)?;
+    let (assessment, probed) = remote.show()?;
+    Ok(ShowReport {
+        attached: true,
+        kind: Some("ssh"),
+        url: Some(config.url.clone()),
+        id: Some(config.id),
+        state: Some(assessment.reachability.into()),
+        reason: Some(assessment.reason).filter(|reason| !reason.is_empty()),
+        probed: Some(probed),
+        warnings: remote.take_warnings(),
     })
 }
 
@@ -383,32 +420,35 @@ pub(crate) fn add_with(
 
     let root = match RemoteUrl::parse(request.url)? {
         RemoteUrl::Path { root } => root,
-        RemoteUrl::Ssh { .. } => {
-            return Err(RemoteError::Unsupported("an ssh remote".into()).into());
+        RemoteUrl::Ssh {
+            user,
+            host,
+            port,
+            root,
+        } => {
+            let target = SshTarget {
+                user,
+                host,
+                port,
+                root,
+            };
+            return add_ssh(
+                collection,
+                request,
+                started,
+                clock,
+                ids,
+                &target,
+                SshSeams::default(),
+            );
         }
     };
     if request.host_key_alias.is_some() {
         return Err(RemoteOpError::HostKeyAliasNeedsSsh);
     }
     let machine = collection.machine_name()?;
-
-    // The config decides whether a remote is attached, in the spelling it
-    // holds one in, so the refusal asks the editor that would add the
-    // entry and sees what it would see.
     let mut doc = ConfigDoc::read(&collection.config_path())?;
-    let placeholder = RemoteConfig {
-        url: String::new(),
-        id: collection.id(),
-        host_key_alias: None,
-    };
-    if doc.clone().add_remote(&placeholder).is_err() {
-        let url = collection
-            .config()
-            .remotes
-            .first()
-            .map_or_else(|| "an entry of the config".to_string(), |r| r.url.clone());
-        return Err(RemoteOpError::AlreadyAttached { url });
-    }
+    refuse_when_attached(collection, &doc)?;
 
     let state = inspect(&root, seams);
     let attached_id = check_root(&root, &state, request.init, collection.id())?;
@@ -417,19 +457,19 @@ pub(crate) fn add_with(
     if !matches!(state, RootState::Missing) {
         warnings.extend(mount_warning(&root, seams));
     }
-    let kind = "path";
     let url = request.url.to_string();
 
     let guard = match started {
         Started::Guarded(guard) => guard,
         Started::DryRun { .. } => {
+            let remote = attached_id
+                .filter(|_| !request.init)
+                .map(|id| PathRemote::with_seams(root.clone(), id, &machine, seams.clone()));
             return dry_run(
-                &root,
+                "path",
                 &url,
-                request.init,
                 attached_id,
-                &machine,
-                seams,
+                remote.as_ref().map(|remote| remote as &dyn Remote),
                 warnings,
             );
         }
@@ -461,43 +501,285 @@ pub(crate) fn add_with(
         warnings.extend(mount_warning(&root, seams));
     }
 
-    // The entry in the config is what attaches the remote. A failure after
-    // it leaves the remote attached and the copy to the next `sync`.
+    let remote = PathRemote::with_seams(root.clone(), remote_id, &machine, seams.clone());
+    attach(
+        collection,
+        guard,
+        &Attachment {
+            kind: "path",
+            url,
+            init: request.init,
+            root,
+            config_text: &config_text,
+            remote: &remote,
+            remote_id,
+        },
+        warnings,
+    )
+}
+
+/// The config decides whether a remote is attached, in the spelling it
+/// holds one in, so the refusal asks the editor that would add the entry
+/// and sees what it would see.
+fn refuse_when_attached(collection: &Collection, doc: &ConfigDoc) -> Result<(), RemoteOpError> {
+    let placeholder = RemoteConfig {
+        url: String::new(),
+        id: collection.id(),
+        host_key_alias: None,
+    };
+    if doc.clone().add_remote(&placeholder).is_ok() {
+        return Ok(());
+    }
+    let url = collection
+        .config()
+        .remotes
+        .first()
+        .map_or_else(|| "an entry of the config".to_string(), |r| r.url.clone());
+    Err(RemoteOpError::AlreadyAttached { url })
+}
+
+/// What `attach` records once the remote's root is ready.
+struct Attachment<'a> {
+    kind: &'static str,
+    url: String,
+    init: bool,
+    /// The root, for the error of a config that cannot be written.
+    root: PathBuf,
+    config_text: &'a str,
+    remote: &'a dyn Remote,
+    remote_id: ObjectId,
+}
+
+/// Writes the `[[remote]]` entry, which is what attaches the remote, and
+/// copies the metadata. A failure after the entry leaves the remote
+/// attached and the copy to the next `sync`.
+fn attach(
+    collection: &Collection,
+    guard: &RunGuard,
+    attachment: &Attachment<'_>,
+    mut warnings: Vec<Warning>,
+) -> Result<AddReport, RemoteOpError> {
+    let Attachment {
+        kind,
+        url,
+        init,
+        root,
+        config_text,
+        remote,
+        remote_id,
+    } = attachment;
     if let Err(source) = write_atomic(&collection.config_path(), config_text.as_bytes()) {
-        return Err(if request.init {
-            RemoteOpError::ConfigWrite { root, url, source }
+        return Err(if *init {
+            RemoteOpError::ConfigWrite {
+                root: root.clone(),
+                url: url.clone(),
+                source,
+            }
         } else {
             source.into()
         });
     }
 
-    let remote = PathRemote::with_seams(root.clone(), remote_id, &machine, seams.clone());
     let pulled =
-        copy_metadata(&remote, &Store::new(collection), guard.lock()).map_err(|error| {
+        copy_metadata(*remote, &Store::new(collection), guard.lock()).map_err(|error| {
             RemoteOpError::MetadataCopy {
                 message: error.to_string(),
             }
         })?;
+    warnings.extend(remote.take_warnings());
 
-    let action = if request.init {
+    let action = if *init {
         RemoteAction::CreateRemote { url: url.clone() }
     } else {
         RemoteAction::AttachRemote { url: url.clone() }
     };
     let mut actions = vec![action];
-    if !request.init {
+    if !init {
         actions.push(RemoteAction::CopyMetadata { objects: pulled });
     }
     Ok(AddReport {
         kind,
-        url,
-        id: Some(remote_id),
+        url: url.clone(),
+        id: Some(*remote_id),
         attached: true,
-        created: request.init,
+        created: *init,
         pulled: Some(pulled),
         dry_run: false,
         actions,
         warnings,
+    })
+}
+
+// =========================================================
+// remote add over ssh
+// =========================================================
+
+/// `remote add` for an ssh remote. The probes look at the NAS in one
+/// read-only script, so a refusal and a dry run write nothing there.
+pub(crate) fn add_ssh(
+    collection: &Collection,
+    request: &AddRequest<'_>,
+    started: &Started,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+    target: &SshTarget,
+    seams: SshSeams,
+) -> Result<AddReport, RemoteOpError> {
+    let machine_name = collection.machine_name()?;
+    let mut doc = ConfigDoc::read(&collection.config_path())?;
+    refuse_when_attached(collection, &doc)?;
+    let machine = &collection.config().machine;
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let rsync = Rsync::resolve(machine.rsync.as_deref(), &path_var).map_err(RemoteError::from)?;
+
+    let host_key_alias = request.host_key_alias.map(String::from);
+    let config = RemoteConfig {
+        url: request.url.to_string(),
+        // The ULID of the remote is known once the probe has read the
+        // marker; the session does not need it.
+        id: collection.id(),
+        host_key_alias,
+    };
+    let remote = SshRemote::connect_with(target, &config, machine, seams)?;
+    remote.begin_connection()?;
+    let probe = remote.probe()?;
+    let attached_id = check_ssh_root(&remote, &probe, target, request.init)?;
+    remote.tools_of(&probe)?;
+    let remote_id = attached_id.unwrap_or_else(|| ids.mint(clock.now()));
+    let remote = remote.with_id(remote_id);
+    let url = request.url.to_string();
+
+    let guard = match started {
+        Started::Guarded(guard) => guard,
+        Started::DryRun { .. } => {
+            let existing = attached_id.filter(|_| !request.init).map(|_| &remote);
+            let mut report = dry_run(
+                "ssh",
+                &url,
+                attached_id,
+                existing.map(|remote| remote as &dyn Remote),
+                Vec::new(),
+            )?;
+            report.warnings.extend(remote.take_warnings());
+            return Ok(report);
+        }
+    };
+
+    doc.add_remote(&RemoteConfig {
+        id: remote_id,
+        ..config
+    })?;
+    doc.set_machine_rsync(&rsync.path().to_string_lossy());
+    let config_text = doc.render()?;
+
+    let root = PathBuf::from(&target.root);
+    let made_root = request.init && matches!(probe.root, RootFound::Missing { .. });
+    if let Err(error) = prepare_ssh_root(&remote, &root, made_root, &machine_name, request.init) {
+        if made_root {
+            remote.remove_made_root();
+        }
+        return Err(error);
+    }
+
+    let warnings = guard.warnings().to_vec();
+    attach(
+        collection,
+        guard,
+        &Attachment {
+            kind: "ssh",
+            url,
+            init: request.init,
+            root,
+            config_text: &config_text,
+            remote: &remote,
+            remote_id,
+        },
+        warnings,
+    )
+}
+
+/// Decides what the probe says about the root, as `check_root` does for a
+/// path remote. Returns the ULID the marker names.
+fn check_ssh_root(
+    remote: &SshRemote,
+    probe: &crate::remote::ssh::Probe,
+    target: &SshTarget,
+    init: bool,
+) -> Result<Option<ObjectId>, RemoteOpError> {
+    let root = PathBuf::from(&target.root);
+    if let (RootFound::Missing { parent_exists }, true) = (&probe.root, init) {
+        // Only the last component is made, as on a path remote.
+        if !parent_exists {
+            return Err(RemoteOpError::ParentMissing {
+                parent: root
+                    .parent()
+                    .expect("a validated root has a parent")
+                    .to_path_buf(),
+                root,
+            });
+        }
+        return Ok(None);
+    }
+    match (remote.marker_in(probe)?, init) {
+        (Some(found), false) => Ok(Some(found.id)),
+        (Some(_), true) => Err(RemoteOpError::AlreadyARemote { root }),
+        (None, false) => Err(RemoteError::Broken(format!(
+            "{} holds no {}; use `remote add --init` to create a remote there",
+            target.root,
+            marker::FILE_NAME
+        ))
+        .into()),
+        (None, true) => match &probe.layout_name {
+            Some(name) => Err(RemoteOpError::LayoutNameTaken {
+                root,
+                name: name.clone(),
+            }),
+            None => Ok(None),
+        },
+    }
+}
+
+/// Makes the root if this run is to, proves that exclusive creation and
+/// hard links work in it, and for `--init` writes the marker.
+fn prepare_ssh_root(
+    remote: &SshRemote,
+    root: &Path,
+    make_root: bool,
+    machine: &str,
+    init: bool,
+) -> Result<(), RemoteOpError> {
+    if make_root {
+        remote.make_root()?;
+    }
+    let probe_name = format!(
+        ".antiq-probe.{}.{}.{}",
+        machine_part(machine),
+        std::process::id(),
+        ulid::Ulid::from_datetime(std::time::SystemTime::now())
+            .to_string()
+            .to_lowercase()
+    );
+    let proven = remote.prove_creation(&probe_name).and_then(|()| {
+        if init {
+            remote.write_marker(&format!(
+                ".{}.{}.tmp",
+                marker::FILE_NAME,
+                std::process::id()
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    proven.map_err(|failed| match failed {
+        Unproven::ExclusiveCreate(reason) => RemoteOpError::ExclusiveCreate {
+            root: root.to_path_buf(),
+            reason,
+        },
+        Unproven::HardLink(reason) => RemoteOpError::HardLink {
+            root: root.to_path_buf(),
+            reason,
+        },
+        Unproven::Remote(error) => error.into(),
     })
 }
 
@@ -589,27 +871,24 @@ fn mount_warning(root: &Path, seams: &Seams) -> Option<Warning> {
 }
 
 fn dry_run(
-    root: &Path,
+    kind: &'static str,
     url: &str,
-    init: bool,
     attached_id: Option<ObjectId>,
-    machine: &str,
-    seams: &Seams,
+    existing: Option<&dyn Remote>,
     warnings: Vec<Warning>,
 ) -> Result<AddReport, RemoteOpError> {
-    let actions = match attached_id {
-        Some(id) if !init => {
-            let remote = PathRemote::with_seams(root.to_path_buf(), id, machine, seams.clone());
+    let actions = match existing {
+        Some(remote) => {
             let objects = remote.list_objects()?.len();
             vec![
                 RemoteAction::AttachRemote { url: url.into() },
                 RemoteAction::CopyMetadata { objects },
             ]
         }
-        _ => vec![RemoteAction::CreateRemote { url: url.into() }],
+        None => vec![RemoteAction::CreateRemote { url: url.into() }],
     };
     Ok(AddReport {
-        kind: "path",
+        kind,
         url: url.into(),
         id: attached_id,
         attached: false,
@@ -656,7 +935,7 @@ fn prepare_root(
 /// the local store, byte for byte, and returns how many objects they
 /// belong to.
 fn copy_metadata(
-    remote: &PathRemote,
+    remote: &dyn Remote,
     store: &Store<'_>,
     lock: &RunLock,
 ) -> Result<usize, RemoteOpError> {
@@ -1162,20 +1441,6 @@ mod tests {
     }
 
     #[test]
-    fn an_ssh_url_is_not_supported_yet_and_writes_nothing() {
-        let world = world();
-        let before = world.config_text();
-        let error = world
-            .run_text("ssh://nas/srv/antiq", false, None, false, &no_mount_point())
-            .expect_err("not supported");
-        assert!(
-            matches!(error, RemoteOpError::Remote(RemoteError::Unsupported(_))),
-            "{error}"
-        );
-        assert_eq!(world.config_text(), before);
-    }
-
-    #[test]
     fn a_url_that_does_not_parse_is_refused() {
         let world = world();
         let error = world
@@ -1437,19 +1702,6 @@ mod tests {
         world.show(&no_mount_point()).expect("shown");
         assert_eq!(names(&root), before.0);
         assert_eq!(world.config_text(), before.1);
-    }
-
-    #[test]
-    fn an_ssh_remote_in_the_config_cannot_be_shown_yet() {
-        let world = world();
-        world.append_to_config(&format!(
-            "\n[[remote]]\nurl = \"ssh://nas/srv/antiq\"\nid = \"{REMOTE_ID}\"\n"
-        ));
-        let error = world.show(&no_mount_point()).expect_err("not supported");
-        assert!(
-            matches!(error, RemoteOpError::Remote(RemoteError::Unsupported(_))),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1886,5 +2138,165 @@ mod tests {
             "{:?}",
             report.warnings
         );
+    }
+
+    // =====================================================
+    // An ssh remote, with the ssh shim as the far side
+    // =====================================================
+
+    /// The ssh shim in a state directory of its own, and the directory on
+    /// this machine that plays the NAS.
+    struct Shim {
+        state: tempfile::TempDir,
+        control: tempfile::TempDir,
+        nas: tempfile::TempDir,
+    }
+
+    fn short_dir() -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .tempdir_in("/tmp")
+            .expect("/tmp is writable");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+            .expect("the directory is ours");
+        dir
+    }
+
+    impl Shim {
+        fn new() -> Shim {
+            assert_ne!(
+                rustix::process::geteuid().as_raw(),
+                0,
+                "these tests assume a non-root user"
+            );
+            let shim = Shim {
+                state: short_dir(),
+                control: short_dir(),
+                nas: tempfile::tempdir().expect("temp dir"),
+            };
+            let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ssh-shim.sh");
+            std::os::unix::fs::symlink(script, shim.state.path().join("ssh")).expect("symlink");
+            shim
+        }
+
+        fn seams(&self, exclusive_create: &'static str) -> SshSeams {
+            SshSeams {
+                exclusive_create,
+                program: Some(self.state.path().join("ssh")),
+                control_dir: Some(self.control.path().to_path_buf()),
+                ..SshSeams::default()
+            }
+        }
+
+        /// `remote add --init` of a directory below the NAS root.
+        fn init_with(
+            &self,
+            exclusive_create: &'static str,
+        ) -> (World, Result<AddReport, RemoteOpError>) {
+            let world = world();
+            let target = SshTarget {
+                user: None,
+                host: "nas".into(),
+                port: None,
+                root: self
+                    .nas
+                    .path()
+                    .join("fresh")
+                    .to_str()
+                    .expect("UTF-8")
+                    .into(),
+            };
+            let collection = world.collection();
+            let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+            let started = run::start(&collection, &clock, false).expect("the run starts");
+            let request = AddRequest {
+                url: "ssh://nas/srv/fresh",
+                init: true,
+                host_key_alias: None,
+            };
+            let report = add_ssh(
+                &collection,
+                &request,
+                &started,
+                &clock,
+                &SeqIds::new(1),
+                &target,
+                self.seams(exclusive_create),
+            );
+            (world, report)
+        }
+    }
+
+    fn names_below(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = fs::read_dir(dir)
+            .expect("the directory is listed")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn an_exclusive_create_that_always_succeeds_is_refused_and_the_root_goes() {
+        let shim = Shim::new();
+        let (world, report) = shim.init_with("exit 0\n");
+        let error = report.expect_err("no exclusive create");
+        assert!(
+            matches!(&error, RemoteOpError::ExclusiveCreate { reason, .. } if reason.contains("second create")),
+            "{error}"
+        );
+        assert_eq!(names_below(shim.nas.path()), Vec::<String>::new());
+        assert!(!world.config_text().contains("[[remote]]"));
+    }
+
+    #[test]
+    fn an_exclusive_create_that_always_fails_is_refused_and_the_root_goes() {
+        let shim = Shim::new();
+        // The first create already fails, so the second one never runs.
+        let calls = shim.state.path().join("creates.log");
+        let script: &'static str = Box::leak(
+            format!("echo x >> {}\necho 'no way' >&2\nexit 1\n", calls.display()).into_boxed_str(),
+        );
+        let (world, report) = shim.init_with(script);
+        assert_eq!(fs::read_to_string(&calls).expect("log").lines().count(), 1);
+        let error = report.expect_err("no exclusive create");
+        assert!(
+            matches!(&error, RemoteOpError::ExclusiveCreate { reason, .. } if reason == "no way"),
+            "{error}"
+        );
+        assert_eq!(names_below(shim.nas.path()), Vec::<String>::new());
+        assert!(!world.config_text().contains("[[remote]]"));
+    }
+
+    #[test]
+    fn a_second_exclusive_create_that_fails_for_another_reason_is_refused() {
+        let shim = Shim::new();
+        let (_world, report) = shim.init_with("if [ -e \"$1\" ]; then exit 1; fi\n: > \"$1\"\n");
+        let error = report.expect_err("the second create is no proof");
+        assert!(
+            matches!(&error, RemoteOpError::ExclusiveCreate { reason, .. } if reason.contains("status 1")),
+            "{error}"
+        );
+        assert_eq!(names_below(shim.nas.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_connection_lost_while_proving_the_root_ends_the_run_with_that_error() {
+        let shim = Shim::new();
+        // The script runs on the far side, which is this machine: it makes
+        // the shim refuse the connection from the next command on.
+        let script: &'static str = Box::leak(
+            format!(
+                "if ( set -C; : > \"$1\" ) 2>/dev/null; then\n    echo 'connect-refused command' > {}/fault\n    exit 0\nfi\nexit 17\n",
+                shim.state.path().display()
+            )
+            .into_boxed_str(),
+        );
+        let (world, report) = shim.init_with(script);
+        let error = report.expect_err("the connection is gone");
+        assert!(
+            matches!(&error, RemoteOpError::Remote(RemoteError::Away { .. })),
+            "{error}"
+        );
+        assert!(!world.config_text().contains("[[remote]]"));
     }
 }

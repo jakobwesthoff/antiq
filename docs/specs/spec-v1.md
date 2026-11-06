@@ -796,12 +796,13 @@ an option), and the port is a number from 1 to 65535. A URL that
 does not fit is a usage error. The config keeps the URL as given.
 `remote add` refuses while a remote
 is attached, and refuses with the reason when a probe fails: no rsync
-3.1 or later, openrsync, no SHA-256 tool on the NAS, a failing
-exclusive create, the remote unreachable. It writes nothing then.
+3.1 or later, openrsync, no SHA-256 tool or `stat` on the NAS, a failing
+exclusive create or hard link, the remote unreachable. It writes nothing
+then.
 
 On a path remote `remote add` decides every refusal before it writes
 anything: a URL that does not fit, `--host-key-alias` (which applies to
-ssh remotes only), an ssh URL (not supported yet), a remote already
+ssh remotes only), a remote already
 attached, and what the root holds. Without `--init`, a missing root and a
 root without a marker that is no mount point are away, a mount point
 without a marker is broken, and a marker names the remote's ULID, as
@@ -818,9 +819,42 @@ remote attached, and `sync` brings in the rest. A config that cannot be
 written after `--init` leaves the marker, and `remote add <url>` without
 `--init` attaches it.
 
+On an ssh remote `remote add` decides every refusal before it writes
+anything on the NAS. `--host-key-alias` is allowed. The local rsync is
+resolved first, as under "Transfers". Then antiq starts the master
+connection and looks at the NAS in one read-only script: the root, the
+names `objects` and `.antiq-clock.*` in it, the NAS rsync, a SHA-256
+tool and `stat`. The NAS rsync is run as `<command> --version` through
+the shell, where the command is `machine.remote_rsync` or `rsync`, so a
+value of several words works. It has to be rsync 3.1 or later and not
+openrsync. A hash tool counts only when it gives the SHA-256 of the
+three bytes `abc`. `stat` has to work in the GNU (`-c`) or the BSD
+(`-f`) form. A rsync, hash tool or `stat` that does not do is broken,
+with the tool named. The root is judged as under "SSH remote": without
+`--init`, a missing root is away and a root without a marker is broken,
+with a hint to use `--init`, and a marker names the remote's ULID. With
+`--init`, a missing root is created when its parent exists, and a root
+that already holds a marker, an `objects` entry or a `.antiq-clock.*`
+file is refused with the name it holds. A dry run ends after these
+probes. The writes follow. `--init` makes the last component of the
+root. The probe for exclusive creation makes a file named
+`.antiq-probe.<machine part>.<pid>.<lower-case ULID>` in the root, makes
+it again, which has to fail, and hard-links it to the same name with
+`.link` added, which has to give a regular file; the file and the link
+are removed. A root that a refused `--init` made is removed again while
+it is empty. Then `--init` writes the marker to a temp name, flushes,
+hard-links it to `antiq-remote.json` when that name is free, removes the
+temp name and flushes. The `[[remote]]` entry and `machine.rsync` go into
+the config in one write, and the metadata of the remote is copied. A
+copy that fails leaves the remote attached, and `sync` brings in the
+rest.
+
 `remote show` prints kind, URL, remote ULID, reachability and the probed
 versions; it reads only, takes no lock, and reports a remote that is away
-or broken with exit 0. `remote remove` only detaches: it deletes nothing
+or broken with exit 0. On an ssh remote it runs one read-only script over
+a connection of its own and prints, for a remote that is reachable, the
+`rsync` of this machine, the `remote rsync`, the `sha256` tool and the
+`stat` form; a tool that is missing or too old shows as `none`. `remote remove` only detaches: it deletes nothing
 on the remote and keeps the local metadata, lists the remote-only pieces
 that become unreachable, and goes through the brake. A path remote whose
 root is not a mount point gets a warning at `remote add` and at
@@ -983,7 +1017,8 @@ machine has, and antiq then applies the version rules to the names. The
 checksum of a file is computed on the NAS by the first of `sha256sum`,
 `shasum -a 256`, `sha256 -q` and `openssl dgst -sha256 -r` that prints
 exactly 64 lower-case hexadecimal digits; no such tool makes the remote
-broken. Every file name given to the remote is one path component, as
+broken. So does a NAS whose `stat` works in neither the GNU (`-c`) nor
+the BSD (`-f`) form. Every file name given to the remote is one path component, as
 on the path remote.
 
 Writing a temp file, creating a claim and renaming a temp do not make
@@ -1957,7 +1992,7 @@ brake would hold.
 | `no_remote` | 1 | a command needs a remote and none is attached | |
 | `remote_away` | 4 | the remote cannot be reached | |
 | `remote_broken` | 1 | the remote is broken, as "Remotes" defines | |
-| `unsupported` | 1 | a command needs something this version does not have yet, such as an ssh remote | |
+| `unsupported` | 1 | a command needs something this version does not have yet | |
 | `format_too_new` | 1 | a write meets metadata of a higher `format` | |
 | `other` | 1 | any other failure | |
 
@@ -2089,21 +2124,28 @@ pin file) and `warnings`.
 terminal, or with `--json`, it lists the pending decisions and exits 3
 when there are any.
 
-`remote add` adds `kind` (`path`), `url` (as given), `id` (the remote's
+`remote add` adds `kind` (`path` or `ssh`), `url` (as given), `id` (the remote's
 ULID; a dry run of `--init` has none yet), `attached`, `created` (whether
 the run made the marker), `pulled` (the number of objects whose metadata
 was copied; left out in a dry run), `dry_run` (present, and true, under
 `--dry-run`), `actions` and `warnings`. An action is `create_remote` or
 `attach_remote`, each with a `url`, or `copy_metadata` with `objects`.
 The errors are `remote_away` for a missing root or a root without a
-marker that is no mount point, `remote_broken` for the other roots that
-cannot be used, `unsupported` for an ssh URL, `usage` for an invalid URL
-or for `--host-key-alias` with a path URL, and `other` for the rest.
+marker that is no mount point, and for an ssh remote that does not
+answer; `remote_broken` for the other roots that cannot be used, for an
+ssh remote that refuses the login and for an ssh remote whose NAS has no
+usable rsync, SHA-256 tool or `stat`; `usage` for an invalid URL or for
+`--host-key-alias` with a path URL; and `other` for the rest, a failing
+exclusive create and a failing hard link among them.
 
 `remote show` adds `attached`. With a remote attached it also adds
 `kind`, `url`, `id`, `state` (`reachable`, `away` or `broken`), `reason`
 (for a remote that is away or broken; it names the place), `probed` (an
-object of what was probed on the remote, empty for a path remote) and
+object of what was probed on the remote: for a reachable ssh remote the
+keys `rsync` and `remote_rsync` with the versions of this machine's and
+the NAS's rsync, `sha256` with the name of the hash tool and `stat` with
+`gnu` or `bsd`, each `null` when that tool is missing or too old; empty
+for a path remote and for an ssh remote that is away or broken) and
 `warnings`. Without a remote it reports `"attached": false` and exits 0.
 
 `remote remove` adds `detached`, `url`, `remote_only` (a list of `{id,

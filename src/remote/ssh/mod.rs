@@ -20,7 +20,7 @@ use super::{
 };
 use crate::config::{MachineConfig, RemoteConfig};
 use crate::id::ObjectId;
-use crate::remote::rsync::{Rsync, RsyncError, TransferSettings};
+use crate::remote::rsync::{Rsync, RsyncError, RsyncVersion, TransferSettings, parse_version_line};
 use crate::report::Warning;
 use classify::{Failure, decided_failure};
 use jiff::Timestamp;
@@ -28,7 +28,7 @@ use script::{EXISTS_STATUS, Script};
 use session::{Output, Session, SessionError, SessionSettings, Target};
 use std::ffi::OsString;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Where an ssh remote lives: the parts of its URL.
@@ -256,31 +256,53 @@ const FETCH_CHECK: &str = r#"[ -f "$1/objects/$2/$3" ] || exit 44
 /// Shell functions every script of the remote starts with. They use
 /// only POSIX `sh` and tools every NAS has.
 ///
+/// - `antiq_stat_flavour` sets `_flavour` to `gnu`, `bsd` or `none`, by
+///   which form of `stat` works.
 /// - `antiq_stat FILE` prints `<size> <mtime>`; status 43 when `stat`
 ///   knows neither the GNU nor the BSD form.
 /// - `antiq_sha256 FILE` prints the SHA-256 as 64 lower-case hex digits
 ///   from the first tool of `sha256sum`, `shasum`, `sha256` and `openssl`
 ///   that gives exactly that; status 42 when none does. Tools differ in
 ///   what they print and a NAS may carry a broken one, so only a result
-///   of the right shape counts.
+///   of the right shape counts. Without an argument it hashes `abc` from
+///   a pipe and counts only the known digest, which proves a tool
+///   without needing a file; `_tool` names the tool that passed.
+/// - `antiq_root_kind ROOT` sets `_root_kind` to `dir`, `missing` (absent
+///   below a directory that can be searched) or `unusable`, and
+///   `_root_why` to the reason for `unusable`.
 /// - `antiq_emit KIND FILE [ARG...]` prints `@KIND ARG... <length>`, the
 ///   file and a newline.
 /// - `antiq_root_check ROOT` ends the script unless ROOT is a directory
 ///   with a readable marker, and prints the marker as a frame.
-pub(crate) const PRELUDE: &str = r#"antiq_stat() {
+pub(crate) const PRELUDE: &str = r#"antiq_stat_flavour() {
     if stat -c '%s' / >/dev/null 2>&1; then
-        stat -c '%s %Y' "$1"
+        _flavour=gnu
     elif stat -f '%z' / >/dev/null 2>&1; then
-        stat -f '%z %m' "$1"
+        _flavour=bsd
     else
-        return 43
+        _flavour=none
     fi
+}
+antiq_stat() {
+    antiq_stat_flavour
+    case $_flavour in
+    gnu) stat -c '%s %Y' "$1" ;;
+    bsd) stat -f '%z %m' "$1" ;;
+    *) return 43 ;;
+    esac
 }
 antiq_sha256() {
     for _tool in 'sha256sum' 'shasum -a 256' 'sha256 -q' 'openssl dgst -sha256 -r'; do
-        _hash=$($_tool "$1" 2>/dev/null) || continue
+        if [ "$#" -eq 0 ]; then
+            _hash=$(printf abc | $_tool 2>/dev/null) || continue
+        else
+            _hash=$($_tool "$1" 2>/dev/null) || continue
+        fi
         _hash=${_hash%% *}
         case $_hash in *[!0-9a-f]*) continue ;; esac
+        if [ "$#" -eq 0 ] && [ "$_hash" != ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ]; then
+            continue
+        fi
         if [ "${#_hash}" -eq 64 ]; then
             printf '%s
 ' "$_hash"
@@ -304,24 +326,34 @@ antiq_emit() {
     cat "$_file" || return 1
     printf '\n'
 }
-antiq_root_check() {
-    if [ ! -d "$1" ]; then
-        _near=$1
-        while [ ! -e "$_near" ] && [ ! -h "$_near" ]; do
-            _near=$(dirname -- "$_near")
-        done
-        if [ "$_near" != "$1" ] && [ -d "$_near" ] && [ -x "$_near" ]; then
-            exit 40
-        fi
-        if [ "$_near" = "$1" ]; then
-            printf '%s is not a directory
-' "$1" >&2
-        else
-            printf '%s cannot be searched or is not a directory
-' "$_near" >&2
-        fi
-        exit 49
+antiq_root_kind() {
+    _root_kind=dir
+    _root_why=
+    [ -d "$1" ] && return 0
+    _near=$1
+    while [ ! -e "$_near" ] && [ ! -h "$_near" ]; do
+        _near=$(dirname -- "$_near")
+    done
+    if [ "$_near" = "$1" ]; then
+        _root_kind=unusable
+        _root_why="$1 is not a directory"
+    elif [ -d "$_near" ] && [ -x "$_near" ]; then
+        _root_kind=missing
+    else
+        _root_kind=unusable
+        _root_why="$_near cannot be searched or is not a directory"
     fi
+}
+antiq_root_check() {
+    antiq_root_kind "$1"
+    case $_root_kind in
+    missing) exit 40 ;;
+    unusable)
+        printf '%s
+' "$_root_why" >&2
+        exit 49
+        ;;
+    esac
     _marker="$1/antiq-remote.json"
     if [ ! -e "$_marker" ] && [ ! -h "$_marker" ]; then
         exit 41
@@ -344,6 +376,10 @@ pub(crate) struct SshSeams {
     /// Runs after rsync ended well and before the far side is asked to
     /// finish the upload.
     pub after_transfer: Option<Hook>,
+    /// The program that stands in for `ssh`.
+    pub program: Option<PathBuf>,
+    /// The directory of the control socket and the master's log.
+    pub control_dir: Option<PathBuf>,
 }
 
 type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
@@ -354,6 +390,8 @@ impl Default for SshSeams {
             exclusive_create: script::EXCLUSIVE_CREATE,
             before_transfer: None,
             after_transfer: None,
+            program: None,
+            control_dir: None,
         }
     }
 }
@@ -444,18 +482,35 @@ impl SshRemote {
         remote: &RemoteConfig,
         machine: &MachineConfig,
     ) -> Result<SshRemote, RemoteError> {
+        SshRemote::connect_with(target, remote, machine, SshSeams::default())
+    }
+
+    pub(crate) fn connect_with(
+        target: &SshTarget,
+        remote: &RemoteConfig,
+        machine: &MachineConfig,
+        seams: SshSeams,
+    ) -> Result<SshRemote, RemoteError> {
         let mut ssh_target = Target::new(&target.host);
         ssh_target.port = target.port;
         ssh_target.user.clone_from(&target.user);
-        let settings = SessionSettings::from_config(machine, remote, ssh_target);
+        let mut settings = SessionSettings::from_config(machine, remote, ssh_target);
+        if let Some(program) = &seams.program {
+            settings.program.clone_from(program);
+        }
+        if let Some(control_dir) = &seams.control_dir {
+            settings.control_dir.clone_from(control_dir);
+        }
         let session = Session::new(settings).map_err(map_session)?;
-        Ok(SshRemote::with_session(
+        let mut remote = SshRemote::with_session(
             session,
             target.root.clone(),
             remote.id,
             machine.clone(),
             target.host.clone(),
-        ))
+        );
+        remote.seams = seams;
+        Ok(remote)
     }
 
     pub(crate) fn with_session(
@@ -510,37 +565,12 @@ impl SshRemote {
         let root = &self.root;
         match output.status {
             0 => {}
-            ROOT_MISSING => {
-                return Err(RemoteError::Away {
-                    message: format!("{root} does not exist on {}", self.host),
-                    overdue: false,
-                });
-            }
-            MARKER_MISSING => {
-                return Err(RemoteError::Broken(format!(
-                    "{root} holds no {}",
-                    marker::FILE_NAME
-                )));
-            }
-            ROOT_UNUSABLE => return Err(RemoteError::Broken(format!("{root}: {stderr}"))),
-            MARKER_UNREADABLE => {
-                return Err(RemoteError::Broken(format!(
-                    "{root}/{} cannot be read",
-                    marker::FILE_NAME
-                )));
-            }
-            NO_HASH_TOOL => {
-                return Err(RemoteError::Broken(format!(
-                    "{} has no sha256sum, shasum, sha256 or openssl that computes a SHA-256",
-                    self.host
-                )));
-            }
-            NO_STAT => {
-                return Err(RemoteError::Broken(format!(
-                    "{} has no stat that prints size and modification time",
-                    self.host
-                )));
-            }
+            ROOT_MISSING => return Err(self.root_missing()),
+            MARKER_MISSING => return Err(self.marker_missing()),
+            ROOT_UNUSABLE => return Err(self.root_unusable(&stderr)),
+            MARKER_UNREADABLE => return Err(self.marker_unreadable()),
+            NO_HASH_TOOL => return Err(self.no_hash_tool()),
+            NO_STAT => return Err(self.no_stat()),
             status => {
                 let reason = if stderr.is_empty() {
                     format!("the command ended with status {status}")
@@ -570,18 +600,61 @@ impl SshRemote {
     }
 
     fn check_marker(&self, bytes: &[u8]) -> Result<(), RemoteError> {
-        let root = &self.root;
         match Marker::parse(bytes) {
-            Ok(found) if found.id == self.id => Ok(()),
-            Ok(found) => Err(RemoteError::Broken(format!(
-                "{root} holds the marker of another remote ({}), not {}",
-                found.id, self.id
-            ))),
-            Err(error) => Err(RemoteError::Broken(format!(
-                "{root}/{}: {error}",
-                marker::FILE_NAME
-            ))),
+            Ok(found) => self.marker_matches(&found),
+            Err(error) => Err(self.marker_invalid(&error)),
         }
+    }
+
+    fn marker_matches(&self, found: &Marker) -> Result<(), RemoteError> {
+        if found.id == self.id {
+            return Ok(());
+        }
+        Err(RemoteError::Broken(format!(
+            "{} holds the marker of another remote ({}), not {}",
+            self.root, found.id, self.id
+        )))
+    }
+
+    fn marker_invalid(&self, error: &marker::MarkerError) -> RemoteError {
+        RemoteError::Broken(format!("{}/{}: {error}", self.root, marker::FILE_NAME))
+    }
+
+    fn root_missing(&self) -> RemoteError {
+        RemoteError::Away {
+            message: format!("{} does not exist on {}", self.root, self.host),
+            overdue: false,
+        }
+    }
+
+    fn marker_missing(&self) -> RemoteError {
+        RemoteError::Broken(format!("{} holds no {}", self.root, marker::FILE_NAME))
+    }
+
+    fn root_unusable(&self, why: &str) -> RemoteError {
+        RemoteError::Broken(format!("{}: {why}", self.root))
+    }
+
+    fn marker_unreadable(&self) -> RemoteError {
+        RemoteError::Broken(format!(
+            "{}/{} cannot be read",
+            self.root,
+            marker::FILE_NAME
+        ))
+    }
+
+    fn no_hash_tool(&self) -> RemoteError {
+        RemoteError::Broken(format!(
+            "{} has no sha256sum, shasum, sha256 or openssl that computes a SHA-256",
+            self.host
+        ))
+    }
+
+    fn no_stat(&self) -> RemoteError {
+        RemoteError::Broken(format!(
+            "{} has no stat that prints size and modification time",
+            self.host
+        ))
     }
 
     fn conflict(&self, upload: &Upload<'_>) -> RemoteError {
@@ -672,6 +745,450 @@ impl SshRemote {
 
     fn check_root(&self, body: &str, action: &'static str) -> Result<(), RemoteError> {
         self.run(&self.script(body), false, action).map(|_| ())
+    }
+}
+
+// =========================================================
+// remote add and remote show
+// =========================================================
+
+/// The `ln` of a script failed, or made no regular file.
+const LN_FAILED: i32 = 48;
+
+/// Looks at the root and the tools and changes nothing. `$1` is the root
+/// and `$2` the command that runs the rsync of the NAS. The answer is one
+/// `@kind length` block per finding: `root` (`dir`, `missing` or
+/// `unusable: <why>`), `parent` for a missing root, `marker`,
+/// `marker_unreadable` or `marker_absent` for a directory, `layout` for
+/// each name antiq writes in a remote that the directory holds, `rsync`
+/// with the first line of its version or `rsync_failed` with its output,
+/// `sha256` with the tool or `none`, and `stat` with the flavour or
+/// `none`.
+const PROBE: &str = r#"antiq_note() {
+    printf '@%s %s
+%s
+' "$1" "${#2}" "$2"
+}
+antiq_root_kind "$1"
+case $_root_kind in
+dir) antiq_note root dir ;;
+missing)
+    antiq_note root missing
+    if [ -d "$(dirname -- "$1")" ]; then antiq_note parent present; else antiq_note parent absent; fi
+    ;;
+*) antiq_note root "unusable: $_root_why" ;;
+esac
+if [ "$_root_kind" = dir ]; then
+    _m="$1/antiq-remote.json"
+    if [ -e "$_m" ] || [ -h "$_m" ]; then
+        if _text=$(cat "$_m" 2>/dev/null); then
+            antiq_note marker "$_text"
+        else
+            antiq_note marker_unreadable ""
+        fi
+    else
+        antiq_note marker_absent ""
+    fi
+    for _f in "$1"/objects "$1"/.antiq-clock.*; do
+        if [ -e "$_f" ] || [ -h "$_f" ]; then antiq_note layout "${_f##*/}"; fi
+    done
+fi
+if _out=$(eval "$2 --version" 2>&1); then
+    antiq_note rsync "${_out%%
+*}"
+else
+    antiq_note rsync_failed "$_out"
+fi
+if antiq_sha256 >/dev/null; then antiq_note sha256 "${_tool%% *}"; else antiq_note sha256 none; fi
+antiq_stat_flavour
+antiq_note stat "$_flavour"
+"#;
+
+/// Makes the root, whose parent has to be there.
+const MAKE_ROOT: &str = "mkdir \"$1\"\n";
+
+/// Removes the root when it is empty; a root with anything in it stays.
+const REMOVE_EMPTY_ROOT: &str = "rmdir \"$1\" 2>/dev/null\nexit 0\n";
+
+/// Hard-links the probe file `$1` to `$2`. The link has to be a regular
+/// file.
+const LINK_PROBE: &str = r#"if ! _e=$(ln "$1" "$2" 2>&1); then
+    printf '%s
+' "$_e" >&2
+    exit 48
+fi
+if [ ! -f "$2" ] || [ -h "$2" ]; then
+    echo "the link is not a regular file" >&2
+    exit 48
+fi
+"#;
+
+const REMOVE_PROBE: &str = "rm -f \"$1\" \"$2\"\nexit 0\n";
+
+/// Writes the marker `$2` to the temp name `$3` in the root `$1`, flushes
+/// it, links it to the name `$4` when that is free, removes the temp and
+/// flushes again.
+const WRITE_MARKER: &str = r#"_t="$1/$3"
+_m="$1/$4"
+if ! printf '%s' "$2" > "$_t"; then
+    rm -f "$_t"
+    exit 1
+fi
+if ! sync; then
+    rm -f "$_t"
+    exit 1
+fi
+if [ -e "$_m" ] || [ -h "$_m" ]; then
+    rm -f "$_t"
+    echo "$4 appeared in the meantime" >&2
+    exit 1
+fi
+if ! _e=$(ln "$_t" "$_m" 2>&1); then
+    rm -f "$_t"
+    printf '%s
+' "$_e" >&2
+    exit 48
+fi
+rm -f "$_t" || exit 1
+sync || exit 1
+"#;
+
+/// What the probe script found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Probe {
+    pub root: RootFound,
+    pub marker: MarkerFound,
+    /// A name antiq writes in a remote that the root holds.
+    pub layout_name: Option<String>,
+    /// The first line of the NAS rsync's `--version`, or what it printed
+    /// when it failed.
+    pub rsync: Result<String, String>,
+    /// The first hash tool that gave the digest of `abc`.
+    pub sha256_tool: Option<String>,
+    pub stat: Option<&'static str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RootFound {
+    Dir,
+    /// Absent below a directory that can be searched.
+    Missing {
+        parent_exists: bool,
+    },
+    Unusable(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MarkerFound {
+    /// The root is no directory, so there is nothing to look at.
+    NoRoot,
+    Absent,
+    Unreadable,
+    Text(Vec<u8>),
+}
+
+/// What `remote add` needs of the NAS, proven by the probe.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Tools {
+    pub rsync: RsyncVersion,
+    pub sha256_tool: String,
+    pub stat: &'static str,
+}
+
+/// Why the writes of `remote add` do not prove the root usable.
+#[derive(Debug)]
+pub(crate) enum Unproven {
+    ExclusiveCreate(String),
+    HardLink(String),
+    Remote(RemoteError),
+}
+
+impl From<RemoteError> for Unproven {
+    fn from(error: RemoteError) -> Unproven {
+        Unproven::Remote(error)
+    }
+}
+
+impl Probe {
+    fn parse(stdout: &[u8]) -> Result<Probe, RemoteError> {
+        let mut root = None;
+        let mut parent_exists = false;
+        let mut marker = MarkerFound::NoRoot;
+        let mut layout_name = None;
+        let mut rsync = None;
+        let mut sha256_tool = None;
+        let mut stat = None;
+        for frame in read_frames(stdout)? {
+            let text = String::from_utf8_lossy(&frame.bytes).into_owned();
+            match frame.kind.as_str() {
+                "root" => root = Some(text),
+                "parent" => parent_exists = text == "present",
+                "marker" => marker = MarkerFound::Text(frame.bytes),
+                "marker_unreadable" => marker = MarkerFound::Unreadable,
+                "marker_absent" => marker = MarkerFound::Absent,
+                "layout" => layout_name = layout_name.or(Some(text)),
+                "rsync" => rsync = Some(Ok(text)),
+                "rsync_failed" => rsync = Some(Err(text)),
+                "sha256" => sha256_tool = Some(text).filter(|tool| tool != "none"),
+                "stat" => {
+                    stat = match text.as_str() {
+                        "gnu" => Some("gnu"),
+                        "bsd" => Some("bsd"),
+                        _ => None,
+                    };
+                }
+                _ => {}
+            }
+        }
+        let root = match root.as_deref() {
+            Some("dir") => RootFound::Dir,
+            Some("missing") => RootFound::Missing { parent_exists },
+            Some(unusable) => RootFound::Unusable(
+                unusable
+                    .strip_prefix("unusable: ")
+                    .unwrap_or(unusable)
+                    .to_string(),
+            ),
+            None => return Err(malformed("the probe did not describe the root")),
+        };
+        Ok(Probe {
+            root,
+            marker,
+            layout_name,
+            rsync: rsync.ok_or_else(|| malformed("the probe did not run the rsync"))?,
+            sha256_tool,
+            stat,
+        })
+    }
+}
+
+/// The output of a script that failed, as a sentence.
+fn failure_reason(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("the command ended with status {}", output.status)
+    } else {
+        stderr
+    }
+}
+
+impl SshRemote {
+    /// Brings the connection up for the work of `remote add`, which cannot
+    /// use [`Remote::begin_phase`] since the root may not have a marker yet.
+    pub(crate) fn begin_connection(&self) -> Result<(), RemoteError> {
+        self.session.begin_phase().map_err(map_session)
+    }
+
+    /// The same remote under the ULID its marker names.
+    pub(crate) fn with_id(mut self, id: ObjectId) -> SshRemote {
+        self.id = id;
+        self
+    }
+
+    /// The command that runs the rsync of the NAS.
+    fn remote_rsync_command(&self) -> &str {
+        self.machine.remote_rsync.as_deref().unwrap_or("rsync")
+    }
+
+    /// Looks at the root and the tools in one read-only script.
+    pub(crate) fn probe(&self) -> Result<Probe, RemoteError> {
+        let script = Script::new(&format!("{PRELUDE}\n{PROBE}"))
+            .arg(&self.root)
+            .arg(self.remote_rsync_command());
+        let output = self.exec(&script)?;
+        if output.status != 0 {
+            return Err(RemoteError::Io {
+                action: "probe",
+                path: self.root.clone(),
+                source: std::io::Error::other(failure_reason(&output)),
+            });
+        }
+        Probe::parse(&output.stdout)
+    }
+
+    /// The marker of a root that has one. `Ok(None)` is a directory
+    /// without a marker; a root that is missing is away, and a root that
+    /// cannot be used or a marker that cannot be read is broken.
+    pub(crate) fn marker_in(&self, probe: &Probe) -> Result<Option<Marker>, RemoteError> {
+        match &probe.root {
+            RootFound::Missing { .. } => return Err(self.root_missing()),
+            RootFound::Unusable(why) => return Err(self.root_unusable(why)),
+            RootFound::Dir => {}
+        }
+        match &probe.marker {
+            MarkerFound::NoRoot | MarkerFound::Absent => Ok(None),
+            MarkerFound::Unreadable => Err(self.marker_unreadable()),
+            MarkerFound::Text(bytes) => Marker::parse(bytes)
+                .map(Some)
+                .map_err(|error| self.marker_invalid(&error)),
+        }
+    }
+
+    /// Whether the probe found the remote this value stands for. Every
+    /// answer of [`SshRemote::marker_in`] and of the marker check is away
+    /// or broken, so nothing else can go wrong here.
+    fn judge(&self, probe: &Probe) -> Assessment {
+        let verdict = self.marker_in(probe).and_then(|found| match found {
+            Some(found) => self.marker_matches(&found),
+            None => Err(self.marker_missing()),
+        });
+        match verdict {
+            Ok(()) => Assessment::new(Reachability::Reachable, ""),
+            Err(RemoteError::Away { message, .. }) => Assessment::new(Reachability::Away, message),
+            Err(other) => Assessment::new(Reachability::Broken, other.to_string()),
+        }
+    }
+
+    /// The tools `remote add` needs on the NAS, or the reason one is not
+    /// good enough.
+    pub(crate) fn tools_of(&self, probe: &Probe) -> Result<Tools, RemoteError> {
+        let command = self.remote_rsync_command();
+        let rsync = match &probe.rsync {
+            Ok(line) => parse_version_line(line).map_err(|refusal| {
+                RemoteError::Broken(format!(
+                    "the rsync on {} (`{command}`): {refusal}",
+                    self.host
+                ))
+            })?,
+            Err(output) => {
+                return Err(RemoteError::Broken(format!(
+                    "`{command} --version` does not run on {}: {output}",
+                    self.host
+                )));
+            }
+        };
+        let sha256_tool = probe
+            .sha256_tool
+            .clone()
+            .ok_or_else(|| self.no_hash_tool())?;
+        let stat = probe.stat.ok_or_else(|| self.no_stat())?;
+        Ok(Tools {
+            rsync,
+            sha256_tool,
+            stat,
+        })
+    }
+
+    /// What `remote show` reports: whether the remote this value stands
+    /// for is reachable, and for a reachable one what was probed.
+    pub(crate) fn show(
+        &self,
+    ) -> Result<(Assessment, serde_json::Map<String, serde_json::Value>), RemoteError> {
+        use serde_json::Value;
+        let mut probed = serde_json::Map::new();
+        let probe = match self.probe() {
+            Ok(probe) => probe,
+            Err(RemoteError::Away { message, .. }) => {
+                return Ok((Assessment::new(Reachability::Away, message), probed));
+            }
+            Err(RemoteError::Broken(message)) => {
+                return Ok((Assessment::new(Reachability::Broken, message), probed));
+            }
+            Err(other) => return Err(other),
+        };
+        let assessment = self.judge(&probe);
+        if assessment.reachability != Reachability::Reachable {
+            return Ok((assessment, probed));
+        }
+        // A tool that is missing or too old shows as null: the state of
+        // the remote does not depend on it.
+        let text = |value: Option<String>| value.map_or(Value::Null, Value::String);
+        let local = Rsync::from_machine(&self.machine).ok();
+        let remote = probe
+            .rsync
+            .as_ref()
+            .ok()
+            .and_then(|line| parse_version_line(line).ok());
+        probed.insert(
+            "rsync".into(),
+            text(local.map(|rsync| rsync.version().to_string())),
+        );
+        probed.insert(
+            "remote_rsync".into(),
+            text(remote.map(|version| version.to_string())),
+        );
+        probed.insert("sha256".into(), text(probe.sha256_tool.clone()));
+        probed.insert("stat".into(), text(probe.stat.map(String::from)));
+        Ok((assessment, probed))
+    }
+
+    /// Makes the root, whose parent has to exist.
+    pub(crate) fn make_root(&self) -> Result<(), RemoteError> {
+        let output = self.exec(&Script::new(MAKE_ROOT).arg(&self.root))?;
+        if output.status == 0 {
+            return Ok(());
+        }
+        Err(RemoteError::Io {
+            action: "create",
+            path: self.root.clone(),
+            source: std::io::Error::other(failure_reason(&output)),
+        })
+    }
+
+    /// Removes a root a refused `remote add` made. A root with anything in
+    /// it stays, and whatever the removal says does not change why the
+    /// run was refused.
+    pub(crate) fn remove_made_root(&self) {
+        let _ = self.exec(&Script::new(REMOVE_EMPTY_ROOT).arg(&self.root));
+    }
+
+    /// Proves that the root takes exclusive creation and hard links, with
+    /// a file called `probe` in it. The probe file and its link are
+    /// removed again.
+    pub(crate) fn prove_creation(&self, probe: &str) -> Result<(), Unproven> {
+        let path = format!("{}/{probe}", self.root);
+        let link = format!("{path}.link");
+        let created = self.exec(&Script::new(self.seams.exclusive_create).arg(&path))?;
+        if created.status != 0 {
+            return Err(Unproven::ExclusiveCreate(failure_reason(&created)));
+        }
+        let proof = self.prove_probe(&path, &link);
+        let _ = self.exec(&Script::new(REMOVE_PROBE).arg(&path).arg(&link));
+        proof
+    }
+
+    fn prove_probe(&self, path: &str, link: &str) -> Result<(), Unproven> {
+        let again = self.exec(&Script::new(self.seams.exclusive_create).arg(path))?;
+        match again.status {
+            EXISTS_STATUS => {}
+            0 => {
+                return Err(Unproven::ExclusiveCreate(
+                    "a second create of the same file succeeded".into(),
+                ));
+            }
+            _ => return Err(Unproven::ExclusiveCreate(failure_reason(&again))),
+        }
+        let linked = self.exec(&Script::new(LINK_PROBE).arg(path).arg(link))?;
+        if linked.status != 0 {
+            return Err(Unproven::HardLink(format!(
+                "cannot link the probe file: {}",
+                failure_reason(&linked)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Writes the marker of this remote under the temp name `temp`.
+    pub(crate) fn write_marker(&self, temp: &str) -> Result<(), Unproven> {
+        let script = Script::new(WRITE_MARKER)
+            .arg(&self.root)
+            .arg(Marker::new(self.id).to_bytes())
+            .arg(temp)
+            .arg(marker::FILE_NAME);
+        let output = self.exec(&script)?;
+        match output.status {
+            0 => Ok(()),
+            LN_FAILED => Err(Unproven::HardLink(format!(
+                "cannot link {} into place: {}",
+                marker::FILE_NAME,
+                failure_reason(&output)
+            ))),
+            _ => Err(Unproven::Remote(RemoteError::Io {
+                action: "write",
+                path: format!("{}/{}", self.root, marker::FILE_NAME),
+                source: std::io::Error::other(failure_reason(&output)),
+            })),
+        }
     }
 }
 
@@ -3274,5 +3791,305 @@ exec /usr/bin/stat "$@""#,
             "{error}"
         );
         assert_eq!(transfers(&Far::fake_calls(&fake)), 0);
+    }
+
+    // ----- the tools of the prelude, as the probe of `remote add` uses them -----
+
+    #[test]
+    fn without_an_argument_only_the_digest_of_abc_counts() {
+        let dir = bare_path(&["sh", "printf"]);
+        tool(dir.path(), "sha256sum", &format!("echo {}", "0".repeat(64)));
+        tool(dir.path(), "shasum", &format!("echo '{ABC}  -'"));
+        let (status, out) = run_with_only(dir.path(), "antiq_sha256 >/dev/null; echo \"$_tool\"");
+        assert_eq!((status, out.trim()), (0, "shasum -a 256"));
+    }
+
+    #[test]
+    fn without_an_argument_and_without_a_matching_tool_the_status_is_42() {
+        let dir = bare_path(&["sh", "printf"]);
+        tool(dir.path(), "sha256sum", &format!("echo {}", "0".repeat(64)));
+        let (status, _) = run_with_only(dir.path(), "antiq_sha256");
+        assert_eq!(status, 42);
+    }
+
+    #[test]
+    fn the_stat_flavour_is_gnu_bsd_or_none() {
+        let cases = [
+            ("case \"$1\" in -c) exit 0;; *) exit 1;; esac", "gnu"),
+            ("case \"$1\" in -f) exit 0;; *) exit 1;; esac", "bsd"),
+            ("exit 1", "none"),
+        ];
+        for (body, flavour) in cases {
+            let dir = bare_path(&["sh"]);
+            tool(dir.path(), "stat", body);
+            let (status, out) = run_with_only(dir.path(), "antiq_stat_flavour; echo \"$_flavour\"");
+            assert_eq!((status, out.trim()), (0, flavour));
+        }
+    }
+
+    // ----- the probe of `remote add` -----
+
+    #[test]
+    fn the_probe_sees_the_marker_and_the_tools_of_a_good_root() {
+        let far = Far::new();
+        let probe = far.remote().probe().expect("a probe");
+        assert_eq!(probe.root, RootFound::Dir);
+        // The shell hands the marker over without its final newline.
+        let file = std::fs::read(far.root().join(marker::FILE_NAME)).expect("the marker");
+        assert_eq!(
+            probe.marker,
+            MarkerFound::Text(file.trim_ascii_end().to_vec())
+        );
+        assert_eq!(probe.layout_name, None);
+        assert!(probe.sha256_tool.is_some());
+        assert!(probe.stat.is_some());
+        assert!(
+            probe
+                .rsync
+                .as_ref()
+                .is_ok_and(|line| line.starts_with("rsync")),
+            "{:?}",
+            probe.rsync
+        );
+    }
+
+    #[test]
+    fn the_probe_reads_the_rsync_command_from_the_machine() {
+        let far = Far::new();
+        let machine = MachineConfig {
+            remote_rsync: Some("echo fake rsync words".into()),
+            ..MachineConfig::default()
+        };
+        let probe = far
+            .remote_of(machine, SshSeams::default())
+            .probe()
+            .expect("a probe");
+        assert_eq!(probe.rsync, Ok("fake rsync words --version".to_string()));
+    }
+
+    #[test]
+    fn the_probe_keeps_the_output_of_an_rsync_that_fails() {
+        let far = Far::new();
+        let machine = MachineConfig {
+            remote_rsync: Some("/nonexistent/rsync".into()),
+            ..MachineConfig::default()
+        };
+        let probe = far
+            .remote_of(machine, SshSeams::default())
+            .probe()
+            .expect("a probe");
+        let why = probe.rsync.expect_err("no rsync there");
+        assert!(why.contains("/nonexistent/rsync"), "{why}");
+    }
+
+    #[test]
+    fn the_probe_names_the_layout_names_a_root_holds() {
+        let far = Far::new();
+        std::fs::write(far.root().join(".antiq-clock.laptop"), "").expect("clock file");
+        let probe = far.remote().probe().expect("a probe");
+        assert_eq!(probe.layout_name.as_deref(), Some(".antiq-clock.laptop"));
+        std::fs::create_dir(far.root().join("objects")).expect("objects");
+        let probe = far.remote().probe().expect("a probe");
+        assert_eq!(probe.layout_name.as_deref(), Some("objects"));
+    }
+
+    #[test]
+    fn the_probe_tells_a_missing_root_with_and_without_its_parent() {
+        let far = Far::new();
+        let below = far.root().join("a");
+        let probe = far.remote_at(&below).probe().expect("a probe");
+        assert_eq!(
+            probe.root,
+            RootFound::Missing {
+                parent_exists: true
+            }
+        );
+        let probe = far.remote_at(&below.join("b")).probe().expect("a probe");
+        assert_eq!(
+            probe.root,
+            RootFound::Missing {
+                parent_exists: false
+            }
+        );
+        assert_eq!(probe.marker, MarkerFound::NoRoot);
+    }
+
+    #[test]
+    fn the_probe_tells_a_root_that_is_a_file_from_one_that_is_missing() {
+        let far = Far::new();
+        let file = far.root().join("plain");
+        std::fs::write(&file, "x").expect("a file");
+        let probe = far.remote_at(&file).probe().expect("a probe");
+        assert!(
+            matches!(&probe.root, RootFound::Unusable(why) if why.ends_with("is not a directory")),
+            "{:?}",
+            probe.root
+        );
+    }
+
+    #[test]
+    fn the_probe_tells_a_marker_that_cannot_be_read_from_none() {
+        let far = Far::new();
+        std::fs::remove_file(far.root().join(marker::FILE_NAME)).expect("no marker");
+        let probe = far.remote().probe().expect("a probe");
+        assert_eq!(probe.marker, MarkerFound::Absent);
+        std::fs::create_dir(far.root().join(marker::FILE_NAME)).expect("a directory");
+        let probe = far.remote().probe().expect("a probe");
+        assert_eq!(probe.marker, MarkerFound::Unreadable);
+    }
+
+    #[test]
+    fn a_probe_answer_ignores_a_kind_it_does_not_know() {
+        let answer =
+            b"@root 3\ndir\n@future 1\nx\n@rsync 5\nrsync\n@sha256 9\nsha256sum\n@stat 3\ngnu\n";
+        let probe = Probe::parse(answer).expect("parses");
+        assert_eq!(probe.root, RootFound::Dir);
+        assert_eq!(probe.stat, Some("gnu"));
+    }
+
+    #[test]
+    fn a_probe_answer_that_does_not_describe_the_root_is_malformed() {
+        let error = Probe::parse(b"@rsync 5\nrsync\n").expect_err("no root");
+        assert!(matches!(error, RemoteError::Broken(_)), "{error}");
+    }
+
+    /// An rsync command that ends the shell running the probe, as a
+    /// script that is killed would.
+    fn killing_machine() -> MachineConfig {
+        MachineConfig {
+            remote_rsync: Some("kill -9 $$ #".into()),
+            ..MachineConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_probe_script_that_dies_is_an_io_error() {
+        let far = Far::new();
+        let error = far
+            .remote_of(killing_machine(), SshSeams::default())
+            .probe()
+            .expect_err("the script died");
+        assert!(
+            matches!(
+                error,
+                RemoteError::Io {
+                    action: "probe",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn show_passes_on_an_error_that_is_neither_away_nor_broken() {
+        let far = Far::new();
+        let error = far
+            .remote_of(killing_machine(), SshSeams::default())
+            .show()
+            .expect_err("the script died");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+    }
+
+    #[test]
+    fn show_turns_a_refused_login_into_a_broken_remote() {
+        let far = Far::new();
+        far.fault("permission-denied");
+        let (assessment, probed) = far.remote().show().expect("an assessment");
+        assert_eq!(assessment.reachability, Reachability::Broken);
+        assert!(probed.is_empty());
+    }
+
+    // ----- the writes of `remote add` -----
+
+    #[test]
+    fn making_a_root_below_a_missing_directory_is_an_io_error() {
+        let far = Far::new();
+        let error = far
+            .remote_at(&far.root().join("a/b"))
+            .make_root()
+            .expect_err("no parent");
+        assert!(
+            matches!(
+                error,
+                RemoteError::Io {
+                    action: "create",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_marker_that_appeared_meanwhile_is_not_replaced() {
+        let far = Far::new();
+        let before = std::fs::read(far.root().join(marker::FILE_NAME)).expect("marker");
+        let error = far.remote().write_marker(".marker.tmp").expect_err("taken");
+        assert!(
+            matches!(&error, Unproven::Remote(RemoteError::Io { source, .. }) if source.to_string().contains("appeared")),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(far.root().join(marker::FILE_NAME)).expect("marker"),
+            before
+        );
+        assert!(!far.root().join(".marker.tmp").exists());
+    }
+
+    #[test]
+    fn a_marker_cannot_be_written_into_a_root_that_is_read_only() {
+        let far = Far::new();
+        std::fs::remove_file(far.root().join(marker::FILE_NAME)).expect("no marker");
+        std::fs::set_permissions(far.root(), std::fs::Permissions::from_mode(0o500))
+            .expect("read only");
+        assert!(
+            std::fs::File::create(far.root().join("probe")).is_err(),
+            "the precondition: the root cannot be written"
+        );
+        let error = far
+            .remote()
+            .write_marker(".marker.tmp")
+            .expect_err("denied");
+        std::fs::set_permissions(far.root(), std::fs::Permissions::from_mode(0o700))
+            .expect("writable again");
+        assert!(
+            matches!(
+                &error,
+                Unproven::Remote(RemoteError::Io {
+                    action: "write",
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(names_in(far.root()), Vec::<String>::new());
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .expect("listed")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_connection_lost_during_the_proof_is_the_error_of_the_connection() {
+        let far = Far::new();
+        far.fault("connect-refused");
+        let error = far.remote().prove_creation(".probe").expect_err("away");
+        assert!(
+            matches!(&error, Unproven::Remote(RemoteError::Away { .. })),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_proof_leaves_no_probe_file_and_no_link() {
+        let far = Far::new();
+        far.remote().prove_creation(".probe").expect("proven");
+        assert_eq!(names_in(far.root()), [marker::FILE_NAME]);
     }
 }

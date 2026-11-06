@@ -371,7 +371,7 @@ fn resolve_in(configured: Option<&Path>, dirs: &[PathBuf]) -> Result<Rsync, Rsyn
 }
 
 /// Reads the first line of `rsync --version`.
-fn parse_version_line(line: &str) -> Result<RsyncVersion, Refusal> {
+pub(crate) fn parse_version_line(line: &str) -> Result<RsyncVersion, Refusal> {
     if line.starts_with("openrsync:") {
         return Err(Refusal::OpenRsync);
     }

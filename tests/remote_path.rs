@@ -312,16 +312,6 @@ fn a_url_that_does_not_fit_is_a_usage_error() {
     assert_eq!(run.error_kind(), "usage");
 }
 
-#[test]
-fn an_ssh_url_is_not_supported_yet_and_writes_nothing() {
-    let collection = TempCollection::minimal();
-    let before = config_of(&collection);
-    let run = remote_in(&collection, &["add", "--json", "ssh://nas/srv/antiq"]);
-    assert_eq!(run.code(), 1);
-    assert_eq!(run.error_kind(), "unsupported");
-    assert_eq!(config_of(&collection), before);
-}
-
 // =========================================================
 // --dry-run
 // =========================================================

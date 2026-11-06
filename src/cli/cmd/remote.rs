@@ -191,12 +191,24 @@ fn render_show(report: &ShowReport) -> Lines {
         Some(reason) => format!("{word} ({reason})"),
         None => word.to_string(),
     };
+    let mut stdout = vec![
+        format!("remote: {kind} {url}"),
+        format!("  id: {id}"),
+        format!("  state: {state}"),
+    ];
+    let probed = report.probed.iter().flatten();
+    for (name, label) in [
+        ("rsync", "rsync"),
+        ("remote_rsync", "remote rsync"),
+        ("sha256", "sha256"),
+        ("stat", "stat"),
+    ] {
+        if let Some((_, found)) = probed.clone().find(|(key, _)| *key == name) {
+            stdout.push(format!("  {label}: {}", found.as_str().unwrap_or("none")));
+        }
+    }
     Lines {
-        stdout: vec![
-            format!("remote: {kind} {url}"),
-            format!("  id: {id}"),
-            format!("  state: {state}"),
-        ],
+        stdout,
         stderr: notes(&report.warnings),
     }
 }
