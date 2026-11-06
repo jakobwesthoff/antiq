@@ -264,6 +264,32 @@ fn deletions_are_followed_in_the_first_run_only_and_the_checks_after_it_tell_not
 }
 
 #[test]
+fn a_deletion_that_follows_a_progress_update_on_its_line_still_starts_the_second_pass() {
+    let world = world();
+    // rsync leaves a progress update without a newline, and the line that
+    // follows it, when a warning went to stderr in between.
+    world.fake.answer(
+        1,
+        ".d          96 ./\n\
+         \r      0   0%    0.00kB/s    0:00:00 (xfr#0, to-chk=0/1)*deleting   0 projects/a/old.txt\n",
+        "",
+        0,
+    );
+    world
+        .fake
+        .answer(2, "*deleting   projects/a/old.txt\n", "", 0);
+    world.fake.answer(3, "", "", 0);
+    let seen = Lines::default();
+
+    let PushOutcome::Report(report) = push_with(&world, false, &seen) else {
+        panic!("a report");
+    };
+
+    assert_eq!(transfers(&world.fake).len(), 3);
+    assert_eq!(report.changes.pieces[0].counts.deleted, 1);
+}
+
+#[test]
 fn a_check_that_fails_after_the_first_run_is_the_error_of_the_push() {
     let world = world();
     world

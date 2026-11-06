@@ -5,7 +5,7 @@
 //! The progress of the mirror as one item: the entries rsync lists, the
 //! bytes it sends, and the operation it is at.
 
-use super::observed::{Segment, segment};
+use super::observed::{Segment, progress_total, segment};
 use crate::progress::{Counter, Event, Observer, Operation};
 
 /// Follows the observed run of the mirror and tells the observer about it.
@@ -42,12 +42,12 @@ impl<'a> Progress<'a> {
 
     /// One segment of the observed output of rsync.
     pub(super) fn segment(&mut self, bytes: &[u8]) {
+        if let Some(total) = progress_total(bytes) {
+            self.reported_total = total;
+            self.show_total();
+        }
         match segment(bytes) {
-            Segment::Progress { total: Some(total) } => {
-                self.reported_total = total;
-                self.show_total();
-            }
-            Segment::Progress { total: None } | Segment::Other => {}
+            Segment::Progress { .. } | Segment::Other => {}
             Segment::Entry(entry) if entry.deleting => self.remove(),
             Segment::Entry(entry) => {
                 // Deletions come last, so an entry after one is not
@@ -208,6 +208,35 @@ mod tests {
         assert_eq!(total(&recorder), "t Storing 3/0");
         feed(&mut progress, &["\r  1  1%  (xfr#1, ir-chk=0/3)\n"]);
         assert_eq!(total(&recorder), "t Storing 3/3");
+    }
+
+    #[test]
+    fn an_entry_glued_to_a_progress_update_counts_and_the_update_sets_the_total() {
+        let recorder = Recorder::new();
+        let mut progress = Progress::new("t", &recorder);
+        feed(&mut progress, &[".d          1 ./\n"]);
+
+        feed(
+            &mut progress,
+            &["\r      5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=3/6)>f+++++++++ 5 a/b.txt\n"],
+        );
+
+        assert_eq!(recorder.lines()[1], "t Storing 2/6");
+        assert_eq!(recorder.lines()[2], "t sent 5");
+    }
+
+    #[test]
+    fn a_deletion_glued_to_a_progress_update_opens_removing() {
+        let recorder = Recorder::new();
+        let mut progress = Progress::new("t", &recorder);
+        feed(&mut progress, &[".d          1 ./\n"]);
+
+        feed(
+            &mut progress,
+            &["\r      5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=0/1)*deleting   0 old\n"],
+        );
+
+        assert_eq!(recorder.lines()[3], "t Removing 1/0");
     }
 
     #[test]

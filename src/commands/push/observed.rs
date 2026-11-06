@@ -39,7 +39,7 @@ pub(super) struct Entry {
 }
 
 /// The total of a progress update such as `... (xfr#3, to-chk=4/7)`.
-fn progress_total(update: &[u8]) -> Option<u64> {
+fn total_of(update: &[u8]) -> Option<u64> {
     let marker = b"chk=";
     let at = update.windows(marker.len()).position(|w| w == marker)? + marker.len();
     let rest = &update[at..];
@@ -52,12 +52,91 @@ fn progress_total(update: &[u8]) -> Option<u64> {
     std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
+/// The end of the progress update that `text` starts with, after the
+/// carriage return: four words (the bytes, `N%`, the rate and the time, as
+/// `h:mm:ss` or `??:??:??`), then an optional `(xfr#N, to-chk=R/T)`, then
+/// the padding. `None` when the text does not read like that.
+fn progress_end(text: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    let word = |at: &mut usize| -> Option<&[u8]> {
+        while text.get(*at) == Some(&b' ') {
+            *at += 1;
+        }
+        let start = *at;
+        while text
+            .get(*at)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            *at += 1;
+        }
+        (*at > start).then(|| &text[start..*at])
+    };
+    let bytes = word(&mut at)?;
+    let percent = word(&mut at)?;
+    let rate = word(&mut at)?;
+    let reads_like_rsync = bytes.iter().all(|b| b.is_ascii_digit() || *b == b',')
+        && percent.ends_with(b"%")
+        && rate.ends_with(b"/s");
+    if !reads_like_rsync {
+        return None;
+    }
+    // The time is the one word that nothing separates from a line that
+    // follows it.
+    while text.get(at) == Some(&b' ') {
+        at += 1;
+    }
+    at += time_length(&text[at..])?;
+    while text.get(at) == Some(&b' ') {
+        at += 1;
+    }
+    if text.get(at) == Some(&b'(') {
+        at += text[at..].iter().position(|byte| *byte == b')')? + 1;
+    }
+    while text.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    Some(at)
+}
+
+/// The length of the time `h:mm:ss` or `??:??:??` that `text` starts with.
+fn time_length(text: &[u8]) -> Option<usize> {
+    if text.starts_with(b"??:??:??") {
+        return Some(8);
+    }
+    let hours = text.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let clock = text.get(hours..hours + 6)?;
+    let shaped = hours > 0
+        && clock[0] == b':'
+        && clock[3] == b':'
+        && [1, 2, 4, 5].iter().all(|at| clock[*at].is_ascii_digit());
+    shaped.then_some(hours + 6)
+}
+
+/// Splits a segment into the progress update it starts with, if any, and
+/// the rest. rsync ends an update without a newline, so when its next
+/// message goes to stderr the next line of stdout follows the update.
+fn split(bytes: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    // rsync starts every progress update with a carriage return.
+    let Some(text) = bytes.strip_prefix(b"\r") else {
+        return (None, bytes);
+    };
+    match progress_end(text) {
+        Some(end) => (Some(&text[..end]), &text[end..]),
+        None => (Some(text), &[]),
+    }
+}
+
+/// The total of the progress update a segment starts with.
+pub(super) fn progress_total(bytes: &[u8]) -> Option<u64> {
+    split(bytes).0.and_then(total_of)
+}
+
 /// Reads one segment of the observed output.
 pub(super) fn segment(bytes: &[u8]) -> Segment {
-    // rsync starts every progress update with a carriage return.
-    if bytes.starts_with(b"\r") {
+    let (update, bytes) = split(bytes);
+    if update.is_some() && bytes.is_empty() {
         return Segment::Progress {
-            total: progress_total(bytes),
+            total: update.and_then(total_of),
         };
     }
     let (line, newline) = match bytes.strip_suffix(b"\n") {
@@ -79,11 +158,17 @@ pub(super) fn segment(bytes: &[u8]) -> Segment {
     let digits = std::str::from_utf8(&field[..space]).expect("ASCII digits are UTF-8");
     let length: u64 = digits.parse().unwrap_or(0);
     let deleting = flags == b"*deleting";
+    let rest = &field[space + 1..];
     let mut plain = line[..line.len() - field.len()].to_vec();
-    plain.extend_from_slice(&field[space + 1..]);
+    plain.extend_from_slice(rest);
     plain.extend_from_slice(newline);
+    // Plain `-i` prints an entry that did not change only when rsync makes
+    // a hard link again: the line then names the file it links to. The
+    // name of an unchanged hard link that itself contains ` => ` is taken
+    // for such a line.
+    let links_again = rest.windows(4).any(|window| window == b" => ");
     Segment::Entry(Entry {
-        unchanged: !deleting && flags[2..].iter().all(|byte| *byte == b' '),
+        unchanged: !deleting && flags[2..].iter().all(|byte| *byte == b' ') && !links_again,
         deleting,
         sent_bytes: if matches!(flags[0], b'<' | b'>') && flags[1] == b'f' {
             length
@@ -102,7 +187,7 @@ pub(super) fn plain_listing(bytes: &[u8]) -> Option<Vec<u8>> {
         Segment::Progress { .. } => None,
         Segment::Entry(entry) if entry.unchanged => None,
         Segment::Entry(entry) => Some(entry.plain),
-        Segment::Other => Some(bytes.to_vec()),
+        Segment::Other => Some(split(bytes).1.to_vec()),
     }
 }
 
@@ -156,6 +241,15 @@ mod tests {
             kept(".f...p..... 5 a.txt\n").as_deref(),
             Some(".f...p..... a.txt\n")
         );
+    }
+
+    #[test]
+    fn a_hard_link_that_rsync_makes_again_is_a_change_and_an_unchanged_one_is_not() {
+        assert_eq!(
+            kept("hf          5 hard.txt => a.txt\n").as_deref(),
+            Some("hf          hard.txt => a.txt\n")
+        );
+        assert_eq!(kept("hf          5 hard.txt\n"), None);
     }
 
     #[test]
@@ -222,6 +316,68 @@ mod tests {
         assert_eq!(
             kept(">f+++++++++ 5 a.txt").as_deref(),
             Some(">f+++++++++ a.txt")
+        );
+    }
+
+    const UPDATE: &str = "\r      5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=3/6)";
+
+    #[test]
+    fn an_entry_glued_to_the_end_of_a_progress_update_is_still_an_entry() {
+        // rsync ends a progress update without a newline; when the next
+        // message goes to stderr, the next line of stdout follows the update.
+        let glued = format!("{UPDATE}>f+++++++++ 5 projects/a/b.txt\n");
+        assert_eq!(
+            kept(&glued).as_deref(),
+            Some(">f+++++++++ projects/a/b.txt\n")
+        );
+        assert_eq!(entry(&glued).sent_bytes, 5);
+        assert_eq!(progress_total(glued.as_bytes()), Some(6));
+    }
+
+    #[test]
+    fn a_deletion_glued_to_a_progress_update_is_still_a_deletion_to_the_report() {
+        let glued = format!("{UPDATE}*deleting   0 gone/f\n");
+        let listing = plain_listing(glued.as_bytes()).expect("kept");
+        assert_eq!(listing, b"*deleting   gone/f\n");
+        assert!(super::super::summary::has_deletion(&listing));
+        assert!(entry(&glued).deleting);
+    }
+
+    #[test]
+    fn a_line_glued_to_a_progress_update_is_kept_as_it_is() {
+        let glued = format!("{UPDATE}IO error encountered -- skipping file deletion\n");
+        assert_eq!(
+            kept(&glued).as_deref(),
+            Some("IO error encountered -- skipping file deletion\n")
+        );
+        assert_eq!(progress_total(glued.as_bytes()), Some(6));
+    }
+
+    #[test]
+    fn the_forms_of_a_progress_update_end_where_the_line_begins() {
+        for update in [
+            "\r      5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=3/6)",
+            "\r  1,234,567  50%  12.34MB/s  0:01:02 (xfr#12, ir-chk=3/6)    ",
+            "\r      5   0%    0.00kB/s    ??:??:??",
+            "\r      5   0%    0.00kB/s    0:00:00  ",
+        ] {
+            let glued = format!("{update}.f          3 a.txt\n");
+            assert_eq!(kept(&glued), None, "{update:?}");
+            let glued = format!("{update}>f+++++++++ 3 a.txt\n");
+            assert_eq!(
+                kept(&glued).as_deref(),
+                Some(">f+++++++++ a.txt\n"),
+                "{update:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_progress_update_that_has_no_fields_of_rsync_is_all_progress() {
+        assert_eq!(kept("\r  1  1%  (xfr#1, ir-chk=9/12)\n"), None);
+        assert_eq!(
+            progress_total(b"\r  1  1%  (xfr#1, ir-chk=9/12)\n"),
+            Some(12)
         );
     }
 
@@ -378,5 +534,51 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&listing), "");
         assert_eq!(sent, 0);
+    }
+
+    fn plain_run(rsync: &Rsync, from: &Path, to: &Path) -> Vec<u8> {
+        let url = TargetUrl::Path {
+            root: to.to_path_buf(),
+        };
+        let outcome = rsync
+            .mirror(&plain_options(&[]), from, &url, false)
+            .run()
+            .expect("rsync runs");
+        assert_eq!(outcome.code, Some(0));
+        outcome.stdout
+    }
+
+    #[test]
+    fn two_identical_files_that_become_hard_links_are_a_change_in_both_listings() {
+        let rsync = real_rsync();
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let from = temp.path().join("from");
+        std::fs::create_dir_all(&from).expect("dirs");
+        std::fs::write(from.join("a.txt"), "hello").expect("file");
+        std::fs::copy(from.join("a.txt"), from.join("b.txt")).expect("copy");
+        let time = std::fs::metadata(from.join("a.txt"))
+            .and_then(|meta| meta.modified())
+            .expect("a time");
+        std::fs::File::options()
+            .write(true)
+            .open(from.join("b.txt"))
+            .and_then(|file| file.set_modified(time))
+            .expect("the copy has the time of the original");
+        let (plain_to, observed_to) = (temp.path().join("plain"), temp.path().join("observed"));
+        plain_run(&rsync, &from, &plain_to);
+        observed_run(&rsync, &from, &observed_to, &[]);
+        std::fs::remove_file(from.join("b.txt")).expect("removed");
+        std::fs::hard_link(from.join("a.txt"), from.join("b.txt")).expect("hard link");
+
+        let plain = plain_run(&rsync, &from, &plain_to);
+        let (observed, _) = observed_run(&rsync, &from, &observed_to, &[]);
+
+        let items = super::super::summary::parse_itemized;
+        assert!(
+            !items(&plain).is_empty(),
+            "{}",
+            String::from_utf8_lossy(&plain)
+        );
+        assert_eq!(items(&observed), items(&plain));
     }
 }
