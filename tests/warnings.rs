@@ -80,10 +80,14 @@ fn status_shows_its_findings_as_blocks_and_a_hint_on_a_stdout_terminal() {
         shown.contains("\n\n ⚠ WARNING  1 damaged version: projects/scanner "),
         "{shown:?}"
     );
+    // The harness starts every run with `-C`, which the command to copy
+    // keeps. The terminal may wrap the long line, so the words are joined.
+    let root = world.collection().root().display().to_string();
+    let joined = shown.replace("\n▌   ", " ");
     assert!(
-        shown.contains(
-            "▌ → antiq rebuild projects/scanner 2026-11-04T090211 writes the missing file.\n"
-        ),
+        joined.contains(&format!(
+            "▌ → antiq -C {root} rebuild projects/scanner 2026-11-04T090211 writes the missing file.\n"
+        )),
         "{shown:?}"
     );
     assert!(

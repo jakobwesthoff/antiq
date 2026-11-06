@@ -5,6 +5,7 @@
 //! The `status` operation.
 
 use super::survey::{self, SurveyError, SurveyedPiece};
+use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::HasKind;
 use crate::filesystem::tree::{DirEntry, TreeRoot};
@@ -43,6 +44,130 @@ pub struct VersionNote {
     pub stamp: Stamp,
     /// Why the version is damaged; empty for the other kinds of notes.
     pub reasons: Vec<String>,
+}
+
+/// What a group of findings below the status table means and what to do
+/// about it. The console shows the message and the help under the count
+/// and the items of the group.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
+pub enum StatusFinding {
+    #[diagnostic(
+        code(antiq::status::future_time),
+        severity(Warning),
+        help("Correct the file time if it is a mistake.")
+    )]
+    #[error(
+        "a file time in the future counts like any other, so a piece that holds such a file cannot become due before that date"
+    )]
+    FutureTime,
+    #[diagnostic(
+        code(antiq::status::damaged),
+        severity(Warning),
+        help("{}", rebuild_help(.versions))
+    )]
+    #[error(
+        "the archive is there, but its listing or checksum file is missing or does not match it, so the version cannot be listed, searched or checked"
+    )]
+    Damaged { versions: Vec<VersionNote> },
+    #[diagnostic(
+        code(antiq::status::incomplete),
+        severity(Warning),
+        help("{}", forget_help(.versions))
+    )]
+    #[error(
+        "only the listing or checksum is left, the archive itself is missing, so the version cannot be restored"
+    )]
+    Incomplete { versions: Vec<VersionNote> },
+    #[diagnostic(
+        code(antiq::status::newer_format),
+        severity(Warning),
+        help("Use a version of antiq that reads the newer format.")
+    )]
+    #[error(
+        "the listing of such a version was written in a format this version of antiq cannot read, so unearth, fork and rebuild refuse it"
+    )]
+    NewerFormat,
+    #[diagnostic(
+        code(antiq::status::recovered),
+        severity(Warning),
+        help("Compare it with the live folder and delete it by hand once you no longer need it.")
+    )]
+    #[error("a folder that antiq gave back after a failed removal is kept in `.antiq/recovered/`")]
+    Recovered,
+    #[diagnostic(
+        code(antiq::status::trash),
+        severity(Warning),
+        help("Look at it, then move it back or delete it by hand.")
+    )]
+    #[error(
+        "a folder taken out for archiving could go neither back to its path nor into `.antiq/recovered/`"
+    )]
+    Trash,
+    #[diagnostic(code(antiq::status::doomed), severity(Warning))]
+    #[error(
+        "the removal of an archived folder did not finish, and antiq tries again at the start of a later run"
+    )]
+    Doomed,
+    #[diagnostic(code(antiq::status::spelling), severity(Warning))]
+    #[error(
+        "the volume treats both spellings as one name, so antiq archives into the stored spelling"
+    )]
+    Spelling,
+}
+
+impl StatusFinding {
+    /// The words after `antiq` of the command the help names, when it
+    /// names one: the group has exactly one version. A console that knows
+    /// how antiq was started can write the command the way to paste it.
+    pub fn command(&self) -> Option<Vec<String>> {
+        match self {
+            StatusFinding::Damaged { versions } => single_command("rebuild", versions),
+            StatusFinding::Incomplete { versions } => single_command("forget", versions),
+            _ => None,
+        }
+    }
+}
+
+/// `verb piece stamp` for the one version of `versions`.
+fn single_command(verb: &str, versions: &[VersionNote]) -> Option<Vec<String>> {
+    match versions {
+        [only] => Some(vec![
+            verb.to_string(),
+            only.piece.to_string(),
+            only.stamp.to_string(),
+        ]),
+        _ => None,
+    }
+}
+
+/// The command of [`StatusFinding::command`] as the help writes it.
+fn command_text(words: &[String]) -> String {
+    format!("antiq {}", words.join(" "))
+}
+
+/// The command that writes the missing file of the one damaged version, or
+/// the form of the command when there are several.
+fn rebuild_help(versions: &[VersionNote]) -> String {
+    match single_command("rebuild", versions) {
+        Some(words) => format!(
+            "{} writes the missing file.",
+            CodeSpan(command_text(&words))
+        ),
+        _ => {
+            "`antiq rebuild <piece> <version>` writes the missing file of one version.".to_string()
+        }
+    }
+}
+
+/// The command that removes the leftovers of the one incomplete version,
+/// or the form of the command when there are several.
+fn forget_help(versions: &[VersionNote]) -> String {
+    const REST: &str = "removes the leftovers, or copy the version back from the push target.";
+    match single_command("forget", versions) {
+        Some(words) => format!("{} {REST}", CodeSpan(command_text(&words))),
+        _ => "`antiq forget <piece> <version>` removes the leftovers of one version, or copy the version back from the push target."
+            .to_string(),
+    }
 }
 
 /// Why a leftover in `doomed/` cannot be deleted, as far as status can
@@ -1217,5 +1342,98 @@ mod tests {
         let found = reported(&temp);
 
         assert_eq!(found.unreadable_directories, [path("area")]);
+    }
+
+    fn note(piece: &str, stamp_text: &str) -> VersionNote {
+        VersionNote {
+            piece: path(piece),
+            stamp: stamp(stamp_text),
+            reasons: Vec::new(),
+        }
+    }
+
+    fn help_of(finding: &StatusFinding) -> Option<String> {
+        miette::Diagnostic::help(finding).map(|help| help.to_string())
+    }
+
+    #[test]
+    fn every_finding_has_a_code_and_the_severity_of_a_warning() {
+        use miette::{Diagnostic, Severity};
+        let findings = [
+            (StatusFinding::FutureTime, "antiq::status::future_time"),
+            (
+                StatusFinding::Damaged { versions: vec![] },
+                "antiq::status::damaged",
+            ),
+            (
+                StatusFinding::Incomplete { versions: vec![] },
+                "antiq::status::incomplete",
+            ),
+            (StatusFinding::NewerFormat, "antiq::status::newer_format"),
+            (StatusFinding::Recovered, "antiq::status::recovered"),
+            (StatusFinding::Trash, "antiq::status::trash"),
+            (StatusFinding::Doomed, "antiq::status::doomed"),
+            (StatusFinding::Spelling, "antiq::status::spelling"),
+        ];
+        for (finding, code) in findings {
+            assert_eq!(
+                finding.code().map(|found| found.to_string()).as_deref(),
+                Some(code)
+            );
+            assert_eq!(finding.severity(), Some(Severity::Warning), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_doomed_leftover_and_a_spelling_difference_have_no_fix() {
+        assert_eq!(help_of(&StatusFinding::Doomed), None);
+        assert_eq!(help_of(&StatusFinding::Spelling), None);
+        assert!(help_of(&StatusFinding::Trash).is_some());
+    }
+
+    #[test]
+    fn one_damaged_version_names_the_command_that_rebuilds_it() {
+        let one = StatusFinding::Damaged {
+            versions: vec![note("tools/scan", STAMP)],
+        };
+        assert_eq!(
+            help_of(&one).as_deref(),
+            Some("`antiq rebuild tools/scan 2026-11-04T090211` writes the missing file.")
+        );
+        let two = StatusFinding::Damaged {
+            versions: vec![note("tools/scan", STAMP), note("tools/scan", OTHER_STAMP)],
+        };
+        assert_eq!(
+            help_of(&two).as_deref(),
+            Some("`antiq rebuild <piece> <version>` writes the missing file of one version.")
+        );
+    }
+
+    #[test]
+    fn one_incomplete_version_names_the_command_that_forgets_it() {
+        let one = StatusFinding::Incomplete {
+            versions: vec![note("notes", STAMP)],
+        };
+        assert_eq!(
+            help_of(&one).as_deref(),
+            Some(
+                "`antiq forget notes 2026-11-04T090211` removes the leftovers, or copy the version back from the push target."
+            )
+        );
+        let none = StatusFinding::Incomplete { versions: vec![] };
+        assert_eq!(
+            help_of(&none).as_deref(),
+            Some(
+                "`antiq forget <piece> <version>` removes the leftovers of one version, or copy the version back from the push target."
+            )
+        );
+    }
+
+    #[test]
+    fn the_message_of_a_finding_says_what_it_means() {
+        assert_eq!(
+            StatusFinding::Recovered.to_string(),
+            "a folder that antiq gave back after a failed removal is kept in `.antiq/recovered/`"
+        );
     }
 }

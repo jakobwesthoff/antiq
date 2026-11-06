@@ -437,7 +437,7 @@ fn version_table(
 
 /// A word of a command line, in single quotes when a shell would split or
 /// expand it.
-fn shell_word(word: &str) -> String {
+pub(super) fn shell_word(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .chars()

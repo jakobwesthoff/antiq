@@ -1569,7 +1569,13 @@ several are indented below it. The kinds, in this order:
 On a terminal each of these notes is a warning block on stdout instead:
 a bold title with the same count and items, a sentence that says what the
 finding means, and a `→` line that says how to fix it where there is a
-fix. When a piece is due, a hint `Run antiq archive -n to see what the next
+fix. The sentence and the fix are the message and the help of the finding
+(codes `antiq::status::future_time`, `damaged`, `incomplete`,
+`newer_format`, `recovered`, `trash`, `doomed` and `spelling`, all of
+severity warning); leftovers in `doomed/` and spelling differences have no
+fix. The fix for exactly one damaged or incomplete version names the
+command that repairs it, written to paste: with the `-C` of the run and
+with each word quoted for a shell where it needs that. When a piece is due, a hint `Run antiq archive -n to see what the next
 run would archive.` follows. A pipe gets the lines above and no hint.
 
 Damaged and newer-format versions are shown by their local time with

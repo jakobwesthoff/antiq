@@ -229,6 +229,9 @@ pub struct Context {
     /// current directory. It is absolute and free of links and `..`, which
     /// is the form the piece references expect.
     pub start: PathBuf,
+    /// The `-C` the run was given, as written. A command line copied from
+    /// the output has to carry it to find the same collection.
+    pub directory: Option<PathBuf>,
 }
 
 /// Runs the command line `args` (starting with the program name), writes
@@ -306,6 +309,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
     let ctx = Context {
         json: cli.json,
         start,
+        directory: cli.directory.clone(),
     };
     match &cli.command {
         Command::Init(args) => cmd::init::run(&ctx, args, out),
