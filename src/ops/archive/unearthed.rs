@@ -222,9 +222,13 @@ fn stable(differences: &[Difference]) -> Result<(), Refusal> {
     }
 }
 
-/// The archives an unearthed folder is compared with.
+/// The archives an unearthed folder is compared with: those it can have
+/// come from, less the superseded ones.
 fn compared_with<'a>(entry: &TrackingEntry, metadata: &'a Metadata) -> Vec<&'a Payload> {
-    let candidates = unearthed_candidates(entry, metadata);
+    let candidates: Vec<&Payload> = unearthed_candidates(entry, metadata)
+        .into_iter()
+        .filter(|payload| !payload.superseded)
+        .collect();
     if candidates.is_empty() {
         newest_archive(metadata).into_iter().collect()
     } else {

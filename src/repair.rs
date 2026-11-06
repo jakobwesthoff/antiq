@@ -223,8 +223,9 @@ pub(crate) fn junk_outside<'a>(
 /// the version the entry was unearthed from. Two machines can both make
 /// version N, so the ones this machine holds are the candidates and the
 /// folder may be any of them; without a local one every payload of the
-/// version is. A superseded payload is never a candidate. An entry that
-/// records no version has none.
+/// version is. Superseded payloads are included: a folder unearthed from a
+/// version that was superseded since is still that unearthed folder. An
+/// entry that records no version has none.
 pub(crate) fn unearthed_candidates<'a>(
     entry: &TrackingEntry,
     metadata: &'a Metadata,
@@ -235,11 +236,7 @@ pub(crate) fn unearthed_candidates<'a>(
     let of_version: Vec<&Payload> = metadata
         .payloads
         .iter()
-        .filter(|payload| {
-            payload.kind == PayloadKind::Archive
-                && payload.version == version
-                && !payload.superseded
-        })
+        .filter(|payload| payload.kind == PayloadKind::Archive && payload.version == version)
         .collect();
     let held: Vec<&Payload> = of_version
         .iter()
@@ -2429,6 +2426,21 @@ mod tests {
         assert_eq!(entry.state, EntryState::Live);
         assert_eq!(entry.unearthed, Some(time(WRITTEN)));
         assert_eq!(entry.unearthed_payload_version, Some(1));
+    }
+
+    #[test]
+    fn an_unearthing_whose_folder_matches_a_superseded_version_becomes_live() {
+        let mut world = World::new();
+        world.archived(ID, "projects/a", FILES);
+        world.edit_meta(ID, |document| {
+            document["payloads"][0]["superseded"] = serde_json::json!(true);
+        });
+        unearthing(&world, ID, "projects/a");
+
+        let warnings = world.run();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(world.entry(ID).state, EntryState::Live);
     }
 
     #[test]
