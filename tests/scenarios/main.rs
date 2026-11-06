@@ -14,3 +14,4 @@ mod harness;
 mod init;
 mod list;
 mod status;
+mod unearth;
