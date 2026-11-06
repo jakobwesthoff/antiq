@@ -2991,6 +2991,28 @@ Notes for the items that call the strict verify and the listing comparison
   `UnholdableNames`. Lost modes and rounded times on exFAT and FAT wait
   for the user (todo 01M6HWBHSHV10VT2QM12V5ES41).
 
+### I26
+
+- 2026-11-04 (finished): `unearthed::classify` serves the run, the dry run
+  and `resolve`. A changed directory mode counts as loss; directory times,
+  symlink modes and junk do not (`verify::changes` compares two listings
+  that way). `ArchiveRequest.interaction` is `&Asker`, a
+  `Mutex<Box<dyn Interaction>>`: `Mutex<&mut dyn Interaction>` cannot be
+  borrowed for as long as the run lock, as `Mutex` is invariant. A loss
+  that appears between the walk and the package cannot reach an unasked
+  replacement, since the verify reports it as `differs`; the bound on the
+  loss matters after an answer, when the folder is walked again.
+- For I31 and I37: `resolve::{conflict, diverged, superseded}::answer`
+  return `unsupported` and are what they replace. `resolve::fit` tries the
+  pending decisions in the order of the table in spec "Decisions".
+  `archive::new::Run`, `Context::for_run` and `archive_one` run the archive
+  step for one piece under a lock the caller holds, with a `Mode` (the
+  history action and a known answer). `tests/support/pieces.rs`
+  `unearthed` builds an unearthed piece through the binary.
+- A fixture's released run lock was found held (`HeldUnknown`) in two full
+  test runs under load, in the 50-round test of `unearthed.rs`; that test
+  retries such a run.
+
 ### I07
 
 - 2026-11-04: two lines in `src/testing/mod.rs` export the shared test
