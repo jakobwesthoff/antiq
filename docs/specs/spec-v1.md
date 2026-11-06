@@ -1152,7 +1152,10 @@ only on the user's request, never as a repair. (ADR 0062)
 - Every refusal of a damaged version names `forget` and copying back from
   the target as the ways out. A version that is not damaged is refused. So
   is an incomplete version, which has no archive; the refusal names
-  `forget`. A listing of a newer format is refused with the error kind
+  `forget`. A folder of the store that holds only versions without an
+  archive is no piece to rebuild: the error is `unknown_reference` and says
+  that the piece holds only incomplete versions, which `forget` removes. A
+  listing of a newer format is refused with the error kind
   `format_too_new`, also when the checksum file is missing or corrupt. An
   empty piece or version is a usage error. It takes the lock and has `-n`,
   which says what it would check and write.

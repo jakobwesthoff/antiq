@@ -34,6 +34,10 @@ pub enum ReferenceError {
     },
     #[error("`{reference}` matches no piece")]
     Unknown { reference: String },
+    #[error(
+        "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
+    )]
+    OnlyIncomplete { reference: String, piece: String },
     #[error("`{path}` is outside the collection at `{root}`")]
     Outside { path: String, root: String },
     #[error("cannot look at the collection root {path}: {source}")]
@@ -57,7 +61,9 @@ impl HasKind for ReferenceError {
     fn kind(&self) -> ErrorKind {
         match self {
             ReferenceError::Ambiguous { .. } => ErrorKind::AmbiguousReference,
-            ReferenceError::Unknown { .. } => ErrorKind::UnknownReference,
+            ReferenceError::Unknown { .. } | ReferenceError::OnlyIncomplete { .. } => {
+                ErrorKind::UnknownReference
+            }
             ReferenceError::Outside { .. } => ErrorKind::OutsideCollection,
             ReferenceError::Root { .. }
             | ReferenceError::Open { .. }
@@ -252,6 +258,35 @@ pub fn resolve_piece(
                 })
                 .collect(),
         }),
+    }
+}
+
+/// Resolves a piece of the store for a command that works on archives
+/// (`unearth`, `fork`, `rebuild`). A folder that holds only sidecars is no
+/// piece for them, but whoever names it is told what to do with it.
+pub fn resolve_stored_piece(
+    collection: &Collection,
+    cwd: &Path,
+    given: &OsStr,
+    scan: &StoreScan,
+) -> Result<RelPath, ReferenceError> {
+    match resolve_piece(
+        collection,
+        cwd,
+        given,
+        &CandidateSet::store(collection, scan),
+    ) {
+        Err(ReferenceError::Unknown { reference }) => {
+            let wider = CandidateSet::store_and_sidecar_only(collection, scan);
+            Err(match resolve_piece(collection, cwd, given, &wider) {
+                Ok(piece) => ReferenceError::OnlyIncomplete {
+                    reference,
+                    piece: piece.to_string(),
+                },
+                Err(_) => ReferenceError::Unknown { reference },
+            })
+        }
+        other => other,
     }
 }
 

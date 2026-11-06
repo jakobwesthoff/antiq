@@ -495,6 +495,10 @@ fn a_piece_whose_only_version_is_incomplete_is_unknown_to_rebuild() {
         remove(&files(world, STAMP).archive);
         let run = assert_refused(world, &["rebuild", PIECE, STAMP]);
         run.json_only(|_| assert_eq!(run.error_kind().as_deref(), Some("unknown_reference")));
+        assert_all_in(
+            &error_text(&run),
+            &["holds only incomplete versions", "forget"],
+        );
     });
 }
 

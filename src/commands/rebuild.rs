@@ -18,7 +18,7 @@ use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::{self, Header, ListingEntry, ListingError};
 use crate::plan::LockHeld;
-use crate::reference::{self, CandidateSet, ReferenceError};
+use crate::reference::{self, ReferenceError};
 use crate::relpath::{Name, RelPath};
 use crate::repair::Repair;
 use crate::report::{self, Warning};
@@ -302,8 +302,7 @@ struct Chosen {
 fn choose(request: &RebuildRequest<'_>, zone: &TimeZone) -> Result<Chosen, RebuildError> {
     let collection = request.collection;
     let scan = store::scan(&collection.pieces_dir())?;
-    let candidates = CandidateSet::store(collection, &scan);
-    let folder = reference::resolve_piece(collection, request.cwd, request.piece, &candidates)?;
+    let folder = reference::resolve_stored_piece(collection, request.cwd, request.piece, &scan)?;
     let found = scan
         .pieces
         .iter()
