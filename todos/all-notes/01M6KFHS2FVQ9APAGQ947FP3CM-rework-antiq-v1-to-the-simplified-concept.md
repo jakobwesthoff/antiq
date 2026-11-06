@@ -1548,6 +1548,16 @@ neighbouring-hunk conflicts.
   `preserve_order` still serves a test (`tests/cli.rs:278-292` asserts
   envelope key order) before keeping or dropping it; a last pass of the
   spec against the code; delete the new plan todo.
+- README and project page (user decision, 2026-11-04): the README is
+  written to work with the user's project-page-starter, structured like
+  the READMEs of the user's other projects that use it (podpull, jlif,
+  patine, blendwerk), and the base configuration for the starter is set
+  up (the `setup-project-page` skill). The lead picks colour, tagline and
+  key features; the user iterates on them later.
+- Last step (user decision, 2026-11-04): the GitHub social preview
+  card, made with the `project-showcase-cards` skill and modelled on the
+  cards made for asqr, torchsnap and the user's other projects (their
+  playground logbooks show how).
 - Depends on: every other item.
 - Tests first: `ErrorKind::ALL` without `not_implemented`.
 - Risk: low. Opus review: no.
