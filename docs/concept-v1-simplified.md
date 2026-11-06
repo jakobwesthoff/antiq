@@ -135,6 +135,12 @@ live folder again. Archiving it later creates a new version.
   timestamp or a unique prefix of one.
 - There is no reclaim: an unearthed folder that is archived again,
   changed or not, becomes a new version.
+- The unearthed files keep their old modification times. So that the
+  folder is not due again at once, `unearth` writes `.antiq-unearthed`
+  at its top, holding the time of the unearth. The idle clock of that
+  folder starts at the later of this time and its newest file time.
+  The file does not count as a change and is not packed into a later
+  archive.
 
 ### `fork <piece> [--version <time>] [--name <new path>]`
 
@@ -230,8 +236,23 @@ Mirrors the collection to the target. **Proposal for the flow:**
    interrupted run removes nothing that was on the target before.
 3. `-n` summarizes rsync's `--itemize-changes` per piece.
 
-The name is `push` and not `backup`: the target is an exact mirror, so
-what is deleted locally is deleted there too.
+rsync runs with `--fsync`, so the target flushes each finished file.
+Beyond that antiq relies on rsync's own check: rsync computes a
+whole-file checksum of each transferred file while writing it and
+compares it with the sender's. antiq reads nothing back. This needs
+rsync 3.x; the `rsync` macOS ships is openrsync, which has no
+`--fsync`. Nothing records when the last push ran.
+
+`push` has no brake: whatever is deleted locally, by antiq or by hand,
+is deleted on the target by the next push. The target is a mirror, not
+a backup with history, and the user documentation says so.
+
+`--if-reachable` makes `push` exit 0 when the target cannot be reached,
+for scheduled runs. Scheduling runs the two commands one after the
+other, such as `antiq archive && antiq push --if-reachable`; there is
+no command that does both.
+
+The name is `push` and not `backup` for the same reason.
 
 ## Configuration
 
@@ -295,19 +316,18 @@ The modules named below exist on main today (`src/`). How each fares,
   draft) are not merged. The parts of i42 that still apply (removing
   the unused error kind, the folder lookup fix) are carried over.
 
+## Documentation after agreement
+
+Once the concept is agreed, it becomes the new `docs/specs/spec-v1.md`
+and this document goes. ADRs about parts that no longer exist are
+deleted, the others are rewritten to the new model; numbers stay, gaps
+are fine. The todos for removed parts are closed in the same step.
+
 ## Open questions
 
-1. How `push` makes sure the archives arrived intact: whether rsync's
-   own whole-file check (with `--fsync`) is enough, or whether antiq
-   reads anything back.
-2. How an unearthed folder keeps from being archived again on the next
-   run, since its files keep their old mtimes and there is no state
-   file to hold the time of the unearth.
-3. Whether `push` stops before deleting much on the target.
-4. Whether anything warns when the last push is long ago, and where its
-   time is kept without a state file.
-5. How scheduled runs work: `archive` and `push` separately, or one
-   command.
-6. Which detail rules of the walk and the idle check stay
-   (`.antiqignore` files, the junk list, future mtimes, empty pieces,
-   mount points, symlinks, dot entries).
+1. Which detail rules of the selection, the walk and the idle check
+   stay (patterns and the dot rule, exclude, symlinks, mount points and
+   nested collections, unreadable entries, `.antiqignore` files, the
+   junk list, future mtimes, empty pieces).
+2. The name of the `archive` command.
+3. Whether a single piece can be archived on request, before it is due.

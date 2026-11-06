@@ -259,6 +259,55 @@ proposals with open questions:
   and an optional `rsync` path. Everything tied to tiers, claims, live
   packages, the remote brake and the own ssh layer goes.
 
+## Concept rounds (2026-11-04)
+
+The concept is `docs/concept-v1-simplified.md` (70c25e0). Order agreed
+with the user: follow-up questions in asqr until none remain, then an
+adversarial review (fable, opus, sonnet, haiku), its questions in asqr,
+repeat until clean.
+
+Concept round 1 (asqr 01M6K53QJ44TT7ZAP6Q3WS1844), applied in f0db7b9:
+
+- `idle_days` default 30, set per collection in its `config.toml`.
+- No reclaim: an unearthed folder archived again is a new version.
+- No `reconcile` command: repairs run at the start of every run.
+- No state file at all.
+- Paths escaped as GNU `sha256sum` does, in the comment lines too.
+- Old `.antiq/objects/` stores are not converted.
+- The user does not want to read the document whole; it is gone through
+  question by question.
+
+Concept round 2 (asqr 01M6K5JFV3VWECWFMV0X8BHE1Q and
+01M6K5JMQHQ257VYAZS2ZNJ8WB):
+
+- Verification: rsync with `--fsync` and its own whole-file check,
+  nothing read back. A full comparison is todo 01M6K6WN14S91E2X5TRQYZRHJ5.
+- `unearth` writes `.antiq-unearthed` with the time; the idle clock
+  starts there.
+- Nothing records the last push; no warning.
+- No brake on `push`. The user's note: it must be documented that push
+  is only a mirror and not a backup, also in the README and user docs
+  once they are written, so nobody gets the wrong idea.
+- Scheduling: two commands, `archive` then `push --if-reachable`.
+- Detail rules of selection, walk and idle check: to be gone through one
+  by one (round 3).
+- The 15 todos listed as obsolete are closed when the concept becomes the
+  spec: tiers, version conflicts, claimed version number, unnamed local
+  payloads, root live package, keep folder until on remote, chunked
+  remote format, several remotes, switching the selection strategy,
+  SQLite index, shared picker crate, find/unearthed-loss/prune
+  decisions, one-shot command, the original v1 scope todo, and the plan
+  "Implement antiq v1" (replaced by a rework plan).
+- Shell integration kept for after v1 (todo rewritten, `horizon:
+  someday`).
+- ADRs: those of removed parts are deleted, the rest rewritten; numbers
+  stay with gaps. The concept becomes the new spec.
+- Paused branches i31, i33, i42, i44 saved as git bundles in the
+  logbook (`plans/impl/bundles/`) and deleted; i42's two commits are
+  carried over by the rework plan where they apply.
+- The user's session note: is `archive` the right name for the command?
+  To discuss (round 3).
+
 ## Presented
 
 - The grep study was presented in round 8
