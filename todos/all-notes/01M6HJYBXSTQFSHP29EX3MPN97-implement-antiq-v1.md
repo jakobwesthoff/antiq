@@ -2603,6 +2603,10 @@ the same commit; the lead checks that at acceptance.
   a changed tree. A walk problem inside a `live_exclude` directory still
   blocks the piece. The live stream check in `live.rs` is separate from
   I12's in `read.rs`.
+- 2026-11-04 (I14, measured): a level-3 live lease is charged 4 MiB
+  fixed plus 2 MiB per worker (baseline subtracted; I14 writes it into
+  spec "Packaging" and `docs/research/compression.md`). zstd keeps a
+  job at 512 KiB or more, so 512 KiB is the smallest job size.
 
 ### I15
 
@@ -2639,51 +2643,6 @@ the same commit; the lead checks that at acceptance.
   without changing what is archived; on staging it compares them. I12
   writes it into spec "Verifying".
 
-### I13
-
-- 2026-11-04: no path-length refusal before unearthing; only name
-  lengths are checked, since extraction works relative to directory
-  handles. I13 removes "and path" from ADR 0054 and spec "unearth".
-- 2026-11-04, I13 plan review (ledger `i13-ledger.md`, 17 findings
-  agreed): three passes over the stream (raw scan, gather, extract),
-  each drained so the checksum is checked; macOS name limit in UTF-16
-  units; the case fold is NFD, lower, upper, lower, NFD.
-- 2026-11-04 (O12): the final pass stays inside `unpack` (ADR 0050). A
-  directory whose mode denies its owner read or search can then hide
-  its children from the strict verify, so `WalkRules` says whether the
-  tree is antiq's own staging; only there may the verify give such a
-  directory owner access for the read and put its mode back afterwards
-  (I12). The staging cleanup already grants owner access (I03's
-  `remove_tree`).
-- 2026-11-04 (O13): Linux cannot set a symlink's mode, so the strict
-  verify and the listing comparison do not compare symlink modes on any
-  platform (I12 writes it into spec "Verifying").
-
-### I07
-
-- 2026-11-04: two lines in `src/testing/mod.rs` export the shared test
-  pool; the Linux container run relies on `RUST_TEST_THREADS=4`, since
-  `sysconf` sees the host's memory, not a container limit (R5 holds
-  only with that).
-- 2026-11-04 (I14, measured): a level-3 live lease is charged 4 MiB
-  fixed plus 2 MiB per worker (baseline subtracted; I14 writes it into
-  spec "Packaging" and `docs/research/compression.md`). zstd keeps a
-  job at 512 KiB or more, so 512 KiB is the smallest job size.
-- 2026-11-04: listing compression takes no pool lease at all. A listing
-  is compressed by one single-threaded level-3 encoder of a few MiB,
-  next to whatever payload lease the thread holds, so the
-  one-lease-per-thread rule never trips (I08).
-- 2026-11-04, review P of the finished diff (ledger `review-p-ledger.md`):
-  an archive encoder costs about 430 MiB plus 140 MiB per worker
-  (measured), so a lease is charged 448 MiB fixed plus 160 MiB per
-  worker instead of 256 MiB per worker (spec "Packaging" and
-  `docs/research/compression.md` written by the lead); the
-  one-lease-per-thread check is an `assert!`; tests added for FIFO among
-  blocked waiters, both wake-up paths, the want-0 clamp and the
-  machine's figures.
-
-### I12
-
 Notes for the items that call the strict verify and the listing comparison
 (`src/pack/verify.rs`):
 
@@ -2711,6 +2670,49 @@ Notes for the items that call the strict verify and the listing comparison
   listing, and both refuse a piece with `Problem::Excluded`.
 - `Compared` and `Verified` are read through accessors; the fields are
   private so that a proof cannot be made from an edited difference list.
+- The stream check reads the frame to its end and checks the zstd
+  checksum when the frame carries one; it does not require the checksum
+  flag. antiq's own packages always carry it; I21 (`import`) decides
+  whether an imported archive without one is accepted.
+
+### I13
+
+- 2026-11-04: no path-length refusal before unearthing; only name
+  lengths are checked, since extraction works relative to directory
+  handles. I13 removes "and path" from ADR 0054 and spec "unearth".
+- 2026-11-04, I13 plan review (ledger `i13-ledger.md`, 17 findings
+  agreed): three passes over the stream (raw scan, gather, extract),
+  each drained so the checksum is checked; macOS name limit in UTF-16
+  units; the case fold is NFD, lower, upper, lower, NFD.
+- 2026-11-04 (O12): the final pass stays inside `unpack` (ADR 0050). A
+  directory whose mode denies its owner read or search can then hide
+  its children from the strict verify, so `WalkRules` says whether the
+  tree is antiq's own staging; only there may the verify give such a
+  directory owner access for the read and put its mode back afterwards
+  (I12). The staging cleanup already grants owner access (I03's
+  `remove_tree`).
+- 2026-11-04 (O13): Linux cannot set a symlink's mode, so the strict
+  verify and the listing comparison do not compare symlink modes on any
+  platform (I12 writes it into spec "Verifying").
+
+### I07
+
+- 2026-11-04: two lines in `src/testing/mod.rs` export the shared test
+  pool; the Linux container run relies on `RUST_TEST_THREADS=4`, since
+  `sysconf` sees the host's memory, not a container limit (R5 holds
+  only with that).
+- 2026-11-04: listing compression takes no pool lease at all. A listing
+  is compressed by one single-threaded level-3 encoder of a few MiB,
+  next to whatever payload lease the thread holds, so the
+  one-lease-per-thread rule never trips (I08).
+- 2026-11-04, review P of the finished diff (ledger `review-p-ledger.md`):
+  an archive encoder costs about 430 MiB plus 140 MiB per worker
+  (measured), so a lease is charged 448 MiB fixed plus 160 MiB per
+  worker instead of 256 MiB per worker (spec "Packaging" and
+  `docs/research/compression.md` written by the lead); the
+  one-lease-per-thread check is an `assert!`; tests added for FIFO among
+  blocked waiters, both wake-up paths, the want-0 clamp and the
+  machine's figures.
 
 ## Relations
 
