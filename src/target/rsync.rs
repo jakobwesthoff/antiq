@@ -15,15 +15,13 @@ use std::process::{Command, Stdio};
 /// Errors of finding and running rsync.
 #[derive(Debug, thiserror::Error)]
 pub enum RsyncError {
-    #[error("no rsync is stored in machine.rsync")]
-    NotResolved,
-    #[error("machine.rsync must be an absolute path, not {}", .0.display())]
+    #[error("`[target] rsync` must be an absolute path, not {}", .0.display())]
     RelativePath(PathBuf),
     #[error("cannot run {}: {source}", path.display())]
     Spawn { path: PathBuf, source: io::Error },
-    #[error("{} is refused: {reason}", path.display())]
+    #[error("{} is refused: {reason}; set `[target] rsync` to an rsync 3.2.4 or newer", path.display())]
     Refused { path: PathBuf, reason: Refusal },
-    #[error("no rsync 3.1 or later found{}", refusals_text(.refusals))]
+    #[error("no rsync 3.2.4 or later found{}; set `[target] rsync` to the path of one", refusals_text(.refusals))]
     NoneFound { refusals: Vec<(PathBuf, String)> },
     /// rsync ran and ended with a non-zero status, or was killed by a
     /// signal (`code` is `None`). `stderr` is what it printed, so that the
@@ -67,7 +65,7 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::OpenRsync => write!(formatter, "openrsync is not supported"),
             Refusal::TooOld(version) => {
-                write!(formatter, "version {version} is older than 3.1")
+                write!(formatter, "version {version} is older than 3.2.4")
             }
             Refusal::Unrecognised(line) => {
                 write!(
@@ -88,14 +86,25 @@ pub struct RsyncVersion {
     pub major: u32,
     pub minor: u32,
     pub patch: u32,
+    /// The release carried a suffix such as `pre1`: a build before the
+    /// release of its number.
+    pub pre_release: bool,
     pub protocol: u32,
 }
 
 impl fmt::Display for RsyncVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if self.pre_release {
+            write!(formatter, " (pre-release)")?;
+        }
+        Ok(())
     }
 }
+
+/// The oldest rsync `push` accepts: 3.2.4 added `--fsync`. The final
+/// flag sorts a pre-release of a version below the version itself.
+const FLOOR: (u32, u32, u32, bool) = (3, 2, 4, true);
 
 /// Directories searched after `PATH`, where Homebrew and a manual install
 /// put rsync on macOS.
@@ -110,7 +119,7 @@ pub struct Rsync {
 
 impl Rsync {
     /// Runs `<path> --version` and accepts the executable when it reports
-    /// rsync 3.1 or later. openrsync, the macOS default, is refused.
+    /// rsync 3.2.4 or later. openrsync, the macOS default, is refused.
     pub fn probe(path: &Path) -> Result<Rsync, RsyncError> {
         let mut command = scrub_environment(Command::new(path), inherited_names());
         command.arg("--version").stdin(Stdio::null());
@@ -134,7 +143,7 @@ impl Rsync {
         })
     }
 
-    /// Finds the rsync `remote add` stores in `machine.rsync`: the
+    /// Finds the rsync `push` runs: the
     /// configured path when there is one, else the first of the `PATH`
     /// directories, `/opt/homebrew/bin` and `/usr/local/bin` that holds an
     /// rsync passing the probe.
@@ -299,7 +308,7 @@ fn join_rsh(args: &[OsString]) -> OsString {
     OsString::from_vec(joined)
 }
 
-/// `machine.rsync` is stored as an absolute path so that a run does not
+/// `[target] rsync` is an absolute path so that a run does not
 /// depend on the `PATH` it starts with.
 fn require_absolute(path: &Path) -> Result<(), RsyncError> {
     if path.is_absolute() {
@@ -357,32 +366,37 @@ pub(crate) fn parse_version_line(line: &str) -> Result<RsyncVersion, Refusal> {
         return Err(unrecognised());
     };
     let protocol = protocol.parse().map_err(|_| unrecognised())?;
-    let (major, minor, patch) = parse_release(release).ok_or_else(unrecognised)?;
+    let (major, minor, patch, pre_release) = parse_release(release).ok_or_else(unrecognised)?;
     let version = RsyncVersion {
         major,
         minor,
         patch,
+        pre_release,
         protocol,
     };
-    if (major, minor) < (3, 1) {
+    if (major, minor, patch, !pre_release) < FLOOR {
         return Err(Refusal::TooOld(version));
     }
     Ok(version)
 }
 
-/// `3.5.1`, `3.2` and `3.1.0pre1`: numbers separated by dots, text after
-/// the digits of a component dropped, the patch level optional.
-fn parse_release(release: &str) -> Option<(u32, u32, u32)> {
+/// `3.5.1`, `3.2` and `3.2.4pre1`: numbers separated by dots, the patch
+/// level optional. Text after the digits of a component marks a
+/// pre-release.
+fn parse_release(release: &str) -> Option<(u32, u32, u32, bool)> {
+    let mut pre_release = false;
     let mut numbers = release.split('.').map(|component| {
         let end = component
             .find(|character: char| !character.is_ascii_digit())
             .unwrap_or(component.len());
+        pre_release |= end < component.len();
         component[..end].parse::<u32>().ok()
     });
     let major = numbers.next()??;
     let minor = numbers.next()??;
     let patch = numbers.next().unwrap_or(Some(0))?;
-    Some((major, minor, patch))
+    drop(numbers);
+    Some((major, minor, patch, pre_release))
 }
 
 fn inherited_names() -> impl Iterator<Item = OsString> {
@@ -437,8 +451,13 @@ mod tests {
             major,
             minor,
             patch,
+            pre_release: false,
             protocol,
         }
+    }
+
+    fn line(release: &str) -> String {
+        format!("rsync  version {release}  protocol version 31\n")
     }
 
     #[test]
@@ -455,15 +474,51 @@ mod tests {
     }
 
     #[test]
-    fn probe_accepts_3_1_0_and_a_pre_release_suffix() {
-        let rsync = probed("rsync  version 3.1.0pre1  protocol version 31\n").expect("3.1 passes");
-        assert_eq!(rsync.version(), version(3, 1, 0, 31));
+    fn probe_accepts_3_2_4_and_newer() {
+        for release in ["3.2.4", "3.2.5", "3.3.0", "3.10.0", "4.0.0", "3.2.5pre1"] {
+            probed(&line(release)).unwrap_or_else(|error| panic!("{release}: {error}"));
+        }
     }
 
     #[test]
-    fn probe_accepts_a_version_without_a_patch_level() {
-        let rsync = probed("rsync  version 3.2  protocol version 31\n").expect("3.2 passes");
-        assert_eq!(rsync.version(), version(3, 2, 0, 31));
+    fn probe_refuses_versions_below_3_2_4() {
+        for release in ["3.2.3", "3.1.0", "3.1.3", "3.2", "3.0.9"] {
+            assert!(
+                matches!(refusal(&line(release)), Refusal::TooOld(_)),
+                "{release}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_refuses_a_pre_release_of_3_2_4() {
+        let refused = refusal(&line("3.2.4pre1"));
+        assert!(matches!(refused, Refusal::TooOld(found) if found.pre_release));
+    }
+
+    #[test]
+    fn a_version_without_a_patch_level_reads_as_patch_zero() {
+        match refusal(&line("3.2")) {
+            Refusal::TooOld(found) => assert_eq!(found, version(3, 2, 0, 31)),
+            other => panic!("expected a refusal for being too old, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_rsync_is_reported_with_its_path_and_the_config_key() {
+        let fake = Fake::new(OPENRSYNC);
+        let error = Rsync::probe(&fake.path()).expect_err("openrsync is refused");
+        let text = error.to_string();
+        assert!(text.contains(&fake.path().display().to_string()), "{text}");
+        assert!(text.contains("openrsync"), "{text}");
+        assert!(text.contains("`[target] rsync`"), "{text}");
+        assert!(text.contains("3.2.4"), "{text}");
+        let old = Fake::new(&line("3.1.0"));
+        let text = Rsync::probe(&old.path()).expect_err("3.1.0").to_string();
+        assert!(
+            text.contains("3.1.0") && text.contains("`[target] rsync`"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -622,7 +677,7 @@ mod tests {
     fn resolve_refuses_a_relative_configured_path() {
         match resolve_in(Some(Path::new("bin/rsync")), &[]).expect_err("it is refused") {
             error @ RsyncError::RelativePath(_) => {
-                assert!(error.to_string().contains("machine.rsync"), "{error}");
+                assert!(error.to_string().contains("`[target] rsync`"), "{error}");
             }
             other => panic!("expected a relative path error, got {other:?}"),
         }
@@ -700,7 +755,7 @@ mod tests {
         };
         assert_eq!(
             none_found.to_string(),
-            "no rsync 3.1 or later found; /usr/bin/rsync: openrsync is not supported; /opt/rsync: cannot run"
+            "no rsync 3.2.4 or later found; /usr/bin/rsync: openrsync is not supported; /opt/rsync: cannot run; set `[target] rsync` to the path of one"
         );
         let unrecognised = Refusal::Unrecognised("hello".to_string());
         assert_eq!(
