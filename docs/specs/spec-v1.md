@@ -782,7 +782,8 @@ archives are fetched on demand. (ADR 0016)
 A remote root holds the marker `antiq-remote.json` with the remote's
 ULID and the layout version, and the config stores that ULID. Every
 remote operation checks the marker first and refuses when it is missing
-or does not match. (ADR 0031)
+or does not match. On the SSH remote the check runs on the NAS, before
+the operation writes or deletes anything. (ADR 0031)
 
 `remote add <url>` attaches an existing remote and refuses when its
 root has no marker; `remote add --init <url>` creates a new remote root.
@@ -1007,11 +1008,14 @@ answers but cannot run the script (a login that ends with a status
 the script does not use, as `nologin`, a forced command or a missing
 `/bin/sh` do) is broken, with the error text as the reason, for the
 reachability check and for `remote show`; any other operation reports it
-as an I/O error. Every script starts by checking the root and the
-marker, the marker comes back to antiq as the first block of the
-answer, and `begin_phase` does the same check over the new master. The
-clock is `date +%s` on the NAS, printed first by a script that begins
-with that check.
+as an I/O error. Every script except those of `remote add` checks the root and the
+marker before its body runs. The script gets the remote's ULID as an
+argument and ends before any write when the marker, read in upper case,
+does not contain it, which is the marker of another remote. The marker
+comes back to antiq as the first block of the answer, and antiq parses
+it again, and `begin_phase` does the same check over the new master. The
+clock is `date +%s` on the NAS, printed as the first line of a script,
+before that check.
 
 A listing gives, for each entry of an object's directory, its name, its
 kind, its size and its modification time, dot names included. A name

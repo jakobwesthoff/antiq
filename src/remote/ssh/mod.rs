@@ -55,6 +55,8 @@ const NO_STAT: i32 = 43;
 /// searched.
 const ROOT_UNUSABLE: i32 = 49;
 const MARKER_UNREADABLE: i32 = 50;
+/// The marker of the root does not hold the id of this remote.
+const MARKER_FOREIGN: i32 = 51;
 /// The file the operation names is not there.
 const FILE_MISSING: i32 = 44;
 /// The upload on the NAS does not have the size of the local file.
@@ -284,8 +286,11 @@ const FETCH_CHECK: &str = r#"[ -f "$1/objects/$2/$3" ] || exit 44
 ///   nothing, and the listing would look empty.
 /// - `antiq_emit KIND FILE [ARG...]` prints `@KIND ARG... <length>`, the
 ///   file and a newline.
-/// - `antiq_root_check ROOT` ends the script unless ROOT is a directory
-///   with a readable marker, and prints the marker as a frame.
+/// - `antiq_root_check ROOT [ID]` ends the script unless ROOT is a
+///   directory with a readable marker, and prints the marker as a frame.
+///   With ID, a marker that does not contain it ends the script with
+///   status 51 before anything is written. The marker is upper-cased
+///   first, as the id is read in any case.
 pub(crate) const PRELUDE: &str = r#"antiq_stat_flavour() {
     if stat -c '%s' / >/dev/null 2>&1; then
         _flavour=gnu
@@ -386,6 +391,10 @@ antiq_root_check() {
     _rc=$?
     [ "$_rc" -eq 43 ] && exit 43
     [ "$_rc" -eq 0 ] || exit 50
+    if [ -n "$2" ]; then
+        _upper=$(tr 'a-z' 'A-Z' <"$_marker") || exit 50
+        case $_upper in *"$2"*) ;; *) exit 51 ;; esac
+    fi
 }
 "#;
 
@@ -561,9 +570,15 @@ impl SshRemote {
         self
     }
 
-    /// A script that starts with the root check. `$1` is the root.
+    /// A script that starts with the root check, which also ends it when
+    /// the marker is not this remote's. `$1` is the root. The id the check
+    /// compares to is the second argument and is dropped before the body
+    /// runs, so the arguments of the body start at `$2`.
     fn script(&self, body: &str) -> Script {
-        Script::new(&format!("{PRELUDE}\nantiq_root_check \"$1\"\n{body}")).arg(&self.root)
+        let check = "antiq_root_check \"$1\" \"$2\"\n_root=$1\nshift 2\nset -- \"$_root\" \"$@\"";
+        Script::new(&format!("{PRELUDE}\n{check}\n{body}"))
+            .arg(&self.root)
+            .arg(self.id.to_string())
     }
 
     /// Runs `script` and turns what the root check found and the status
@@ -593,6 +608,7 @@ impl SshRemote {
             MARKER_MISSING => return Err(self.marker_missing()),
             ROOT_UNUSABLE => return Err(self.root_unusable(&stderr)),
             MARKER_UNREADABLE => return Err(self.marker_unreadable()),
+            MARKER_FOREIGN => return Err(self.marker_foreign()),
             NO_HASH_TOOL => return Err(self.no_hash_tool()),
             NO_STAT => return Err(self.no_stat()),
             status => {
@@ -638,6 +654,13 @@ impl SshRemote {
             "{} holds the marker of another remote ({}), not {}",
             self.root, found.id, self.id
         )))
+    }
+
+    fn marker_foreign(&self) -> RemoteError {
+        RemoteError::Broken(format!(
+            "{} holds the marker of another remote, not {}",
+            self.root, self.id
+        ))
     }
 
     fn marker_invalid(&self, error: &marker::MarkerError) -> RemoteError {
@@ -996,6 +1019,7 @@ fn script_status_is_unexpected(status: i32) -> bool {
             | MARKER_MISSING
             | ROOT_UNUSABLE
             | MARKER_UNREADABLE
+            | MARKER_FOREIGN
             | NO_HASH_TOOL
             | NO_STAT
     )
@@ -1799,6 +1823,135 @@ mod tests {
         let found = assess(&far.remote());
         assert_eq!(found.reachability, Reachability::Broken, "{}", found.reason);
         assert!(found.reason.contains("another remote"), "{}", found.reason);
+    }
+
+    const OTHER_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    /// A far side whose marker belongs to another remote, with the object
+    /// directory made.
+    fn far_of_another_remote() -> Far {
+        let far = Far::new();
+        far.object_dir(OBJECT);
+        far.write_marker(&Marker::new(OTHER_ID.parse().expect("a ULID")));
+        far
+    }
+
+    fn assert_broken_for_another_remote(error: &RemoteError) {
+        assert!(
+            matches!(error, RemoteError::Broken(why) if why.contains("another remote")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn creating_under_the_marker_of_another_remote_writes_nothing() {
+        let far = far_of_another_remote();
+        let error = far
+            .remote()
+            .create_exclusive(object(), "claim")
+            .expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(!far_file(&far, "claim").exists());
+    }
+
+    #[test]
+    fn writing_a_temp_under_the_marker_of_another_remote_writes_nothing() {
+        let far = far_of_another_remote();
+        let error = far
+            .remote()
+            .write_temp(object(), ".t", b"x")
+            .expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(!far_file(&far, ".t").exists());
+    }
+
+    #[test]
+    fn renaming_under_the_marker_of_another_remote_moves_nothing() {
+        let far = far_of_another_remote();
+        std::fs::write(far_file(&far, ".t"), "x").expect("temp");
+        let error = far
+            .remote()
+            .rename_into_place(object(), ".t", "final")
+            .expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(far_file(&far, ".t").exists());
+        assert!(!far_file(&far, "final").exists());
+    }
+
+    #[test]
+    fn deleting_under_the_marker_of_another_remote_removes_nothing() {
+        let far = far_of_another_remote();
+        std::fs::write(far_file(&far, "keep"), "x").expect("file");
+        let error = far.remote().delete(object(), "keep").expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(far_file(&far, "keep").exists());
+    }
+
+    #[test]
+    fn deleting_a_partial_under_the_marker_of_another_remote_removes_nothing() {
+        let far = far_of_another_remote();
+        let partial = far_file(&far, ".antiq-partial");
+        std::fs::create_dir(&partial).expect("dir");
+        std::fs::write(partial.join(".t"), "x").expect("file");
+        let error = far
+            .remote()
+            .delete_partial(object(), ".t")
+            .expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(partial.join(".t").exists());
+    }
+
+    #[test]
+    fn putting_under_the_marker_of_another_remote_writes_nothing() {
+        let far = far_of_another_remote();
+        let (_fake_dir, fake) = fake_rsync();
+        let source = far.local("pack.tar", b"x");
+        std::fs::write(far_file(&far, "seed.tar"), "seed").expect("seed");
+        let sha = sha_of(b"x");
+        let seeded = Upload {
+            seed: Some("seed.tar"),
+            ..upload(&source, &sha)
+        };
+        let error = far
+            .remote_with(&fake, SshSeams::default())
+            .put_payload(&seeded)
+            .expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(!far_file(&far, ".pack.laptop.part").exists());
+    }
+
+    #[test]
+    fn flushing_under_the_marker_of_another_remote_runs_no_sync() {
+        let far = far_of_another_remote();
+        let ran = far.state.path().join("sync-ran");
+        far.wrap("sync", &format!("touch '{}'", ran.display()));
+        let error = far.remote().flush().expect_err("foreign");
+        assert_broken_for_another_remote(&error);
+        assert!(!ran.exists());
+    }
+
+    #[test]
+    fn a_marker_written_in_lower_case_stays_reachable() {
+        let far = Far::new();
+        std::fs::write(
+            far.root().join(marker::FILE_NAME),
+            format!(
+                "{{\"format\":1,\"id\":\"{}\",\"layout\":1}}\n",
+                REMOTE_ID.to_lowercase()
+            ),
+        )
+        .expect("marker");
+        let found = assess(&far.remote());
+        assert_eq!(
+            found.reachability,
+            Reachability::Reachable,
+            "{}",
+            found.reason
+        );
+        far.object_dir(OBJECT);
+        far.remote()
+            .write_temp(object(), ".t", b"x")
+            .expect("a write goes through");
     }
 
     #[test]
