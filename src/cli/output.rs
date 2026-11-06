@@ -144,14 +144,23 @@ pub struct Output {
     stdout_style: Style,
 }
 
+/// Whether the label of an error on stderr is coloured: on a terminal, and
+/// not when `NO_COLOR` is set to a non-empty value.
+fn stderr_colored(is_tty: bool, no_color: bool) -> bool {
+    is_tty && !no_color
+}
+
 impl Output {
     /// The process's own stdout and stderr. Colour is used when stderr is
-    /// a terminal.
+    /// a terminal and `NO_COLOR` is not set.
     pub fn stdio() -> Output {
         Output::new(
             Box::new(io::stdout()),
             Box::new(io::stderr()),
-            io::stderr().is_terminal(),
+            stderr_colored(
+                io::stderr().is_terminal(),
+                std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
+            ),
         )
         .with_stdout_style(Style::of(io::stdout()))
     }
@@ -427,6 +436,14 @@ mod tests {
             capture.stderr(),
             "error: `scan` matches 2 pieces\n    candidate: projects/scanner\n    candidate: tools/scan-old\n  while attempting to find the piece\n"
         );
+    }
+
+    #[test]
+    fn the_error_label_is_coloured_on_a_terminal_unless_no_color_is_set() {
+        assert!(stderr_colored(true, false));
+        assert!(!stderr_colored(true, true), "NO_COLOR turns it off");
+        assert!(!stderr_colored(false, false), "a pipe is never coloured");
+        assert!(!stderr_colored(false, true));
     }
 
     #[test]
