@@ -173,7 +173,7 @@ fn status_takes_nothing() {
 }
 
 accepts!(archive_takes_dry_run, "archive", ["archive", "--dry-run"]);
-accepts!(
+accepts_and_needs_a_collection!(
     unearth_takes_its_options,
     "unearth",
     [

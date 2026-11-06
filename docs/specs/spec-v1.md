@@ -1648,7 +1648,17 @@ given, and exits 3. Under `--json` nothing goes to stderr.
 
 `archive` has no payload defined yet.
 
-`unearth` has no payload defined yet.
+`unearth` adds `unearthed` (false for a piece that was unearthed before
+and for a piece that was skipped), `id`, `path` (where the piece is, or
+would have been put), `abs_path`, `payload_version` (the archive that was
+unearthed, left out when nothing was), `skipped` (`{"reason": "no_space",
+"needed", "available"}` for a piece left alone for want of room, which
+exits 3) and `warnings`. A refused target, an archive that is not on this
+machine, a version that does not exist and an archive that does not match
+its metadata are errors of kind `other`; a path outside the collection is
+`outside_collection`. The plan of a `--dry-run` has one `unearth` action
+with `id`, `path` and `payload_version`, and no action for a piece that is
+unearthed already.
 
 `fork` has no payload defined yet.
 
