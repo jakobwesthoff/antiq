@@ -64,6 +64,18 @@ fn is_summary(line: &str, words: &str) -> bool {
     time.len() >= 4 && time.chars().all(|c| c.is_ascii_digit() || c == ':')
 }
 
+/// The stdout of a `--json` run on a terminal: one JSON object of the
+/// command and nothing of the cards.
+fn assert_only_json(stdout: &str, command: &str) {
+    for card in ["\x1b", "Pushing to", "waiting", "╸", "⠋", "⠙", "⠹", "⠸"] {
+        assert!(!stdout.contains(card), "{card:?} in {stdout:?}");
+    }
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "{stdout:?}");
+    let json: serde_json::Value = serde_json::from_str(lines[0]).expect("one JSON object");
+    assert_eq!(json["command"], command);
+}
+
 // =========================================================
 // archive
 // =========================================================
@@ -197,6 +209,14 @@ fn a_dry_run_on_a_terminal_shows_no_cards() {
 }
 
 #[test]
+fn a_json_run_on_a_terminal_prints_the_json_and_no_cards() {
+    let archive = archive_world(2);
+    let run = archive.run_tty_sized(&["--json", "archive"], 100, 24, &[]);
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "archive");
+}
+
+#[test]
 fn a_run_with_nothing_due_prints_the_text_it_always_did() {
     let clock = Clock::now();
     let collection = Collection::build(&clock)
@@ -299,6 +319,49 @@ fn unearth_leaves_the_line_of_the_piece_and_a_summary_with_the_destination() {
 }
 
 #[test]
+fn a_json_unearth_on_a_terminal_prints_the_json_and_no_cards() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["--json", "unearth", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "unearth");
+}
+
+#[test]
+fn a_skipped_unearth_leaves_its_line_its_reason_and_a_warning_summary() {
+    let clock = Clock::now();
+    let mut builder: CollectionBuilder = Collection::build(&clock);
+    builder
+        .patterns(&["projects/*"])
+        .version("projects/scanner", NEW, &[("a.txt", "hello\n")]);
+    let world = World::new(Setup::new(builder.finish()), Mode::Text);
+    world.oversize_listing("projects/scanner", NEW);
+    let run = world.run_tty_sized(&["unearth", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(3);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines[0].starts_with("  ⚠ projects/scanner version "),
+        "{lines:#?}"
+    );
+    assert!(lines[0].contains("skipped"), "{lines:#?}");
+    assert!(
+        lines[1].contains("needed,") && lines[1].trim_end().ends_with("free"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .last()
+            .expect("a summary")
+            .starts_with("⚠ Skipped projects/scanner"),
+        "{lines:#?}"
+    );
+    assert!(
+        !run.stderr.contains("Skipped projects/scanner:"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+#[test]
 fn unearth_on_a_dumb_terminal_prints_the_line_once() {
     let world = unearth_world();
     let run = world.run_tty_sized(
@@ -362,6 +425,14 @@ fn push_init_shows_a_header_the_finished_lines_and_the_claim() {
     );
     assert!(lines.iter().any(|line| line.contains(".antiq-target")));
     assert!(lines.iter().all(|line| !line.starts_with("PIECE")));
+}
+
+#[test]
+fn a_json_push_on_a_terminal_prints_the_json_and_no_cards() {
+    let world = push_world();
+    let run = world.run_tty_sized(&["--json", "push", "--init"], 100, 24, &[]);
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "push");
 }
 
 #[test]

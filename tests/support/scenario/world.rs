@@ -110,6 +110,24 @@ impl World {
         self.target.as_ref()
     }
 
+    /// Makes the listing of the version `stamp` of `piece` say that its
+    /// file is far larger than any volume has room for. The totals of the
+    /// listing agree, so only the free-space check refuses.
+    pub fn oversize_listing(&self, piece: &str, stamp: &str) {
+        let path = self.collection.version_files(piece, stamp).listing;
+        let text =
+            zstd::stream::decode_all(&std::fs::read(&path).expect("reads")[..]).expect("decodes");
+        let text = String::from_utf8(text)
+            .expect("text")
+            .replace("# bytes         6", "# bytes         9000000000000000")
+            .replace("                 6  a.txt", "  9000000000000000  a.txt");
+        std::fs::write(
+            &path,
+            zstd::stream::encode_all(text.as_bytes(), 3).expect("compresses"),
+        )
+        .expect("writes");
+    }
+
     /// Runs the command against the world's collection (`-C <root>`).
     pub fn run(&self, args: &[&str]) -> Outcome {
         self.execute(Some(&self.collection), None, args, None)

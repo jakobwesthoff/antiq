@@ -255,24 +255,10 @@ fn a_taken_destination_is_refused() {
     assert!(run.stderr.contains("it is taken"), "{:?}", run.stderr);
 }
 
-/// Makes the listing of the only version say that the file is far larger than
-/// any volume has room for. Its totals agree, so only the free-space check
-/// refuses.
+/// The listing of the only version says its file is far larger than any
+/// volume has room for.
 fn oversize_listing(world: &World) {
-    let path = world
-        .collection()
-        .version_files("projects/scanner", NEW)
-        .listing;
-    let text = zstd::stream::decode_all(&fs::read(&path).expect("reads")[..]).expect("decodes");
-    let text = String::from_utf8(text)
-        .expect("text")
-        .replace("# bytes         6", "# bytes         9000000000000000")
-        .replace("                 6  a.txt", "  9000000000000000  a.txt");
-    fs::write(
-        &path,
-        zstd::stream::encode_all(text.as_bytes(), 3).expect("compresses"),
-    )
-    .expect("writes");
+    world.oversize_listing("projects/scanner", NEW);
 }
 
 #[test]
