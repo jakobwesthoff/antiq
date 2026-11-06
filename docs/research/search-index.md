@@ -315,3 +315,71 @@ one thread and 666.4 ms on ten):
 The ten threads take the pieces one at a time from a shared counter. The
 resident set size of the query process is the 569 MB of mapped file
 pages that the pass touched.
+
+## Fuzzy matching and the two-step path
+
+The picker scores with nucleo (`Pattern::parse` with smart case and smart
+normalization, `Matcher` with `Config::DEFAULT`), which accepts a path
+when the query's characters occur in it in order, anywhere. None of the
+indexes above has that semantic.
+
+- Tantivy `FuzzyTermQuery` is an edit distance (here 1, with transpositions)
+  between the query and a single term of the dictionary. `scaner` found
+  the word `scanner` (1 244 255 hits, the same as the word query) in
+  3.96 ms (`count`) on the default data and 4.11 ms on the data with 4.6 M
+  terms. The prefix form found the same hits in the same time.
+- The word index accepts a path if it holds a word or a word prefix, the
+  trigram index and SQLite FTS5 if it holds the needle as a substring, the
+  fst automaton if the needle's characters occur in order.
+- On set 0 (50 000 paths, in memory) nucleo accepted 30 072 paths for
+  `ctr` (60.1 %), 15 803 for `ctrl` (31.6 %), 21 711 for `scan`, 1 249 for
+  `scanner/src` and 2 472 for `.tif`. A literal, case-insensitive
+  substring search found 1 012, 989, 7 986, 30 and 2 472.
+- The fst subsequence automaton is the only index in this document that
+  returns the nucleo candidate set (9 096 605 matches for `ctr` over 300
+  pieces, 60.6 % of the 15 M paths, against 60.1 % of set 0 for nucleo).
+  It took 6.2 s on one thread and 0.69 s on ten. Scoring everything took
+  5.1 to 5.8 s and 0.61 to 0.68 s in `picker-search.md`.
+
+Two-step path on the stored fields: the index returns up to 200 hits
+(`TopDocs`, 200 by score), the stored paths of those hits are fetched
+from the document store, nucleo scores them. A regex query scores every hit
+the same (tantivy's automaton weight builds a constant scorer), so the 200
+are not the best matches. Best of
+5 per figure, one run of the program. The nucleo columns are over the
+candidates of the 200.
+
+Word index:
+
+| Query | nucleo accepts in set 0 | substring in set 0 | index hits in piece 0 | index hits all | step 1 ms | fetch 200 ms | nucleo ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ctr` | 30 072 | 1 012 | 989 | 306 125 | 4.77 | 0.09 | 0.033 |
+| `ctrl` | 15 803 | 989 | 989 | 306 125 | 4.82 | 0.09 | 0.033 |
+| `scan` | 21 711 | 7 986 | 7 985 | 2 387 240 | 8.90 | 0.08 | 0.041 |
+| `scanner/src` | 1 249 | 30 | 310 | 84 180 | 9.73 | 0.72 | 0.006 |
+| `.tif` | 2 472 | 2 472 | 1 291 | 381 940 | 0.02 | 0.07 | 0.006 |
+
+Trigram index:
+
+| Query | index hits in piece 0 | index hits all | step 1 ms | fetch 200 ms | nucleo ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `ctr` | 1 012 | 312 790 | 1.03 | 0.71 | 0.007 |
+| `ctrl` | 989 | 306 125 | 1.84 | 0.71 | 0.007 |
+| `scan` | 7 986 | 2 387 420 | 15.16 | 0.81 | 0.004 |
+| `scanner/src` | 44 | 12 770 | 8.30 | 0.67 | 0.033 |
+| `.tif` | 2 472 | 762 365 | 3.94 | 0.77 | 0.005 |
+
+For `.tif` the word index finds the word `tif`; the substring has 1 181
+more paths (`.tiff`).
+
+Scoring every hit of `ctrl` (306 125 hits in 300 pieces, all accepted by
+nucleo) after the index lookup, with the paths fetched from the stored
+field in the same process:
+
+| Index | Collect all hits ms | Fetch and score ms (second and third run) | First run ms | Peak memory, maximum resident set size / footprint |
+| --- | ---: | ---: | ---: | ---: |
+| Word index (6 segments) | 18.6 to 19.0 | 422.3, 424.0 | 940.3 | 540 MB / 33 MB |
+| Trigram index (20 segments) | 17.9 to 18.5 | 1271.4, 1276.2 | 2749.0 | 564 MB / 45 MB |
+
+Both indexes had been through the update rounds above when this was
+measured.
