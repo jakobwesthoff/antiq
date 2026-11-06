@@ -810,6 +810,17 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_path_that_cannot_be_looked_at_is_an_error_not_a_missing_marker() {
+        let temp = tempfile::tempdir().expect("a temp directory");
+        let file = temp.path().join("file");
+        fs::write(&file, "x").expect("the file is written");
+
+        let error = read_marker(&file).expect_err("a file has no marker below it");
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn a_marker_read_that_fails_with_a_gone_share_error_is_unreachable() {
         use rustix::io::Errno;
         for errno in [

@@ -382,6 +382,12 @@ mod tests {
     }
 
     #[test]
+    fn a_store_that_cannot_be_read_is_an_error_of_no_kind_of_its_own() {
+        let error = ForgetError::Versions(VersionsError::InvalidStamp("x".to_string()));
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
     fn a_version_that_is_not_there_is_an_error_of_no_kind_of_its_own() {
         let none = ForgetError::Version(VersionLookupError::NoSuch {
             piece: "tools/scan".to_string(),
