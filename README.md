@@ -680,7 +680,8 @@ naming the missing tool.
 
 The tasks live in the `Justfile` (`just --list` shows them). `just check`
 runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-`cargo test`. Every commit has to pass it.
+`cargo test`. The last commit of a change has to pass it before it reaches
+`main`.
 
 Coverage needs `cargo-llvm-cov`. After a change, `just coverage
 <base-commit>` lists the changed lines under `src/` that no test runs.

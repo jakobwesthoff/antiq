@@ -10,8 +10,9 @@ todo vault at `todos/`.
 ## Working on the code
 
 - The development tasks are the recipes of the `Justfile`; use them
-  (`just --list`). Every commit passes `just check` (formatting, clippy
-  with warnings as errors, the tests).
+  (`just --list`). The last commit of every piece of work passes `just
+  check` (formatting, clippy with warnings as errors, the tests) before
+  it reaches `main`; commits in between need not run it on their own.
 - Tests: unit tests sit in their module; each command has a
   `tests/<command>.rs` that runs the binary; whole user tasks are
   scenarios in `tests/scenarios/`, run in text and in JSON mode (how to
