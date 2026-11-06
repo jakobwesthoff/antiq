@@ -265,6 +265,18 @@ fn a_hint_is_inline_and_wrapped_text_hangs_under_the_text() {
 }
 
 #[test]
+fn an_explicit_blank_paragraph_of_a_warning_is_one_bar_line_and_adds_no_second() {
+    let block = Block::warning(rich("Title"))
+        .text(rich("One."))
+        .text(Para::Blank)
+        .text(rich("Two."));
+    assert_eq!(
+        block.render(&bare(80)),
+        ["▌ ⚠ WARNING", "▌ Title", "▌", "▌   One.", "▌", "▌   Two."]
+    );
+}
+
+#[test]
 fn the_hint_is_blue_and_the_dry_run_line_magenta() {
     assert_eq!(
         Block::hint(rich("Run `x`.")).render(&colored()),
