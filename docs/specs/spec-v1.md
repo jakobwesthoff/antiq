@@ -1373,7 +1373,12 @@ in place.
   reason `differs`, `no_room` or `error` as for `archive`, and exit 3.
   A version that is stored while its store folder may not be durable is
   reported as skipped with a message that says it was stored. On success
-  the output is one line, `imported <piece>: version <stamp>`.
+  the output is one line, `imported <piece>: version <stamp>`. On a
+  terminal a real run shows the progress card of `archive` for the one
+  piece instead (see "Progress cards") and ends with the summary `Imported
+  <piece> as version <stamp>`, or `Skipped <piece>` when it is skipped. The
+  repairs and warnings follow the summary. A dry run, `--json` and a stdout
+  that is not a terminal keep the line.
 - This is also the way to bring in old archive files: unpack them with
   their original timestamps somewhere temporary, then import each folder.
   (ADR 0009, ADR 0055)
@@ -2269,7 +2274,7 @@ that stream without a panic, and the run ends with the exit code it would have h
 
 #### Progress cards
 
-A real run of `archive`, `push`, `unearth`, `fork` or `rebuild` on a rich stdout shows its
+A real run of `archive`, `push`, `unearth`, `fork`, `rebuild` or `import` on a rich stdout shows its
 progress as cards (ADR 0064). A dry run, `--json` and a stdout that is not a
 terminal print the lines they print without cards. The warnings and notes
 of the run follow the result as always.
@@ -2277,18 +2282,18 @@ of the run follow the result as always.
 A piece that is working has a card of two lines. The first has a mark that
 turns, the piece in bold and the operation, which ends in the column where
 the second line ends: `packing`,
-`verifying`, `storing` and `removing` for `archive`, `storing` and
+`verifying`, `storing` and `removing` for `archive`, `packing`, `verifying` and `storing` for `import`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
 `unearth`, `extracting` and `verifying` for `fork`, `verifying` for `rebuild`. The second has a bar,
 the percentage and a count: `N/M files`, `N/M entries` for the removing of
 `archive`, and sizes such as `412 MB/1.2 GB` for the operations whose count
 is the content bytes of the piece: the `packing` and `verifying` of
-`archive`, the `extracting` and `verifying` of `unearth` and `fork` and the `verifying` of `rebuild`. A `push` has a card
+`archive` and `import`, the `extracting` and `verifying` of `unearth` and `fork` and the `verifying` of `rebuild`. A `push` has a card
 of its own kind, described below. A count shows numbers only in units that match the card (content
 bytes, files, entries). The bar of `packing` follows the content bytes of
 the files among the bytes of the tar stream that the compressor has
 consumed, against the size of the files; the headers and the padding of the
-stream count for nothing. The bar of the `verifying` of `archive` follows the
+stream count for nothing. The bar of the `verifying` of `archive` and `import` follows the
 content bytes of the members as the archive hands them out and those of the
 files of the folder as they are read, against twice the content bytes of the files;
 its count shows both numbers halved, in content bytes. The bar of
@@ -2312,7 +2317,7 @@ done.
 A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
 refused or unfinished piece, `⚠` yellow for a skipped one), the piece in
 bold, its size, its result and the time as `m:ss`. The result is `N files`
-for `archive`, `unearth` and `fork`, `listing rebuilt`, `checksum rebuilt`
+for `archive`, `import`, `unearth` and `fork`, `listing rebuilt`, `checksum rebuilt`
 or `both files rebuilt` for `rebuild`, the non-zero ones of `N created`, `N updated`
 and `N deleted` for the pieces of a `push` on a terminal that does not move
 the cursor, and `refused`, `skipped` or `unfinished`. The

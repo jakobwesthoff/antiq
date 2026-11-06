@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push`, `unearth`, `fork` and `rebuild` share when they show cards on a
-//! terminal: when to show them, how they are set up, and the summary line
+//! What `archive`, `push`, `unearth`, `fork`, `rebuild` and `import` share when they show
+//! cards on a terminal: when to show them, how they are set up, and the summary line
 //! and the pieces that never sent an event.
 
 use crate::cli::Context;
@@ -12,6 +12,7 @@ use crate::cli::console::live::{Label, Setup, observed};
 use crate::cli::output::Output;
 use crate::cli::table::sanitize;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
+use antiq::commands::import::ImportReport;
 use antiq::commands::push::PushReport;
 use antiq::progress::{Observer, Operation, Outcome};
 use anyhow::Context as _;
@@ -186,6 +187,30 @@ pub(super) fn archive_summary(report: &ArchiveReport, took: Duration) -> Option<
 }
 
 // =========================================================
+// import
+// =========================================================
+
+/// The closing line of an import that showed its card: the version that
+/// came about, or that the folder was skipped.
+pub(super) fn import_summary(report: &ImportReport, took: Duration) -> Summary {
+    let (text, tone) = if let Some(version) = &report.imported {
+        let piece = sanitize(&version.piece);
+        (
+            format!("Imported {piece} as version {}", version.stamp),
+            Tone::Ok,
+        )
+    } else {
+        let skipped = (report.skipped.as_ref()).expect("an import ends with a version or a skip");
+        (format!("Skipped {}", sanitize(&skipped.piece)), Tone::Warn)
+    };
+    Summary {
+        tone,
+        parts: vec![(text, tone)],
+        took,
+    }
+}
+
+// =========================================================
 // push
 // =========================================================
 
@@ -340,6 +365,7 @@ pub(super) fn card_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use antiq::commands::import::{ImportedVersion, SkippedImport};
 
     #[test]
     fn a_destination_below_the_directory_is_a_relative_path() {
@@ -423,5 +449,60 @@ mod tests {
         assert_eq!(exit_tone(0), Tone::Ok);
         assert_eq!(exit_tone(1), Tone::Bad);
         assert_eq!(exit_tone(3), Tone::Bad);
+    }
+
+    fn imported_report(
+        version: Option<ImportedVersion>,
+        skipped: Option<SkippedImport>,
+    ) -> ImportReport {
+        ImportReport {
+            imported: version,
+            skipped,
+            repairs: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_summary_of_an_import_names_the_piece_and_the_version() {
+        let report = imported_report(
+            Some(ImportedVersion {
+                piece: "projects/scanner".to_string(),
+                stamp: "2023-11-14T221320".to_string(),
+                version: jiff::Timestamp::UNIX_EPOCH,
+                archive_bytes: 3,
+                files: 4,
+                bytes: 9,
+            }),
+            None,
+        );
+        let summary = import_summary(&report, Duration::from_secs(5));
+        assert_eq!(summary.tone, Tone::Ok);
+        assert_eq!(
+            summary.parts,
+            [(
+                "Imported projects/scanner as version 2023-11-14T221320".to_string(),
+                Tone::Ok
+            )]
+        );
+        assert_eq!(summary.took, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_summary_of_a_skipped_import_names_the_piece() {
+        let report = imported_report(
+            None,
+            Some(SkippedImport {
+                piece: "projects/scanner".to_string(),
+                reason: antiq::commands::archive::SkipReason::NoRoom,
+                message: "no room".to_string(),
+            }),
+        );
+        let summary = import_summary(&report, Duration::from_secs(5));
+        assert_eq!(summary.tone, Tone::Warn);
+        assert_eq!(
+            summary.parts,
+            [("Skipped projects/scanner".to_string(), Tone::Warn)]
+        );
     }
 }

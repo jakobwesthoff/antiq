@@ -311,7 +311,8 @@ Old projects also lie outside the collection: on another disk, in a
 downloads folder, or packed in archive files from years ago. `import`
 puts such a folder into the archive without moving it into the collection
 first. It packs the folder as a version, checks the archive the way
-`archive` does, and leaves the source folder where it is:
+`archive` does, and leaves the source folder where it is. On a terminal it
+shows the progress card of `archive` while it works:
 
 ```bash
 antiq import ~/old-disk/pixel-clock

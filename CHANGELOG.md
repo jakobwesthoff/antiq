@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `import` shows a progress card on a terminal, as `archive` does. A pipe,
+  `--json` and a dry run print what they printed before
+
 ## [1.0.0] - 2026-11-06
 
 The first release of antiq: it keeps the idle folders of a collection as

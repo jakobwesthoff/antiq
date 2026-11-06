@@ -7,10 +7,10 @@
 # archived piece, and its source folder stays in old-disk.
 
 Output out/discard.txt
-# The picture shows both commands, their output and the prompt: 6 rows of
+# The picture shows both commands, their output and the prompt: 8 rows of
 # 38.46 pixels plus 87 pixels, the padding of 80 and 7 that vhs keeps, make
-# 318.
-Set Height 318
+# 395.
+Set Height 395
 Source common.tape
 
 # The source lies beside the collection and stands for an old disk. It is
@@ -26,7 +26,7 @@ Show
 
 Type "antiq import ~/old-disk/pixel-clock"
 Enter
-Wait+Screen@60s /imported pixel-clock/
+Wait+Screen@60s /took [0-9]+:[0-9][0-9]/
 Sleep 500ms
 Type "antiq list pixel-clock"
 Enter

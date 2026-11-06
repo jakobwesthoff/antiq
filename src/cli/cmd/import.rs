@@ -4,12 +4,14 @@
 
 //! The `import` command: packs a folder as a version.
 
+use super::archive::COUNTS;
+use super::progress::{self, Description};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{Context, ImportArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
-use antiq::commands::import::{ImportReport, Outcome, Request, import};
+use antiq::commands::import::{ImportReport, Outcome, Request, import, import_observed};
 use antiq::plan::PlanAction;
 use anyhow::Context as _;
 
@@ -24,7 +26,18 @@ pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result
         cwd: ctx.start.clone(),
         dry_run: args.dry_run,
     };
-    let outcome = import(&collection, &SystemClock, &request)
+    // On a terminal the piece shows as a card while it is packed, as for an
+    // archive, and its closing line replaces the line of the pipe.
+    let (result, shown) = progress::watch(
+        ctx,
+        out,
+        args.dry_run,
+        Description::new(COUNTS),
+        |observer| import_observed(&collection, &SystemClock, &request, observer),
+        || import(&collection, &SystemClock, &request),
+        |_| Vec::new(),
+    )?;
+    let outcome = result
         .map_err(antiq::Error::from)
         .context(if args.dry_run {
             "plan the import"
@@ -34,7 +47,14 @@ pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result
 
     match outcome {
         Outcome::Imported(report) => {
-            print_report(ctx, &report, out)?;
+            match &shown {
+                Some(shown) => {
+                    let summary = progress::import_summary(&report, shown.took());
+                    shown.print_summary(out, &summary)?;
+                    print_notes(&report, out)?;
+                }
+                None => print_report(ctx, &report, out)?,
+            }
             Ok(report.exit_code())
         }
         Outcome::Planned(plan) => {
@@ -78,6 +98,11 @@ fn print_report(ctx: &Context, report: &ImportReport, out: &mut Output) -> anyho
         out.line(&format!("skipped {}: {}", skipped.piece, skipped.message))
             .context("print the result")?;
     }
+    print_notes(report, out)
+}
+
+/// The repairs and the warnings of the run.
+fn print_notes(report: &ImportReport, out: &mut Output) -> anyhow::Result<()> {
     let mut notices: Vec<Notice> = report
         .repairs
         .iter()

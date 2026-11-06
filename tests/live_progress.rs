@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push`, `unearth`, `fork` and `rebuild` show on a terminal while they work
+//! What `archive`, `push`, `unearth`, `fork`, `rebuild` and `import` show on a terminal while they work
 //! and what stays after they end. The bytes of a run on a pseudo-terminal
 //! are replayed on a screen, so the tests read what a person would see.
 
@@ -14,6 +14,7 @@ use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
 use support::scenario::world::{Mode, Setup, World};
 use support::screen::Screen;
+use support::tree::Tree;
 
 const NEW: &str = "2026-11-04T090211";
 
@@ -749,6 +750,147 @@ fn push_on_a_dumb_terminal_makes_no_dry_run_to_forecast_and_lists_its_pieces_at_
         "{lines:#?}"
     );
     assert!(!run.stdout.contains('\x1b') && !run.stdout.contains('\r'));
+}
+
+// =========================================================
+// import
+// =========================================================
+
+const IMPORT_STAMP: &str = "2023-11-14T221320";
+
+fn import_world() -> World {
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["projects/*"]);
+    World::new(Setup::new(builder.finish()), Mode::Text)
+}
+
+/// A folder `data` with two files, outside any collection.
+fn import_source() -> Tree {
+    let mut tree = Tree::new();
+    tree.file("data/a.txt", "alpha");
+    tree.file("data/sub/b.txt", "beta");
+    tree
+}
+
+/// The arguments of an import of `source` as `projects/imported` with the
+/// version stamp `IMPORT_STAMP`, `before` standing ahead of the command.
+fn import_args(source: &Tree, before: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = before.iter().map(|arg| arg.to_string()).collect();
+    args.extend(
+        [
+            "import",
+            "--as",
+            "projects/imported",
+            "--time",
+            IMPORT_STAMP,
+        ]
+        .map(String::from),
+    );
+    args.push(source.path("data").display().to_string());
+    args
+}
+
+fn as_strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn import_leaves_the_line_of_the_piece_and_a_summary() {
+    let world = import_world();
+    let source = import_source();
+    let args = import_args(&source, &[]);
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(lines[0].starts_with("  ✔ projects/imported "), "{lines:#?}");
+    assert!(lines[0].contains("2 files"), "{lines:#?}");
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(
+        is_summary(
+            &lines[2],
+            &format!("✔ Imported projects/imported as version {IMPORT_STAMP}")
+        ),
+        "{:?}",
+        lines[2]
+    );
+    assert!(!run.stdout.contains("imported projects/imported: version"));
+}
+
+#[test]
+fn import_on_a_terminal_prints_the_notes_after_the_summary() {
+    let world = import_world();
+    let config = world.collection().path(".antiq/config.toml");
+    let mut text = fs::read_to_string(&config).expect("the config exists");
+    text.push_str("\nmystery = 1\n");
+    fs::write(&config, text).expect("the config is written");
+    let source = import_source();
+    let args = import_args(&source, &[]);
+    let run = world.run_tty_merged(&as_strs(&args), &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    let summary = lines
+        .iter()
+        .position(|line| line.starts_with("✔ Imported projects/imported"))
+        .unwrap_or_else(|| panic!("no summary in {lines:#?}"));
+    let note = lines
+        .iter()
+        .position(|line| line.contains("Unknown setting mystery"))
+        .unwrap_or_else(|| panic!("no note in {lines:#?}"));
+    assert!(summary < note, "{lines:#?}");
+}
+
+#[test]
+fn import_on_a_dumb_terminal_shows_the_card_without_escapes() {
+    let world = import_world();
+    let source = import_source();
+    let args = import_args(&source, &[]);
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[("TERM", "dumb")]);
+    run.expect_code(0);
+    assert!(
+        !run.stdout.contains('\x1b') && !run.stdout.contains('\r'),
+        "{:?}",
+        run.stdout
+    );
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(lines[0].starts_with("  ✔ projects/imported "), "{lines:#?}");
+}
+
+// The next three pin the output import had before it showed cards.
+
+#[test]
+fn a_json_import_on_a_terminal_prints_the_json_and_no_cards() {
+    let world = import_world();
+    let source = import_source();
+    let args = import_args(&source, &["--json"]);
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[]);
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "import");
+}
+
+#[test]
+fn an_import_dry_run_on_a_terminal_shows_no_cards() {
+    let world = import_world();
+    let source = import_source();
+    let mut args = import_args(&source, &[]);
+    args.push("-n".to_string());
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[]);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('╸') && !run.stdout.contains("waiting"));
+    assert!(!run.stdout.contains("\x1b[1A") && !run.stdout.contains("\x1b[J"));
+}
+
+#[test]
+fn an_import_that_cannot_take_the_lock_prints_no_cards_and_fails_as_before() {
+    let world = import_world();
+    let source = import_source();
+    let args = import_args(&source, &[]);
+    let _lock = hold_lock(&world.collection().root());
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[]);
+    assert_ne!(run.code(), 0);
+    assert_eq!(run.stdout, "", "{:?}", run.stdout);
+    assert!(run.stderr.contains("lock"), "{:?}", run.stderr);
 }
 
 // =========================================================
