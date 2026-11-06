@@ -26,6 +26,7 @@ use crate::meta::{self, Payload, PayloadKind};
 use crate::pack::{PackError, PackageFormat};
 use crate::plan::{Plan, PlanAction};
 use crate::relpath::RelPath;
+use crate::remote::{Remote, RemoteError};
 use crate::report::{CommandReport, Warning};
 use crate::run::RunGuard;
 use crate::select::{Rules, SelectError};
@@ -59,6 +60,8 @@ pub enum UnearthError {
     Machine(#[from] MachineError),
     #[error(transparent)]
     Pack(#[from] PackError),
+    #[error(transparent)]
+    Remote(#[from] RemoteError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -77,6 +80,10 @@ pub enum UnearthError {
         "`{path}` is a live piece of another collection and has no archive versions to choose from"
     )]
     VersionOfLivePiece { path: RelPath },
+    #[error(
+        "the remote no longer has `{file}` of `{path}`; its metadata changed, run `unearth` again"
+    )]
+    NotOnRemote { file: String, path: RelPath },
     #[error("`{path}` has no archive of version {version}; it has {available}")]
     NoSuchVersion {
         path: RelPath,
@@ -106,6 +113,7 @@ impl crate::error::HasKind for UnearthError {
         match self {
             UnearthError::Store(error) => error.kind(),
             UnearthError::Listing(error) => error.kind(),
+            UnearthError::Remote(error) => error.kind(),
             UnearthError::UnreadableVersions { too_new: true, .. } => ErrorKind::FormatTooNew,
             _ => ErrorKind::Other,
         }
@@ -420,19 +428,32 @@ pub fn apply(
     guard: &RunGuard,
     clock: &dyn Clock,
 ) -> Result<UnearthReport, UnearthError> {
-    if plan.source != UnearthSource::LocalArchive {
-        return Err(UnearthError::NoLocalArchive {
+    apply_with_remote(collection, plan, guard, clock, None)
+}
+
+/// Carries out a plan that may need `remote` for the archive. Without one,
+/// a plan that does fails with [`UnearthError::NoLocalArchive`].
+pub fn apply_with_remote(
+    collection: &Collection,
+    plan: &UnearthPlan,
+    guard: &RunGuard,
+    clock: &dyn Clock,
+    remote: Option<&dyn Remote>,
+) -> Result<UnearthReport, UnearthError> {
+    match plan.source {
+        UnearthSource::LocalArchive | UnearthSource::RemoteArchive => local::unearth_archive(
+            collection,
+            plan,
+            guard.lock(),
+            clock,
+            &local::Environment::real(),
+            guard.warnings().to_vec(),
+            remote,
+        ),
+        UnearthSource::LivePackage | UnearthSource::Fork => Err(UnearthError::NoLocalArchive {
             path: plan.current.metadata.path.clone(),
-        });
+        }),
     }
-    local::unearth_archive(
-        collection,
-        plan,
-        guard.lock(),
-        clock,
-        &local::Environment::real(),
-        guard.warnings().to_vec(),
-    )
 }
 
 /// Works out what unearthing `request` would do. Nothing is written.

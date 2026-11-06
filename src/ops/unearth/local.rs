@@ -11,9 +11,10 @@
 //! entry leaves an `unearthing` entry that the repair of the next run
 //! finishes or drops.
 
+use super::remote::{Arrived, Fetch, fetch};
 use super::{
-    Skipped, TargetProblem, UnearthError, UnearthPlan, UnearthReport, absolute, ancestors,
-    check_target_on_disk, io_error, target_error,
+    Skipped, TargetProblem, UnearthError, UnearthPlan, UnearthReport, UnearthSource, absolute,
+    ancestors, check_target_on_disk, io_error, target_error,
 };
 use crate::clock::Clock;
 use crate::collection::Collection;
@@ -27,8 +28,9 @@ use crate::lock::RunLock;
 use crate::meta::PayloadKind;
 use crate::pack::hashing::HashingReader;
 use crate::pack::names::{MemberName, check_members, fold_path};
-use crate::pack::{PackError, Packager, TarZstd, TargetRules, WalkRules};
+use crate::pack::{Packager, TarZstd, TargetRules, WalkRules};
 use crate::relpath::RelPath;
+use crate::remote::Remote;
 use crate::repair::record_unearth;
 use crate::report::Warning;
 use crate::select::Rules;
@@ -40,7 +42,8 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Moves a directory from one tree to another: `from` in the first to `to`
 /// in the second.
-type Rename<'a> = &'a dyn Fn(&TreeRoot, &RelPath, &TreeRoot, &RelPath) -> Result<Moved, FsxError>;
+pub(super) type Rename<'a> =
+    &'a dyn Fn(&TreeRoot, &RelPath, &TreeRoot, &RelPath) -> Result<Moved, FsxError>;
 
 /// What the steps of an unearth reach through. Tests replace a part to
 /// fail a step, to change the world between two steps, or to watch the
@@ -88,14 +91,31 @@ pub(crate) fn unearth_archive(
     clock: &dyn Clock,
     env: &Environment<'_>,
     warnings: Vec<Warning>,
+    remote: Option<&dyn Remote>,
 ) -> Result<UnearthReport, UnearthError> {
-    let package = Store::new(collection).file_path(plan.id, &plan.payload.file);
-    check_archive(plan, &package)?;
+    let arrived = match plan.source {
+        UnearthSource::RemoteArchive => {
+            let remote = remote.ok_or_else(|| UnearthError::NoLocalArchive {
+                path: plan.target.clone(),
+            })?;
+            match fetch(collection, plan, remote, env.free_space)? {
+                Fetch::Arrived(arrived) => arrived,
+                Fetch::NoSpace { needed, available } => {
+                    return Ok(skipped(collection, plan, needed, available, warnings));
+                }
+            }
+        }
+        _ => {
+            let package = Store::new(collection).file_path(plan.id, &plan.payload.file);
+            check_archive(plan, &package)?;
+            Arrived::held(collection, plan, package)?
+        }
+    };
 
     let staging_dir = collection.staging_dir();
     let available = (env.free_space)(&staging_dir)?;
     if available < plan.needed {
-        return Ok(skipped(collection, plan, available, warnings));
+        return Ok(skipped(collection, plan, plan.needed, available, warnings));
     }
 
     // The tree is extracted below `staging/`, in a folder named after the
@@ -111,7 +131,7 @@ pub(crate) fn unearth_archive(
         lock,
         clock,
         env,
-        &package,
+        &arrived,
         &staging_root,
         &staged_name,
     );
@@ -136,7 +156,7 @@ pub(crate) fn unearth_archive(
         }
         Placed::NoSpace => {
             let available = (env.free_space)(&staging_dir).unwrap_or(0);
-            Ok(skipped(collection, plan, available, warnings))
+            Ok(skipped(collection, plan, plan.needed, available, warnings))
         }
     }
 }
@@ -145,6 +165,7 @@ pub(crate) fn unearth_archive(
 fn skipped(
     collection: &Collection,
     plan: &UnearthPlan,
+    needed: u64,
     available: u64,
     warnings: Vec<Warning>,
 ) -> UnearthReport {
@@ -154,16 +175,13 @@ fn skipped(
         path: plan.target.clone(),
         abs_path: absolute(collection, &plan.target),
         payload_version: None,
-        skipped: Some(Skipped::NoSpace {
-            needed: plan.needed,
-            available,
-        }),
+        skipped: Some(Skipped::NoSpace { needed, available }),
         warnings,
     }
 }
 
 /// The archive file is the one the metadata describes.
-fn check_archive(plan: &UnearthPlan, package: &Path) -> Result<(), UnearthError> {
+pub(super) fn check_archive(plan: &UnearthPlan, package: &Path) -> Result<(), UnearthError> {
     let payload = &plan.payload;
     let differs = |what: String| UnearthError::ArchiveDiffers {
         file: payload.file.as_str().to_string(),
@@ -203,10 +221,11 @@ fn place(
     lock: &RunLock,
     clock: &dyn Clock,
     env: &Environment<'_>,
-    package: &Path,
+    arrived: &Arrived,
     staging_root: &TreeRoot,
     staged_name: &RelPath,
 ) -> Result<Placed, UnearthError> {
+    let package = arrived.archive.as_path();
     let id = plan.id;
     let target = &plan.target;
     let root = TreeRoot::open(collection.root()).map_err(io_error("open", collection.root()))?;
@@ -236,7 +255,7 @@ fn place(
     // Staging holds exactly the package, so no name is left out of the
     // comparison. The top's mode is not compared on staging; it is set
     // here and `move_dir` carries it.
-    env.packager.verify_strict(
+    let verified = env.packager.verify_strict(
         package,
         &staged,
         &WalkRules {
@@ -244,17 +263,19 @@ fn place(
             staged: true,
         },
     )?;
+    arrived.check_listing(plan, verified.listing())?;
     staged
         .set_mode(&RelPath::root(), unpacked.top_mode)
         .map_err(io_error("set the mode of", &collection.staging_dir()))?;
 
     let machine = collection.machine_name()?;
+    let stored = arrived.store(collection, lock, plan)?;
     let mut entry = unearthing_entry(plan, clock);
     tracking::write(collection, lock, clock, &mut entry)?;
 
     let placed = move_into_place(&root, &rules, env, staging_root, staged_name, target);
     match placed {
-        Ok(warnings) => {
+        Ok(mut warnings) => {
             // The entry's time is the unearthing time, here and in the
             // repair that finishes an interrupted unearth.
             let changed = record_unearth(
@@ -269,16 +290,23 @@ fn place(
             entry.unearthed = Some(entry.written);
             entry.version_taken_out = VersionTakenOut::Pending;
             tracking::write(collection, lock, clock, &mut entry)?;
+            warnings.extend(Arrived::update_index(collection, lock, &stored));
             Ok(Placed::Done { warnings })
         }
         Err(error) => {
             // The tree did not arrive, so the entry goes back to what it
             // was. If that fails the next run's repair drops the
-            // `unearthing` entry, which has no folder.
-            let _ = match &plan.entry {
-                Some(previous) => tracking::write(collection, lock, clock, &mut previous.clone()),
-                None => tracking::remove(collection, lock, id),
+            // `unearthing` entry, which has no folder, and the files stay
+            // because that entry lists the archive as held.
+            let restored = match &plan.entry {
+                Some(previous) => {
+                    tracking::write(collection, lock, clock, &mut previous.clone()).is_ok()
+                }
+                None => tracking::remove(collection, lock, id).is_ok(),
             };
+            if restored {
+                stored.undo(collection, plan);
+            }
             Err(error)
         }
     }
@@ -460,8 +488,8 @@ fn check_target_names(
 }
 
 /// Whether the failure is a full volume, wherever in the error it is.
-fn is_out_of_space(error: &PackError) -> bool {
-    let mut source = std::error::Error::source(error);
+pub(super) fn is_out_of_space(error: &dyn std::error::Error) -> bool {
+    let mut source = error.source();
     while let Some(cause) = source {
         if let Some(found) = cause.downcast_ref::<io::Error>()
             && found.raw_os_error() == Some(libc::ENOSPC)
@@ -589,7 +617,15 @@ mod tests {
         env: &Environment<'_>,
     ) -> Result<UnearthReport, UnearthError> {
         let plan = fx.planned(request);
-        unearth_archive(&fx.collection, &plan, &fx.lock, &fx.clock, env, Vec::new())
+        unearth_archive(
+            &fx.collection,
+            &plan,
+            &fx.lock,
+            &fx.clock,
+            env,
+            Vec::new(),
+            None,
+        )
     }
 
     fn unearth(fx: &Fixture) -> UnearthReport {
@@ -1074,6 +1110,7 @@ mod tests {
             &fx.clock,
             &Environment::real(),
             Vec::new(),
+            None,
         )
         .expect_err("fails");
 
@@ -1725,6 +1762,7 @@ mod tests {
             &fx.clock,
             &Environment::real(),
             vec![Warning::new("from the start of the run")],
+            None,
         )
         .expect("works");
 
