@@ -20,7 +20,7 @@ pub enum PushOutcome {
 
 /// An action of the plan a dry run prints, after the repairs.
 #[derive(Debug, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PushAction {
     /// The marker `.antiq-target` is sent to the target.
     WriteMarker,
@@ -74,7 +74,9 @@ impl PushReport {
 
     fn to_value(&self) -> Value {
         let mut object = Map::new();
-        object.insert("dry_run".into(), json!(self.dry_run));
+        if self.dry_run {
+            object.insert("dry_run".into(), json!(true));
+        }
         if let Some(plan) = &self.plan {
             object.insert(
                 "actions".into(),
@@ -229,7 +231,6 @@ mod tests {
         assert_eq!(
             keys(&value),
             [
-                "dry_run",
                 "result",
                 "target",
                 "initialized",
@@ -259,10 +260,7 @@ mod tests {
         let mut unreachable = report();
         unreachable.reason = Some("share gone".into());
         let value = serde_json::to_value(unreachable).expect("serialises");
-        assert_eq!(
-            keys(&value),
-            ["dry_run", "result", "target", "reason", "warnings"]
-        );
+        assert_eq!(keys(&value), ["result", "target", "reason", "warnings"]);
         assert_eq!(value["result"], "unreachable");
         assert_eq!(value["reason"], "share gone");
     }
@@ -280,8 +278,8 @@ mod tests {
             keys(&value),
             ["dry_run", "actions", "result", "target", "warnings"]
         );
-        assert_eq!(value["actions"][0], json!({"action": "write_marker"}));
-        assert_eq!(value["actions"][1]["action"], "mirror");
+        assert_eq!(value["actions"][0], json!({"kind": "write_marker"}));
+        assert_eq!(value["actions"][1]["kind"], "mirror");
         assert_eq!(value["actions"][1]["other"]["deleted"], 3);
         assert_eq!(value["actions"][1]["pieces"][0]["piece"], "work");
     }

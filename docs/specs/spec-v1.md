@@ -1850,14 +1850,14 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `actions`, which hold the repairs, each as in `repairs`, and, per piece,
 `{"kind": "archive", "piece": ...}`.
 
-`push` has `dry_run`, `result`, `target` (the `[target] url` as written)
-and `warnings`. In a real run `result` is `"pushed"`, and `initialized` (the
+`push` has `result`, `target` (the `[target] url` as written) and
+`warnings`; `dry_run` comes first in a dry run only. In a real run `result` is `"pushed"`, and `initialized` (the
 marker was written), `forced`, `pieces` (each `{piece, created, updated,
 deleted}`, only pieces that changed, by path), `other` (the same counts for
 paths outside every piece), `vanished` (the paths of the `file has vanished`
 lines), `second_pass` and `notes` come between `target` and `warnings`. A
-dry run has `actions` after `dry_run`: the repairs, then `{"action":
-"write_marker"}` where `--init` would write it, then `{"action": "mirror",
+dry run has `actions` after `dry_run`: the repairs, then `{"kind":
+"write_marker"}` where `--init` would write it, then `{"kind": "mirror",
 "pieces": ..., "other": ...}`. A target that cannot be reached under
 `--if-reachable` exits 0 with `result` `"unreachable"` and `reason` in place
 of the counts, and the console prints `note: <reason>` on stderr and

@@ -628,7 +628,7 @@ fn if_reachable_turns_an_unreachable_target_into_exit_0_with_the_reason() {
         let json = run.json();
         assert_eq!(json["command"], "push", "{args:?}");
         assert_eq!(json["result"], "unreachable", "{args:?}");
-        assert_eq!(json["dry_run"], args.contains(&"-n"), "{args:?}");
+        assert_eq!(json["dry_run"] == true, args.contains(&"-n"), "{args:?}");
         assert!(
             json["reason"]
                 .as_str()
@@ -1378,7 +1378,7 @@ fn a_dry_run_with_init_over_ssh_sends_no_marker_and_mirrors_with_n() {
         "{:?}",
         calls[2]
     );
-    assert_eq!(run.json()["actions"][0]["action"], "write_marker");
+    assert_eq!(run.json()["actions"][0]["kind"], "write_marker");
     let text = push_text(&collection, &["--init", "-n"]);
     assert!(
         text.stdout.contains("Would write the marker"),
@@ -1445,7 +1445,7 @@ fn a_push_summarises_the_changes_per_piece_in_json_and_text() {
     let json = push(&collection, &[]).json();
 
     assert_eq!(json["result"], "pushed");
-    assert_eq!(json["dry_run"], false);
+    assert!(json.get("dry_run").is_none(), "{json}");
     assert_eq!(
         json["pieces"],
         serde_json::json!([{"piece": "projects", "created": 2, "updated": 1, "deleted": 1}])
@@ -1488,7 +1488,7 @@ fn a_dry_run_lists_the_repairs_and_the_mirror_and_sends_no_marker() {
     assert_eq!(json["actions"][0]["kind"], "repair");
     assert_eq!(json["actions"][0]["repair"], "delete_temporary");
     let mirror = &json["actions"][1];
-    assert_eq!(mirror["action"], "mirror");
+    assert_eq!(mirror["kind"], "mirror");
     assert_eq!(mirror["pieces"][0]["piece"], "projects");
     assert_eq!(mirror["other"]["created"], 1);
     assert_eq!(json["actions"].as_array().expect("a list").len(), 2);

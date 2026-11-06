@@ -13,7 +13,11 @@ mod support;
 
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
+use support::cmd::Antiq;
+use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use support::scenario::target::Target;
 use support::scenario::world::{Mode, Outcome, Setup, World};
 use support::tree::Tree;
 
@@ -192,4 +196,99 @@ fn import_follows_the_rule() {
         &world(due_piece),
         &["import", path, "--as", "projects/data"],
     ));
+}
+
+// =========================================================
+// push
+// =========================================================
+
+const RSYNC_3_2_4: &str = "rsync  version 3.2.4  protocol version 31\n";
+
+const ITEMIZED: &str = ">f+++++++++ projects/a/new.txt\n\
+    >f+++++++++ loose.txt\n";
+
+/// A collection that pushes to the folder `url` through a fake rsync.
+fn targeted(url: &Path) -> (Collection, FakeRsync) {
+    let collection = Collection::build(&Clock::now())
+        .piece("projects/a", |piece| {
+            piece.age_days(3).file("a.txt", "a");
+        })
+        .finish();
+    let fake = FakeRsync::new(RSYNC_3_2_4);
+    let url = serde_json::to_string(url.to_str().expect("a UTF-8 path")).expect("quotes");
+    let rsync = serde_json::to_string(fake.path().to_str().expect("a UTF-8 path")).expect("quotes");
+    let config = collection.path(".antiq/config.toml");
+    let mut text = fs::read_to_string(&config).expect("the config exists");
+    text.push_str(&format!("\n[target]\nurl = {url}\nrsync = {rsync}\n"));
+    fs::write(&config, text).expect("the config is written");
+    (collection, fake)
+}
+
+fn push(collection: &Collection, args: &[&str]) -> Value {
+    let run = Antiq::new()
+        .env("TZ", "UTC")
+        .arg("-C")
+        .arg(collection.root())
+        .arg("--json")
+        .arg("push")
+        .args(args)
+        .run();
+    assert_eq!(run.code(), 0, "{}", run.stdout);
+    run.json()
+}
+
+#[test]
+fn a_real_push_has_no_dry_run_key() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    fake.answer_all(ITEMIZED, "", 0);
+
+    let json = push(&collection, &[]);
+
+    assert_eq!(json["result"], "pushed");
+    assert!(json.get("dry_run").is_none(), "{json}");
+}
+
+#[test]
+fn an_unreachable_real_push_has_no_dry_run_key() {
+    let gone = Target::new();
+    let (collection, _fake) = targeted(&gone.path().join("not-there"));
+
+    let json = push(&collection, &["--if-reachable"]);
+
+    assert_eq!(json["result"], "unreachable");
+    assert!(json.get("dry_run").is_none(), "{json}");
+}
+
+#[test]
+fn a_dry_push_names_its_actions_by_kind() {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    fake.answer_all(ITEMIZED, "", 0);
+
+    let json = push(&collection, &["--init", "-n"]);
+
+    assert_eq!(json["dry_run"], true);
+    let kinds: Vec<&Value> = json["actions"]
+        .as_array()
+        .expect("a list of actions")
+        .iter()
+        .map(|action| {
+            assert!(action.get("action").is_none(), "{action}");
+            &action["kind"]
+        })
+        .collect();
+    assert_eq!(kinds, ["write_marker", "mirror"]);
+}
+
+#[test]
+fn an_unreachable_dry_push_keeps_dry_run() {
+    let gone = Target::new();
+    let (collection, _fake) = targeted(&gone.path().join("not-there"));
+
+    let json = push(&collection, &["--if-reachable", "-n"]);
+
+    assert_eq!(json["result"], "unreachable");
+    assert_eq!(json["dry_run"], true, "{json}");
 }
