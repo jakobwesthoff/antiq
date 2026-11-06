@@ -17,6 +17,8 @@ Enter
 Wait+Screen@120s /(Forked|took [0-9]+:[0-9][0-9])/
 Sleep 1s
 Screenshot ../assets/shots/fork.png
+# vhs writes a screenshot a moment later; the screen must still hold it.
+Sleep 1s
 
 Hide
 Type "clear && echo '// edited' >> scanner/src/main.rs"

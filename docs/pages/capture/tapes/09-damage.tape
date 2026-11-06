@@ -18,6 +18,8 @@ Type "antiq push"
 Enter
 Sleep 2s
 Screenshot ../assets/shots/error-damaged.png
+# vhs writes a screenshot a moment later; the screen must still hold it.
+Sleep 1s
 
 Hide
 Type "clear"
