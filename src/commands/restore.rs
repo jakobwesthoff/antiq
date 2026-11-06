@@ -6,7 +6,9 @@
 
 #![allow(dead_code, reason = "the restore core that uses these follows")]
 
+use crate::archive::TargetRules;
 use crate::archive::extract::ExtractionFlush;
+use crate::archive::names::{MemberName, check_members};
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::FilesystemError;
@@ -17,6 +19,8 @@ use crate::markers::RESTORED_FILE;
 use crate::pin::PIN_FILE;
 use crate::reference::{self, CandidateSet, ReferenceError};
 use crate::relpath::{Name, RelPath};
+use crate::select::Rules;
+use crate::tree::{EntryKind, TreeEntry};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Places};
 use crate::versions::naming::{self, Candidate, Lookup};
@@ -28,6 +32,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 /// Why a restore failed.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +81,17 @@ pub enum RestoreError {
         piece: String,
         stamp: String,
         name: String,
+    },
+    #[error("cannot restore to `{path}`: {problem}")]
+    Target {
+        path: RelPath,
+        problem: TargetProblem,
+    },
+    #[error("cannot {action} `{path}`: {source}")]
+    Look {
+        action: &'static str,
+        path: String,
+        source: io::Error,
     },
 }
 
@@ -278,6 +294,182 @@ pub(crate) fn marker_not_a_file(entries: &[ListingEntry]) -> Option<String> {
         };
         (!fits).then(|| String::from_utf8_lossy(name).into_owned())
     })
+}
+
+// =========================================================
+// Checking the destination
+// =========================================================
+
+/// Why a destination is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetProblem {
+    Root,
+    InsideAntiq,
+    NotSelected,
+    Excluded { at: RelPath },
+    InsidePiece { piece: RelPath },
+    NotAFolder { at: RelPath },
+    SpelledDifferently { at: RelPath },
+    Taken,
+    Unholdable { reason: String },
+}
+
+impl std::fmt::Display for TargetProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TargetProblem::Root => f.write_str("it is the collection root"),
+            TargetProblem::InsideAntiq => f.write_str("it is inside `.antiq/`"),
+            TargetProblem::NotSelected => f.write_str("the patterns do not select it"),
+            TargetProblem::Excluded { at } => write!(f, "`{at}` is excluded"),
+            TargetProblem::InsidePiece { piece } => write!(f, "`{piece}` is a piece"),
+            TargetProblem::NotAFolder { at } => {
+                write!(f, "`{at}` is a file or a symlink, not a folder")
+            }
+            TargetProblem::SpelledDifferently { at } => {
+                write!(f, "`{at}` is spelled differently on disk")
+            }
+            TargetProblem::Taken => f.write_str("it is taken"),
+            TargetProblem::Unholdable { reason } => f.write_str(reason),
+        }
+    }
+}
+
+/// The proper ancestors of `path`, shallowest first.
+fn ancestors(path: &RelPath) -> Vec<RelPath> {
+    let names: Vec<&[u8]> = path.components().collect();
+    (1..names.len())
+        .map(|taken| {
+            RelPath::from_bytes(names[..taken].join(&b'/'))
+                .expect("a prefix of a valid path is a valid path")
+        })
+        .collect()
+}
+
+/// Checks that `target` is a place a folder can be put: one the patterns
+/// select that is not excluded, not in `.antiq/`, not inside another piece
+/// and free. Returns the folders above it that do not exist yet,
+/// shallowest first.
+///
+/// The check looks at the file system, so it runs once before the
+/// extraction and again right before the rename, when the world may have
+/// changed.
+pub(crate) fn check_destination(
+    root: &TreeRoot,
+    rules: &Rules,
+    target: &RelPath,
+) -> Result<Vec<RelPath>, RestoreError> {
+    let refuse = |problem| RestoreError::Target {
+        path: target.clone(),
+        problem,
+    };
+    if target.is_root() {
+        return Err(refuse(TargetProblem::Root));
+    }
+    if target
+        .components()
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(b".antiq"))
+    {
+        return Err(refuse(TargetProblem::InsideAntiq));
+    }
+    if !rules.matches(target) {
+        return Err(refuse(TargetProblem::NotSelected));
+    }
+
+    let mut missing = Vec::new();
+    for ancestor in ancestors(target) {
+        if rules.matches(&ancestor) {
+            return Err(refuse(TargetProblem::InsidePiece { piece: ancestor }));
+        }
+        match look_at(root, &ancestor)? {
+            Some(found) => {
+                if found.kind != EntryKind::Directory {
+                    return Err(refuse(TargetProblem::NotAFolder { at: ancestor }));
+                }
+                if rules.excludes(&ancestor, found.device, found.inode) {
+                    return Err(refuse(TargetProblem::Excluded { at: ancestor }));
+                }
+                // A volume that ignores case or normalisation reaches the
+                // folder under the spelling asked for. The piece would
+                // then be stored under a path the selection never reports.
+                // A folder that vanished since the lstat is refused alike.
+                if store::lookup_exact(root, &ancestor)?.as_ref() != Some(&ancestor) {
+                    return Err(refuse(TargetProblem::SpelledDifferently { at: ancestor }));
+                }
+            }
+            None => {
+                if rules.excludes(&ancestor, 0, 0) {
+                    return Err(refuse(TargetProblem::Excluded { at: ancestor }));
+                }
+                missing.push(ancestor);
+            }
+        }
+    }
+    if rules.excludes(target, 0, 0) {
+        return Err(refuse(TargetProblem::Excluded { at: target.clone() }));
+    }
+    match look_at(root, target)? {
+        Some(_) => Err(refuse(TargetProblem::Taken)),
+        None => Ok(missing),
+    }
+}
+
+/// `lstat` of `path`; `None` when nothing is there. Nothing is followed.
+fn look_at(root: &TreeRoot, path: &RelPath) -> Result<Option<TreeEntry>, RestoreError> {
+    match root.lstat(path) {
+        Ok(found) => Ok(Some(found)),
+        // A name past the limit of the volume cannot exist; the names are
+        // held to the rules of the volume by `check_destination_names`.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(Errno::NAMETOOLONG.raw_os_error()) =>
+        {
+            Ok(None)
+        }
+        Err(source) => Err(RestoreError::Look {
+            action: "look at",
+            path: path.to_string(),
+            source,
+        }),
+    }
+}
+
+/// Holds the names of the destination to the rules of the volume: every
+/// name on the way must be one the volume can hold, and the ones made here
+/// must be stored as written.
+pub(crate) fn check_destination_names(
+    target: &RelPath,
+    missing: &[RelPath],
+    volume: &TargetRules,
+) -> Result<(), RestoreError> {
+    let refuse = |reason| RestoreError::Target {
+        path: target.clone(),
+        problem: TargetProblem::Unholdable { reason },
+    };
+    let names: Vec<RelPath> = ancestors(target)
+        .into_iter()
+        .chain(std::iter::once(target.clone()))
+        .collect();
+    let members: Vec<MemberName> = names.iter().cloned().map(MemberName::plain).collect();
+    if let Some(problem) = check_members(&members, volume).first() {
+        return Err(refuse(problem.to_string()));
+    }
+    if volume.decomposes {
+        for made in names
+            .iter()
+            .filter(|name| missing.contains(name) || *name == target)
+        {
+            let name = made.components().last().expect("a name has a last part");
+            let changes =
+                std::str::from_utf8(name).is_ok_and(|text| text.nfd().collect::<String>() != text);
+            if changes {
+                return Err(refuse(format!(
+                    "the volume would store `{made}` decomposed"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // =========================================================
@@ -1118,5 +1310,349 @@ mod choice_tests {
             matches!(error, RestoreError::MarkerNotAFile { .. }),
             "{error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    use crate::archive::names::{LengthUnit, NameLimit};
+    use crate::testing::tree::Tree;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn rel(text: &str) -> RelPath {
+        RelPath::parse(text).expect("a valid test path")
+    }
+
+    fn rules(patterns: &[&str], exclude: &[&str]) -> Rules {
+        let patterns: Vec<String> = patterns.iter().map(ToString::to_string).collect();
+        let exclude: Vec<RelPath> = exclude.iter().map(|path| rel(path)).collect();
+        Rules::new(&patterns, &exclude).expect("valid rules")
+    }
+
+    /// The paths of the destination checks run against a fresh tree.
+    struct Disk {
+        tree: Tree,
+    }
+
+    impl Disk {
+        fn new() -> Disk {
+            Disk { tree: Tree::new() }
+        }
+
+        fn check(&self, rules: &Rules, target: &str) -> Result<Vec<RelPath>, RestoreError> {
+            let root = TreeRoot::open(self.tree.root()).expect("the tree opens");
+            let rules = rules.clone().bind(&root).expect("rules bind");
+            check_destination(&root, &rules, &rel(target))
+        }
+    }
+
+    fn problem(result: Result<Vec<RelPath>, RestoreError>) -> TargetProblem {
+        match result.expect_err("the destination is refused") {
+            RestoreError::Target { problem, .. } => problem,
+            other => panic!("expected a target problem, got {other:?}"),
+        }
+    }
+
+    fn all() -> Rules {
+        rules(&["**"], &[])
+    }
+
+    #[test]
+    fn the_collection_root_is_refused() {
+        assert_eq!(problem(Disk::new().check(&all(), "")), TargetProblem::Root);
+    }
+
+    #[test]
+    fn anything_in_antiq_is_refused_whatever_its_case() {
+        let disk = Disk::new();
+        for target in [".antiq/x", ".ANTIQ/x", ".antiq"] {
+            assert_eq!(
+                problem(disk.check(&all(), target)),
+                TargetProblem::InsideAntiq,
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_no_pattern_selects_is_refused() {
+        let disk = Disk::new();
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/*"], &[]), "tools/x")),
+            TargetProblem::NotSelected
+        );
+    }
+
+    #[test]
+    fn an_excluded_destination_is_refused() {
+        let disk = Disk::new();
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/*"], &["projects/x"]), "projects/x")),
+            TargetProblem::Excluded {
+                at: rel("projects/x")
+            }
+        );
+    }
+
+    #[test]
+    fn a_destination_below_an_existing_excluded_folder_is_refused() {
+        let mut disk = Disk::new();
+        disk.tree.dir("vendor");
+        assert_eq!(
+            problem(disk.check(&rules(&["*/*"], &["vendor"]), "vendor/x")),
+            TargetProblem::Excluded { at: rel("vendor") }
+        );
+    }
+
+    #[test]
+    fn a_destination_below_a_missing_excluded_folder_is_refused() {
+        let disk = Disk::new();
+        assert_eq!(
+            problem(disk.check(&rules(&["*/*"], &["vendor"]), "vendor/x")),
+            TargetProblem::Excluded { at: rel("vendor") }
+        );
+    }
+
+    #[test]
+    fn a_folder_excluded_by_identity_is_refused() {
+        // Two spellings of one folder exist only on a volume that ignores
+        // case.
+        let mut disk = Disk::new();
+        disk.tree.dir("Vendor");
+        let root = TreeRoot::open(disk.tree.root()).expect("opens");
+        if !TargetRules::probe(&root).expect("probe").case_insensitive {
+            eprintln!("skipped: the volume keeps case");
+            return;
+        }
+        assert_eq!(
+            problem(disk.check(&rules(&["*/*"], &["Vendor"]), "vendor/x")),
+            TargetProblem::Excluded { at: rel("vendor") }
+        );
+    }
+
+    #[test]
+    fn a_destination_inside_a_selected_folder_is_inside_a_piece() {
+        let disk = Disk::new();
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/**"], &[]), "projects/a/b")),
+            TargetProblem::InsidePiece {
+                piece: rel("projects/a")
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_above_the_destination_is_refused() {
+        let mut disk = Disk::new();
+        disk.tree.file("projects", "x");
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/*"], &[]), "projects/a")),
+            TargetProblem::NotAFolder {
+                at: rel("projects")
+            }
+        );
+    }
+
+    #[test]
+    fn a_symlink_above_the_destination_is_refused_and_nothing_is_written_through_it() {
+        let mut disk = Disk::new();
+        let elsewhere = Tree::new();
+        disk.tree.symlink("projects", elsewhere.root());
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/*"], &[]), "projects/a")),
+            TargetProblem::NotAFolder {
+                at: rel("projects")
+            }
+        );
+        assert!(
+            std::fs::read_dir(elsewhere.root())
+                .expect("lists")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn anything_at_the_destination_makes_it_taken() {
+        let mut disk = Disk::new();
+        disk.tree.file("projects/file", "x");
+        disk.tree.dir("projects/folder");
+        disk.tree.symlink("projects/dangling", "/nowhere/at/all");
+        for target in ["projects/file", "projects/folder", "projects/dangling"] {
+            assert_eq!(
+                problem(disk.check(&rules(&["projects/*"], &[]), target)),
+                TargetProblem::Taken,
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_the_volume_finds_under_another_spelling_is_refused() {
+        let mut disk = Disk::new();
+        disk.tree.dir("Projects");
+        let root = TreeRoot::open(disk.tree.root()).expect("opens");
+        if !TargetRules::probe(&root).expect("probe").case_insensitive {
+            eprintln!("skipped: the volume keeps case");
+            return;
+        }
+        assert_eq!(
+            problem(disk.check(&rules(&["projects/*"], &[]), "projects/a")),
+            TargetProblem::SpelledDifferently {
+                at: rel("projects")
+            }
+        );
+    }
+
+    #[test]
+    fn missing_parents_come_back_shallowest_first() {
+        let mut disk = Disk::new();
+        disk.tree.dir("a");
+        assert_eq!(
+            disk.check(&rules(&["a/*/*/*"], &[]), "a/b/c/d")
+                .expect("allowed"),
+            vec![rel("a/b"), rel("a/b/c")]
+        );
+    }
+
+    #[test]
+    fn a_free_destination_in_an_existing_parent_needs_no_parent() {
+        let mut disk = Disk::new();
+        disk.tree.dir("projects");
+        assert!(
+            disk.check(&rules(&["projects/*"], &[]), "projects/a")
+                .expect("allowed")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_ancestor_is_an_error_not_a_refusal() {
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let mut disk = Disk::new();
+        disk.tree.unreadable_dir("projects");
+        match disk
+            .check(&rules(&["projects/*/*"], &[]), "projects/a/b")
+            .expect_err("unreadable")
+        {
+            RestoreError::Look { path, .. } => assert_eq!(path, "projects/a"),
+            other => panic!("expected a look error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_parent_of_the_destination_is_an_error() {
+        assert_ne!(
+            rustix::process::getuid().as_raw(),
+            0,
+            "the test needs a non-root user"
+        );
+        let mut disk = Disk::new();
+        disk.tree.dir("projects");
+        std::fs::set_permissions(
+            disk.tree.path("projects"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("mode");
+        let result = disk.check(&rules(&["projects/*"], &[]), "projects/a");
+        std::fs::set_permissions(
+            disk.tree.path("projects"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("mode");
+        assert!(matches!(
+            result.expect_err("unreadable"),
+            RestoreError::Look { .. }
+        ));
+    }
+
+    #[test]
+    fn a_name_past_the_limit_of_the_volume_does_not_exist_and_is_no_look_error() {
+        let mut disk = Disk::new();
+        disk.tree.dir("projects");
+        let target = format!("projects/{}", "n".repeat(300));
+        assert!(
+            disk.check(&rules(&["projects/*"], &[]), &target)
+                .expect("a name that cannot exist is free")
+                .is_empty()
+        );
+    }
+
+    fn volume(decomposes: bool, max: usize) -> TargetRules {
+        TargetRules {
+            decomposes,
+            name_limit: NameLimit {
+                max,
+                unit: LengthUnit::Bytes,
+            },
+            ..TargetRules::linux()
+        }
+    }
+
+    #[test]
+    fn a_name_past_the_limit_of_the_volume_is_unholdable() {
+        let target = rel(&format!("projects/{}", "n".repeat(20)));
+        let refused =
+            check_destination_names(&target, &[], &volume(false, 10)).expect_err("refused");
+        match refused {
+            RestoreError::Target {
+                problem: TargetProblem::Unholdable { reason },
+                ..
+            } => assert!(reason.contains("the volume allows 10"), "{reason}"),
+            other => panic!("expected unholdable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_is_unholdable_where_the_volume_needs_utf8() {
+        let target = RelPath::from_bytes(b"projects/\xff".to_vec()).expect("a path");
+        let rules = TargetRules {
+            requires_utf8: true,
+            ..TargetRules::linux()
+        };
+        assert!(matches!(
+            check_destination_names(&target, &[], &rules).expect_err("refused"),
+            RestoreError::Target {
+                problem: TargetProblem::Unholdable { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_parent_made_here_that_the_volume_would_store_decomposed_is_refused() {
+        let target = rel("caf\u{e9}/x");
+        let refused = check_destination_names(&target, &[rel("caf\u{e9}")], &volume(true, 255))
+            .expect_err("refused");
+        match refused {
+            RestoreError::Target {
+                problem: TargetProblem::Unholdable { reason },
+                ..
+            } => assert_eq!(reason, "the volume would store `caf\u{e9}` decomposed"),
+            other => panic!("expected unholdable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_destination_itself_is_held_to_the_decomposing_rule() {
+        let target = rel("caf\u{e9}");
+        assert!(check_destination_names(&target, &[], &volume(true, 255)).is_err());
+    }
+
+    #[test]
+    fn an_existing_decomposed_parent_is_accepted() {
+        let target = rel("caf\u{e9}/x");
+        check_destination_names(&target, &[], &volume(true, 255)).expect("accepted");
+    }
+
+    #[test]
+    fn plain_names_pass_on_a_decomposing_volume() {
+        check_destination_names(&rel("projects/a"), &[rel("projects")], &volume(true, 255))
+            .expect("accepted");
     }
 }
