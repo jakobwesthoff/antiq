@@ -97,6 +97,20 @@ pub(crate) fn setting_notes_with(
     warnings
 }
 
+/// What the run lock tells a command that takes none: the note for a run
+/// that holds it, or a warning when the lock file cannot be read. At most
+/// one of the two is set.
+pub fn lock_status(collection: &Collection) -> (Option<String>, Option<Warning>) {
+    match lock::holder(&collection.lock_path()) {
+        Ok(Some(holder)) => (Some(lock_note(&holder).message), None),
+        Ok(None) => (None, None),
+        Err(error) => (
+            None,
+            Some(Warning::new(format!("cannot read the lock file: {error}"))),
+        ),
+    }
+}
+
 /// The note for a run that holds the lock while a command that takes none
 /// looks at the collection.
 pub fn lock_note(holder: &Holder) -> Warning {

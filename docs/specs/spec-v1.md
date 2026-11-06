@@ -1139,7 +1139,8 @@ path, then version with the newest first. A skipped version is a `warning:`
 line on stderr. With no hit `grep` exits 0 and says `no archived path
 matches <pattern>` on stderr; a pattern that is not a valid regular
 expression is a usage error, exit 2, also outside a collection. A held lock
-is noted as for `list`: a `note:` line on stderr.
+is noted as for `list`: a `note:` line on stderr, after the `note:` lines
+on the settings of the collection.
 
 ### status
 
@@ -1486,8 +1487,8 @@ counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
 "list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
 null where the head of the listing lacks them) and `damage` (a list of texts).
 
-`grep` adds `pattern`, `pieces` and `skipped`, and a `note` field while the
-lock is held or its file cannot be read. Each element of `pieces` has
+`grep` adds `pattern`, `pieces`, `skipped` and `warnings` (as for `list`),
+and a `note` field while the lock is held. Each element of `pieces` has
 `piece`, `name_match`, `versions` and `files`. `versions` lists the searched
 versions of the piece, newest first, each with `stamp` (the version stamp)
 and `version` (its time as RFC 3339 in UTC); for a piece whose name matches

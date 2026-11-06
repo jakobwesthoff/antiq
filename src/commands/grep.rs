@@ -5,10 +5,12 @@
 //! The `grep` operation: searches the paths of every archived file in the
 //! listings of the store.
 
+use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing;
 use crate::relpath::{Name, RelPath};
+use crate::report::{self, Warning};
 use crate::versions::VersionsError;
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
@@ -44,6 +46,10 @@ impl HasKind for GrepError {
 pub struct GrepReport {
     pub pieces: Vec<PieceHits>,
     pub skipped: Vec<SkippedVersion>,
+    /// The notes on the settings of the collection and on its lock file.
+    pub warnings: Vec<Warning>,
+    /// The run that holds the lock, while there is one.
+    pub note: Option<String>,
 }
 
 /// The hits in one piece.
@@ -92,6 +98,17 @@ pub struct SkippedVersion {
 /// matches bytes, so `(?-u)` can match a path that is not UTF-8.
 pub fn compile(pattern: &str) -> Result<Regex, GrepError> {
     Regex::new(pattern).map_err(GrepError::InvalidPattern)
+}
+
+/// Searches the store of `collection`, and adds the notes on its settings
+/// and its lock. Nothing is locked, so a running `archive` is only noted.
+pub fn grep_collection(collection: &Collection, pattern: &Regex) -> Result<GrepReport, GrepError> {
+    let mut found = grep(&collection.pieces_dir(), pattern)?;
+    found.warnings = report::setting_notes(collection);
+    let (note, unreadable_lock) = report::lock_status(collection);
+    found.warnings.extend(unreadable_lock);
+    found.note = note;
+    Ok(found)
 }
 
 /// Searches the listings of every complete version below `pieces_dir`.

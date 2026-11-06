@@ -8,10 +8,10 @@ use crate::cli::output::{Output, Style};
 use crate::cli::table::{Color, WIDE_FROM, mid, paint, sanitize, spaces};
 use crate::cli::{Context, GrepArgs};
 use antiq::collection::Collection;
-use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep};
+use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep_collection};
+use antiq::report::Warning;
 use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
-use antiq::{lock, report};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 use regex::bytes::Regex;
@@ -33,10 +33,9 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
     let collection = Collection::find(&start)
         .map_err(antiq::Error::from)
         .context("find the collection")?;
-    let found = grep(&collection.pieces_dir(), &pattern)
+    let found = grep_collection(&collection, &pattern)
         .map_err(antiq::Error::from)
         .context("search the listings")?;
-    let note = lock_note(&collection);
     print_report(
         out,
         ctx.json,
@@ -44,7 +43,6 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
             pattern: &args.pattern,
             regex: &pattern,
             found: &found,
-            note,
             zone: &system_zone(),
         },
     )?;
@@ -56,8 +54,6 @@ struct Printed<'a> {
     pattern: &'a str,
     regex: &'a Regex,
     found: &'a GrepReport,
-    /// What the run lock says, if anything.
-    note: Option<String>,
     /// The zone that dates are shown in on a terminal.
     zone: &'a TimeZone,
 }
@@ -67,13 +63,15 @@ struct Printed<'a> {
 fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Result<()> {
     let found = printed.found;
     if json {
-        out.json(
-            Some("grep"),
-            &json_report(printed.pattern, found, printed.note.clone()),
-        )
-        .context("print the result")?;
+        out.json(Some("grep"), &json_report(printed.pattern, found))
+            .context("print the result")?;
     } else {
-        if let Some(note) = &printed.note {
+        // Notes on the settings, then the lock, as `list` orders them.
+        for warning in &found.warnings {
+            out.note(&format!("note: {}", warning.message))
+                .context("print the notes")?;
+        }
+        if let Some(note) = &found.note {
             out.note(&format!("note: {note}"))
                 .context("print the notes")?;
         }
@@ -106,16 +104,6 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
         .context("print the notes")?;
     }
     Ok(())
-}
-
-/// What the run lock says, for a command that takes no lock: who holds it,
-/// or that the lock file cannot be read.
-fn lock_note(collection: &Collection) -> Option<String> {
-    match lock::holder(&collection.lock_path()) {
-        Ok(Some(holder)) => Some(report::lock_note(&holder).message),
-        Ok(None) => None,
-        Err(error) => Some(format!("cannot read the lock file: {error}")),
-    }
 }
 
 // =========================================================
@@ -430,6 +418,7 @@ struct JsonReport<'a> {
     pattern: &'a str,
     pieces: Vec<JsonPiece>,
     skipped: Vec<JsonSkipped<'a>>,
+    warnings: &'a [Warning],
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
 }
@@ -465,11 +454,7 @@ struct JsonSkipped<'a> {
 
 /// The report as the object of `--json`: pieces and paths in the escaped
 /// form, versions by stamp and by their time.
-fn json_report<'a>(
-    pattern: &'a str,
-    found: &'a GrepReport,
-    note: Option<String>,
-) -> JsonReport<'a> {
+fn json_report<'a>(pattern: &'a str, found: &'a GrepReport) -> JsonReport<'a> {
     let piece = |hits: &PieceHits| JsonPiece {
         piece: hits.piece.to_string(),
         name_match: hits.name_match,
@@ -503,7 +488,8 @@ fn json_report<'a>(
                 reason: &skipped.reason,
             })
             .collect(),
-        note,
+        warnings: &found.warnings,
+        note: found.note.clone(),
     }
 }
 
@@ -560,7 +546,7 @@ mod tests {
     fn report(pieces: Vec<PieceHits>) -> GrepReport {
         GrepReport {
             pieces,
-            skipped: Vec::new(),
+            ..GrepReport::default()
         }
     }
 
@@ -801,7 +787,6 @@ mod tests {
                 pattern: r"main\.rs",
                 regex: &regex,
                 found: &found,
-                note: None,
                 zone: &TimeZone::UTC,
             },
         )

@@ -6,10 +6,9 @@
 
 use crate::collection::Collection;
 use crate::error::HasKind;
-use crate::lock;
 use crate::query::Query;
 use crate::relpath::RelPath;
-use crate::report::{self, CommandReport, Warning, lock_note};
+use crate::report::{self, CommandReport, Warning};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Inspection, Places};
 use crate::versions::stamp::Stamp;
@@ -209,12 +208,8 @@ pub fn list(collection: &Collection, query: Option<&str>) -> Result<ListReport, 
 
     let mut warnings = report::setting_notes(collection);
     warnings.extend(rows.warnings);
-    let mut note = None;
-    match lock::holder(&collection.lock_path()) {
-        Ok(Some(holder)) => note = Some(lock_note(&holder).message),
-        Ok(None) => {}
-        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
-    }
+    let (note, unreadable_lock) = report::lock_status(collection);
+    warnings.extend(unreadable_lock);
     Ok(ListReport {
         versions: rows.versions,
         warnings,

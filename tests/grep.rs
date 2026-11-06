@@ -179,6 +179,7 @@ fn json_lists_pieces_versions_and_files() {
                 "files": [{"path": "tools/bench/main.rs", "versions": [OLD]}],
             }],
             "skipped": [],
+            "warnings": [],
         })
     );
     assert_eq!(run.stderr, "");
@@ -373,15 +374,62 @@ fn a_held_lock_is_the_note_field_under_json() {
 }
 
 #[test]
-fn a_lock_file_that_cannot_be_read_is_a_note() {
+fn a_lock_file_that_cannot_be_read_is_a_warning() {
     let collection = collection_of(&two_pieces());
     fs::create_dir(collection.path(".antiq/lock")).expect("the lock path is a directory");
 
-    let run = grep_json(&collection, "README");
+    let text = grep(&collection, &["README"]);
+    assert_eq!(text.code(), 0);
+    assert!(
+        text.stderr.starts_with("note: cannot read the lock file: "),
+        "{}",
+        text.stderr
+    );
 
-    assert_eq!(run.code(), 0);
-    let note = run.json()["note"].as_str().expect("a note").to_string();
-    assert!(note.starts_with("cannot read the lock file: "), "{note}");
+    let json = grep_json(&collection, "README");
+    assert_eq!(json.code(), 0);
+    let warning = json.json()["warnings"][0]["message"]
+        .as_str()
+        .expect("a warning")
+        .to_string();
+    assert!(
+        warning.starts_with("cannot read the lock file: "),
+        "{warning}"
+    );
+    assert!(json.json().get("note").is_none());
+}
+
+// =========================================================
+// Notes on the settings
+// =========================================================
+
+/// Puts `line` into the `[collection]` table of the collection's config.
+fn with_config_line(collection: &Collection, line: &str) {
+    let path = collection.path(".antiq/config.toml");
+    let config = fs::read_to_string(&path).expect("the config exists");
+    let config = config.replacen("[collection]\n", &format!("[collection]\n{line}\n"), 1);
+    fs::write(&path, config).expect("the config is written");
+}
+
+#[test]
+fn an_unknown_config_key_is_a_note_and_a_warning() {
+    let collection = collection_of(&two_pieces());
+    with_config_line(&collection, "bogus = 1");
+
+    let text = grep(&collection, &["qxzv"]);
+    assert_eq!(text.code(), 0);
+    assert_eq!(
+        text.stderr,
+        "note: the key `bogus` under [collection] is unknown and ignored\n\
+         no archived path matches qxzv\n"
+    );
+
+    let json = grep_json(&collection, "README");
+    assert_eq!(
+        json.json()["warnings"],
+        json!([{"message": "the key `bogus` under [collection] is unknown and ignored"}])
+    );
+    assert_eq!(json.stderr, "");
 }
 
 #[test]
