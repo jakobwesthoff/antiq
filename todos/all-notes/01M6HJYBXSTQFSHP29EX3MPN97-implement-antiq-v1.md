@@ -2604,6 +2604,16 @@ the same commit; the lead checks that at acceptance.
   blocks the piece. The live stream check in `live.rs` is separate from
   I12's in `read.rs`.
 
+### I16
+
+- 2026-11-04: the time of the last sync in `status`'s header comes from
+  an optional `last_sync` key in `.antiq/remote-state.json`; I29 owns
+  the file, I30 writes the key after a sync, and `status` shows "never
+  synced" without it. Without a remote, `status` lists no upload rows
+  on the console; the JSON keeps `pending_upload`. Console labels are
+  I16's proposal, kept in one place; the user sees the rendered output
+  before the merge.
+
 ### I12
 
 - 2026-11-04, I12 plan review (ledger `i12-ledger.md`, 8 findings
