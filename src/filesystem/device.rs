@@ -4,10 +4,6 @@
 
 //! Devices, mount points and filesystem kinds.
 
-// TODO: the piece walk (I05) and the collection and remote checks (I16,
-// I23) are the callers; until they land the library has none.
-#![allow(dead_code)]
-
 use super::{FilesystemError, io_error};
 use crate::filesystem::tree::TreeRoot;
 use crate::relpath::RelPath;
@@ -15,15 +11,6 @@ use std::io;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::SystemTime;
-
-/// The device a directory lives on, in the form `TreeEntry::device` has,
-/// so the two can be compared. `path` must be a readable directory.
-pub(crate) fn device_of(path: &Path) -> Result<u64, FilesystemError> {
-    identity_of(path)
-        .map(|(device, _)| device)
-        .map_err(io_error("stat", path))
-}
 
 /// Whether another filesystem is mounted at `path`.
 pub(crate) fn is_mount_point(path: &Path) -> Result<bool, FilesystemError> {
@@ -106,6 +93,10 @@ fn kind_from_name(name: &str) -> FsKind {
 
 /// The kind named by the type magic number Linux reports (`f_type`):
 /// ext2 to ext4, btrfs, tmpfs and overlayfs; SMB, CIFS and SMB2; NFS.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the Linux `fs_kind` reads the type magic")
+)]
 fn kind_from_magic(magic: u32) -> FsKind {
     match magic {
         0xef53 | 0x9123_683e | 0x0102_1994 | 0x794c_7630 => FsKind::Local,
@@ -135,57 +126,10 @@ pub(crate) fn fs_kind(path: &Path) -> Result<FsKind, FilesystemError> {
     Ok(kind_from_magic(stat.f_type as u32))
 }
 
-/// The birth time of the entry itself in nanoseconds since the epoch
-/// (negative before it), or `None` where the filesystem keeps none.
-pub(crate) fn birth_time(path: &Path) -> Result<Option<i128>, FilesystemError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(io_error("stat", path))?;
-    birth_from(metadata.created()).map_err(io_error("stat", path))
-}
-
-/// `Unsupported` is how std says a platform or filesystem keeps no birth
-/// time (musl does not).
-fn birth_from(created: io::Result<SystemTime>) -> io::Result<Option<i128>> {
-    match created {
-        Ok(time) => Ok(Some(nanoseconds_since_epoch(time))),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn nanoseconds_since_epoch(time: SystemTime) -> i128 {
-    match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(after) => after.as_nanos() as i128,
-        Err(before) => -(before.duration().as_nanos() as i128),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::tree::Tree;
-
-    fn here() -> i128 {
-        nanoseconds_since_epoch(SystemTime::now())
-    }
-
-    #[test]
-    fn the_device_is_the_one_the_walk_reports() {
-        let tree = Tree::new();
-        let expected = TreeRoot::open(tree.root())
-            .expect("opens")
-            .lstat(&RelPath::root())
-            .expect("stat")
-            .device;
-        assert_ne!(expected, 0, "the test needs a device number");
-        assert_eq!(device_of(tree.root()).expect("device"), expected);
-    }
-
-    #[test]
-    fn the_device_of_a_missing_path_is_an_error() {
-        let tree = Tree::new();
-        let error = device_of(&tree.path("nope")).expect_err("fails");
-        assert!(error.to_string().contains("nope"), "{error}");
-    }
 
     fn mount_point(own: Identity, parent: Identity, platform: bool) -> bool {
         let identity = |path: &Path| Ok(if path.ends_with("..") { parent } else { own });
@@ -465,49 +409,5 @@ mod tests {
     fn the_kind_of_a_missing_path_is_an_error() {
         let tree = Tree::new();
         assert!(fs_kind(&tree.path("nope")).is_err());
-    }
-
-    #[test]
-    fn a_new_file_was_born_a_moment_ago() {
-        let mut tree = Tree::new();
-        let file = tree.file("f", "x");
-        let born = birth_time(&file).expect("answers");
-        #[cfg(target_os = "macos")]
-        assert!(born.is_some(), "macOS keeps birth times");
-        let minute = 60 * 1_000_000_000;
-        let now = here();
-        assert!(born.is_none_or(|born| (now - born).abs() < minute));
-    }
-
-    #[test]
-    fn unsupported_means_no_birth_time_and_other_errors_stay() {
-        let unsupported = Err(io::Error::from(io::ErrorKind::Unsupported));
-        assert_eq!(birth_from(unsupported).expect("no error"), None);
-        let denied = Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert!(birth_from(denied).is_err());
-    }
-
-    #[test]
-    fn the_birth_time_of_a_symlink_is_its_own() {
-        let mut tree = Tree::new();
-        let link = tree.symlink("l", "nowhere");
-        assert!(
-            birth_time(&link).is_ok(),
-            "a dangling link has a birth time"
-        );
-    }
-
-    #[test]
-    fn the_birth_time_of_a_missing_path_is_an_error() {
-        let tree = Tree::new();
-        assert!(birth_time(&tree.path("nope")).is_err());
-    }
-
-    #[test]
-    fn times_before_the_epoch_are_negative() {
-        let before = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
-        assert_eq!(nanoseconds_since_epoch(before), -1_000_000_000);
-        let after = SystemTime::UNIX_EPOCH + std::time::Duration::new(2, 5);
-        assert_eq!(nanoseconds_since_epoch(after), 2_000_000_005);
     }
 }

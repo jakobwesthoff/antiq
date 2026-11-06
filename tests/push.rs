@@ -11,6 +11,7 @@ use std::path::Path;
 use support::cmd::{Antiq, Run, hold_lock, snapshot};
 use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection};
+use support::scenario::target::Target;
 
 fn collection() -> Collection {
     Collection::build(&Clock::now())
@@ -43,6 +44,24 @@ fn add_target_key(collection: &Collection, line: &str) {
         text.replacen("[target]\n", &format!("[target]\n{line}\n"), 1),
     )
     .expect("the config can be written");
+}
+
+/// Replaces the `url` of the `[target]` table.
+fn set_target_url(collection: &Collection, url: &Path) {
+    let path = collection.path(".antiq/config.toml");
+    let text = fs::read_to_string(&path).expect("the config exists");
+    let quoted = serde_json::to_string(url.to_str().expect("a UTF-8 path")).expect("quotes");
+    let replaced: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("url = ") {
+                format!("url = {quoted}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    fs::write(&path, replaced.join("\n") + "\n").expect("the config can be written");
 }
 
 /// A stand-in rsync that reports `version`, set as `[target] rsync`.
@@ -178,21 +197,19 @@ fn a_dry_run_with_the_lock_held_names_the_holder_and_lists_nothing() {
 
 #[test]
 fn a_dry_run_changes_nothing_and_takes_no_lock() {
-    let collection = collection();
-    set_url(&collection, "/nonexistent/target");
+    let collection = stored(&[]);
     let before = snapshot(&collection.root());
 
     let run = push(&collection, &["-n"]);
 
-    // The checks behind the lock are not built yet.
+    // The steps behind the pre-check are not built yet.
     assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
     assert_eq!(snapshot(&collection.root()), before);
 }
 
 #[test]
 fn a_real_run_repairs_before_it_goes_on() {
-    let collection = collection();
-    set_url(&collection, "/nonexistent/target");
+    let collection = stored(&[]);
     let stale = collection.path(".antiq/tmp/stale-entry");
     fs::create_dir_all(stale.parent().expect("has a parent")).expect("tmp exists");
     fs::write(&stale, "left behind").expect("the entry is written");
@@ -242,8 +259,24 @@ fn every_flag_combination_parses_and_needs_a_collection() {
 const STAMP: &str = "2024-06-30T081245";
 const OTHER_STAMP: &str = "2024-07-01T081245";
 
-/// A collection with `projects/a` and one stored version of it per stamp.
-fn stored(stamps: &[&str]) -> Collection {
+/// A collection with `projects/a` and one stored version of it per stamp,
+/// pushing to an empty target of its own that carries its marker, with a
+/// stand-in rsync of the given version.
+struct Stored {
+    collection: Collection,
+    _target: Target,
+    fake: FakeRsync,
+}
+
+impl std::ops::Deref for Stored {
+    type Target = Collection;
+
+    fn deref(&self) -> &Collection {
+        &self.collection
+    }
+}
+
+fn stored_with(stamps: &[&str], rsync_version: &str) -> Stored {
     let mut builder = Collection::build(&Clock::now());
     builder.piece("projects/a", |piece| {
         piece.age_days(3).file("a.txt", "a");
@@ -252,8 +285,19 @@ fn stored(stamps: &[&str]) -> Collection {
         builder.version("projects/a", stamp, &[("a.txt", "a")]);
     }
     let collection = builder.finish();
-    set_url(&collection, "/nonexistent/target");
-    collection
+    let target = Target::new();
+    target.marker(&collection);
+    set_url(&collection, target.path().to_str().expect("a UTF-8 path"));
+    let fake = use_fake_rsync(&collection, rsync_version);
+    Stored {
+        collection,
+        _target: target,
+        fake,
+    }
+}
+
+fn stored(stamps: &[&str]) -> Stored {
+    stored_with(stamps, RSYNC_3_2_4)
 }
 
 /// The message of a refused push.
@@ -457,8 +501,8 @@ fn an_rsync_that_is_too_old_or_not_rsync_is_refused_with_its_path() {
         "rsync  version 3.1.0  protocol version 31\n",
     ];
     for version in versions {
-        let collection = stored(&[]);
-        let fake = use_fake_rsync(&collection, version);
+        let collection = stored_with(&[], version);
+        let fake = &collection.fake;
 
         let run = push(&collection, &[]);
 
@@ -476,8 +520,7 @@ fn an_rsync_that_is_too_old_or_not_rsync_is_refused_with_its_path() {
 
 #[test]
 fn a_dry_run_checks_the_rsync_too() {
-    let collection = stored(&[]);
-    let _fake = use_fake_rsync(&collection, "rsync  version 3.2.3  protocol version 31\n");
+    let collection = stored_with(&[], "rsync  version 3.2.3  protocol version 31\n");
 
     let run = push(&collection, &["-n"]);
 
@@ -490,7 +533,6 @@ fn a_dry_run_checks_the_rsync_too() {
 fn an_rsync_of_3_2_4_goes_on_to_the_next_step() {
     for args in [&[][..], &["-n"][..]] {
         let collection = stored(&[]);
-        let _fake = use_fake_rsync(&collection, "rsync  version 3.2.4  protocol version 31\n");
 
         let run = push(&collection, args);
 
@@ -500,5 +542,346 @@ fn an_rsync_of_3_2_4_goes_on_to_the_next_step() {
             "{args:?}: {}",
             run.stdout
         );
+    }
+}
+
+// =========================================================
+// Step 4: the pre-check of a path target
+// =========================================================
+
+const RSYNC_3_2_4: &str = "rsync  version 3.2.4  protocol version 31\n";
+
+/// A collection with a sound rsync and `url` as its target.
+fn targeted(url: &Path) -> (Collection, FakeRsync) {
+    let collection = collection();
+    set_url(&collection, url.to_str().expect("a UTF-8 path"));
+    let fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+    (collection, fake)
+}
+
+/// Asserts that a push stopped as unreachable and returns the reason.
+fn unreachable_reason(run: &Run) -> String {
+    assert_eq!(run.code(), 4, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "target_unreachable", "{}", run.stdout);
+    run.error_message()
+}
+
+/// Asserts that a push was refused with exit 1 and returns the message.
+fn refused_message(run: &Run) -> String {
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_ne!(run.error_kind(), "not_implemented", "{}", run.stdout);
+    run.error_message()
+}
+
+fn passes_the_precheck(run: &Run) {
+    assert_eq!(run.error_kind(), "not_implemented", "{}", run.stdout);
+}
+
+#[test]
+fn a_missing_directory_is_unreachable_also_with_init_and_in_a_dry_run() {
+    let gone = Target::new();
+    let (collection, _fake) = targeted(&gone.path().join("not-there"));
+
+    for args in [&[][..], &["--init"][..], &["-n"][..], &["--force"][..]] {
+        let reason = unreachable_reason(&push(&collection, args));
+        assert!(reason.contains("not-there"), "{args:?}: {reason}");
+    }
+}
+
+#[test]
+fn if_reachable_turns_an_unreachable_target_into_exit_0_with_the_reason() {
+    let gone = Target::new();
+    let (collection, _fake) = targeted(&gone.path().join("not-there"));
+
+    for args in [&["--if-reachable"][..], &["--if-reachable", "-n"][..]] {
+        let run = push(&collection, args);
+
+        assert_eq!(run.code(), 0, "{args:?}: {}", run.stdout);
+        let json = run.json();
+        assert_eq!(json["command"], "push", "{args:?}");
+        assert_eq!(json["result"], "unreachable", "{args:?}");
+        assert_eq!(json["dry_run"], args.contains(&"-n"), "{args:?}");
+        assert!(
+            json["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("not-there")),
+            "{args:?}: {json}"
+        );
+    }
+
+    let text = push_text(&collection, &["--if-reachable"]);
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert_eq!(text.stdout, "");
+    assert!(text.stderr.starts_with("note: "), "{}", text.stderr);
+    assert!(text.stderr.contains("not-there"), "{}", text.stderr);
+}
+
+#[test]
+fn an_empty_directory_without_a_marker_is_unreachable_and_names_init() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+
+    for args in [&[][..], &["--force"][..], &["-n"][..]] {
+        let reason = unreachable_reason(&push(&collection, args));
+        assert!(reason.contains("push --init"), "{args:?}: {reason}");
+    }
+    let run = push(&collection, &["--if-reachable"]);
+    assert_eq!(run.code(), 0, "{}", run.stdout);
+    assert_eq!(run.json()["result"], "unreachable");
+}
+
+#[test]
+fn init_takes_an_empty_directory_through_the_pre_check() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+
+    passes_the_precheck(&push(&collection, &["--init"]));
+}
+
+#[test]
+fn a_directory_with_files_and_no_marker_is_refused_whatever_the_flags() {
+    let mut target = Target::new();
+    target.tree_mut().file("stray.txt", "x");
+    let (collection, _fake) = targeted(&target.path());
+
+    for args in [&[][..], &["--init"][..], &["--force"][..], &["-n"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(message.contains("not empty"), "{args:?}: {message}");
+    }
+}
+
+#[test]
+fn a_marker_of_another_collection_is_refused_also_with_force() {
+    let target = Target::new();
+    target.marker_with(
+        "01BX5ZZKBKACTAV9WEVGEMMVRY",
+        &target.machine_name(),
+        "/elsewhere",
+    );
+    let (collection, _fake) = targeted(&target.path());
+
+    for args in [&[][..], &["--force"][..], &["--init"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(
+            message.contains("another collection"),
+            "{args:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_marker_that_cannot_be_read_is_refused() {
+    for content in ["not json at all\n", "{\"format\":1}\n", ""] {
+        let target = Target::new();
+        fs::write(target.path().join(".antiq-target"), content).expect("written");
+        let (collection, _fake) = targeted(&target.path());
+
+        let message = refused_message(&push(&collection, &["--force"]));
+
+        assert!(message.contains("not readable"), "{content:?}: {message}");
+    }
+}
+
+#[test]
+fn a_marker_that_is_no_regular_file_is_not_readable() {
+    let target = Target::new();
+    fs::create_dir(target.path().join(".antiq-target")).expect("made");
+    let (collection, _fake) = targeted(&target.path());
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("not readable"), "{message}");
+
+    let target = Target::new();
+    std::os::unix::fs::symlink("elsewhere", target.path().join(".antiq-target")).expect("link");
+    let (collection, _fake) = targeted(&target.path());
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("not readable"), "{message}");
+
+    // A link to a good marker does not stand in for one.
+    let target = Target::new();
+    let elsewhere = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    elsewhere.marker(&collection);
+    std::os::unix::fs::symlink(
+        elsewhere.path().join(".antiq-target"),
+        target.path().join(".antiq-target"),
+    )
+    .expect("link");
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("not readable"), "{message}");
+}
+
+#[test]
+fn a_marker_that_cannot_be_opened_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let target = Target::new();
+    let marker = target.path().join(".antiq-target");
+    fs::write(&marker, "x").expect("written");
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).expect("locked");
+    assert!(
+        fs::File::open(&marker).is_err(),
+        "the test runs as a user without access"
+    );
+    let (collection, _fake) = targeted(&target.path());
+
+    let run = push(&collection, &[]);
+
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).expect("unlocked");
+    let message = refused_message(&run);
+    assert!(message.contains("not readable"), "{message}");
+    assert!(message.contains("Permission denied"), "{message}");
+}
+
+#[test]
+fn a_marker_file_is_not_read_beyond_64_kib() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    let line = format!(
+        "{{\"format\":1,\"id\":\"{}\",\"host\":\"{}\",\"path\":\"{}\",\"pad\":\"{}\"}}\n",
+        collection.id(),
+        target.machine_name(),
+        collection.root().display(),
+        "x".repeat(100 * 1024)
+    );
+    fs::write(target.path().join(".antiq-target"), line).expect("written");
+
+    let message = refused_message(&push(&collection, &[]));
+
+    assert!(message.contains("not readable"), "{message}");
+}
+
+#[test]
+fn a_marker_of_a_newer_format_has_its_own_error_kind() {
+    let target = Target::new();
+    fs::write(
+        target.path().join(".antiq-target"),
+        "{\"format\":2,\"id\":\"x\"}\n",
+    )
+    .expect("written");
+    let (collection, _fake) = targeted(&target.path());
+
+    let run = push(&collection, &[]);
+
+    assert_eq!(run.code(), 1, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "format_too_new");
+}
+
+#[test]
+fn another_host_or_path_in_the_marker_is_refused_naming_both_and_force_pushes_on() {
+    let cases = [("Some Other Mac", None), ("", Some("/moved/collection"))];
+    for (host, path) in cases {
+        let target = Target::new();
+        let (collection, _fake) = targeted(&target.path());
+        let own_host = target.machine_name();
+        let host = if host.is_empty() {
+            own_host.as_str()
+        } else {
+            host
+        };
+        let own_path = collection.root().to_str().expect("UTF-8").to_string();
+        let path = path.unwrap_or(own_path.as_str());
+        target.marker_with(&collection.id().to_string(), host, path);
+        let marker = target.path().join(".antiq-target");
+        let before = fs::read(&marker).expect("the marker exists");
+
+        let message = refused_message(&push(&collection, &[]));
+        assert!(message.contains(host), "{message}");
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains(&own_path), "{message}");
+        assert!(message.contains(&own_host), "{message}");
+
+        passes_the_precheck(&push(&collection, &["--force"]));
+        assert_eq!(fs::read(&marker).expect("still there"), before);
+    }
+}
+
+#[test]
+fn a_matching_marker_passes_also_with_force_and_is_refused_with_init() {
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    target.marker(&collection);
+
+    passes_the_precheck(&push(&collection, &[]));
+    passes_the_precheck(&push(&collection, &["--force"]));
+    passes_the_precheck(&push(&collection, &["-n"]));
+    let message = refused_message(&push(&collection, &["--init"]));
+    assert!(message.contains("already"), "{message}");
+}
+
+#[test]
+fn a_directory_that_cannot_be_read_is_refused_not_unreachable() {
+    use std::os::unix::fs::PermissionsExt;
+    let target = Target::new();
+    let (collection, _fake) = targeted(&target.path());
+    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o000)).expect("locked");
+    assert!(
+        fs::read_dir(target.path()).is_err(),
+        "the test runs as a user without access"
+    );
+
+    let run = push(&collection, &[]);
+
+    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o755)).expect("unlocked");
+    let message = refused_message(&run);
+    assert!(message.contains("cannot be read"), "{message}");
+}
+
+#[test]
+fn a_target_that_is_the_collection_or_below_it_is_refused_with_every_flag() {
+    let (collection, _fake) = targeted(Path::new("/nonexistent/x"));
+    let inside = collection.root().to_path_buf();
+    set_target_url(&collection, &inside);
+    let below = collection.path("projects");
+    let missing_below = collection.path("projects/a/no-such-dir");
+    let link_dir = Target::new();
+    let link = link_dir.path().join("spelling");
+    std::os::unix::fs::symlink(collection.path("projects"), &link).expect("link");
+
+    for target in [&inside, &below, &missing_below, &link] {
+        set_target_url(&collection, target);
+        for args in [&[][..], &["--init"][..], &["--force"][..], &["-n"][..]] {
+            let message = refused_message(&push(&collection, args));
+            assert!(
+                message.contains("collection"),
+                "{target:?} {args:?}: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_target_that_holds_the_collection_is_refused_with_every_flag() {
+    let (collection, _fake) = targeted(Path::new("/"));
+    let parent = collection
+        .root()
+        .parent()
+        .expect("has a parent")
+        .to_path_buf();
+
+    for target in [Path::new("/"), parent.as_path()] {
+        set_target_url(&collection, target);
+        for args in [&[][..], &["--init"][..], &["--force"][..]] {
+            let message = refused_message(&push(&collection, args));
+            assert!(
+                message.contains("inside the target"),
+                "{target:?} {args:?}: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_root_of_a_mounted_volume_is_refused_with_every_flag() {
+    use std::os::unix::fs::MetadataExt;
+    let dev = Path::new("/dev");
+    assert_ne!(
+        fs::metadata(dev).expect("/dev exists").dev(),
+        fs::metadata("/").expect("/ exists").dev(),
+        "the test machine mounts /dev on a device of its own"
+    );
+    let (collection, _fake) = targeted(dev);
+
+    for args in [&[][..], &["--init"][..], &["--force"][..]] {
+        let message = refused_message(&push(&collection, args));
+        assert!(message.contains("mount"), "{args:?}: {message}");
     }
 }

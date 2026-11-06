@@ -7,15 +7,20 @@
 use crate::clock::Clock;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
+use crate::machine::MachineError;
 use crate::plan::HeldDryRun;
 use crate::relpath::RelPath;
+use crate::report::{CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
+use crate::target::marker::{self, MarkerError};
 use crate::target::rsync::{Rsync, RsyncError};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+mod precheck;
 mod store;
 
 /// Why push failed.
@@ -62,6 +67,26 @@ pub enum PushError {
     NameClash { first: RelPath, second: RelPath },
     #[error(".antiq/trash/ still holds {}, which a repair could not put back", .path.display())]
     TrashNotEmpty { path: PathBuf },
+    /// The target cannot be used; the text says what is wrong with it.
+    #[error("{problem}")]
+    Target { problem: String },
+    /// The target cannot be reached, which `--if-reachable` accepts.
+    #[error("{reason}")]
+    Unreachable { reason: String },
+    #[error(
+        "the target's marker {} names host `{marker_host}` and path `{marker_path}`, this run is host `{host}` and path `{path}`; push with --force to overwrite the target once, or edit the marker",
+        marker::FILE_NAME
+    )]
+    MarkerMismatch {
+        marker_host: String,
+        marker_path: String,
+        host: String,
+        path: String,
+    },
+    #[error("cannot use the target's marker")]
+    MarkerFormat(#[source] MarkerError),
+    #[error("cannot name this machine")]
+    Machine(#[source] MachineError),
     /// The steps after the ones built so far.
     #[error("push is not implemented beyond its first checks")]
     Unfinished,
@@ -73,6 +98,9 @@ impl HasKind for PushError {
             PushError::NoTarget => ErrorKind::NoTarget,
             PushError::Run(error) => error.kind(),
             PushError::Rsync(error) => error.kind(),
+            PushError::Unreachable { .. } => ErrorKind::TargetUnreachable,
+            PushError::MarkerFormat(MarkerError::TooNew { .. }) => ErrorKind::FormatTooNew,
+            PushError::Machine(error) => error.kind(),
             PushError::Unfinished => ErrorKind::NotImplemented,
             PushError::Url(_)
             | PushError::RootNotUtf8 { .. }
@@ -82,7 +110,10 @@ impl HasKind for PushError {
             | PushError::Trash { .. }
             | PushError::DamagedStore { .. }
             | PushError::NameClash { .. }
-            | PushError::TrashNotEmpty { .. } => ErrorKind::Other,
+            | PushError::TrashNotEmpty { .. }
+            | PushError::Target { .. }
+            | PushError::MarkerMismatch { .. }
+            | PushError::MarkerFormat(MarkerError::Invalid { .. }) => ErrorKind::Other,
         }
     }
 }
@@ -90,6 +121,13 @@ impl HasKind for PushError {
 /// What the command line asked `push` to do.
 #[derive(Debug, Clone, Copy)]
 pub struct PushRequest {
+    /// The target is an empty directory that is the right one: write its
+    /// marker.
+    pub init: bool,
+    /// Push although the marker names another host or path.
+    pub force: bool,
+    /// A target that cannot be reached is no failure.
+    pub if_reachable: bool,
     pub dry_run: bool,
 }
 
@@ -98,6 +136,29 @@ pub struct PushRequest {
 pub enum PushOutcome {
     /// A dry run that found another run holding the lock.
     HeldDryRun(HeldDryRun),
+    /// The target cannot be reached and `--if-reachable` accepts that.
+    Unreachable(UnreachableReport),
+}
+
+/// The report of a push that stopped because the target cannot be reached.
+#[derive(Debug, Serialize)]
+pub struct UnreachableReport {
+    pub dry_run: bool,
+    pub result: &'static str,
+    /// The `[target] url` as written.
+    pub target: String,
+    pub reason: String,
+    pub warnings: Vec<Warning>,
+}
+
+impl CommandReport for UnreachableReport {
+    fn partial(&self) -> bool {
+        false
+    }
+
+    fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
 }
 
 /// Pushes the collection to its target.
@@ -108,12 +169,12 @@ pub fn push(
 ) -> Result<PushOutcome, PushError> {
     // Everything that needs no lock is checked first, so that a push without
     // a usable target says so also while another run holds the lock.
-    let _url = target_url(collection)?;
+    let url = target_url(collection)?;
     utf8_root(collection.root())?;
 
     let started = run::start(collection, clock, request.dry_run).map_err(PushError::Run)?;
     // The guard, when there is one, holds the lock until push returns.
-    let _guard = match started {
+    let guard = match started {
         Started::DryRun {
             holder: Some(holder),
             ..
@@ -126,7 +187,51 @@ pub fn push(
     };
 
     let _rsync = local_rsync(collection)?;
-    Err(PushError::Unfinished)
+
+    let warnings = guard
+        .as_ref()
+        .map_or_else(Vec::new, |guard| guard.warnings().to_vec());
+    let TargetUrl::Path { root } = &url else {
+        // The pre-check of an ssh target.
+        return Err(PushError::Unfinished);
+    };
+    let identity = identity(collection, crate::machine::detect())?;
+    let flags = precheck::Flags {
+        init: request.init,
+        force: request.force,
+    };
+    let (probe, _canonical) = precheck::inspect_path(root, collection.root())?;
+    match precheck::decide(probe, false, &identity, flags, &root.display().to_string()) {
+        precheck::Decision::Unreachable(reason) if request.if_reachable => {
+            Ok(PushOutcome::Unreachable(UnreachableReport {
+                dry_run: request.dry_run,
+                result: "unreachable",
+                target: collection
+                    .config()
+                    .target
+                    .url
+                    .clone()
+                    .expect("the url parsed before"),
+                reason,
+                warnings,
+            }))
+        }
+        precheck::Decision::Unreachable(reason) => Err(PushError::Unreachable { reason }),
+        precheck::Decision::Refuse(error) => Err(error),
+        precheck::Decision::Proceed(_) => Err(PushError::Unfinished),
+    }
+}
+
+/// What this run puts into a marker or compares a marker with.
+fn identity(
+    collection: &Collection,
+    host: Result<String, MachineError>,
+) -> Result<precheck::Identity, PushError> {
+    Ok(precheck::Identity {
+        id: collection.id(),
+        host: host.map_err(PushError::Machine)?,
+        path: utf8_root(collection.root())?.to_string(),
+    })
 }
 
 /// The rsync that runs the push: `[target] rsync`, else the first good one

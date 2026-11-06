@@ -1452,8 +1452,11 @@ target. `--init` and `--force` are each refused together with
 4. **Pre-check the target.** The target path is canonicalized first. A
    path target that is the collection root or lies below it (compared by
    the volume's name equality, ADR 0054) is exit 1, also with `--init`,
-   and so is a path target that is a mount root ("use a folder on the
-   volume, not its root"). Otherwise the checks use the file system for a
+   and so is a path target that holds the collection root, or is a mount
+   root ("use a folder on the volume, not its root"). A directory that
+   does not exist is judged at its nearest existing folder: below the
+   collection root it is exit 1, anywhere else it counts as missing.
+   Otherwise the checks use the file system for a
    path target and `rsync --list-only <target>/` for an ssh target:
 
    | Situation | Result |
@@ -1466,6 +1469,12 @@ target. `--init` and `--force` are each refused together with
    | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
    | `.antiq-target` of another collection, or not readable | exit 1 |
    | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is |
+   | `.antiq-target` of this collection, with `--init` | exit 1 |
+
+   `.antiq-target` is not readable when it is not a regular file (a link
+   counts as not regular), cannot be opened, or does not parse. An error
+   other than the five above, while reading a path target, is exit 1 with
+   the system's message.
 
    When the listing shows `.antiq-target` on an ssh target, it is fetched
    with one rsync run of `<target>/.antiq-target` into `.antiq/tmp/`, with
@@ -1756,7 +1765,7 @@ and its parent is a directory when the plan is made. The run decides.
 | `unknown_reference` | 1 | a piece reference matches no candidate | |
 | `outside_collection` | 1 | a path given as a piece, `--as` or `--name` lies outside the collection | |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |
-| `target_unreachable` | 4 | the target cannot be reached | |
+| `target_unreachable` | 4 | the target cannot be reached; the message is the reason | |
 | `no_target` | 1 | `push` runs without `[target] url` | |
 | `not_implemented` | 1 | a command is not built yet; removed once every command is | |
 | `format_too_new` | 1 | `unearth`, `fork` or `rebuild` meets a listing of a newer format (see "Damage"), or `push` meets a marker with a higher `format` | |
@@ -1777,6 +1786,12 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `{message}` objects. A dry run adds `refused` and `warnings` after
 `actions`, which hold the repairs, each as in `repairs`, and, per piece,
 `{"kind": "archive", "piece": ...}`.
+
+A `push` that finds the target unreachable under `--if-reachable` exits 0
+with `dry_run`, `result` (`"unreachable"`), `target` (the `[target] url` as
+written), `reason` and `warnings`; the console prints `note: <reason>` on
+stderr and nothing on stdout. Without `--if-reachable` it is the error kind
+`target_unreachable`.
 
 `list` adds `versions`, `warnings` (the notes on the settings of the
 collection, as `{message}` objects) and, while a run holds the lock, `note`

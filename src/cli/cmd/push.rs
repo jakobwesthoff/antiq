@@ -18,6 +18,9 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
         .map_err(antiq::Error::from)
         .context("find the collection")?;
     let request = PushRequest {
+        init: args.init,
+        force: args.force,
+        if_reachable: args.if_reachable,
         dry_run: args.dry_run,
     };
     let outcome = push(&collection, &request, &SystemClock)
@@ -32,6 +35,15 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 for line in held.lines() {
                     out.line(&line).context("print the result")?;
                 }
+            }
+        }
+        PushOutcome::Unreachable(report) => {
+            if ctx.json {
+                out.json(Some("push"), &report)
+                    .context("print the result")?;
+            } else {
+                out.note(&format!("note: {}", report.reason))
+                    .context("print the result")?;
             }
         }
     }
