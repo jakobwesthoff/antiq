@@ -664,6 +664,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_match_needs_a_head_with_its_figures() {
+        for (line, reason) in [
+            ("archive-bytes", "archive-bytes"),
+            ("files", "`files` line"),
+        ] {
+            let (store, spoiled) = spoilable();
+            spoiled.listing_without(line);
+
+            let report = found(&store, "notes");
+
+            assert_eq!(report.skipped.len(), 1, "without {line}");
+            assert!(
+                report.skipped[0].reason.contains(reason),
+                "without {line}: {}",
+                report.skipped[0].reason
+            );
+            assert_eq!(report.pieces[0].versions.len(), 1, "without {line}");
+        }
+    }
+
+    #[test]
     fn a_bad_entry_line_discards_the_hits_before_it() {
         let (store, spoiled) = spoilable();
         // The matching entry is read first; the line after it is not an entry.
