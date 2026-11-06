@@ -27,6 +27,13 @@ which gives its version number, and then renames it locally to that
 `meta.<N>`. Until then the tracking entry's version taken out reads
 `pending`. Without a remote the change stays pending.
 
+The rename leaves the bytes as they are, so the local and the committed
+copy are identical, and it is refused when the number is not above the
+highest committed version in the directory. A `meta.pending` that cannot
+be read is an error, not a reason to use an older version, as it holds the
+only copy of the change. No change is recorded on top of a committed
+version that cannot be read or has a higher `format`.
+
 ## Consequences
 
 None further.

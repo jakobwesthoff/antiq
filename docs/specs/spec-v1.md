@@ -457,6 +457,13 @@ holds only versions known to be committed. Local readers prefer
 version", which gives its number, and renames it locally to that
 `meta.<N>`. Without a remote it stays pending. (ADR 0058)
 
+The rename leaves the bytes as they are, so the local and the committed
+copy are identical. It is refused when `N` is not above the highest
+committed version in the object's directory. A `meta.pending` that cannot
+be read is an error, not a reason to use an older version, as it holds the
+only copy of the change. No change is recorded on top of a committed
+version that cannot be read or has a higher `format`.
+
 | Command | Changes |
 |---------|---------|
 | `archive` | lifecycle `archived`, a new archive payload, history |
