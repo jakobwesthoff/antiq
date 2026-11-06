@@ -818,6 +818,32 @@ mod tests {
     }
 
     #[test]
+    fn compute_leaves_out_pruned_objects_and_their_entries() {
+        let mut fx = Fixture::new();
+        fx.object(
+            A,
+            "projects/alpha",
+            "archived",
+            &[PayloadSpec::archive(1, 7)],
+        );
+        fx.object(
+            B,
+            "projects/beta",
+            "archived",
+            &[PayloadSpec::archive(1, 7)],
+        );
+        fx.track(A, "projects/alpha", EntryState::Gone);
+        fx.track(B, "projects/beta", EntryState::Gone);
+        let mut tombstones = crate::tombstone::Tombstones::default();
+        tombstones.record(id(A), 1);
+        tombstones.write(&fx.collection, &fx.lock).expect("writes");
+        let index = fx.compute();
+        assert_eq!(index.known_ids(), vec![id(B)]);
+        assert!(index.get(id(A)).is_none());
+        assert_eq!(index.tracked().len(), 1);
+    }
+
+    #[test]
     fn the_current_payload_is_the_newest_archive_that_is_not_superseded() {
         let mut fx = Fixture::new();
         fx.object(

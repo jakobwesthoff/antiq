@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 pub enum TrackingError {
     #[error(transparent)]
     Fsx(#[from] FsxError),
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
     #[error("cannot {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -381,6 +383,7 @@ pub fn read(collection: &Collection, id: ObjectId) -> Result<Option<TrackingEntr
 /// would otherwise stop every command, `reconcile` included. Only an
 /// unreadable directory fails.
 pub fn read_all(collection: &Collection) -> Result<TrackingSet, TrackingError> {
+    let pruned = crate::tombstone::active(collection)?;
     let dir = collection.tracking_dir();
     let listing = match fs::read_dir(&dir) {
         Ok(listing) => listing,
@@ -395,7 +398,9 @@ pub fn read_all(collection: &Collection) -> Result<TrackingSet, TrackingError> {
     let mut ids = Vec::new();
     for item in listing {
         let item = item.map_err(io_error("list", &dir))?;
-        if let Some(id) = entry_id(&item.file_name()) {
+        if let Some(id) = entry_id(&item.file_name())
+            && !pruned.contains(&id)
+        {
             ids.push(id);
         }
     }
@@ -995,6 +1000,47 @@ mod tests {
         assert_eq!(set.damaged.len(), 1);
         assert_eq!(set.damaged[0].id.to_string(), ID);
         assert!(matches!(set.damaged[0].error, TrackingError::Parse { .. }));
+    }
+
+    fn prune(fixture: &Fixture, object: &str, version: u32) {
+        let mut tombstones =
+            crate::tombstone::Tombstones::read(&fixture.collection).expect("reads");
+        tombstones.record(object.parse().expect("a valid ID"), version);
+        tombstones
+            .write(&fixture.collection, &fixture.lock)
+            .expect("writes");
+    }
+
+    #[test]
+    fn read_all_skips_the_entries_of_pruned_objects_until_a_newer_version_arrives() {
+        let fixture = fixture();
+        let mut pruned = entry_of(ID);
+        let mut kept = entry_of(SECOND_ID);
+        store(&fixture, &mut pruned);
+        store(&fixture, &mut kept);
+        fs::write(file_of(&fixture, THIRD_ID), "{not json").expect("write");
+        prune(&fixture, ID, 2);
+        prune(&fixture, THIRD_ID, 2);
+
+        let set = read_all(&fixture.collection).expect("lists");
+        assert_eq!(set.entries, [kept]);
+        assert!(set.damaged.is_empty(), "{:?}", set.damaged.len());
+
+        let dir = fixture
+            .collection
+            .object_dir(ID.parse().expect("a valid ID"));
+        fs::create_dir_all(&dir).expect("dirs");
+        fs::write(dir.join("meta.3"), b"x").expect("write");
+        let set = read_all(&fixture.collection).expect("lists");
+        assert_eq!(set.entries.len(), 2, "the lifted entry reads again");
+    }
+
+    #[test]
+    fn a_pruned_file_that_cannot_be_read_fails_read_all() {
+        let fixture = fixture();
+        fs::write(fixture.collection.pruned_path(), b"{").expect("write");
+        let error = read_all(&fixture.collection).expect_err("unreadable");
+        assert!(matches!(error, TrackingError::Store(_)), "{error}");
     }
 
     #[test]

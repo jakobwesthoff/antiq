@@ -20,6 +20,7 @@ use crate::pack::verify::{Compared, Difference, Field, compare_with_listing};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
 use crate::store::{Source, Store, StoreError};
+use crate::tombstone;
 use crate::tracking::{
     self, EntryState, LocalPayload, TrackingEntry, TrackingError, VersionTakenOut,
 };
@@ -323,6 +324,7 @@ pub(crate) fn run(
 
     // The order matters: a tree that differs from its archive has to leave
     // the trash before the trash is emptied.
+    repairs.finish_drops()?;
     repairs.finish_removals()?;
     repairs.empty_run_directories();
     repairs.remove_write_leftovers();
@@ -1183,6 +1185,32 @@ impl Repairs<'_> {
     /// manifest belongs to an entry and is written after it. The entry of
     /// an ID whose file cannot be read may still exist, so its manifest
     /// stays.
+    /// Finishes the drop of every pruned object whose record is in force.
+    /// A drop writes the record first and then removes the entry, the
+    /// manifest, the object directory and the index cache file, so any of
+    /// them can be left behind. Entries of pruned objects are not among
+    /// `self.entries`: `tracking::read_all` leaves them out.
+    fn finish_drops(&mut self) -> Result<(), RepairError> {
+        for id in tombstone::active(self.collection)? {
+            self.effects.remove_entry(self.collection, self.lock, id)?;
+            self.remove_file(&self.collection.manifest_path(id));
+            let directory = self.collection.object_dir(id);
+            match self.effects.remove_tree_at(&directory) {
+                Ok(()) => {
+                    if let Err(error) = self.effects.flush_dir(&self.collection.objects_dir()) {
+                        self.warn(format!("cannot flush the object directories: {error}"));
+                    }
+                }
+                Err(error) => self.warn(format!(
+                    "cannot remove {} of a pruned object: {error}",
+                    directory.display()
+                )),
+            }
+            self.remove_file(&self.collection.index_dir().join(format!("{id}.json")));
+        }
+        Ok(())
+    }
+
     fn remove_orphan_manifests(&mut self) {
         let directory = self.collection.tracking_dir();
         let Ok(items) = fs::read_dir(&directory) else {
@@ -4385,5 +4413,151 @@ mod tests {
 
         assert!(matches!(outcome, Outcome::Refused(_)));
         assert!(collection.trash_path(object).exists());
+    }
+
+    // =====================================================
+    // Pruned objects
+    // =====================================================
+
+    impl World {
+        /// What a drop that stopped after writing the tombstone leaves: the
+        /// entry, its manifest, the object directory and the index cache.
+        fn half_dropped(&self, object: &str, highest: u32) {
+            let entry = TrackingEntry::new(
+                id(object),
+                path("projects/old"),
+                EntryState::Gone,
+                VersionTakenOut::Committed(1),
+                time(WRITTEN),
+            );
+            self.store_entry(&entry);
+            fs::write(self.collection.manifest_path(id(object)), b"{}").expect("a manifest");
+            let dir = self.collection.object_dir(id(object));
+            fs::create_dir_all(&dir).expect("the object directory");
+            for number in 1..=highest {
+                fs::write(dir.join(format!("meta.{number}")), b"x").expect("a version");
+            }
+            fs::create_dir_all(self.collection.index_dir()).expect("the index directory");
+            fs::write(
+                self.collection
+                    .index_dir()
+                    .join(format!("{}.json", id(object))),
+                b"{}",
+            )
+            .expect("a cache file");
+        }
+
+        fn tombstone(&self, object: &str, version: u32) {
+            let mut tombstones =
+                crate::tombstone::Tombstones::read(&self.collection).expect("reads");
+            tombstones.record(id(object), version);
+            tombstones
+                .write(&self.collection, &self.lock)
+                .expect("writes");
+        }
+    }
+
+    #[test]
+    fn a_drop_that_stopped_after_the_tombstone_is_finished() {
+        let world = World::new();
+        world.half_dropped(ID, 2);
+        world.tombstone(ID, 2);
+        let warnings = world.run();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(!world.collection.manifest_path(id(ID)).exists());
+        assert!(!world.collection.object_dir(id(ID)).exists());
+        assert!(
+            !world
+                .collection
+                .index_dir()
+                .join(format!("{}.json", id(ID)))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_drop_of_other_objects_leaves_the_rest_alone() {
+        let world = World::new();
+        world.half_dropped(ID, 2);
+        world.half_dropped(OTHER_ID, 1);
+        world.tombstone(ID, 2);
+        world.run();
+        assert!(world.collection.tracking_path(id(OTHER_ID)).exists());
+        assert!(world.collection.object_dir(id(OTHER_ID)).exists());
+    }
+
+    #[test]
+    fn a_lifted_tombstone_keeps_the_object() {
+        let world = World::new();
+        world.half_dropped(ID, 3);
+        world.tombstone(ID, 2);
+        world.run();
+        assert!(world.collection.tracking_path(id(ID)).exists());
+        assert!(world.collection.object_dir(id(ID)).join("meta.3").exists());
+    }
+
+    #[test]
+    fn a_drop_whose_directory_is_gone_already_still_removes_the_entry() {
+        let world = World::new();
+        world.half_dropped(ID, 1);
+        fs::remove_dir_all(world.collection.object_dir(id(ID))).expect("gone");
+        world.tombstone(ID, 1);
+        world.run();
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+    }
+
+    #[test]
+    fn an_object_directory_that_cannot_be_removed_is_a_warning_and_the_next_run_finishes_it() {
+        let world = World::new();
+        world.half_dropped(ID, 1);
+        world.tombstone(ID, 1);
+        let fails = |what: &str, subject: &str| what == "remove" && subject.ends_with(ID);
+        let effects = Scripted::new(&fails);
+        let warnings = world.run_with(&effects).expect("the repairs run");
+        assert!(mentions(&warnings, "of a pruned object"), "{warnings:?}");
+        assert!(!world.collection.tracking_path(id(ID)).exists());
+        assert!(world.collection.object_dir(id(ID)).exists());
+        world.run();
+        assert!(!world.collection.object_dir(id(ID)).exists());
+    }
+
+    #[test]
+    fn an_objects_directory_that_cannot_be_flushed_is_a_warning() {
+        let world = World::new();
+        world.half_dropped(ID, 1);
+        world.tombstone(ID, 1);
+        let objects = world.collection.objects_dir().display().to_string();
+        let fails = |what: &str, subject: &str| what == "flush" && subject == objects;
+        let effects = Scripted::new(&fails);
+        let warnings = world.run_with(&effects).expect("the repairs run");
+        assert!(
+            mentions(&warnings, "cannot flush the object directories"),
+            "{warnings:?}"
+        );
+        assert!(!world.collection.object_dir(id(ID)).exists());
+    }
+
+    #[test]
+    fn an_entry_of_a_pruned_object_that_cannot_be_removed_stops_the_repairs() {
+        let world = World::new();
+        world.half_dropped(ID, 1);
+        world.tombstone(ID, 1);
+        let fails = |what: &str, _: &str| what == "remove_entry";
+        let effects = Scripted::new(&fails);
+        let error = world.run_with(&effects).expect_err("stops");
+        assert!(matches!(error, RepairError::Tracking(_)), "{error}");
+        assert!(
+            world.collection.object_dir(id(ID)).exists(),
+            "nothing else is removed first"
+        );
+    }
+
+    #[test]
+    fn a_pruned_record_that_cannot_be_read_stops_the_repairs() {
+        let world = World::new();
+        fs::write(world.collection.pruned_path(), b"{").expect("write");
+        let error = world.run_with(&RealEffects).expect_err("stops");
+        assert!(matches!(error, RepairError::Tracking(_)), "{error}");
     }
 }

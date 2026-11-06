@@ -516,6 +516,7 @@ Local layout:
 .antiq/config.toml
 .antiq/lock
 .antiq/remote-state.json              when the remote was last reachable or first found away, when the last sync finished
+.antiq/pruned.json                    objects dropped by `reconcile --prune`, each with its highest committed version
 .antiq/objects/<ulid>/...             same layout as on the remote
 .antiq/objects/<ulid>/meta.pending    a recorded change not committed yet
 .antiq/tracking/<ulid>.json           tracking entries

@@ -23,7 +23,7 @@ use crate::remote::path::{PathRemote, RootState, Seams, assess, inspect, probe_e
 use crate::remote::rsync::Rsync;
 use crate::remote::ssh::{RootFound, SshRemote, SshSeams, SshTarget, Unproven};
 use crate::remote::url::{RemoteUrl, UrlError};
-use crate::remote::{KnownVersions, Remote, RemoteError, RemoteState};
+use crate::remote::{Remote, RemoteError, RemoteState};
 use crate::report::{CommandReport, Warning};
 use crate::run::{RunGuard, Started};
 use crate::store::{Store, StoreError};
@@ -618,12 +618,11 @@ fn attach(
         });
     }
 
-    let pulled =
-        copy_metadata(*remote, &Store::new(collection), guard.lock()).map_err(|error| {
-            RemoteOpError::MetadataCopy {
-                message: error.to_string(),
-            }
-        })?;
+    let pulled = copy_metadata(*remote, collection, guard.lock()).map_err(|error| {
+        RemoteOpError::MetadataCopy {
+            message: error.to_string(),
+        }
+    })?;
     warnings.extend(remote.take_warnings());
 
     let action = if *init {
@@ -974,15 +973,11 @@ fn prepare_root(
 /// belong to.
 fn copy_metadata(
     remote: &dyn Remote,
-    store: &Store<'_>,
+    collection: &Collection,
     lock: &RunLock,
 ) -> Result<usize, RemoteOpError> {
-    let mut known = KnownVersions::new();
-    for id in store.objects()? {
-        if let Some(highest) = store.committed_versions(id)?.last() {
-            known.insert(id, *highest);
-        }
-    }
+    let store = Store::new(collection);
+    let known = crate::tombstone::known_versions(collection)?;
     let files = remote.pull_metadata(&known)?;
     let mut objects = BTreeSet::new();
     for file in files {
@@ -1733,6 +1728,35 @@ mod tests {
             ..Seams::default()
         };
         assert!(world.show(&mounted).expect("shown").warnings.is_empty());
+    }
+
+    #[test]
+    fn attaching_does_not_bring_back_a_pruned_object_but_brings_a_newer_version() {
+        let world = world();
+        let root = world.remote("antiq");
+        put_version(&root, REMOTE_ID, 1, b"one");
+        put_version(&root, OTHER_ID, 1, b"other");
+        put_version(&root, OTHER_ID, 2, b"newer");
+        let collection = world.collection();
+        let clock = FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a time"));
+        let started = run::start(&collection, &clock, false).expect("the run starts");
+        let Started::Guarded(guard) = &started else {
+            panic!("a real run holds the lock");
+        };
+        let mut tombstones = crate::tombstone::Tombstones::default();
+        tombstones.record(id(REMOTE_ID), 1);
+        tombstones.record(id(OTHER_ID), 1);
+        tombstones.write(&collection, guard.lock()).expect("writes");
+        drop(started);
+        world.add(&root).expect("attached");
+        let store = Store::new(&collection);
+        assert!(!collection.object_dir(id(REMOTE_ID)).exists());
+        assert_eq!(store.objects().expect("lists"), vec![id(OTHER_ID)]);
+        assert_eq!(
+            store.committed_versions(id(OTHER_ID)).expect("lists"),
+            [2],
+            "only the version above the recorded one comes"
+        );
     }
 
     #[test]

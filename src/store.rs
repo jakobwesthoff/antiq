@@ -31,6 +31,8 @@ pub enum StoreError {
     Fsx(#[from] FsxError),
     #[error(transparent)]
     Meta(#[from] MetaError),
+    #[error(transparent)]
+    Tombstone(#[from] crate::tombstone::TombstoneError),
     #[error("the recorded change (meta.pending) cannot be read: {reason}")]
     PendingUnreadable { reason: String },
     #[error(
@@ -159,12 +161,16 @@ impl<'c> Store<'c> {
 
     /// The objects that have a directory, in ID order. Names that are not
     /// the canonical (upper case) spelling of an ID are skipped, since
-    /// every path of the store is built from that spelling.
+    /// every path of the store is built from that spelling. An object
+    /// pruned by `reconcile --prune` is skipped as well while its record
+    /// is in force.
     pub fn objects(&self) -> Result<Vec<ObjectId>, StoreError> {
+        let pruned = crate::tombstone::active(self.collection)?;
         let mut ids = Vec::new();
         for name in self.names_in(&self.collection.objects_dir(), true)? {
             if let Ok(id) = name.parse::<ObjectId>()
                 && id.to_string() == name
+                && !pruned.contains(&id)
             {
                 ids.push(id);
             }
@@ -313,7 +319,8 @@ impl<'c> Store<'c> {
     /// (pulled from the remote) as they are. They are not parsed: a
     /// version of a later format, or one that cannot be read, is kept so
     /// that [`Store::current`] can report it. A version that is there
-    /// already is left alone if the bytes agree.
+    /// already is left alone if the bytes agree. A version that the record
+    /// of a pruned object covers is not stored.
     pub fn store_committed(
         &self,
         _lock: &RunLock,
@@ -321,6 +328,9 @@ impl<'c> Store<'c> {
         number: NonZeroU32,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
+        if crate::tombstone::Tombstones::read(self.collection)?.covers(id, number.get()) {
+            return Ok(());
+        }
         let path = self.meta_path(id, number.get());
         match read_if_present(&path)? {
             Some(existing) if existing == bytes => Ok(()),

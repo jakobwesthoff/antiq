@@ -94,6 +94,11 @@ impl Collection {
         self.antiq_dir().join("remote-state.json")
     }
 
+    /// The objects this machine dropped on purpose.
+    pub fn pruned_path(&self) -> PathBuf {
+        self.antiq_dir().join("pruned.json")
+    }
+
     pub fn objects_dir(&self) -> PathBuf {
         self.antiq_dir().join("objects")
     }

@@ -33,6 +33,7 @@ pub mod run;
 pub mod select;
 pub mod store;
 pub mod sysmem;
+pub mod tombstone;
 pub mod tracking;
 pub mod tree;
 pub mod walk;

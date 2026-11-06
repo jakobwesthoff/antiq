@@ -3142,6 +3142,19 @@ Notes for the items that call the strict verify and the listing comparison
   The budget keeps 40 of the 300 pieces, so the other 260 are read
   again for every query.
 
+### I35
+
+- 2026-11-04: the record of pruned objects, `.antiq/pruned.json`, lives
+  in `src/tombstone.rs`. `sync` (I30) and `unearth` (I34) build the
+  `known` they pass to `Remote::pull_metadata` through
+  `tombstone::known_versions(collection)`, never from `Store::objects`
+  and `committed_versions` alone: a pruned object counts with its
+  recorded version, so a pull brings only versions above it.
+  `Store::store_committed` skips a version the record covers, and
+  `Store::objects` and `tracking::read_all` leave a pruned object out
+  while its record is in force, so a command that lists through them
+  needs no check of its own.
+
 ## Relations
 
 - Relates to: [Define the v1 scope and architecture of antiq](01M6E17PET32XD9PC04AJ2PBZY-define-the-v1-scope-and-architecture-of-antiq.md)
