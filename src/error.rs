@@ -21,7 +21,6 @@ use crate::lock::LockError;
 use crate::machine::MachineError;
 use crate::meta::MetaError;
 use crate::ops::archive::ArchiveError;
-use crate::ops::find::FindError;
 use crate::ops::fork::ForkError;
 use crate::ops::import::ImportError;
 use crate::ops::init::InitError;
@@ -143,8 +142,6 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
-    Find(#[from] FindError),
-    #[error(transparent)]
     Fork(#[from] ForkError),
     #[error(transparent)]
     Fsx(#[from] FsxError),
@@ -227,7 +224,6 @@ impl Error {
             Error::Brake(e) => e.kind(),
             Error::Collection(e) => e.kind(),
             Error::Config(e) => e.kind(),
-            Error::Find(e) => e.kind(),
             Error::Fork(e) => e.kind(),
             Error::Fsx(e) => e.kind(),
             Error::Id(e) => e.kind(),

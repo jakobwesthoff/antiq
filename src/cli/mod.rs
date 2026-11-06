@@ -7,7 +7,6 @@
 
 pub mod cmd;
 pub mod output;
-pub mod picker;
 pub mod tty;
 
 use self::output::Output;
@@ -47,8 +46,6 @@ pub enum Command {
     Archive(DryRunArgs),
     /// Bring an archived piece back
     Unearth(UnearthArgs),
-    /// List and search all pieces, and open the picker
-    Find(FindArgs),
     /// Give an unearthed piece a new ID
     Fork(ForkArgs),
     /// Keep a piece from being archived
@@ -79,7 +76,6 @@ impl Command {
             Command::Status => "status",
             Command::Archive(_) => "archive",
             Command::Unearth(_) => "unearth",
-            Command::Find(_) => "find",
             Command::Fork(_) => "fork",
             Command::Pin(_) => "pin",
             Command::Unpin(_) => "unpin",
@@ -158,15 +154,6 @@ pub struct UnearthArgs {
     /// Exit 0 when the remote is away
     #[arg(long)]
     pub if_reachable: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct FindArgs {
-    /// What to search for; without it every piece is listed
-    pub query: Option<String>,
-    /// Print the path of the picked piece
-    #[arg(long)]
-    pub print: bool,
 }
 
 #[derive(Debug, Args)]
@@ -343,7 +330,6 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Status => cmd::status::run(&ctx, out),
         Command::Archive(args) => cmd::archive::run(&ctx, args, out),
         Command::Unearth(args) => cmd::unearth::run(&ctx, args, out),
-        Command::Find(args) => cmd::find::run(&ctx, args, out),
         Command::Fork(args) => cmd::fork::run(&ctx, args, out),
         Command::Pin(args) => cmd::pin::run(&ctx, args, out),
         Command::Unpin(args) => cmd::unpin::run(&ctx, args, out),

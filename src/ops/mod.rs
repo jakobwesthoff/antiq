@@ -5,7 +5,6 @@
 //! One module per command.
 
 pub mod archive;
-pub mod find;
 pub mod fork;
 pub mod import;
 pub mod init;

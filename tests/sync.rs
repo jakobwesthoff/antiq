@@ -116,10 +116,6 @@ fn sync_pulls_a_version_and_fetches_its_listing() {
     Pulled version 1 of 01EJ3PX0010000000000000001
     Fetched the listing of 01EJ3PX0010000000000000001
     ");
-    let found = antiq_in(&ben, &["find", "main.rs"]);
-    assert_eq!(found.code(), 0, "{}{}", found.stdout, found.stderr);
-    // The query matches a member of the archive, not the piece's name.
-    assert!(found.stdout.contains("alpha"), "{}", found.stdout);
 }
 
 #[test]
@@ -250,8 +246,6 @@ fn sync_uploads_commits_and_another_machine_pulls_it() {
     let ben = attached(remote.path(), "ben");
     let pulled = antiq_in(&ben, &["sync"]);
     assert_eq!(pulled.code(), 0, "{}{}", pulled.stdout, pulled.stderr);
-    let found = antiq_in(&ben, &["find", "a.txt"]);
-    assert!(found.stdout.contains("notes"), "{}", found.stdout);
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //!
 //! Every function returns an `io::Result`, so a failed write reaches the
 //! caller as an error instead of a panic. A closed pipe is the exception:
-//! it is what `antiq find | head` ends with, so a stream whose reader is
+//! it is what `antiq status | head` ends with, so a stream whose reader is
 //! gone silently drops what is written to it from then on.
 
 use antiq::error::ErrorKind;
@@ -215,6 +215,7 @@ impl Output {
 
     /// Writes a line of a command's result to stdout as the bytes it is.
     /// For output that a shell reads back, such as a path.
+    #[allow(dead_code, reason = "used again by C11")]
     pub fn line_os(&mut self, text: &OsStr) -> io::Result<()> {
         self.stdout.write_line_bytes(text.as_bytes())
     }

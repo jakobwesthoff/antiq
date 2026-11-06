@@ -184,33 +184,6 @@ fn the_imported_piece_is_archived_in_status() {
 }
 
 #[test]
-fn find_shows_the_imported_piece_by_its_name_and_by_a_member() {
-    let mut world = World::new();
-    world.archive("proj.tar.zst", FILES);
-    world.import(&["proj.tar.zst"]);
-    for query in ["proj", "a.txt"] {
-        let run = Antiq::new()
-            .arg("--json")
-            .arg("-C")
-            .arg(world.temp.root())
-            .args(["find", query])
-            .run();
-        assert_eq!(
-            run.code(),
-            0,
-            "stdout: {}, stderr: {}",
-            run.stdout,
-            run.stderr
-        );
-        let json = run.json();
-        let matches = json["matches"].as_array().expect("matches");
-        assert_eq!(matches.len(), 1, "{query}: {json}");
-        assert_eq!(matches[0]["path"], "proj");
-        assert_eq!(matches[0]["state"], "archived");
-    }
-}
-
-#[test]
 fn path_names_the_piece_and_files_and_path_start_in_the_directory_c_names() {
     let mut world = World::new();
     world.archive("proj.tar.zst", FILES);

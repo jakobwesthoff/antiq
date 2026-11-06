@@ -11,12 +11,11 @@ use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 12] = [
     "init",
     "status",
     "archive",
     "unearth",
-    "find",
     "fork",
     "pin",
     "unpin",
@@ -33,7 +32,7 @@ fn json_run(args: &[&str]) -> support::cmd::Run {
 }
 
 #[test]
-fn help_lists_the_thirteen_subcommands() {
+fn help_lists_the_twelve_subcommands() {
     let run = Antiq::new().arg("--help").run();
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let mut listed: Vec<&str> = run
@@ -94,8 +93,17 @@ fn status_takes_no_dry_run() {
 }
 
 #[test]
-fn find_takes_no_force() {
-    assert_usage_error(&["find", "--force"], "unexpected argument '--force' found");
+fn find_is_not_a_command() {
+    let dir = tempfile::tempdir().expect("the temp dir is writable");
+    let run = json_run(&["-C", dir.path().to_str().expect("UTF-8"), "find"]);
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert!(
+        run.error_message()
+            .contains("unrecognized subcommand 'find'"),
+        "message: {}",
+        run.error_message()
+    );
 }
 
 #[test]
@@ -173,12 +181,6 @@ accepts_and_needs_a_collection!(
         "--dry-run",
         "--if-reachable"
     ]
-);
-accepts_and_needs_a_collection!(find_takes_no_query, "find", ["find"]);
-accepts_and_needs_a_collection!(
-    find_takes_a_query_and_print,
-    "find",
-    ["find", "q", "--print"]
 );
 accepts_and_needs_a_collection!(
     fork_takes_a_name_and_dry_run,

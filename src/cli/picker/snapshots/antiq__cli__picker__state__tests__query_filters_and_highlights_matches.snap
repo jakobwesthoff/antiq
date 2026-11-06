@@ -1,9 +1,0 @@
----
-source: src/cli/picker/state.rs
-expression: s.debug_render()
----
-  g[a]mma
-  bet[a]
-> [a]lpha
-3/3
-> a
