@@ -277,10 +277,17 @@ impl Cards {
         }
     }
 
-    /// The columns the name of a piece takes with its version label.
+    /// The columns the name of a piece takes with its version label. A name
+    /// shows with its label only from `MIN_LABELLED_NAME` columns on, so a
+    /// shorter one is counted as that wide.
     fn full_width(name: &str, label: Option<&str>) -> usize {
-        let label = label.map_or(0, |label| 1 + "version ".len() + sanitize(label).width());
-        sanitize(name).width() + label
+        let name = sanitize(name).width();
+        match label {
+            Some(label) => {
+                name.max(MIN_LABELLED_NAME) + 1 + "version ".len() + sanitize(label).width()
+            }
+            None => name,
+        }
     }
 
     /// Makes room in the name column for a piece and its version label.
@@ -727,9 +734,11 @@ impl Cards {
         let word = current.map_or("", |(operation, _)| Self::operation_word(operation));
         let end = visible_width(&second);
 
-        // Room for the name: the line up to the column where the second
-        // line ends, less the mark, the gap and the word.
-        let room = end
+        // The name gets the room of the name column, less what the mark, the
+        // gap and the word need on the terminal. Nothing in it depends on the
+        // count, so a cut name does not change from one frame to the next.
+        let room = cols
+            .min(MAX_WIDTH)
             .saturating_sub(4 + GAP + word.width())
             .max(MIN_NAME)
             .min(layout.name);

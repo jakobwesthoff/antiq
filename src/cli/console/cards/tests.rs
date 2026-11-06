@@ -314,6 +314,25 @@ fn the_result_column_has_the_width_of_the_command_and_a_longer_result_widens_its
 }
 
 #[test]
+fn a_short_name_keeps_its_version_on_the_finished_line() {
+    let mut cards = cards(UNEARTH);
+    cards.apply(
+        Msg::Started {
+            name: "web".to_string(),
+            bytes: Some(48_300_000),
+            label: Some("2026-11-05 13:02:11".to_string()),
+        },
+        secs(0),
+    );
+    cards.apply(finished("web", 48_300_000, Outcome::Files(15)), secs(4));
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(
+        lines[0].starts_with("  ✔ web version 2026-11-05 13:02:11 "),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
     let mut cards = with_style(ARCHIVE, style(true, true));
     run_piece(
@@ -1249,7 +1268,7 @@ fn a_long_name_is_cut_behind_the_prefix() {
     cards.apply(started(name, 0), secs(0));
     let (storing, _k) = operation(name, Operation::Storing, 1, 4);
     cards.apply(storing, secs(0));
-    let region = cards.region(secs(0), MOCKUP, 24);
+    let region = cards.region(secs(0), 59, 24);
     assert!(
         region[0].starts_with("  ⠋ Pushing to backup@"),
         "{:?}",
@@ -1257,7 +1276,41 @@ fn a_long_name_is_cut_behind_the_prefix() {
     );
     assert!(region[0].contains('…'), "{:?}", region[0]);
     assert!(region[0].ends_with("storing"), "{:?}", region[0]);
-    assert!(visible_width(&region[0]) <= MOCKUP, "{:?}", region[0]);
+    assert!(visible_width(&region[0]) <= 59, "{:?}", region[0]);
+}
+
+#[test]
+fn a_name_that_fits_the_terminal_is_not_cut_for_the_width_of_the_count() {
+    let mut cards = cards(UNEARTH);
+    cards.apply(
+        Msg::Started {
+            name: "projects/recipe-api".to_string(),
+            bytes: None,
+            label: Some("2026-11-05 13:02:11 +02:00".to_string()),
+        },
+        secs(0),
+    );
+    let (storing, _k) = operation("projects/recipe-api", Operation::Storing, 0, 0);
+    cards.apply(storing, secs(0));
+    let region = cards.region(secs(0), 100, 24);
+    assert!(
+        region[0].contains("projects/recipe-api version 2026-11-05 13:02:11 +02:00"),
+        "{region:?}"
+    );
+}
+
+#[test]
+fn a_cut_name_is_the_same_whatever_the_width_of_the_count() {
+    let name = "backup@nas.local:/volume1/antiq/projects/collection";
+    let first_line = |done: u64, total: u64| {
+        let mut cards = prefixed(UNEARTH, "Pushing to ");
+        cards.apply(started(name, 0), secs(0));
+        let (storing, _k) = operation(name, Operation::Storing, done, total);
+        cards.apply(storing, secs(0));
+        let line = cards.region(secs(0), 59, 24)[0].clone();
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    assert_eq!(first_line(1, 4), first_line(1_203, 2_931));
 }
 
 #[test]
