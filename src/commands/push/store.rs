@@ -144,13 +144,7 @@ pub(super) fn check(collection: &Collection, mode: &Mode) -> Result<Vec<RelPath>
     let mut lines = Vec::new();
     for ((piece, version), inspection) in items.iter().zip(inspections) {
         let inspection = inspection.map_err(PushError::Versions)?;
-        if inspection.condition == Condition::BeingStored {
-            if let Mode::Real { warnings } = mode {
-                lines.push(being_stored(piece, version, warnings));
-            }
-        } else if let Some(line) = refusal(piece, version, &inspection.condition) {
-            lines.push(line);
-        }
+        lines.extend(verdict(piece, version, &inspection.condition, mode));
     }
     if !lines.is_empty() {
         return Err(PushError::DamagedStore { lines });
@@ -231,6 +225,25 @@ fn first_non_directory(
         }
     }
     Ok(None)
+}
+
+/// The line that refuses a version in the condition `condition`, if any.
+/// A staged archive is the repairs' business: a real run refuses it only
+/// when a repair failed, and a dry run does not count it, since the
+/// repairs it lists finish the move.
+fn verdict(
+    piece: &RelPath,
+    version: &StoreVersion,
+    condition: &Condition,
+    mode: &Mode,
+) -> Option<String> {
+    match (condition, mode) {
+        (Condition::BeingStored, Mode::Real { warnings }) => {
+            Some(being_stored(piece, version, warnings))
+        }
+        (Condition::BeingStored, Mode::DryRun(_)) => None,
+        _ => refusal(piece, version, condition),
+    }
 }
 
 /// The line for a version whose archive is staged because a repair could
@@ -580,6 +593,35 @@ mod tests {
         match result {
             Err(PushError::Root { path, .. }) => assert_eq!(path, missing),
             other => panic!("expected a Root error, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn a_staged_version_is_refused_in_a_real_run_and_passed_in_a_dry_run() {
+        let warnings = [Warning::new("cannot move x")];
+        let real = Mode::Real {
+            warnings: &warnings,
+        };
+        let line = verdict(
+            &path("projects/a"),
+            &whole(),
+            &Condition::BeingStored,
+            &real,
+        )
+        .expect("refused");
+        assert!(line.contains("cannot move x"), "{line}");
+
+        let dry = Mode::DryRun(Planned::default());
+        assert_eq!(
+            verdict(&path("projects/a"), &whole(), &Condition::BeingStored, &dry),
+            None
+        );
+        for mode in [&real, &dry] {
+            assert!(verdict(&path("projects/a"), &whole(), &Condition::Incomplete, mode).is_some());
+            assert_eq!(
+                verdict(&path("projects/a"), &whole(), &Condition::Sound, mode),
+                None
+            );
         }
     }
 

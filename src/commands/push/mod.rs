@@ -277,11 +277,24 @@ pub fn push(
     }
 
     recheck_directory(&call_url, directory)?;
-    let call = rsync.mirror(&options, collection.root(), &call_url, request.dry_run);
-    let outcome = call.run().map_err(PushError::Rsync)?;
-    let finished = mirror::classify(&outcome)?;
-    report.vanished = finished.vanished;
-    report.changes = summary::group(&summary::parse_itemized(&outcome.stdout), &folders);
+    let mirrored = mirror::run_mirror(
+        &mirror::Mirror {
+            rsync: &rsync,
+            options: &options,
+            collection: collection.root(),
+            url: &call_url,
+        },
+        &|call| call.run(),
+        request.dry_run,
+    )?;
+    report.vanished = mirrored.vanished;
+    report.second_pass = mirrored.second_pass;
+    let items: Vec<summary::Item> = mirrored
+        .stdouts
+        .iter()
+        .flat_map(|stdout| summary::parse_itemized(stdout))
+        .collect();
+    report.changes = summary::group(&items, &folders);
 
     if let Some(plan) = report.plan.as_mut() {
         if proceed.write_marker {

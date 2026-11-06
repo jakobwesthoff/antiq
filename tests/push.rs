@@ -1430,7 +1430,10 @@ fn a_push_summarises_the_changes_per_piece_in_json_and_text() {
     let target = Target::new();
     let (collection, fake) = targeted(&target.path());
     target.marker(&collection);
-    fake.answer_all(ITEMIZED, "", 0);
+    fake.answer(1, ITEMIZED, "", 0);
+    fake.answer(2, "", "", 0);
+    fake.answer(3, ITEMIZED, "", 0);
+    fake.answer(4, "", "", 0);
 
     let json = push(&collection, &[]).json();
 
@@ -1644,4 +1647,111 @@ fn a_dry_run_does_not_refuse_a_version_whose_staging_a_repair_finishes() {
 
     assert_eq!(json["result"], "pushed", "{json}");
     assert_eq!(json["actions"][0]["repair"], "delete_sidecars");
+}
+
+#[test]
+fn a_planned_repair_with_no_staged_archive_saves_a_dry_run() {
+    let target = Target::new();
+    let mut builder = Collection::build(&Clock::now());
+    builder.patterns(&["projects/*"]);
+    builder.piece("projects/a", |piece| {
+        piece.age_days(3).file("a.txt", "a");
+    });
+    builder.version("projects/a", STAMP, &[("a.txt", "a")]);
+    let collection = builder.finish();
+    set_url(&collection, target.path().to_str().expect("UTF-8"));
+    let _fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+    target.marker(&collection);
+    // An unearth that died left a damaged copy of the version; repair 5
+    // deletes it.
+    collection.damage_truncate_archive("projects/a", STAMP);
+    fs::write(
+        collection.path("projects/a/.antiq-restored"),
+        format!("restored 2024-07-01T00:00:00Z version {STAMP}\n"),
+    )
+    .expect("written");
+
+    let json = push(&collection, &["-n"]).json();
+
+    assert_eq!(json["result"], "pushed", "{json}");
+    assert_eq!(json["actions"][0]["repair"], "delete_restored_version");
+}
+
+// =========================================================
+// Step 7: the second pass
+// =========================================================
+
+/// The number of transfers the stand-in saw.
+fn transfers(fake: &FakeRsync) -> Vec<Vec<String>> {
+    fake.calls()
+        .into_iter()
+        .filter(|call| call[0] == "transfer")
+        .collect()
+}
+
+fn pushing() -> (Collection, FakeRsync, Target) {
+    let target = Target::new();
+    let (collection, fake) = targeted(&target.path());
+    target.marker(&collection);
+    (collection, fake, target)
+}
+
+#[test]
+fn deletions_are_followed_by_a_dry_run_and_a_quiet_one_ends_the_push() {
+    let (collection, fake, _target) = pushing();
+    fake.answer(1, "*deleting   projects/gone.txt\n", "", 0);
+    fake.answer(2, "", "", 0);
+
+    let json = push(&collection, &[]).json();
+
+    let calls = transfers(&fake);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(!calls[0].contains(&"-n".to_string()));
+    assert!(calls[1].contains(&"-n".to_string()));
+    assert_eq!(json["second_pass"], false);
+    assert_eq!(json["pieces"][0]["deleted"], 1);
+}
+
+#[test]
+fn a_dry_run_that_finds_more_is_followed_by_the_mirror_and_counts_both() {
+    let (collection, fake, _target) = pushing();
+    fake.answer(1, "*deleting   projects/Gone.txt\n", "", 0);
+    fake.answer(2, ">f+++++++++ projects/gone.txt\n", "", 0);
+    fake.answer(3, ">f+++++++++ projects/gone.txt\n", "", 0);
+
+    let json = push(&collection, &[]).json();
+
+    let calls = transfers(&fake);
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(!calls[2].contains(&"-n".to_string()));
+    assert_eq!(json["second_pass"], true);
+    assert_eq!(json["pieces"][0]["deleted"], 1);
+    assert_eq!(json["pieces"][0]["created"], 1);
+}
+
+#[test]
+fn a_failing_second_mirror_is_exit_1_and_no_deletion_means_one_call() {
+    let (collection, fake, _target) = pushing();
+    fake.answer(1, "*deleting   projects/gone.txt\n", "", 0);
+    fake.answer(2, ">f+++++++++ projects/x\n", "", 0);
+    fake.answer(3, "", "rsync: write failed\n", 11);
+
+    let message = refused_message(&push(&collection, &[]));
+    assert!(message.contains("write failed"), "{message}");
+
+    let (collection, fake, _target) = pushing();
+    fake.answer_all(">f+++++++++ projects/x\n", "", 0);
+    goes_on(&push(&collection, &[]));
+    assert_eq!(transfers(&fake).len(), 1);
+}
+
+#[test]
+fn a_dry_run_of_the_push_runs_no_second_pass() {
+    let (collection, fake, _target) = pushing();
+    fake.answer_all("*deleting   projects/gone.txt\n", "", 0);
+
+    let json = push(&collection, &["-n"]).json();
+
+    assert_eq!(transfers(&fake).len(), 1);
+    assert_eq!(json["actions"][0]["pieces"][0]["deleted"], 1);
 }

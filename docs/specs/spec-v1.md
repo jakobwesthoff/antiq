@@ -1564,8 +1564,12 @@ target. `--init` and `--force` are each refused together with
    links. With `--delete-delay`, deletions happen only at the end, so an
    interrupted run removes nothing that was on the target before.
 7. **Second pass.** When the run's output has a line starting with
-   `*deleting`, `push` runs the same command with `-n` and, if that prints
-   any itemized line, the mirror once more.
+   `*deleting` and the run ended with exit 0, 23 or 24, `push` runs the
+   same command with `-n` and, if that prints any itemized line (of a
+   directory too), the mirror once more. A run that ended any other way
+   deleted nothing and gets no second pass. The result is the worst of
+   the runs, and the first failure's text is the one printed; the
+   summary adds up the changes of both mirror runs.
 8. **Result.** rsync exit 0 is success; 24 (files vanished during the run)
    is success with a note naming the paths of the `file has vanished`
    lines. Everything else, including any failure after the pre-check, is

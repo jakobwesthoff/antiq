@@ -6,6 +6,7 @@
 
 use super::PushError;
 use super::precheck::{Runner, Scratch};
+use super::summary;
 use crate::target::marker::{self, Marker};
 use crate::target::rsync::{Options, Outcome, Rsync};
 use crate::target::url::TargetUrl;
@@ -124,6 +125,76 @@ pub(super) fn classify(outcome: &Outcome) -> Result<Finished, PushError> {
         None => format!("rsync was ended by a signal: {said}"),
     };
     Err(PushError::Mirror { detail })
+}
+
+/// What the mirror needs to run.
+pub(super) struct Mirror<'a> {
+    pub rsync: &'a Rsync,
+    pub options: &'a Options,
+    pub collection: &'a Path,
+    pub url: &'a TargetUrl,
+}
+
+/// What the runs of the mirror left.
+#[derive(Debug)]
+pub(super) struct Mirrored {
+    pub vanished: Vec<String>,
+    /// The output of every run that changed the target (or, in a dry run,
+    /// would), in order.
+    pub stdouts: Vec<Vec<u8>>,
+    pub second_pass: bool,
+}
+
+/// Runs the mirror (step 6), and after deletions the second pass (step 7).
+pub(super) fn run_mirror(
+    mirror: &Mirror,
+    run: Runner,
+    dry_run: bool,
+) -> Result<Mirrored, PushError> {
+    let call = |dry_run: bool| {
+        mirror
+            .rsync
+            .mirror(mirror.options, mirror.collection, mirror.url, dry_run)
+    };
+    let first = run(&call(dry_run)).map_err(PushError::Rsync)?;
+    let mut vanished = Vec::new();
+    let mut failure: Option<PushError> = None;
+    let mut record = |outcome: &Outcome| match classify(outcome) {
+        Ok(finished) => vanished.extend(finished.vanished),
+        // The first failure is the one reported.
+        Err(error) => {
+            failure.get_or_insert(error);
+        }
+    };
+    record(&first);
+    let mut stdouts = vec![first.stdout.clone()];
+
+    // `--delete-delay` deletes at the end, after rsync has seen the whole
+    // tree, so a name that differs only in case from one it deletes can
+    // have been skipped on a volume that treats them as one. Another run
+    // finds what is left. A dry run cannot see the effect of the first
+    // deletions, and a run that ended before its end deleted nothing.
+    let deleted =
+        !dry_run && summary::has_deletion(&first.stdout) && matches!(first.code, Some(0 | 23 | 24));
+    let mut second_pass = false;
+    if deleted {
+        let check = run(&call(true)).map_err(PushError::Rsync)?;
+        record(&check);
+        if summary::has_itemized_line(&check.stdout) {
+            let again = run(&call(false)).map_err(PushError::Rsync)?;
+            record(&again);
+            stdouts.push(again.stdout);
+            second_pass = true;
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(Mirrored {
+            vanished,
+            stdouts,
+            second_pass,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +468,244 @@ mod tests {
         let detail = mirror_error(outcome_of(Some(12), "", "rsync: protocol broke\n"));
         assert!(!detail.contains("fsync"), "{detail}");
         assert!(detail.contains("exit 12"), "{detail}");
+    }
+
+    // -----------------------------------------------------
+    // The second pass
+    // -----------------------------------------------------
+
+    /// Runs the mirror against answers given in order, and returns the
+    /// result with the argument lists of the calls.
+    fn mirrored(
+        answers: Vec<Outcome>,
+        dry_run: bool,
+    ) -> (Result<Mirrored, PushError>, Vec<Vec<String>>) {
+        let fixture = fixture();
+        let options = Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: Vec::new(),
+        };
+        let calls: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let result = run_mirror(
+            &Mirror {
+                rsync: &fixture.rsync,
+                options: &options,
+                collection: Path::new("/c"),
+                url: &fixture.url,
+            },
+            &|call| {
+                let mut calls = calls.borrow_mut();
+                calls.push(
+                    call.args()
+                        .iter()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect(),
+                );
+                match answers.get(calls.len() - 1) {
+                    Some(outcome) => Ok(outcome.clone()),
+                    None => panic!("an unexpected call {}", calls.len()),
+                }
+            },
+            dry_run,
+        );
+        (result, calls.into_inner())
+    }
+
+    fn dry(call: &[String]) -> bool {
+        call.contains(&"-n".to_string())
+    }
+
+    const DELETING: &str = "*deleting   gone.txt
+";
+    const CREATED: &str = ">f+++++++++ new.txt
+";
+
+    #[test]
+    fn a_run_without_deletions_is_one_call() {
+        let (result, calls) = mirrored(vec![outcome_of(Some(0), CREATED, "")], false);
+        let done = result.expect("success");
+        assert_eq!(calls.len(), 1);
+        assert!(!done.second_pass);
+        assert_eq!(done.stdouts, [CREATED.as_bytes()]);
+    }
+
+    #[test]
+    fn deletions_are_followed_by_a_dry_run_that_ends_the_pass_when_it_is_quiet() {
+        for code in [0, 23, 24] {
+            let answers = vec![
+                outcome_of(Some(code), DELETING, ""),
+                outcome_of(
+                    Some(0),
+                    "sending incremental file list
+",
+                    "",
+                ),
+            ];
+            let (result, calls) = mirrored(answers, false);
+            assert_eq!(calls.len(), 2, "exit {code}");
+            assert!(!dry(&calls[0]) && dry(&calls[1]), "exit {code}: {calls:?}");
+            if code == 23 {
+                assert!(result.is_err(), "the first failure stays");
+            } else {
+                assert!(!result.expect("success").second_pass);
+            }
+        }
+    }
+
+    #[test]
+    fn a_dry_run_that_finds_changes_is_followed_by_the_mirror_once_more() {
+        let answers = vec![
+            outcome_of(Some(0), DELETING, ""),
+            outcome_of(Some(0), CREATED, ""),
+            outcome_of(Some(0), CREATED, ""),
+        ];
+        let (result, calls) = mirrored(answers, false);
+        let done = result.expect("success");
+        assert_eq!(calls.len(), 3);
+        assert!(!dry(&calls[2]), "{calls:?}");
+        assert_eq!(calls[0], calls[2]);
+        assert!(done.second_pass);
+        assert_eq!(done.stdouts.len(), 2, "the first run and the second mirror");
+    }
+
+    #[test]
+    fn a_directory_line_in_the_dry_run_counts_as_a_change() {
+        let answers = vec![
+            outcome_of(Some(0), DELETING, ""),
+            outcome_of(
+                Some(0),
+                "cd+++++++++ dir/
+",
+                "",
+            ),
+            outcome_of(Some(0), "", ""),
+        ];
+        let (result, calls) = mirrored(answers, false);
+        assert!(result.expect("success").second_pass);
+        assert_eq!(calls.len(), 3);
+    }
+
+    #[test]
+    fn a_dry_run_of_the_push_never_runs_a_second_pass() {
+        let (result, calls) = mirrored(vec![outcome_of(Some(0), DELETING, "")], true);
+        assert!(!result.expect("success").second_pass);
+        assert_eq!(calls.len(), 1);
+        assert!(dry(&calls[0]));
+    }
+
+    #[test]
+    fn no_second_pass_follows_a_run_that_did_not_get_to_delete() {
+        for code in [Some(12), Some(30), Some(255), None] {
+            let (result, calls) = mirrored(
+                vec![outcome_of(
+                    code, DELETING, "boom
+",
+                )],
+                false,
+            );
+            assert!(result.is_err(), "{code:?}");
+            assert_eq!(calls.len(), 1, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_failing_dry_run_or_second_mirror_is_the_error_and_a_first_failure_stays() {
+        let answers = vec![
+            outcome_of(Some(0), DELETING, ""),
+            outcome_of(
+                Some(30),
+                "",
+                "Timeout in data send/receive
+",
+            ),
+        ];
+        let (result, calls) = mirrored(answers, false);
+        assert_eq!(calls.len(), 2);
+        match result {
+            Err(PushError::Mirror { detail }) => assert!(detail.contains("exit 30"), "{detail}"),
+            other => panic!("expected a mirror error, got {other:?}"),
+        }
+
+        let answers = vec![
+            outcome_of(Some(0), DELETING, ""),
+            outcome_of(Some(0), CREATED, ""),
+            outcome_of(
+                Some(11),
+                "",
+                "disk full
+",
+            ),
+        ];
+        match mirrored(answers, false).0 {
+            Err(PushError::Mirror { detail }) => assert!(detail.contains("disk full"), "{detail}"),
+            other => panic!("expected a mirror error, got {other:?}"),
+        }
+
+        let answers = vec![
+            outcome_of(
+                Some(23),
+                DELETING,
+                "first problem
+",
+            ),
+            outcome_of(Some(0), CREATED, ""),
+            outcome_of(
+                Some(11),
+                "",
+                "second problem
+",
+            ),
+        ];
+        match mirrored(answers, false).0 {
+            Err(PushError::Mirror { detail }) => {
+                assert!(detail.contains("first problem"), "{detail}");
+            }
+            other => panic!("expected a mirror error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vanished_files_of_every_run_are_kept() {
+        let answers = vec![
+            outcome_of(Some(24), DELETING, "file has vanished: \"/c/a\"\n"),
+            outcome_of(Some(0), CREATED, ""),
+            outcome_of(Some(24), "", "file has vanished: \"/c/b\"\n"),
+        ];
+        let done = mirrored(answers, false).0.expect("success");
+        assert_eq!(done.vanished, ["/c/a", "/c/b"]);
+    }
+
+    #[test]
+    fn an_rsync_that_cannot_start_for_the_second_call_is_the_rsync_error() {
+        let fixture = fixture();
+        let options = Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: Vec::new(),
+        };
+        let count = RefCell::new(0);
+        let result = run_mirror(
+            &Mirror {
+                rsync: &fixture.rsync,
+                options: &options,
+                collection: Path::new("/c"),
+                url: &fixture.url,
+            },
+            &|_| {
+                *count.borrow_mut() += 1;
+                if *count.borrow() == 1 {
+                    Ok(outcome_of(Some(0), DELETING, ""))
+                } else {
+                    Err(RsyncError::Spawn {
+                        path: "rsync".into(),
+                        cause: io::Error::other("gone"),
+                    })
+                }
+            },
+            false,
+        );
+        assert!(matches!(result, Err(PushError::Rsync(_))), "{result:?}");
     }
 
     #[test]

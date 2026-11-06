@@ -136,6 +136,20 @@ pub(super) fn parse_itemized(stdout: &[u8]) -> Vec<Item> {
         .collect()
 }
 
+/// Whether any line of `stdout` is an itemized change, of a directory too.
+pub(super) fn has_itemized_line(stdout: &[u8]) -> bool {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| split_item(line).is_some())
+}
+
+/// Whether `stdout` has a line that deletes something.
+pub(super) fn has_deletion(stdout: &[u8]) -> bool {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.starts_with(b"*deleting"))
+}
+
 /// Counts `items` per piece. `folders` are the live pieces and the store
 /// folders; a path belongs to the longest of them that it is, or lies
 /// below, and `.antiq/pieces/<folder>/...` belongs to `<folder>`.
@@ -235,6 +249,24 @@ mod tests {
         assert_eq!(found[0].path, "caf\u{e9}.txt".as_bytes());
         let literal = parse_itemized(b">f+++++++++ odd\\#name\n");
         assert_eq!(literal[0].path, b"odd\\#name");
+    }
+
+    #[test]
+    fn itemized_lines_of_directories_count_for_the_second_pass() {
+        assert!(has_itemized_line(b"cd+++++++++ a/\n"));
+        assert!(has_itemized_line(b">f+++++++++ a\n"));
+        assert!(has_itemized_line(b"*deleting   a\n"));
+        assert!(!has_itemized_line(
+            b"sending incremental file list\ncreated directory x\n"
+        ));
+        assert!(!has_itemized_line(b""));
+    }
+
+    #[test]
+    fn only_a_deleting_line_is_a_deletion() {
+        assert!(has_deletion(b">f+++++++++ a\n*deleting   b\n"));
+        assert!(!has_deletion(b">f+++++++++ a\nthe *deleting word\n"));
+        assert!(!has_deletion(b""));
     }
 
     fn path(text: &str) -> RelPath {
