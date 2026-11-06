@@ -841,7 +841,10 @@ its own. A pattern that contains `**` gets a note on stderr, in `warnings`
 under `--json`.
 
 After creating the collection, `init` prints how many folders the next
-`archive` would archive.
+`archive` would archive, counted as `status` shows the due ones, as the
+last line on stdout: `The next archive would archive 2 folders.` (`1 folder`
+for one). `-n` prints no count. If the new collection cannot be surveyed,
+the collection stays, no count is printed and a warning says why.
 
 ### archive
 
@@ -1626,8 +1629,10 @@ skipped version and the lock note appear only in the object, while the note
 that nothing matched is on stderr as in text output.
 
 `init` adds `created`, `id` (absent in a dry run), `path` (the canonical
-collection root), `patterns` and `warnings`, and in a dry run `config`, the
-text of the config that would be written, before `actions`. The action is
+collection root), `patterns`, `due` (the number of folders the next `archive`
+would archive; absent in a dry run and when the survey failed) and
+`warnings`, and in a dry run `config`, the text of the config that would be
+written, before `actions`. The action is
 `{"action": "create_collection", "path": ...}`.
 
 `status` has these keys, all of them present with an empty list when there

@@ -128,7 +128,7 @@ fn the_json_of_a_created_collection_has_its_keys_in_order() {
     assert_eq!(
         keys(&run.json()),
         [
-            "format", "command", "created", "id", "path", "patterns", "actions", "warnings"
+            "format", "command", "created", "id", "path", "patterns", "due", "actions", "warnings"
         ]
     );
 }
@@ -145,6 +145,7 @@ fn init_prints_a_summary_on_the_console() {
     Created the collection at <root>
       id: <id>
       patterns: *
+    The next archive would archive 0 folders.
     ");
 }
 
@@ -271,6 +272,56 @@ fn the_written_config_names_every_setting() {
         );
     }
     assert!(text.contains("\n# [target]\n"), "{text}");
+}
+
+/// A tree with `old` folders last changed 400 days ago and one folder
+/// changed just now.
+fn tree_with_old_folders(old: usize) -> Tree {
+    let mut tree = Tree::new();
+    let long_ago = support::tree::days_ago(400);
+    for number in 0..old {
+        tree.file_with(&format!("old{number}/file"), "x", 0o644, long_ago);
+    }
+    tree.file("fresh/file", "x");
+    tree
+}
+
+#[test]
+fn init_says_how_many_folders_the_next_archive_would_archive() {
+    let tree = tree_with_old_folders(2);
+    let run = init_in(&tree, &[]);
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().last(),
+        Some("The next archive would archive 2 folders.")
+    );
+}
+
+#[test]
+fn one_folder_is_not_plural() {
+    let tree = tree_with_old_folders(1);
+    let run = init_in(&tree, &[]);
+    assert_eq!(
+        run.stdout.lines().last(),
+        Some("The next archive would archive 1 folder.")
+    );
+}
+
+#[test]
+fn the_json_has_the_number_of_folders_due() {
+    let tree = tree_with_old_folders(3);
+    let run = init_in(&tree, &["--json"]);
+    assert_eq!(run.json()["due"], 3);
+}
+
+#[test]
+fn a_dry_run_counts_nothing() {
+    let tree = tree_with_old_folders(2);
+    let text = init_in(&tree, &["-n"]);
+    assert!(!text.stdout.contains("would archive"), "{}", text.stdout);
+    assert!(!text.stderr.contains("would archive"), "{}", text.stderr);
+    let json = init_in(&tree, &["--json", "-n"]).json();
+    assert!(json.get("due").is_none(), "{json}");
 }
 
 // =========================================================

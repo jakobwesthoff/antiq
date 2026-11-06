@@ -67,6 +67,10 @@ fn render(report: &InitReport) -> Lines {
             stdout.push(format!("  id: {id}"));
         }
         stdout.push(format!("  patterns: {}", report.patterns.join(", ")));
+        if let Some(due) = report.due {
+            let folders = if due == 1 { "folder" } else { "folders" };
+            stdout.push(format!("The next archive would archive {due} {folders}."));
+        }
     }
     stderr.extend(
         report
@@ -89,6 +93,7 @@ mod tests {
             id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("a ULID")),
             path: "/work".into(),
             patterns: vec!["a*".into(), "b*".into()],
+            due: Some(2),
             config: None,
             actions: Vec::new(),
             warnings: vec![Warning::new("watch out")],
@@ -108,9 +113,27 @@ mod tests {
                 "Created the collection at /work",
                 "  id: 01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "  patterns: a*, b*",
+                "The next archive would archive 2 folders.",
             ]
         );
         assert_eq!(texts(&lines.stderr), ["note: watch out"]);
+    }
+
+    #[test]
+    fn one_folder_is_singular_and_no_count_prints_no_line() {
+        let one = render(&InitReport {
+            due: Some(1),
+            ..report()
+        });
+        assert_eq!(
+            one.stdout.last().map(String::as_str),
+            Some("The next archive would archive 1 folder.")
+        );
+        let none = render(&InitReport {
+            due: None,
+            ..report()
+        });
+        assert_eq!(none.stdout.len(), 3);
     }
 
     #[test]
@@ -119,6 +142,7 @@ mod tests {
             dry_run: true,
             created: false,
             id: None,
+            due: None,
             config: Some("[collection]\nid = \"X\"\n".into()),
             ..report()
         });

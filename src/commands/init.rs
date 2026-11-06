@@ -6,6 +6,7 @@
 
 use crate::clock::Clock;
 use crate::collection::Collection;
+use crate::commands::survey::{Verdict, survey_with};
 use crate::config::{ConfigDoc, ConfigError};
 use crate::filesystem::atomic::{flush_dir, write_atomic};
 use crate::filesystem::tree::TreeRoot;
@@ -15,6 +16,8 @@ use crate::relpath::{Name, RelPath};
 use crate::report::{CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
 use crate::tree::EntryKind;
+use crate::walk::{Hooks, RealFs};
+use jiff::Timestamp;
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::fs;
@@ -82,6 +85,10 @@ pub struct InitReport {
     pub id: Option<ObjectId>,
     pub path: String,
     pub patterns: Vec<String>,
+    /// How many folders the next `archive` would archive. Absent in a dry
+    /// run, and when the new collection could not be surveyed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due: Option<usize>,
     /// The `config.toml` a dry run would write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
@@ -216,6 +223,15 @@ pub fn apply(
     clock: &dyn Clock,
     ids: &dyn IdSource,
 ) -> Result<InitReport, InitError> {
+    apply_with(plan, clock, ids, &RealFs)
+}
+
+fn apply_with(
+    plan: &InitPlan,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+    hooks: &dyn Hooks,
+) -> Result<InitReport, InitError> {
     let (id, config) = render_config(plan, clock, ids)?;
 
     let staged = create_staging_directory(&plan.root)?;
@@ -226,7 +242,28 @@ pub fn apply(
         let _ = fs::remove_dir_all(&staged);
     }
     published?;
-    Ok(plan.report(Some(id), None, false))
+
+    let mut report = plan.report(Some(id), None, false);
+    match count_due(&plan.root, clock.now(), hooks) {
+        Ok(due) => report.due = Some(due),
+        Err(reason) => report.warnings.push(Warning::new(format!(
+            "cannot tell how many folders the next archive would archive: {reason}"
+        ))),
+    }
+    Ok(report)
+}
+
+/// How many folders the next `archive` would archive: the ones `status`
+/// shows as due. The error is the text for the warning that replaces the
+/// count, since the collection exists by now and stays.
+fn count_due(root: &Path, now: Timestamp, hooks: &dyn Hooks) -> Result<usize, String> {
+    let collection = Collection::find(root).map_err(|error| error.to_string())?;
+    let surveyed = survey_with(&collection, now, hooks).map_err(|error| error.to_string())?;
+    Ok(surveyed
+        .pieces
+        .iter()
+        .filter(|piece| piece.verdict == Verdict::Due)
+        .count())
 }
 
 /// Says what `apply` would write, and writes nothing. The ID in the config
@@ -300,6 +337,7 @@ impl InitPlan {
             created: id.is_some(),
             id,
             patterns: self.patterns.clone(),
+            due: None,
             config,
             actions: vec![InitAction::CreateCollection { path: path.clone() }],
             path,
@@ -747,6 +785,95 @@ mod tests {
     }
 
     // =========================================================
+    // The number of folders the next archive would archive
+    // =========================================================
+
+    const DAY: i64 = 86_400;
+
+    /// A file in `relative` that was last changed `days` before the clock.
+    fn aged(tree: &mut Tree, relative: &str, days: i64) {
+        let seconds = clock().now().as_second() - days * DAY;
+        tree.file_with(relative, "x", 0o644, seconds);
+    }
+
+    #[test]
+    fn the_report_counts_the_folders_the_next_archive_would_archive() {
+        let mut tree = Tree::new();
+        aged(&mut tree, "old/file", 40);
+        aged(&mut tree, "older/file", 400);
+        aged(&mut tree, "fresh/file", 1);
+        let report = run(&request(&tree, &[], false));
+        assert_eq!(report.due, Some(2));
+    }
+
+    #[test]
+    fn a_folder_exactly_idle_days_old_is_not_counted() {
+        let mut tree = Tree::new();
+        aged(&mut tree, "edge/file", 30);
+        assert_eq!(run(&request(&tree, &[], false)).due, Some(0));
+    }
+
+    #[test]
+    fn a_pinned_folder_and_an_empty_one_are_not_counted() {
+        let mut tree = Tree::new();
+        aged(&mut tree, "pinned/file", 400);
+        tree.file("pinned/.antiq-pin", "");
+        tree.dir("empty");
+        assert_eq!(run(&request(&tree, &[], false)).due, Some(0));
+    }
+
+    #[test]
+    fn the_count_follows_the_given_patterns() {
+        let mut tree = Tree::new();
+        aged(&mut tree, "a1/file", 400);
+        aged(&mut tree, "b1/file", 400);
+        let patterns = patterns(&["a*"]);
+        assert_eq!(run(&request(&tree, &patterns, false)).due, Some(1));
+    }
+
+    /// Every call fails as if the process had run out of descriptors.
+    struct OutOfDescriptors;
+
+    impl Hooks for OutOfDescriptors {
+        fn fault(&self, _path: &RelPath, _call: crate::walk::Call) -> Option<io::Error> {
+            Some(io::Error::from_raw_os_error(libc::EMFILE))
+        }
+    }
+
+    #[test]
+    fn a_survey_that_fails_leaves_the_collection_and_a_warning() {
+        let mut tree = Tree::new();
+        aged(&mut tree, "old/file", 400);
+        let report = apply_with(
+            &plan_of(&tree, &[]),
+            &clock(),
+            &SeqIds::new(1),
+            &OutOfDescriptors,
+        )
+        .expect("the collection is created");
+        assert!(report.created);
+        assert_eq!(report.due, None);
+        let [warning] = report.warnings.as_slice() else {
+            panic!("one warning expected: {:?}", report.warnings);
+        };
+        assert!(
+            warning
+                .message
+                .starts_with("cannot tell how many folders the next archive would archive: "),
+            "{}",
+            warning.message
+        );
+        assert!(tree.path(".antiq/config.toml").is_file());
+    }
+
+    #[test]
+    fn a_directory_that_is_no_collection_cannot_be_counted() {
+        let tree = Tree::new();
+        let reason = count_due(tree.root(), clock().now(), &RealFs).expect_err("no collection");
+        assert!(reason.contains("collection"), "{reason}");
+    }
+
+    // =========================================================
     // The report
     // =========================================================
 
@@ -760,7 +887,7 @@ mod tests {
             serde_json::to_string(&report).expect("serialises"),
             format!(
                 "{{\"created\":true,\"id\":\"{id}\",\"path\":\"{root}\",\
-                 \"patterns\":[\"a*\"],\
+                 \"patterns\":[\"a*\"],\"due\":0,\
                  \"actions\":[{{\"action\":\"create_collection\",\"path\":\"{root}\"}}],\
                  \"warnings\":[]}}"
             )
