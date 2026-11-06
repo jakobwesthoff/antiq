@@ -4,10 +4,6 @@
 
 //! Free space.
 
-// TODO: `archive` (I19) and `unearth` (I20) check free space before they
-// pack or fetch; until they land the library has no caller.
-#![allow(dead_code)]
-
 use super::{FsxError, io_error};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};

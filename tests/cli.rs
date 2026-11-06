@@ -295,24 +295,24 @@ accepts!(
 
 #[test]
 fn a_json_run_prints_one_not_implemented_envelope() {
-    let run = json_run(&["archive"]);
+    let run = json_run(&["sync"]);
     assert_eq!(run.code(), 1);
     assert_eq!(run.stderr, "");
     let json = run.json();
     let keys: Vec<&String> = json.as_object().expect("an object").keys().collect();
     assert_eq!(keys, ["format", "command", "error"]);
     assert_eq!(json["format"], 1);
-    assert_eq!(json["command"], "archive");
+    assert_eq!(json["command"], "sync");
     assert_eq!(json["error"]["kind"], "not_implemented");
-    assert_eq!(json["error"]["message"], "archive is not implemented");
+    assert_eq!(json["error"]["message"], "sync is not implemented");
 }
 
 #[test]
 fn a_plain_run_prints_its_error_to_stderr() {
-    let run = Antiq::new().arg("archive").run();
+    let run = Antiq::new().arg("sync").run();
     assert_eq!(run.code(), 1);
     assert_eq!(run.stdout, "");
-    assert_eq!(run.stderr, "error: archive is not implemented\n");
+    assert_eq!(run.stderr, "error: sync is not implemented\n");
 }
 
 #[test]

@@ -1200,7 +1200,8 @@ Read-only commands and `--dry-run` never touch these directories.
 
 Before packing a piece, `archive` checks free space in `.antiq/`
 against the piece's apparent size, and parallel pieces reserve their
-sum. A piece's reservation ends when its package has left `.antiq/tmp/`
+sum. `archive` works on as many pieces at a time as the machine has
+cores. A piece's reservation ends when its package has left `.antiq/tmp/`
 for the object store or has been removed. `unearth` checks for the archive's size, when it has to be fetched,
 plus the listing's total size. A piece without enough space is skipped,
 and `ENOSPC` during a step removes that step's temp output and skips the
@@ -1814,6 +1815,21 @@ that order. An action is `{action: "archive", path, id, size}` for each
 idle piece the next `archive` takes, in path order. `id` is null for a
 new piece and `size` is the piece's apparent size in bytes (a file with
 several names counts once).
+
+`archive` has `archived`, `skipped`, `kept` and `warnings`, in that
+order, each list in path order. `archived` has `{id, path, size,
+archive_size, payload_version}` for each piece whose folder was removed:
+`size` is the apparent size in bytes and `archive_size` the bytes of the
+stored archive. `skipped` has `{id, path, reason, message}` for each piece
+left alone; `id` is present only for a piece that had an ID before the
+run. `reason` is `unreadable`, `mount_point`, `excluded`,
+`nested_collection`, `differs`, `no_space` or `error`. `kept` has `{id,
+path, how, recovered_as}` for each piece that was archived and whose folder
+was not removed because it differs from the archive: `how` is `unearthed`
+when the folder is back at its path and `recovered` when it is below
+`.antiq/recovered/`, where `recovered_as` names it (present only then).
+The run exits 3 when `skipped` is not empty; a `kept` row alone does not
+make it partial.
 
 `unearth` adds `unearthed` (false for a piece that was unearthed before
 and for a piece that was skipped), `id`, `path` (where the piece is, or
