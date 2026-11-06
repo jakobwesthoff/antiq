@@ -314,15 +314,15 @@ mod tests {
     }
 
     #[test]
-    fn the_cards_of_a_fork_count_files_in_every_operation() {
+    fn the_cards_of_a_fork_count_files_while_extracting_and_bytes_while_verifying() {
         use antiq::progress::Operation;
-        for (operation, word) in [
-            (Operation::Extracting, "extracting"),
-            (Operation::Verifying, "verifying"),
+        for (operation, word, count) in [
+            (Operation::Extracting, "extracting", "1/4 files"),
+            (Operation::Verifying, "verifying", "1 B/4 B"),
         ] {
             let [first, second] = progress::card_of(super::super::unearth::COUNTS, operation, 1, 4);
             assert!(first.ends_with(&format!("  {word}")), "{first:?}");
-            assert!(second.ends_with("25%  1/4 files"), "{second:?}");
+            assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
         }
     }
 

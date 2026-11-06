@@ -22,14 +22,6 @@ taken one at a time.
   tail (lead, 2026-11-05). What still runs after the last byte is
   measured first; if that tail stays long, the lead decides again.
 
-## Packing stops at 99 percent
-
-The `Packing` counter counts packed files (`TarZstd::pack` in
-`src/archive/mod.rs`). One large file holds the bar still while it is
-packed. After the last file the tar writer and the zstd encoder finish
-and the caller syncs the archive, and the card sits at 99 percent with
-a bar one cell short of full until the operation ends.
-
 ## A resize does not reflow the region
 
 The driver reads the terminal size for every frame but does not handle
@@ -50,13 +42,6 @@ mirror before the real one, to know the totals for the cards. Against a
 local target that costs one extra scan. Over ssh it costs a second
 remote file listing, which has not been measured. If it is slow, the
 cards could start without totals instead.
-
-## The read-back of an archive has no percentage
-
-During `Verifying`, the hash of the read-back archive and the
-decompression in `read_package` show an indeterminate bar; the counter
-starts only at the comparison of the files. Counting the bytes read
-would give that phase a percentage.
 
 ## Tests that depend on compressed sizes
 

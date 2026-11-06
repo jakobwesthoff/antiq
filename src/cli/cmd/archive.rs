@@ -6,7 +6,7 @@
 
 use super::progress;
 use super::progress::{Description, Shown};
-use crate::cli::console::cards::{Count, items};
+use crate::cli::console::cards::{Count, items, sizes};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
@@ -19,15 +19,32 @@ use antiq::plan::{PlanAction, Step};
 use antiq::progress::Operation;
 use anyhow::Context as _;
 
-/// The removing of a piece counts the entries of its listing; every other
-/// operation counts files.
-pub(super) const COUNTS: &[(Operation, Count)] = &[(
-    Operation::Removing,
-    Count {
-        text: |done, total| items(done, total, "entries"),
-        percent: true,
-    },
-)];
+/// The packing and the verifying of a piece follow bytes and show them as
+/// sizes, the removing of a piece counts the entries of its listing, and
+/// every other operation counts files.
+pub(super) const COUNTS: &[(Operation, Count)] = &[
+    (
+        Operation::Packing,
+        Count {
+            text: sizes,
+            percent: true,
+        },
+    ),
+    (
+        Operation::Verifying,
+        Count {
+            text: sizes,
+            percent: true,
+        },
+    ),
+    (
+        Operation::Removing,
+        Count {
+            text: |done, total| items(done, total, "entries"),
+            percent: true,
+        },
+    ),
+];
 
 pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -182,8 +199,8 @@ mod tests {
     #[test]
     fn the_cards_of_an_archive_name_each_operation_and_what_it_counts() {
         for (operation, word, count) in [
-            (Operation::Packing, "packing", "1/4 files"),
-            (Operation::Verifying, "verifying", "1/4 files"),
+            (Operation::Packing, "packing", "1 B/4 B"),
+            (Operation::Verifying, "verifying", "1 B/4 B"),
             (Operation::Storing, "storing", "1/4 files"),
             (Operation::Removing, "removing", "1/4 entries"),
         ] {

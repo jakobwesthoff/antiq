@@ -589,6 +589,29 @@ fn the_text_of_a_count_drops_below_sixty_columns() {
     assert!(!cards.region(secs(0), 59, 24)[1].contains("bytes"));
 }
 
+#[test]
+fn the_sizes_text_reads_done_over_total_in_decimal_units_and_is_empty_without_a_total() {
+    assert_eq!(sizes(412_000_000, Some(1_200_000_000)), "412 MB/1.2 GB");
+    assert_eq!(sizes(0, Some(999)), "0 B/999 B");
+    assert_eq!(sizes(5, None), "");
+}
+
+#[test]
+fn a_card_with_the_sizes_text_shows_sizes_next_to_the_percentage() {
+    const BYTES: Counts = &[(
+        Operation::Packing,
+        Count {
+            text: sizes,
+            percent: true,
+        },
+    )];
+    let mut cards = cards(BYTES);
+    cards.apply(started("a", 10), secs(0));
+    let (msg, _k) = operation("a", Operation::Packing, 700_000_000, 1_000_000_000);
+    cards.apply(msg, secs(0));
+    assert!(cards.region(secs(0), MOCKUP, 24)[1].ends_with("70%  700 MB/1.0 GB"));
+}
+
 // =========================================================
 // What an event for an unknown piece does
 // =========================================================

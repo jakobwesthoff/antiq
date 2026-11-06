@@ -2175,7 +2175,7 @@ turns, the piece in bold, its size and the operation: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
 `unearth`, `extracting` and `verifying` for `fork`. The second has a bar, the percentage and a count: `N/M files`,
-and `N/M entries` for the removing of `archive`. A `push` has a card of its
+`N/M entries` for the removing of `archive`, and sizes such as `412 MB/1.2 GB` for the operations whose bar follows bytes: the `packing` and `verifying` of `archive` and the `verifying` of `unearth`. A `push` has a card of its
 own kind, described below. An operation whose total is not
 known yet has a bar with a moving lit part and no percentage or count. The
 percentage is rounded and stays at 99 until the operation is done.

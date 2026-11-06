@@ -29,6 +29,15 @@ rsync ends. The table of the pieces and the closing line follow it.
 One formatter writes the card and the finished line, so the lines on the
 screen during the run and the lines that remain after it look alike.
 
+The bar of an operation follows the work in bytes where bytes are what
+takes time: packing follows the bytes the compressor has consumed,
+verifying in `archive` the bytes read from the archive and the folder, and
+verifying in `unearth` the bytes of the files compared. The count under
+the bar shows the same numbers as sizes, so the count and the bar agree.
+The compressor works behind the writer, so the bytes handed to it reach
+the total long before it has compressed them; the bytes it has consumed
+are what the bar shows.
+
 The region of cards is redrawn in place with the carriage return, cursor
 up and erase to the end of the screen, and nothing else. antiq switches no
 terminal mode, uses no alternate screen and no scroll region, and hides

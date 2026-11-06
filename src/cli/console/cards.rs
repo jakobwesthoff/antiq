@@ -57,6 +57,14 @@ pub(crate) fn items(done: u64, total: Option<u64>, noun: &str) -> String {
     })
 }
 
+/// `412 MB/1.2 GB`, and nothing while the total is not known. For the
+/// operations whose bar follows bytes.
+pub(crate) fn sizes(done: u64, total: Option<u64>) -> String {
+    total.map_or_else(String::new, |total| {
+        format!("{}/{}", decimal_size(done), decimal_size(total))
+    })
+}
+
 /// The count of an operation that its command does not list.
 const FILES: Count = Count {
     text: |done, total| items(done, total, "files"),
