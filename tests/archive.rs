@@ -431,3 +431,23 @@ fn a_piece_that_cannot_enter_trash_is_skipped_with_exit_3_and_the_next_run_archi
     assert_stored(&collection, "old/site");
     assert_no_leftovers(&collection);
 }
+
+#[test]
+fn notes_on_the_settings_go_to_stderr_and_into_the_warnings() {
+    let collection = world();
+    let config = collection.path(".antiq/config.toml");
+    let mut text = fs::read_to_string(&config).expect("the config exists");
+    text.push_str("\nmystery = 1\n");
+    fs::write(&config, text).expect("the config is written");
+
+    let plain = archive(&collection, &[], &["-n"]);
+    let json = archive(&collection, &["--json"], &["-n"]);
+
+    let note = "note: the key `mystery` under [collection] is unknown and ignored";
+    assert_eq!(plain.code(), 0, "{}", plain.stderr);
+    assert_eq!(plain.stderr.lines().collect::<Vec<_>>(), [note]);
+    assert_eq!(
+        json.json()["warnings"][0]["message"],
+        "the key `mystery` under [collection] is unknown and ignored"
+    );
+}

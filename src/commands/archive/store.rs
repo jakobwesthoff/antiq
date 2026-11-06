@@ -400,27 +400,27 @@ fn stage_and_store(
         &names,
     );
     if let Err(source) = moved {
+        let partly_moved = matches!(source, VersionsError::PartlyMoved { .. });
+        let not_durable = matches!(source, VersionsError::StoredNotDurable { .. });
         let error = ArchiveError::MoveIn {
             piece: piece.clone(),
             stamp: stamp_text.clone(),
             source: Box::new(source),
         };
-        let cause = match &error {
-            ArchiveError::MoveIn { source, .. } => Some(&**source),
-            _ => None,
-        };
-        return Err(match cause {
+        return Err(if partly_moved {
             // Repair 1 finishes the move from the staging.
-            Some(VersionsError::PartlyMoved { .. }) => Abort {
+            Abort {
                 failure: StoreFailure::Failed(Box::new(error)),
                 keep_staging: true,
-            },
+            }
+        } else if not_durable {
             // The version exists. The piece stops before its folder goes.
-            Some(VersionsError::StoredNotDurable { .. }) => Abort {
+            Abort {
                 failure: StoreFailure::NotDurable(Box::new(error)),
                 keep_staging: false,
-            },
-            _ => Abort::of(error),
+            }
+        } else {
+            Abort::of(error)
         });
     }
 
@@ -1248,6 +1248,32 @@ mod tests {
             error.to_string(),
             "cannot verify the packing of piece in tmp/pack/2026-11-04T090211"
         );
+    }
+
+    #[test]
+    fn an_archive_that_cannot_be_read_in_the_verify_is_a_failure_and_no_change_of_the_folder() {
+        let world = world();
+        let probe = Probe {
+            before_verify: Some(Box::new(|staging| {
+                for entry in fs::read_dir(staging).expect("the staging is listed") {
+                    let file = entry.expect("an entry").path();
+                    if file.extension().is_some_and(|extension| extension == "zst") {
+                        fs::write(&file, "not an archive").expect("the archive is replaced");
+                    }
+                }
+            })),
+            ..Probe::default()
+        };
+
+        let failure = failure(&world, &probe);
+
+        assert!(
+            matches!(failure, StoreFailure::Failed(_)),
+            "{}",
+            describe(&failure)
+        );
+        staging_is_gone(&world);
+        store_is_empty(&world);
     }
 
     #[test]

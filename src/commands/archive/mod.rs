@@ -772,6 +772,11 @@ mod tests {
         failing_delete: bool,
         /// Runs after the folder was renamed into `trash/`.
         after_trash_rename: Option<Change>,
+        /// Runs after the archive is written, before it is read back.
+        before_read_back: Option<Change>,
+        /// Runs after the archive is read back, before it is compared with
+        /// the folder.
+        before_verify: Option<Change>,
     }
 
     impl Hooks for Probe {
@@ -804,6 +809,18 @@ mod tests {
             self.trashed.store(true, Ordering::SeqCst);
             if let Some(change) = &self.after_trash_rename {
                 change(tree);
+            }
+        }
+
+        fn before_read_back(&self, staging: &Path) {
+            if let Some(change) = &self.before_read_back {
+                change(staging);
+            }
+        }
+
+        fn before_verify(&self, staging: &Path) {
+            if let Some(change) = &self.before_verify {
+                change(staging);
             }
         }
 
@@ -1636,5 +1653,134 @@ mod tests {
             source: io::Error::from(io::ErrorKind::NotFound),
         };
         assert_eq!(open.to_string(), "cannot open the collection /x");
+    }
+
+    // =========================================================
+    // Other ways a piece ends
+    // =========================================================
+
+    #[test]
+    fn a_folder_that_changes_while_it_is_packed_is_skipped_as_differs() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let live = world.root().join("piece/a.txt");
+        let seams = Probe {
+            before_verify: Some(Box::new(move |_| {
+                fs::write(&live, "changed during the pack").expect("the file is written");
+            })),
+            ..Probe::default()
+        };
+
+        let report = execute_with(&world, &Target::Due, &seams, 1).expect("the run ends");
+
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].reason, SkipReason::Differs);
+        assert!(world.root().join("piece/a.txt").exists());
+        assert!(entries(&antiq(&world, "pieces/piece")).is_empty());
+        assert_no_leftovers(&world);
+    }
+
+    #[test]
+    fn an_archive_that_reads_back_differently_is_skipped_as_error() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let seams = Probe {
+            before_read_back: Some(Box::new(|staging| {
+                let archive = find_archive(staging).expect("the archive is staged");
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .open(archive)
+                    .expect("the archive opens");
+                io::Write::write_all(&mut file, b"x").expect("a byte is added");
+            })),
+            ..Probe::default()
+        };
+
+        let report = execute_with(&world, &Target::Due, &seams, 1).expect("the run ends");
+
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].reason, SkipReason::Error);
+        assert!(world.root().join("piece/a.txt").exists());
+        assert_no_leftovers(&world);
+    }
+
+    fn find_archive(dir: &Path) -> Option<std::path::PathBuf> {
+        for entry in fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                if let Some(found) = find_archive(&path) {
+                    return Some(found);
+                }
+            } else if path.to_string_lossy().ends_with(".tar.zst") {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_opened_skips_the_piece() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        fs::remove_dir(antiq(&world, "pieces")).expect("pieces/ is empty");
+
+        let report = execute_with(&world, &Target::Due, &RealSeams, 1).expect("the run ends");
+
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].reason, SkipReason::Error);
+        assert!(
+            report.skipped[0].message.starts_with("cannot open "),
+            "{:?}",
+            report.skipped[0]
+        );
+        assert!(world.root().join("piece/a.txt").exists());
+    }
+
+    /// Restores the mode of a directory when dropped.
+    struct Mode(std::path::PathBuf);
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn a_piece_whose_pin_cannot_be_looked_at_is_refused_as_an_unreadable_marker() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        let top = world.root().join("piece");
+        let _restore = Mode(top.clone());
+        fs::set_permissions(&top, fs::Permissions::from_mode(0o000)).expect("the piece is locked");
+        assert!(
+            fs::read_dir(&top).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+
+        let report = execute_with(&world, &Target::Due, &RealSeams, 1).expect("the run ends");
+
+        let refused = &report.refused[0];
+        assert!(kinds(refused).contains(&"unreadable_entry"), "{refused:?}");
+        assert_eq!(
+            kinds(refused).last(),
+            Some(&"unreadable_marker"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn the_reports_hand_their_warnings_to_the_binary() {
+        let mut world = world("mystery = 1");
+        add(&mut world, "recent", 1);
+        let report = run_all(&world);
+        let plan = plan_of(&world, &Target::Due);
+
+        assert!(!plan.partial());
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].message.contains("mystery"));
+        assert_eq!(CommandReport::warnings(&plan), plan.warnings.as_slice());
+        assert_eq!(CommandReport::warnings(&report), report.warnings.as_slice());
     }
 }
