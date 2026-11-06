@@ -7,5 +7,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod find;
 mod harness;
 mod init;
