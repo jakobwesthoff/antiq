@@ -13,6 +13,7 @@ use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::io::{self, IsTerminal, Write};
+use std::os::fd::AsFd;
 
 /// The format number of the JSON envelope.
 const ENVELOPE_FORMAT: u32 = 1;
@@ -69,11 +70,65 @@ struct ErrorBody<'a> {
     details: &'a Map<String, Value>,
 }
 
+/// The width a console is laid out for when nothing says otherwise.
+const DEFAULT_WIDTH: usize = 80;
+
+/// How data on stdout is laid out and coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "the commands render through it as they are built")]
+pub struct Style {
+    pub width: usize,
+    pub color: bool,
+}
+
+#[allow(dead_code, reason = "the commands render through it as they are built")]
+impl Style {
+    /// The style for a stream. `columns` is what the terminal reports, if
+    /// the stream is one. Without a terminal the width is 80 and nothing
+    /// is coloured; a terminal that reports no columns gets width 80. A
+    /// non-empty `NO_COLOR` turns colour off (`no_color`).
+    pub fn for_terminal(columns: Option<u16>, no_color: bool, is_tty: bool) -> Style {
+        if !is_tty {
+            return Style {
+                width: DEFAULT_WIDTH,
+                color: false,
+            };
+        }
+        Style {
+            width: columns
+                .filter(|columns| *columns > 0)
+                .map_or(DEFAULT_WIDTH, usize::from),
+            color: !no_color,
+        }
+    }
+
+    /// The style of `stream`, asking the environment for `NO_COLOR`.
+    pub fn of(stream: impl AsFd) -> Style {
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        let is_tty = rustix::termios::isatty(&stream);
+        let columns = if is_tty {
+            terminal_columns(&stream)
+        } else {
+            None
+        };
+        Style::for_terminal(columns, no_color, is_tty)
+    }
+}
+
+/// The columns a terminal reports for itself, `None` when the stream is
+/// no terminal or reports none.
+#[allow(dead_code, reason = "the commands render through it as they are built")]
+pub fn terminal_columns(stream: impl AsFd) -> Option<u16> {
+    let size = rustix::termios::tcgetwinsize(stream).ok()?;
+    (size.ws_col > 0).then_some(size.ws_col)
+}
+
 /// Where a run writes to.
 pub struct Output {
     stdout: Sink,
     stderr: Sink,
     colored: bool,
+    stdout_style: Style,
 }
 
 impl Output {
@@ -85,6 +140,7 @@ impl Output {
             Box::new(io::stderr()),
             io::stderr().is_terminal(),
         )
+        .with_stdout_style(Style::of(io::stdout()))
     }
 
     pub fn new(
@@ -96,7 +152,24 @@ impl Output {
             stdout: Sink::new(stdout),
             stderr: Sink::new(stderr),
             colored,
+            stdout_style: Style {
+                width: DEFAULT_WIDTH,
+                color: false,
+            },
         }
+    }
+
+    /// The same output with `style` for what goes to stdout.
+    #[allow(dead_code, reason = "the commands render through it as they are built")]
+    pub fn with_stdout_style(mut self, style: Style) -> Output {
+        self.stdout_style = style;
+        self
+    }
+
+    /// How data on stdout is laid out and coloured.
+    #[allow(dead_code, reason = "the commands render through it as they are built")]
+    pub fn stdout_style(&self) -> Style {
+        self.stdout_style
     }
 
     /// Writes `payload` as the JSON object of `command` to stdout.
@@ -375,5 +448,133 @@ mod tests {
             .json(Some("find"), &json!({}))
             .expect_err("a full disk is reported");
         assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn without_a_terminal_the_width_is_80_and_nothing_is_coloured() {
+        assert_eq!(
+            Style::for_terminal(None, false, false),
+            Style {
+                width: 80,
+                color: false
+            }
+        );
+        // A size reported for a stream that is no terminal does not count.
+        assert_eq!(
+            Style::for_terminal(Some(200), false, false),
+            Style {
+                width: 80,
+                color: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_terminal_gets_its_width_and_colour() {
+        assert_eq!(
+            Style::for_terminal(Some(120), false, true),
+            Style {
+                width: 120,
+                color: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_reports_no_columns_gets_80() {
+        assert_eq!(
+            Style::for_terminal(Some(0), false, true),
+            Style {
+                width: 80,
+                color: true
+            }
+        );
+        assert_eq!(Style::for_terminal(None, false, true).width, 80);
+    }
+
+    #[test]
+    fn no_color_turns_colour_off_on_a_terminal() {
+        assert_eq!(
+            Style::for_terminal(Some(100), true, true),
+            Style {
+                width: 100,
+                color: false
+            }
+        );
+    }
+
+    /// A pseudo terminal whose window has `columns` columns.
+    struct Pty {
+        master: std::os::fd::OwnedFd,
+        slave: std::os::fd::OwnedFd,
+    }
+
+    fn pty(columns: u16) -> Pty {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut master, mut slave) = (0, 0);
+        let size = libc::winsize {
+            ws_row: 24,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: both descriptors are fresh results of `openpty`, owned
+        // from here on, and the null pointers ask for no name or termios.
+        let (master, slave) = unsafe {
+            let made = libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &size as *const libc::winsize as *mut libc::winsize,
+            );
+            assert_eq!(made, 0, "a pseudo terminal can be opened");
+            (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave))
+        };
+        Pty { master, slave }
+    }
+
+    #[test]
+    fn a_terminal_reports_the_columns_of_its_window() {
+        let pty = pty(132);
+        assert_eq!(terminal_columns(&pty.slave), Some(132));
+        let style = Style::of(&pty.slave);
+        assert_eq!(style.width, 132);
+        drop(pty.master);
+    }
+
+    #[test]
+    fn a_window_of_zero_columns_is_unknown() {
+        let pty = pty(0);
+        assert_eq!(terminal_columns(&pty.slave), None);
+        assert_eq!(Style::of(&pty.slave).width, 80);
+        drop(pty.master);
+    }
+
+    #[test]
+    fn a_pipe_and_dev_null_are_no_terminal() {
+        let (reader, _writer) = io::pipe().expect("a pipe can be made");
+        assert_eq!(terminal_columns(&reader), None);
+        assert_eq!(
+            Style::of(&reader),
+            Style {
+                width: 80,
+                color: false
+            }
+        );
+        let null = std::fs::File::open("/dev/null").expect("/dev/null opens");
+        assert_eq!(terminal_columns(&null), None);
+    }
+
+    #[test]
+    fn output_carries_the_style_of_its_stdout() {
+        let capture = Capture::default();
+        let style = Style {
+            width: 120,
+            color: true,
+        };
+        let out = capture.output(false).with_stdout_style(style);
+        assert_eq!(out.stdout_style(), style);
+        assert_eq!(capture.output(false).stdout_style().width, 80);
     }
 }
