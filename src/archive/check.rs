@@ -10,7 +10,7 @@ use super::hashing::HashingReader;
 use super::verify::{Difference, Hashed, compare, read_hashed};
 use super::{PackError, read};
 use crate::listing::{ListingEntry, is_sha256_hex};
-use crate::progress::{Counter, Metered};
+use crate::progress::Counter;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -29,21 +29,12 @@ pub struct FileDigest {
 
 /// Reads the whole file at `path`.
 pub fn file_digest(path: &Path) -> Result<FileDigest, PackError> {
-    file_digest_with(path, None)
-}
-
-/// [`file_digest`], adding the bytes to `counter` as they are read.
-pub fn file_digest_counted(path: &Path, counter: &Counter) -> Result<FileDigest, PackError> {
-    file_digest_with(path, Some(counter))
-}
-
-fn file_digest_with(path: &Path, counter: Option<&Counter>) -> Result<FileDigest, PackError> {
     let read_error = |source| PackError::ReadFile {
         path: path.to_path_buf(),
         source,
     };
     let file = File::open(path).map_err(read_error)?;
-    let mut reader = HashingReader::new(Metered::new(file, counter));
+    let mut reader = HashingReader::new(file);
     io::copy(&mut reader, &mut io::sink()).map_err(read_error)?;
     Ok(FileDigest {
         bytes: reader.bytes_read(),
@@ -54,11 +45,6 @@ fn file_digest_with(path: &Path, counter: Option<&Counter>) -> Result<FileDigest
 /// The SHA-256 of the file at `path`, as lower-case hex.
 pub fn file_sha256(path: &Path) -> Result<String, PackError> {
     file_digest(path).map(|digest| digest.sha256)
-}
-
-/// [`file_sha256`], adding the bytes to `counter` as they are read.
-pub fn file_sha256_counted(path: &Path, counter: &Counter) -> Result<String, PackError> {
-    file_digest_counted(path, counter).map(|digest| digest.sha256)
 }
 
 // =========================================================
@@ -182,23 +168,6 @@ pub enum ArchiveCheck<'a> {
 /// Whether the archive is the file that was stored. The size is checked
 /// first, from the metadata, so a file of the wrong size is not read.
 pub fn check_archive(archive: &Path, expected: ArchiveCheck<'_>) -> Result<(), PackError> {
-    check_archive_with(archive, expected, None)
-}
-
-/// [`check_archive`], adding the bytes of the checksum read to `counter`.
-pub fn check_archive_counted(
-    archive: &Path,
-    expected: ArchiveCheck<'_>,
-    counter: &Counter,
-) -> Result<(), PackError> {
-    check_archive_with(archive, expected, Some(counter))
-}
-
-fn check_archive_with(
-    archive: &Path,
-    expected: ArchiveCheck<'_>,
-    counter: Option<&Counter>,
-) -> Result<(), PackError> {
     let (bytes, checksum) = match expected {
         ArchiveCheck::Size(bytes) => (Some(bytes), None),
         ArchiveCheck::Checksum(checksum) => (None, Some(checksum)),
@@ -208,7 +177,7 @@ fn check_archive_with(
         check_archive_size(archive, expected)?;
     }
     if let Some(checksum) = checksum {
-        let found = file_digest_with(archive, counter)?.sha256;
+        let found = file_digest(archive)?.sha256;
         if found != checksum.sha256 {
             return Err(differs(
                 archive,
@@ -230,25 +199,7 @@ pub fn check_members_against_listing(
     archive: &Path,
     listing: &[ListingEntry],
 ) -> Result<(), PackError> {
-    check_members_with(archive, listing, None)
-}
-
-/// [`check_members_against_listing`], adding the bytes of the archive read
-/// to `counter`.
-pub fn check_members_against_listing_counted(
-    archive: &Path,
-    listing: &[ListingEntry],
-    counter: &Counter,
-) -> Result<(), PackError> {
-    check_members_with(archive, listing, Some(counter))
-}
-
-fn check_members_with(
-    archive: &Path,
-    listing: &[ListingEntry],
-    counter: Option<&Counter>,
-) -> Result<(), PackError> {
-    let members = read::list_with(archive, counter)?;
+    let members = read::list(archive)?;
     check_entries_against_listing(&members, listing)
 }
 
@@ -348,39 +299,6 @@ mod tests {
             }
         );
         assert_eq!(file_sha256(&file).expect("reads"), ABC);
-    }
-
-    #[test]
-    fn a_counted_digest_adds_the_bytes_of_the_file_and_hashes_the_same() {
-        let (_dir, file) = file_with(b"abc");
-        let counter = Counter::new();
-        assert_eq!(
-            file_digest_counted(&file, &counter).expect("reads"),
-            file_digest(&file).expect("reads")
-        );
-        assert_eq!(counter.done(), 3);
-        assert_eq!(file_sha256_counted(&file, &counter).expect("reads"), ABC);
-        assert_eq!(counter.done(), 6);
-    }
-
-    #[test]
-    fn checking_an_archive_against_its_checksum_counts_the_bytes_it_reads() {
-        let (_dir, file) = file_with(b"abc");
-        let checksum = ChecksumFile::new(ABC.into(), "a.tar.zst".into());
-        let counter = Counter::new();
-        check_archive_counted(&file, ArchiveCheck::Checksum(&checksum), &counter)
-            .expect("the archive matches");
-        assert_eq!(counter.done(), 3);
-    }
-
-    #[test]
-    fn checking_the_members_against_a_listing_counts_the_archive_bytes() {
-        let packaged = pack_piece(&mixed(), "proj");
-        let (_dir, file) = file_with(&packaged.bytes);
-        let counter = Counter::new();
-        check_members_against_listing_counted(&file, &packaged.packed.listing, &counter)
-            .expect("the members match");
-        assert_eq!(counter.done(), packaged.bytes.len() as u64);
     }
 
     #[test]

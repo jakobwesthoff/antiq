@@ -39,18 +39,6 @@ pub fn list(package: &Path) -> Result<Vec<ListingEntry>, PackError> {
     read_package(package).map(|read| read.entries)
 }
 
-/// [`list`], adding the bytes of the package read to `counter`.
-pub fn list_counted(package: &Path, counter: &Counter) -> Result<Vec<ListingEntry>, PackError> {
-    list_with(package, Some(counter))
-}
-
-pub(super) fn list_with(
-    package: &Path,
-    counter: Option<&Counter>,
-) -> Result<Vec<ListingEntry>, PackError> {
-    read_package_with(package, counter).map(|read| read.entries)
-}
-
 pub(super) fn damaged(error: io::Error) -> PackError {
     PackError::Damaged(error.to_string())
 }
@@ -107,12 +95,8 @@ const END_MARKER: u64 = 1024;
 /// the scan of `unpack`: the tar reader
 /// loads a long-name or pax record whole, whatever size its header gives.
 pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
-    read_package_with(package, None)
-}
-
-fn read_package_with(package: &Path, counter: Option<&Counter>) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
-    read_package_from(Metered::new(file, counter))
+    read_package_from(file)
 }
 
 /// Reads the package `source` holds to its end.
@@ -586,15 +570,6 @@ mod tests {
             tar[tar.len() - 1024..].iter().all(|byte| *byte == 0),
             "the last two blocks are zeros"
         );
-    }
-
-    #[test]
-    fn listing_a_package_counts_the_compressed_bytes_of_the_file() {
-        let packaged = pack_piece(&mixed_piece(), "proj");
-        let (_dir, path) = on_disk(&packaged.bytes);
-        let listed = Counter::new();
-        list_counted(&path, &listed).expect("the package lists");
-        assert_eq!(listed.done(), packaged.bytes.len() as u64);
     }
 
     #[test]
