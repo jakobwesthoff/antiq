@@ -120,3 +120,97 @@ cache warm, best of 5, milliseconds (and MB/s of the 299.3 MB):
 In the anchored form every query takes the same time, and the hash line
 takes 1.8 times as long as the comment line. In the prefiltered form hash
 and comment lines take the same time.
+
+## Engines, formats and threads
+
+Hash lines, prefiltered form, set `A`, page cache warm. Each cell is
+milliseconds for the 30 listings with, in brackets, MB/s of the 299.3 MB of
+plain text (also for the zstd files, so the figure includes decoding).
+
+Engines:
+
+- `grep-reader`: `grep-searcher` `Searcher::search_reader` with a
+  `grep-regex` matcher over a `File`, or over a `zstd::Decoder` for zstd
+  files (streaming, no whole-file buffer). Line numbers on.
+- `grep-slice`: the same matcher through `search_slice` over the file read
+  or decoded into a buffer of the thread.
+- `regex`: `regex::bytes::Regex::find_at` over that buffer, then the line
+  check (a match inside one line is counted once).
+- `memmem`: `memchr::memmem::Finder` over that buffer, `memrchr` and
+  `memchr` for the line bounds, then the line check. Literal queries only.
+
+Threads: `std::thread::scope`, each thread takes the next file from an
+atomic counter, with its own buffer. 14 threads = the 14 cores.
+
+| Engine | Query | plain, 1 thread | plain, 14 threads | zstd, 1 thread | zstd, 14 threads |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `grep-reader` | `lit` | 37.5 (7980) | 7.1 (42110) | 196.6 (1522) | 22.1 (13556) |
+| `grep-reader` | `ci` | 68.1 (4392) | 10.2 (29454) | 223.5 (1339) | 25.1 (11920) |
+| `grep-reader` | `re` | 92.0 (3251) | 36.8 (8124) | 249.2 (1201) | 40.5 (7381) |
+| `grep-reader` | `miss` | 28.0 (10684) | 3.9 (76875) | 185.1 (1617) | 19.7 (15173) |
+| `grep-slice` | `lit` | 37.9 (7899) | 7.4 (40179) | 196.3 (1524) | 22.8 (13107) |
+| `grep-slice` | `ci` | 64.7 (4623) | 11.4 (26303) | 222.9 (1342) | 24.7 (12102) |
+| `grep-slice` | `re` | 90.9 (3292) | 31.1 (9633) | 254.1 (1178) | 38.4 (7799) |
+| `grep-slice` | `miss` | 22.0 (13599) | 6.0 (50227) | 178.8 (1674) | 19.4 (15395) |
+| `regex` | `lit` | 29.1 (10277) | 7.4 (40492) | 186.7 (1603) | 21.5 (13900) |
+| `regex` | `ci` | 57.3 (5223) | 9.8 (30536) | 213.3 (1403) | 25.5 (11759) |
+| `regex` | `re` | 30.9 (9687) | 7.3 (40783) | 189.9 (1576) | 20.9 (14296) |
+| `regex` | `miss` | 21.2 (14099) | 6.1 (49060) | 179.9 (1664) | 19.4 (15448) |
+| `memmem` | `lit` | 27.3 (10945) | 6.5 (46147) | 185.7 (1612) | 21.5 (13928) |
+| `memmem` | `miss` | 21.2 (14138) | 6.1 (49087) | 179.4 (1668) | 19.3 (15541) |
+
+Hit counts were identical in all engines for the same query (106 446 for
+`lit`, 116 391 for `ci`, 4 980 for `re`, 0 for `miss`).
+
+Line numbers in `grep-slice`, plain, 1 thread, hash lines: `lit` 29.0 ms
+without and 38.5 ms with line numbers, `re` 86.2 ms without and 91.6 ms with
+(one process per figure, best of 5).
+
+Where the pattern with the line prefix is used instead (anchored form,
+`grep-reader`, zstd, 14 threads): hash lines 92.6 ms for `lit` and 74.6 ms
+for `re`, comment lines 62.9 ms and 49.7 ms.
+
+### Decompression share
+
+The `decode` run reads (plain) or decodes (zstd, `zstd::Decoder` into the
+thread's buffer) every file and does nothing else. Best of 5, milliseconds
+for the 30 listings:
+
+| | 1 thread | 14 threads |
+| --- | ---: | ---: |
+| read plain files into memory | 16.1 | 4.9 |
+| decode zstd files into memory | 173.4 | 18.4 |
+
+Decoding is 93 % of the `regex` `lit` search on zstd files with one thread
+(173.4 of 186.7 ms), 88 % of `grep-reader` `lit` (173.4 of 196.6 ms), and 86
+% and 83 % of those with 14 threads (18.4 of 21.5 and 22.1 ms). Decoding
+runs at 1.73 GB/s of plain text per thread. With 14 threads the 30 files
+give each thread 2 or 3 files. Three decodes take 3 times 173.4 / 30 =
+17.3 ms.
+
+### Peak memory
+
+`ru_maxrss` of the process, by engine and format. With one thread
+`grep-reader` needs 4 MB (plain) and 7 MB (zstd). The engines that hold a
+file in memory (`grep-slice`, `regex`, `memmem`) need 13 to 15 MB (plain)
+and 16 to 17 MB (zstd) with one thread, and 146 to 148 MB (plain) and 186
+to 188 MB (zstd) with 14 threads, each thread holding a buffer for a
+listing of 10 MB. `grep-reader` with 14 threads needs 6 MB (plain) and 46
+MB (zstd).
+
+### Extrapolation to 300 pieces
+
+The times above multiplied by 10 (300 listings of the same size, no
+measurement at that size). With 14 threads the 30 listings leave
+threads with 3 files while the mean is 2.1; with 300 listings it is 22
+against 21.4, so those figures are upper bounds. In a cache the 300
+listings take 2.99 GB plain and 0.92 GB as zstd.
+
+| Engine, query | plain, 1 thread | plain, 14 threads | zstd, 1 thread | zstd, 14 threads |
+| --- | ---: | ---: | ---: | ---: |
+| `memmem` `lit` | 273 ms | 65 ms | 1.86 s | 215 ms |
+| `regex` `ci` | 573 ms | 98 ms | 2.13 s | 255 ms |
+| `regex` `re` | 309 ms | 73 ms | 1.90 s | 209 ms |
+| `grep-reader` `lit` | 375 ms | 71 ms | 1.97 s | 221 ms |
+| `grep-reader` `ci` | 681 ms | 102 ms | 2.24 s | 251 ms |
+| `grep-reader` `re` | 920 ms | 368 ms | 2.49 s | 405 ms |
