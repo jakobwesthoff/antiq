@@ -489,10 +489,16 @@ fn candidates_are_a_list_of_paths() {
 }
 
 #[test]
-fn a_dry_run_has_actions_right_after_dry_run_true() {
+fn a_dry_run_has_actions_as_a_list_after_dry_run_true() {
     accepted(
         &["--json", "pin", "-n"],
         "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"actions\":[]}\n",
+        0,
+    );
+    // The spec puts `lock_held` between the two when the lock is held.
+    accepted(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"lock_held\":{\"pid\":1},\"actions\":[]}\n",
         0,
     );
     rejected(
@@ -503,7 +509,13 @@ fn a_dry_run_has_actions_right_after_dry_run_true() {
     );
     rejected(
         &["--json", "pin", "-n"],
-        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"x\":1,\"actions\":[]}\n",
+        "{\"format\":1,\"command\":\"pin\",\"actions\":[],\"dry_run\":true}\n",
+        0,
+        "actions",
+    );
+    rejected(
+        &["--json", "pin", "-n"],
+        "{\"format\":1,\"command\":\"pin\",\"dry_run\":true,\"actions\":{}}\n",
         0,
         "actions",
     );

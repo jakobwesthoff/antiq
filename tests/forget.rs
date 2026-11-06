@@ -666,3 +666,241 @@ fn the_command_line_refuses_a_missing_or_doubled_target() {
         assert!(exists(world, "projects/scanner", SCANNER_NEW));
     });
 }
+
+// =========================================================
+// Dry run
+// =========================================================
+
+fn unchanged(world: &World, script: impl FnOnce()) {
+    let before = snapshot(&world.collection().root());
+    script();
+    assert_eq!(snapshot(&world.collection().root()), before);
+}
+
+#[test]
+fn a_dry_run_names_the_files_of_the_version_and_changes_nothing() {
+    both(three_versions, |world| {
+        unchanged(world, || {
+            let run = world.run(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
+            run.expect_code(0)
+                .keys(&["format", "command", "dry_run", "actions", "warnings"]);
+            let files = names(world, "projects/scanner", SCANNER_NEW);
+            run.text_only(|out| {
+                assert_eq!(
+                    out,
+                    format!(
+                        "Would delete version {SCANNER_NEW} of projects/scanner: {}\n",
+                        files.join(", ")
+                    )
+                );
+            });
+            run.json_only(|json| {
+                assert_eq!(json["dry_run"], true);
+                let actions = json["actions"].as_array().expect("a list");
+                assert_eq!(actions.len(), 1);
+                let keys: Vec<&str> = actions[0]
+                    .as_object()
+                    .expect("an object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(
+                    keys,
+                    ["kind", "piece", "stamp", "version", "incomplete", "files"]
+                );
+                assert_eq!(actions[0]["kind"], "forget_version");
+                assert_eq!(actions[0]["stamp"], SCANNER_NEW);
+                assert_eq!(actions[0]["version"], "2026-11-04T09:02:11Z");
+                assert_eq!(actions[0]["files"], serde_json::json!(files));
+                assert_eq!(json["warnings"], Value::Array(Vec::new()));
+            });
+            assert_eq!(run.stderr, "");
+        });
+    });
+}
+
+#[test]
+fn a_dry_run_on_a_terminal_names_the_version_by_its_local_time() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run_tty(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
+    run.expect_code(0);
+    assert!(
+        run.stdout
+            .starts_with("Would delete version 2026-11-04 22:02:11 of projects/scanner: "),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_dry_run_of_all_versions_lists_each_and_says_which_are_incomplete() {
+    both(three_versions, |world| {
+        world
+            .collection()
+            .damage_remove_archive("projects/scanner", SCANNER_OLD);
+        unchanged(world, || {
+            let run = world.run(&[
+                "forget",
+                "projects/scanner",
+                "--all-versions",
+                "--force",
+                "-n",
+            ]);
+            run.expect_code(0);
+            run.text_only(|out| {
+                let lines: Vec<&str> = out.lines().collect();
+                assert_eq!(lines.len(), 2, "{out:?}");
+                assert!(
+                    lines[0].starts_with(&format!(
+                        "Would delete incomplete version {SCANNER_OLD} of projects/scanner: "
+                    )),
+                    "{:?}",
+                    lines[0]
+                );
+                assert!(
+                    lines[1].starts_with(&format!(
+                        "Would delete version {SCANNER_NEW} of projects/scanner: "
+                    )),
+                    "{:?}",
+                    lines[1]
+                );
+            });
+            run.json_only(|json| {
+                let actions = json["actions"].as_array().expect("a list");
+                assert_eq!(actions[0]["incomplete"], true);
+                assert_eq!(actions[1]["incomplete"], false);
+            });
+        });
+    });
+}
+
+#[test]
+fn a_dry_run_lists_the_repairs_first() {
+    both(three_versions, |world| {
+        let leftover = world.collection().path(".antiq/tmp/leftover");
+        fs::write(&leftover, "x").expect("the leftover is written");
+        unchanged(world, || {
+            let run = world.run(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
+            run.expect_code(0);
+            run.text_only(|out| {
+                let lines: Vec<&str> = out.lines().collect();
+                assert_eq!(lines[0], "Would delete .antiq/tmp/leftover");
+                assert!(lines[1].starts_with("Would delete version"), "{out:?}");
+            });
+            run.json_only(|json| {
+                assert_eq!(
+                    json["actions"][0],
+                    serde_json::json!(
+                        {"kind": "repair", "repair": "delete_temporary", "entry": "leftover"}
+                    )
+                );
+                assert_eq!(json["actions"][1]["kind"], "forget_version");
+            });
+        });
+        assert!(leftover.exists());
+    });
+}
+
+#[test]
+fn a_dry_run_assumes_repair_one_was_done() {
+    both(three_versions, |world| {
+        world
+            .collection()
+            .damage_remove_archive("tools/scan-old", SCAN_OLD);
+        stage_archive(world, "tools/scan-old", SCAN_OLD);
+        unchanged(world, || {
+            let run = world.run(&["forget", "tools/scan-old", SCAN_OLD, "-n"]);
+            run.expect_code(1);
+            assert_eq!(
+                run.error_kind().as_deref().unwrap_or("unknown_reference"),
+                "unknown_reference"
+            );
+        });
+    });
+}
+
+#[test]
+fn a_dry_run_assumes_repair_five_was_done() {
+    let build = |builder: &mut CollectionBuilder| {
+        three_versions(builder);
+        builder.patterns(&["projects/*"]);
+        builder.piece("projects/scanner", |piece| {
+            piece
+                .age_days(1)
+                .file("src/main.rs", "fn main() {}\n")
+                .restored(1, Some(SCANNER_NEW));
+        });
+    };
+    both(build, |world| {
+        unchanged(world, || {
+            let gone = world.run(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
+            gone.expect_code(1);
+            gone.text_only(|_| {
+                assert!(
+                    gone.stderr.contains("matches no version"),
+                    "{:?}",
+                    gone.stderr
+                );
+            });
+
+            let kept = world.run(&["forget", "projects/scanner", SCANNER_OLD, "-n"]);
+            kept.expect_code(0);
+            kept.text_only(|out| {
+                let lines: Vec<&str> = out.lines().collect();
+                assert_eq!(
+                    lines[0],
+                    format!(
+                        "Would delete version {SCANNER_NEW} of projects/scanner that an unearth left"
+                    )
+                );
+                assert!(lines[1].starts_with("Would delete version"), "{out:?}");
+            });
+            kept.json_only(|json| {
+                assert_eq!(json["actions"][0]["repair"], "delete_restored_version");
+                assert_eq!(json["actions"][1]["stamp"], SCANNER_OLD);
+            });
+        });
+    });
+}
+
+#[test]
+fn a_dry_run_that_finds_the_lock_held_names_the_holder_and_lists_no_repairs() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, three_versions);
+        fs::write(world.collection().path(".antiq/tmp/leftover"), "x").expect("written");
+        let _lock = hold_lock(&world.collection().root());
+        let before = snapshot(&world.collection().root());
+
+        let run = world.run(&["forget", "projects/scanner", SCANNER_NEW, "-n"]);
+        run.expect_code(0)
+            .keys(&["format", "command", "dry_run", "lock_held", "actions"]);
+        run.text_only(|out| {
+            let line = format!("The lock is held by pid {}, started ", std::process::id());
+            assert!(out.starts_with(&line), "{out:?}");
+            assert!(out.ends_with(". No repairs are listed.\n"), "{out:?}");
+            assert_eq!(out.lines().count(), 1);
+        });
+        run.json_only(|json| {
+            assert_eq!(json["dry_run"], true);
+            assert_eq!(json["lock_held"]["pid"], std::process::id());
+            assert!(json["lock_held"]["started"].is_string());
+            assert_eq!(json["actions"], Value::Array(Vec::new()));
+        });
+        assert_eq!(run.stderr, "");
+        assert_eq!(snapshot(&world.collection().root()), before);
+    }
+}
+
+#[test]
+fn a_dry_run_reports_what_a_real_run_would_refuse() {
+    both(three_versions, |world| {
+        unchanged(world, || {
+            let run = world.run(&["forget", "projects/scanner", "2020-01-01", "-n"]);
+            run.expect_code(1);
+            let run = world.run(&["forget", "", SCANNER_NEW, "-n"]);
+            run.expect_code(2);
+            let run = world.run(&["forget", "projects/scanner", "", "-n"]);
+            run.expect_code(2);
+        });
+    });
+}

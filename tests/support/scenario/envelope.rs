@@ -85,9 +85,9 @@ pub fn check(args: &[String], stdout: &str, code: i32) -> Result<(), String> {
         if object["dry_run"] != Value::Bool(true) {
             return Err("dry_run is present but not true".to_string());
         }
-        if keys.get(position + 1).map(|key| key.as_str()) != Some("actions")
-            || !object["actions"].is_array()
-        {
+        // `lock_held` may stand between the two, as the spec shows.
+        let actions = keys.iter().position(|key| key.as_str() == "actions");
+        if actions.is_none_or(|actions| actions < position) || !object["actions"].is_array() {
             return Err("actions does not follow dry_run as a list".to_string());
         }
     }

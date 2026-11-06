@@ -4,14 +4,15 @@
 
 //! The `forget` operation: deletes one version of a piece, or all of them.
 
-use crate::clock::Clock;
+use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
+use crate::lock::Holder;
 use crate::reference::{self, CandidateSet, ReferenceError};
 use crate::relpath::{RelPath, escape};
 use crate::repair::Repair;
 use crate::report::{self, CommandReport, Warning};
-use crate::run::{RunError, RunGuard};
+use crate::run::{self, RunError, RunGuard, Started};
 use crate::versions::VersionsError;
 use crate::versions::names::VersionFile;
 use crate::versions::naming::{self, Candidate, Lookup};
@@ -168,7 +169,7 @@ pub fn forget(
 ) -> Result<ForgetReport, ForgetError> {
     check_arguments(request)?;
     let guard = RunGuard::begin(request.collection, clock)?;
-    let chosen = choose(request, zone)?;
+    let chosen = choose(request, zone, &[])?;
 
     let pieces = crate::filesystem::tree::TreeRoot::open(&request.collection.pieces_dir())
         .map_err(|source| VersionsError::Io {
@@ -204,6 +205,91 @@ pub fn forget(
     })
 }
 
+/// The lock holder a dry run names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LockHeld {
+    pub pid: u32,
+    /// In whole seconds.
+    pub started: Timestamp,
+}
+
+/// What a dry run found.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ForgetPlan {
+    /// Another run holds the lock, so nothing else was read.
+    Held {
+        dry_run: bool,
+        lock_held: LockHeld,
+        actions: Vec<Action>,
+    },
+    /// The repairs a real run starts with, then the versions it deletes.
+    Listed {
+        dry_run: bool,
+        actions: Vec<Action>,
+        warnings: Vec<Warning>,
+    },
+}
+
+/// Lists what [`forget`] would do, without taking the lock or changing
+/// anything. The versions are chosen as if the repairs had been done.
+pub fn plan(
+    request: &ForgetRequest<'_>,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+) -> Result<ForgetPlan, ForgetError> {
+    check_arguments(request)?;
+    let started = run::start(request.collection, clock, true)?;
+    let Started::DryRun {
+        holder,
+        repairs,
+        warnings: unreadable,
+    } = started
+    else {
+        unreachable!("a dry run starts no guarded run");
+    };
+    if let Some(Holder { pid, started, .. }) = holder {
+        return Ok(ForgetPlan::Held {
+            dry_run: true,
+            lock_held: LockHeld {
+                pid,
+                started: whole_seconds(started),
+            },
+            actions: Vec::new(),
+        });
+    }
+
+    // Repair 1 deletes sidecars whose archive is staged, which `settled` leaves
+    // out already; only repair 5 removes a version the scan shows whole.
+    let deleted_by_repairs: Vec<(RelPath, Stamp)> = repairs
+        .iter()
+        .filter_map(|repair| match repair {
+            Repair::DeleteRestoredVersion {
+                piece,
+                version,
+                delete: true,
+            } => Some((piece.clone(), *version)),
+            _ => None,
+        })
+        .collect();
+    let chosen = choose(request, zone, &deleted_by_repairs)?;
+
+    let mut actions: Vec<Action> = repairs.into_iter().map(Action::Repair).collect();
+    actions.extend(
+        chosen
+            .versions
+            .iter()
+            .map(|version| Action::ForgetVersion(VersionEntry::of(&chosen.folder, version))),
+    );
+    let mut warnings = report::setting_notes(request.collection);
+    warnings.extend(unreadable);
+    Ok(ForgetPlan::Listed {
+        dry_run: true,
+        actions,
+        warnings,
+    })
+}
+
 /// The empty piece or version is a flaw of the command line: the shell
 /// passed a variable that was not set.
 fn check_arguments(request: &ForgetRequest<'_>) -> Result<(), ForgetError> {
@@ -222,9 +308,13 @@ struct Chosen {
     versions: Vec<StoreVersion>,
 }
 
-fn choose(request: &ForgetRequest<'_>, zone: &TimeZone) -> Result<Chosen, ForgetError> {
+fn choose(
+    request: &ForgetRequest<'_>,
+    zone: &TimeZone,
+    repaired: &[(RelPath, Stamp)],
+) -> Result<Chosen, ForgetError> {
     let collection = request.collection;
-    let scan = settled(collection, store::scan(&collection.pieces_dir())?)?;
+    let scan = settled(collection, store::scan(&collection.pieces_dir())?, repaired)?;
     let candidates = CandidateSet::store_and_sidecar_only(collection, &scan);
     let folder = reference::resolve_piece(collection, request.cwd, request.piece, &candidates)?;
     let found: &StorePiece = scan
@@ -273,15 +363,22 @@ fn choose(request: &ForgetRequest<'_>, zone: &TimeZone) -> Result<Chosen, Forget
 
 /// `scan` without the versions that a run is still moving into the store:
 /// sidecars whose archive is staged in `tmp/pack/` belong to repair 1, not
-/// to the user. A folder left without a version is no piece to forget.
-fn settled(collection: &Collection, mut scan: StoreScan) -> Result<StoreScan, VersionsError> {
+/// to the user. A version in `repaired` is one that a repair of the start
+/// of the run deletes, which a dry run has not done yet. A folder left
+/// without a version is no piece to forget.
+fn settled(
+    collection: &Collection,
+    mut scan: StoreScan,
+    repaired: &[(RelPath, Stamp)],
+) -> Result<StoreScan, VersionsError> {
     let staging = collection.tmp_dir().join("pack");
     for folder in scan.pieces.iter_mut().chain(&mut scan.sidecar_only) {
         let mut kept = Vec::new();
         for version in std::mem::take(&mut folder.versions) {
             let staged = version.is_incomplete()
                 && store::is_being_stored(&staging, &folder.path, &version.stamp)?;
-            if !staged {
+            let repaired = repaired.contains(&(folder.path.clone(), version.stamp));
+            if !staged && !repaired {
                 kept.push(version);
             }
         }
