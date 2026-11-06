@@ -2852,7 +2852,10 @@ mod tests {
 
         anna.sync();
 
-        assert!(!anna.collection.meta_pending_path(id).exists());
+        assert_eq!(
+            anna.store().committed_versions(id).expect("lists"),
+            vec![1, 2]
+        );
     }
 
     #[test]
