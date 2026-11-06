@@ -1979,6 +1979,43 @@ mod destination_tests {
         );
     }
 
+    #[test]
+    fn every_problem_says_what_is_wrong() {
+        let at = rel("a/b");
+        let texts: Vec<String> = [
+            TargetProblem::Root,
+            TargetProblem::InsideAntiq,
+            TargetProblem::NotSelected,
+            TargetProblem::Excluded { at: at.clone() },
+            TargetProblem::InsidePiece { piece: at.clone() },
+            TargetProblem::NotAFolder { at: at.clone() },
+            TargetProblem::SpelledDifferently { at },
+            TargetProblem::Taken,
+            TargetProblem::Unholdable {
+                reason: "too long".to_string(),
+            },
+            TargetProblem::MountPoint,
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(
+            texts,
+            [
+                "it is the collection root",
+                "it is inside `.antiq/`",
+                "the patterns do not select it",
+                "`a/b` is excluded",
+                "`a/b` is a piece",
+                "`a/b` is a file or a symlink, not a folder",
+                "`a/b` is spelled differently on disk",
+                "it is taken",
+                "too long",
+                "it is on another volume than `.antiq/tmp/`: mount point",
+            ]
+        );
+    }
+
     fn volume(decomposes: bool, max: usize) -> TargetRules {
         TargetRules {
             decomposes,
@@ -2140,6 +2177,7 @@ mod bring_tests {
         volume: Option<TargetRules>,
         device: Option<fn(&RelPath) -> u64>,
         before_rename_fault: bool,
+        restore_failure: bool,
     }
 
     impl Spy {
@@ -2160,6 +2198,7 @@ mod bring_tests {
                 volume: None,
                 device: None,
                 before_rename_fault: false,
+                restore_failure: false,
             }
         }
 
@@ -2287,6 +2326,14 @@ mod bring_tests {
             from: &RelPath,
             to: &RelPath,
         ) -> Result<Moved, FilesystemError> {
+            if self.restore_failure {
+                let _ = moves::move_dir(root, from, root, to)?;
+                return Ok(Moved {
+                    mode_restore_error: Some(FilesystemError::Locked {
+                        path: "restore the mode".into(),
+                    }),
+                });
+            }
             match self.move_fault {
                 Some(fault) => Err(fault()),
                 None => moves::move_dir(root, from, root, to),
@@ -2980,5 +3027,35 @@ mod bring_tests {
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_mode_that_cannot_be_put_back_after_the_rename_is_a_warning() {
+        let world = World::new();
+        let mut spy = world.spy();
+        spy.restore_failure = true;
+        let (_, warnings) = done(world.run(&spy));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("restore the mode"), "{warnings:?}");
+    }
+
+    #[test]
+    fn staging_takes_the_first_unused_number() {
+        let mut world = World::new();
+        world.collection.tree().dir(".antiq/tmp/extract/1");
+        world.collection.tree().dir(".antiq/tmp/extract/2");
+        let staged = world.extract_dir().join("3");
+        let seen = Arc::new(Mutex::new(false));
+        let flag = seen.clone();
+        let spy = world.spy().on(Step::StagingMade, move || {
+            *flag.lock().expect("flag") = staged.is_dir();
+            Ok(())
+        });
+        done(world.run(&spy));
+        assert!(*seen.lock().expect("flag"));
+        assert!(
+            world.extract_dir().join("1").is_dir(),
+            "an old folder stays"
+        );
     }
 }

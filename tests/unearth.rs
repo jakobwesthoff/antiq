@@ -350,3 +350,65 @@ fn a_listing_of_a_newer_format_is_refused_with_its_own_kind() {
     run.expect_code(1);
     assert_eq!(run.error_kind().as_deref(), Some("format_too_new"));
 }
+
+#[test]
+fn a_terminal_names_the_version_by_its_local_time() {
+    let world = world(Mode::Text, scanner);
+    let dry = world.run_tty(&["unearth", "projects/scanner", "-n"]);
+    dry.expect_code(0);
+    // 09:02:11 UTC is 22:02:11 at +13:00.
+    assert!(
+        dry.stdout
+            .contains("Would unearth projects/scanner (version 2026-11-04 22:02:11)"),
+        "{:?}",
+        dry.stdout
+    );
+    assert_eq!(
+        dry.stdout.lines().nth(1),
+        Some("  check the version 2026-11-04 22:02:11 is sound"),
+        "{:?}",
+        dry.stdout
+    );
+    let run = world.run_tty(&["unearth", "projects/scanner"]);
+    run.expect_code(0);
+    assert!(
+        run.stdout
+            .contains("Unearthed projects/scanner (version 2026-11-04 22:02:11)"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn the_offset_tells_apart_versions_that_render_alike_on_a_terminal() {
+    // New Zealand's summer time ends at 03:00 on 2026-04-05, so 02:30 happens twice.
+    let world = world(Mode::Text, |builder| {
+        builder
+            .version("projects/notes", "2026-04-04T133000", &[("a.txt", "a")])
+            .version("projects/notes", "2026-04-04T143000", &[("a.txt", "a")]);
+    });
+    let run = world.run_tty(&["unearth", "projects/notes"]);
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("(version 2026-04-05 02:30:00 +12:00)"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_text_run_that_does_not_fit_says_so_on_stderr() {
+    let world = world(Mode::Text, |b| {
+        b.version("projects/scanner", NEW, &[("a.txt", "hello\n")]);
+    });
+    oversize_listing(&world);
+    let run = world.run(&["unearth", "projects/scanner"]);
+    run.expect_code(3);
+    assert_eq!(run.stdout, "");
+    assert!(
+        run.stderr
+            .starts_with("Skipped projects/scanner: 9000 TB needed, "),
+        "{:?}",
+        run.stderr
+    );
+}

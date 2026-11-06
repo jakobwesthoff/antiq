@@ -1373,4 +1373,26 @@ mod tests {
             other => panic!("expected a plan, got {other:?}"),
         }
     }
+
+    #[test]
+    fn the_action_and_the_report_describe_themselves() {
+        let action = UnearthAction {
+            action: "unearth",
+            piece: "projects/scanner".to_string(),
+            stamp: NEW.to_string(),
+            version: Timestamp::UNIX_EPOCH,
+            path: "projects/scanner".to_string(),
+            bytes: 1,
+            checks: CHECKS.to_vec(),
+            skipped: None,
+            siblings: Vec::new(),
+        };
+        assert_eq!(
+            action.describe(),
+            format!("unearth projects/scanner (version {NEW})")
+        );
+        let world = World::new(&[NEW]);
+        let report = report(world.run(&Probe::default()));
+        assert!(CommandReport::warnings(&report).is_empty());
+    }
 }
