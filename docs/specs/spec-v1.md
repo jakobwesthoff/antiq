@@ -1929,7 +1929,7 @@ and marks pieces. A piece is marked missing on the remote when its
 current metadata is committed, this machine holds no archive of it, and
 the current archive file is not in the object's directory on the remote or
 the remote does not list the object. The mark clears once the file is
-back. A remote that cannot be listed ends the remote part with its error
+back. A remote operation that fails ends the remote part with its error
 and leaves the marks as they are. The upload temp files of this machine
 for pieces that are pending upload, and those of every object with a
 recorded change, are kept. A dry run reads the remote

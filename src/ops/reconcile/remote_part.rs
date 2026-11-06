@@ -245,11 +245,13 @@ fn reach(
     match (lock, mode) {
         (Some(lock), Mode::Run { now, .. }) => {
             let applied = cleanup::apply(remote, &settings, lock, now, &cleaned)?;
+            // The marks are written last: an error of the remote part leaves
+            // them as they were.
+            remote.flush()?;
             for (mut entry, missing) in changes {
                 entry.missing_on_remote = missing;
                 tracking::write(collection, lock, clock, &mut entry)?;
             }
-            remote.flush()?;
             part.reached = true;
             part.remote = Some(RemoteReport {
                 pulled,
@@ -528,6 +530,17 @@ mod tests {
             Ok(Box::new(remote))
         };
         stop_of(reconcile_with(world, &opener).expect("the local part runs"))
+    }
+
+    #[test]
+    fn a_failing_flush_stops_the_remote_part_before_the_marks_are_written() {
+        let world = world();
+        let before = entry_bytes(&world);
+
+        let stop = remote_failing(&world, Op::Flush, Fault::Io);
+
+        assert_eq!(stop.kind(), crate::error::ErrorKind::Other);
+        assert_eq!(entry_bytes(&world), before);
     }
 
     #[test]
