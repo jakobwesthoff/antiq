@@ -2544,11 +2544,12 @@ mod tests {
         assert!(matches!(error, RemoteError::Io { .. }), "{error}");
     }
 
-    /// Takes the read permission from `file`, and checks that it is gone, as
-    /// a test run by the superuser would not see the failure it is after.
-    fn make_unreadable(file: &Path) {
-        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        assert!(std::fs::File::open(file).is_err(), "the test runs as root");
+    /// Takes all permissions from `path` and says whether that made it
+    /// unreadable. The superuser reads it anyway, and a test that depends
+    /// on the failure returns early then.
+    fn make_unreadable(path: &Path) -> bool {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        std::fs::File::open(path).is_err()
     }
 
     #[test]
@@ -2556,7 +2557,9 @@ mod tests {
         let far = Far::new();
         let file = far.object_dir(OBJECT).join("payload");
         std::fs::write(&file, "abc").expect("file");
-        make_unreadable(&file);
+        if !make_unreadable(&file) {
+            return;
+        }
         let error = far
             .remote()
             .checksum(object(), "payload")
@@ -2583,7 +2586,9 @@ mod tests {
         let source = far.local("pack.tar", b"x");
         let there = far_file(&far, "pack.tar");
         std::fs::write(&there, "other").expect("there already");
-        make_unreadable(&there);
+        if !make_unreadable(&there) {
+            return;
+        }
         let error = far
             .remote_with(&fake, SshSeams::default())
             .put_payload(&upload(&source, &sha_of(b"x")))
