@@ -720,6 +720,31 @@ mod tests {
         assert_eq!(report.pieces[0].files[0].versions, [stamp(NEW), stamp(OLD)]);
     }
 
+    #[test]
+    fn a_missing_checksum_file_does_not_stop_the_search() {
+        let (store, spoiled) = spoilable();
+        spoiled.remove(VersionFile::Checksum);
+
+        let report = found(&store, "needle");
+
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.pieces[0].files[0].versions, [stamp(NEW), stamp(OLD)]);
+    }
+
+    #[test]
+    fn an_archive_of_another_size_than_the_listing_records_does_not_stop_the_search() {
+        let (store, spoiled) = spoilable();
+        let size = std::fs::metadata(spoiled.path(VersionFile::Archive))
+            .expect("the archive exists")
+            .len();
+        spoiled.truncate(VersionFile::Archive, size - 1);
+
+        let report = found(&store, "needle");
+
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.pieces[0].files[0].versions, [stamp(NEW), stamp(OLD)]);
+    }
+
     // =========================================================
     // The pattern and the workers
     // =========================================================
