@@ -11,17 +11,20 @@ tags: [testing, error-handling]
 Not confirmed yet. On 2026-11-05 an agent auditing tests for clock and
 environment dependence ran the whole suite in a Linux container as a
 non-root user and reported two tests that pass on macOS but fail there.
-The lead has not reproduced it; which container image and Linux version
-were used is not recorded. Whether this is a bug in antiq on Linux or an
+The lead has not reproduced it. The agent's container was a Rust image
+with zstd, attr and rsync installed, run as a non-root user; the exact
+Linux version is not recorded. Every other test passed there. Whether this is a bug in antiq on Linux or an
 artefact of that container is open.
 
 ## What was reported
 
 - `commands::import::tests::a_folder_that_cannot_be_opened_is_an_error`
-  (`src/commands/import.rs`): the import fails with `ImportError::Pin`
-  ("cannot look for a pin in ...") instead of the expected `Open` error.
+  (`src/commands/import.rs`, assertion near line 1378): the import fails
+  with `ImportError::Pin` ("cannot look for a pin in /tmp/.tmpXXXX")
+  instead of the expected `Open` error.
 - `commands::status::tests::a_directory_inside_a_leftover_that_cannot_be_read_is_a_warning_and_the_rest_is_named`
-  (`src/commands/status.rs`): `status` gives 0 warnings instead of 1.
+  (`src/commands/status.rs`, assertion near line 1142): `status` gives 0
+  warnings instead of 1.
 
 Both tests make a directory unreadable and expect antiq to report it.
 
