@@ -27,6 +27,12 @@ beb748f:docs/specs/spec-v1.md`. Where the new spec and the concept
 differ, the item reports the difference to the lead and the concept
 decides until the spec is fixed (PS2, PO9).
 
+Line numbers cited as "concept:<line>" are those of beb748f. The
+concept's final text is at a19b83f (`push --force` instead of
+`--take-over`, `rsync -H`; section 8.5); read the behaviour from `git
+show a19b83f:docs/concept-v1-simplified.md` and use beb748f only to
+follow a line citation.
+
 ## 1. Overview
 
 ### End state
@@ -970,7 +976,7 @@ apply, plus the review's rules:
   to hide it; the named consumer removes it) (PS1, PO2).
 - Docs travel with the code: the spec section an item implements, the
   ADR it touches, the todos it affects, in the same commit. After D0 the
-  concept and the old spec are read with `git show beb748f:<path>`; a
+  concept and the old spec are read with `git show beb748f:<path>` (the concept's final text with `git show a19b83f:<path>`, see the top note); a
   difference between the new spec and the concept goes to the lead, and
   the concept decides until the spec is fixed (PS2).
 - MPL-2.0 header on every source, test and script file (CLAUDE.md);
