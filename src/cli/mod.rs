@@ -620,8 +620,30 @@ mod tests {
     }
 
     #[test]
-    fn if_reachable_leaves_an_away_remote_failing_until_the_policy_says_otherwise() {
+    fn if_reachable_ends_a_run_with_an_away_remote_with_zero() {
         let cli = parse(&["sync", "--if-reachable"]);
+        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
+            message: "no route to host".into(),
+            overdue: false,
+        })
+        .into();
+        assert_eq!(finish_captured(&cli, Err(away)).0, 0);
+    }
+
+    #[test]
+    fn if_reachable_leaves_an_overdue_away_remote_at_exit_four() {
+        let cli = parse(&["sync", "--if-reachable"]);
+        let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
+            message: "no route to host".into(),
+            overdue: true,
+        })
+        .into();
+        assert_eq!(finish_captured(&cli, Err(away)).0, 4);
+    }
+
+    #[test]
+    fn an_away_remote_without_the_flag_exits_with_four() {
+        let cli = parse(&["sync"]);
         let away: anyhow::Error = antiq::Error::from(RemoteError::Away {
             message: "no route to host".into(),
             overdue: false,
