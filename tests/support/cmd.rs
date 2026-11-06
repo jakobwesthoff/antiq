@@ -32,6 +32,28 @@ pub fn detached(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// `PATH` with a stand-in `ssh` in front, which answers like a host that
+/// does not resolve, so that no test reaches the network by accident. A
+/// test that wants an ssh sets `PATH` itself.
+fn path_without_real_ssh(home: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).expect("the bin directory is made");
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\necho 'ssh: Could not resolve hostname nas: Name or service not known' >&2\nexit 255\n",
+    )
+    .expect("the stand-in is written");
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
+    let mut dirs = vec![bin];
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(dirs).expect("no directory name holds a colon")
+}
+
 /// The antiq binary under test, with a home directory of its own.
 pub struct Antiq {
     command: Command,
@@ -50,6 +72,7 @@ impl Antiq {
         let home = tempfile::tempdir().expect("the temp dir is writable");
         let mut command = detached(program);
         command.env("HOME", home.path());
+        command.env("PATH", path_without_real_ssh(home.path()));
         Antiq {
             command,
             _home: home,

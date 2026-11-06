@@ -16,6 +16,9 @@
 #   master.log   path of the -E file the master was started with
 #   leaked       one line per -M that real ssh would have left running as
 #                a plain connection (the control path was taken)
+#   remote_path  optional: the PATH the commands run with, so a test can
+#                put wrappers of sync, ln and other tools of the far side
+#                in front
 #   fault        optional: "<name> [start|command|all]"; the call prints
 #                ssh-texts/<name>.txt next to this script and exits 255
 #                (see the cases below for the names that do something else)
@@ -248,5 +251,9 @@ if fault_applies command; then
     esac
 fi
 
+if [ -f "$state/remote_path" ]; then
+    PATH=$(cat "$state/remote_path")
+    export PATH
+fi
 sh -c "$command"
 exit $?

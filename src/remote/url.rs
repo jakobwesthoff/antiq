@@ -30,6 +30,8 @@ pub enum UrlError {
     NoPath,
     #[error("`{text}` is not a user or host name of A-Z a-z 0-9 . _ -")]
     Name { text: String },
+    #[error("the host `{text}` starts with `-`, which ssh would read as an option")]
+    HostOption { text: String },
     #[error("`{text}` is not a port from 1 to 65535")]
     Port { text: String },
 }
@@ -95,6 +97,11 @@ fn parse_ssh(rest: &str) -> Result<RemoteUrl, UrlError> {
     }
     if root.is_empty() {
         return Err(UrlError::NoPath);
+    }
+    // ssh takes the host as a word on its command line, where a leading
+    // dash makes it an option.
+    if host.starts_with('-') {
+        return Err(UrlError::HostOption { text: host.into() });
     }
     for name in user.into_iter().chain([host]) {
         if name.is_empty() || !name.bytes().all(is_name_byte) {
@@ -323,6 +330,22 @@ mod tests {
                 text: "na$s".into()
             })
         );
+    }
+
+    #[test]
+    fn a_host_that_starts_with_a_dash_is_refused() {
+        assert_eq!(
+            parse("ssh://-oProxyCommand/srv"),
+            Err(UrlError::HostOption {
+                text: "-oProxyCommand".into()
+            })
+        );
+        assert!(matches!(
+            parse("ssh://-x:22/srv"),
+            Err(UrlError::HostOption { .. })
+        ));
+        assert!(parse("ssh://a-b/srv").is_ok());
+        assert!(parse("ssh://-user@nas/srv").is_ok());
     }
 
     #[test]

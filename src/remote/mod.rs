@@ -22,9 +22,13 @@ use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, flush_file};
 use crate::id::ObjectId;
 use crate::machine::MachineError;
+use crate::report::Warning;
 use jiff::Timestamp;
 use path::PathRemote;
+use rsync::RsyncError;
 use serde::Serialize;
+use ssh::SshRemote;
+use ssh::session::SessionError;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::num::NonZeroU32;
@@ -260,16 +264,19 @@ pub trait Remote: Send + Sync {
 
     /// Creates the empty file `name` in the object's directory, and fails
     /// to when it exists. The claim of a metadata version is made this
-    /// way (ADR 0030).
+    /// way (ADR 0030). The path remote makes the new entry durable at
+    /// once; the ssh remote does at the next [`Remote::flush`].
     fn create_exclusive(&self, id: ObjectId, name: &str) -> Result<Created, RemoteError>;
 
     /// Writes `bytes` under the temp name `temp` in the object's
-    /// directory and makes them durable. A file of that name is rewritten
-    /// from the start.
+    /// directory. A file of that name is rewritten from the start. The
+    /// path remote makes the bytes durable at once; the ssh remote makes
+    /// them durable at the next [`Remote::flush`].
     fn write_temp(&self, id: ObjectId, temp: &str, bytes: &[u8]) -> Result<(), RemoteError>;
 
     /// Renames `temp` to `name` without replacing a file that has that
-    /// name, then makes the object's directory durable.
+    /// name. The path remote makes the object's directory durable at once;
+    /// the ssh remote does at the next [`Remote::flush`].
     fn rename_into_place(
         &self,
         id: ObjectId,
@@ -297,8 +304,15 @@ pub trait Remote: Send + Sync {
     fn checksum(&self, id: ObjectId, name: &str) -> Result<String, RemoteError>;
 
     /// Makes everything the remote has written so far durable on its own
-    /// side. The path remote flushes every file as it writes it.
+    /// side. The path remote flushes every file as it writes it; the ssh
+    /// remote runs `sync` on the far side.
     fn flush(&self) -> Result<(), RemoteError>;
+
+    /// What the remote noticed while it worked and the user should know,
+    /// collected since the last call. The default has nothing to report.
+    fn take_warnings(&self) -> Vec<Warning> {
+        Vec::new()
+    }
 
     /// Called once when the run is done with the remote.
     fn finish(&self);
@@ -418,13 +432,26 @@ pub fn open(collection: &Collection) -> Result<Box<dyn Remote>, RemoteError> {
             let machine = collection.machine_name()?;
             Ok(Box::new(PathRemote::new(root, config.id, &machine)))
         }
-        RemoteUrl::Ssh { .. } => Err(RemoteError::Unsupported("an ssh remote".into())),
+        RemoteUrl::Ssh {
+            user,
+            host,
+            port,
+            root,
+        } => {
+            let target = ssh::SshTarget {
+                user,
+                host,
+                port,
+                root,
+            };
+            let machine = &collection.config().machine;
+            Ok(Box::new(SshRemote::connect(&target, config, machine)?))
+        }
     }
 }
 
 /// Looks at the remote of a collection without changing anything. A remote
-/// that cannot be opened, such as an ssh remote before this version can
-/// open it, cannot be used and is reported as broken.
+/// that cannot be opened is reported as broken.
 pub fn probe_state(collection: &Collection) -> RemoteState {
     let Some(config) = collection.config().remotes.first() else {
         return RemoteState::None;
@@ -435,7 +462,27 @@ pub fn probe_state(collection: &Collection) -> RemoteState {
                 .reachability
                 .into()
         }
-        Ok(RemoteUrl::Ssh { .. }) | Err(_) => RemoteState::Broken,
+        Ok(RemoteUrl::Ssh {
+            user,
+            host,
+            port,
+            root,
+        }) => {
+            let target = ssh::SshTarget {
+                user,
+                host,
+                port,
+                root,
+            };
+            let machine = &collection.config().machine;
+            match SshRemote::connect(&target, config, machine)
+                .and_then(|remote| remote.reachability())
+            {
+                Ok(assessment) => assessment.reachability.into(),
+                Err(_) => RemoteState::Broken,
+            }
+        }
+        Err(_) => RemoteState::Broken,
     }
 }
 
@@ -531,12 +578,6 @@ mod tests {
     }
 
     #[test]
-    fn an_ssh_remote_cannot_be_used_yet_and_is_broken() {
-        let collection = collection_with("ssh://nas/srv/antiq", Some("laptop"));
-        assert_eq!(probe_state(&collection), RemoteState::Broken);
-    }
-
-    #[test]
     fn a_url_that_does_not_parse_is_broken() {
         let collection = collection_with("relative/path", Some("laptop"));
         assert_eq!(probe_state(&collection), RemoteState::Broken);
@@ -569,6 +610,14 @@ mod tests {
     }
 
     #[test]
+    fn a_path_remote_has_nothing_to_warn_about() {
+        let root = remote_root();
+        let collection = collection_with(root.path().to_str().expect("UTF-8"), Some("laptop"));
+        let remote = open(&collection).expect("a path remote opens");
+        assert!(remote.take_warnings().is_empty());
+    }
+
+    #[test]
     fn a_version_nobody_knows_of_is_version_zero() {
         let id: ObjectId = REMOTE_ID.parse().expect("a ULID");
         let mut known = KnownVersions::new();
@@ -586,11 +635,11 @@ mod tests {
     }
 
     #[test]
-    fn opening_an_ssh_url_is_unsupported() {
-        let collection = collection_with("ssh://nas/srv/antiq", Some("laptop"));
-        let error = open(&collection).err().expect("not supported yet");
-        assert!(matches!(error, RemoteError::Unsupported(_)), "{error}");
-        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    fn opening_an_ssh_url_with_a_host_that_ssh_reads_as_an_option_is_an_error() {
+        let collection = collection_with("ssh://-oProxyCommand/srv/antiq", Some("laptop"));
+        let error = open(&collection).err().expect("the host is refused");
+        assert!(matches!(error, RemoteError::Url(_)), "{error}");
+        assert_eq!(probe_state(&collection), RemoteState::Broken);
     }
 
     #[test]
@@ -658,6 +707,16 @@ pub enum RemoteError {
     InvalidName { name: String },
     #[error("`{name}` exists on the remote with other content")]
     PayloadConflict { name: String },
+    /// The ssh session failed in a way that says nothing about whether the
+    /// remote is away or broken.
+    #[error(transparent)]
+    Session(SessionError),
+    /// rsync moved a file and ended with a failure that says nothing about
+    /// whether the remote is away or broken.
+    #[error("{0}")]
+    Transfer(String),
+    #[error(transparent)]
+    Rsync(#[from] RsyncError),
 }
 
 impl HasKind for RemoteError {
@@ -668,7 +727,10 @@ impl HasKind for RemoteError {
             | RemoteError::Fsx(_)
             | RemoteError::Machine(_)
             | RemoteError::InvalidName { .. }
-            | RemoteError::PayloadConflict { .. } => ErrorKind::Other,
+            | RemoteError::PayloadConflict { .. }
+            | RemoteError::Session(_)
+            | RemoteError::Transfer(_)
+            | RemoteError::Rsync(_) => ErrorKind::Other,
             RemoteError::NoRemote => ErrorKind::NoRemote,
             RemoteError::Away { .. } => ErrorKind::RemoteAway,
             RemoteError::Broken(_) => ErrorKind::RemoteBroken,

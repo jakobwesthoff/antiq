@@ -791,7 +791,8 @@ remote or an absolute local path for the path remote. The root path
 may contain only `[A-Za-z0-9._/-]` and is made of components that are
 neither empty nor `.` or `..`; it does not end with `/` and is not `/`
 itself. The user and the host of an ssh URL may contain only
-`[A-Za-z0-9._-]`, and the port is a number from 1 to 65535. A URL that
+`[A-Za-z0-9._-]`, the host does not start with `-` (ssh would read it as
+an option), and the port is a number from 1 to 65535. A URL that
 does not fit is a usage error. The config keeps the URL as given.
 `remote add` refuses while a remote
 is attached, and refuses with the reason when a probe fails: no rsync
@@ -961,6 +962,17 @@ the master connection drops while a command runs, ssh reports nothing
 to the command, and antiq reads the master's log for the keepalive
 text. A session the server refuses through its `MaxSessions` limit gives
 one warning per run.
+
+Reachability: a root that does not exist below a directory that can be
+searched is away. A root that is not a directory, a directory above the
+root that cannot be searched, a marker that is missing, cannot be read,
+cannot be parsed or has a higher `format` or `layout`, and the marker of
+another remote are broken. A host that does not answer is away or broken
+as described above. Every script starts by checking the root and the
+marker, the marker comes back to antiq as the first block of the
+answer, and `begin_phase` does the same check over the new master. The
+clock is `date +%s` on the NAS, printed first by a script that begins
+with that check.
 
 After writing a run's temp files and before their renames, antiq runs
 `sync` on the NAS, and once more after the renames.
