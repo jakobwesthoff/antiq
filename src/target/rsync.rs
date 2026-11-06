@@ -21,8 +21,10 @@ use crate::config::TargetConfig;
 pub enum RsyncError {
     #[error("`[target] rsync` must be an absolute path, not {}", .0.display())]
     RelativePath(PathBuf),
-    #[error("cannot run {}: {source}", path.display())]
-    Spawn { path: PathBuf, source: io::Error },
+    // The io error is in the text and not a source, so that a rendered chain
+    // names it once.
+    #[error("cannot run {}: {cause}", path.display())]
+    Spawn { path: PathBuf, cause: io::Error },
     #[error("{} is refused: {reason}; set `[target] rsync` to an rsync 3.2.4 or newer", path.display())]
     Refused { path: PathBuf, reason: Refusal },
     #[error("no rsync 3.2.4 or later found{}; set `[target] rsync` to the path of one", refusals_text(.refusals))]
@@ -137,9 +139,9 @@ impl Rsync {
     pub fn probe(path: &Path) -> Result<Rsync, RsyncError> {
         let mut command = scrub_environment(Command::new(path), inherited_names());
         command.arg("--version").stdin(Stdio::null());
-        let output = command.output().map_err(|source| RsyncError::Spawn {
+        let output = command.output().map_err(|cause| RsyncError::Spawn {
             path: path.to_path_buf(),
-            source,
+            cause,
         })?;
         let refuse = |reason| RsyncError::Refused {
             path: path.to_path_buf(),
@@ -338,9 +340,9 @@ impl Call {
     pub fn run(&self) -> Result<Outcome, RsyncError> {
         let mut command = self.command();
         command.stdin(Stdio::null());
-        let output = command.output().map_err(|source| RsyncError::Spawn {
+        let output = command.output().map_err(|cause| RsyncError::Spawn {
             path: self.program.clone(),
-            source,
+            cause,
         })?;
         Ok(Outcome {
             code: output.status.code(),
@@ -387,7 +389,7 @@ fn resolve_in(configured: Option<&Path>, dirs: &[PathBuf]) -> Result<Rsync, Rsyn
         match Rsync::probe(&candidate) {
             Ok(rsync) => return Ok(rsync),
             // Most directories on a `PATH` hold no rsync at all.
-            Err(RsyncError::Spawn { source, .. }) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(RsyncError::Spawn { cause, .. }) if cause.kind() == io::ErrorKind::NotFound => {}
             Err(RsyncError::Refused { reason, .. }) => {
                 refusals.push((candidate, reason.to_string()));
             }
@@ -638,6 +640,21 @@ mod tests {
             RsyncError::Spawn { path, .. } => assert_eq!(path, missing),
             other => panic!("expected a spawn error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_spawn_error_names_the_io_error_once_in_its_rendered_chain() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let error = Rsync::probe(&dir.path().join("rsync")).expect_err("nothing to run");
+
+        let mut rendered = error.to_string();
+        let mut link = std::error::Error::source(&error);
+        while let Some(cause) = link {
+            rendered.push_str(&format!(": {cause}"));
+            link = cause.source();
+        }
+
+        assert_eq!(rendered.matches("No such file").count(), 1, "{rendered}");
     }
 
     #[test]
