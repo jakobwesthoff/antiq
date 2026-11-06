@@ -47,10 +47,11 @@ content stays; no information is lost. The order and the voice change.
 - Which captures, and in which form (images or text transcripts).
 - The exact wording of the pitch and the use cases.
 
-Once the README names the AI context-directory use case and the
-supported platforms, revisit the GitHub topics: on 2026-11-05 `ai-agents`
-and `macos`/`linux` were left out because the README did not state them
-yet, and the repository already has the maximum of 20 topics.
+The GitHub topics already follow this planned README (2026-11-05):
+`ai-agents`, `coding-agents`, `macos` and `linux` are set, so the
+reworked README has to state the AI and agent context-directory use case
+and both platforms. If it names Claude Code, `claude-code` can replace
+`declutter` or `checksum` (the repository holds the maximum of 20).
 
 Do this after the console overhaul and the live progress rows land, so
 the captures show the final output.
