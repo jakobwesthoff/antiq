@@ -2851,26 +2851,23 @@ mod tests {
     given_back!(a_file_with_only_its_time_changed_is_given_back, |root| {
         set_mtime(&root.join("a/top.txt"), 1_700_000_000);
     });
-    given_back!(
-        a_replaced_file_with_the_same_size_and_time_is_given_back,
-        |root| {
-            let file = root.join("a/top.txt");
-            let before = fs::metadata(&file).expect("exists");
-            let directory = fs::metadata(root.join("a")).expect("exists");
-            fs::write(root.join("a/other"), "x").expect("written");
-            fs::rename(root.join("a/other"), &file).expect("replaced");
-            filetime::set_file_mtime(
-                &file,
-                filetime::FileTime::from_last_modification_time(&before),
-            )
-            .expect("the time is set");
-            filetime::set_file_mtime(
-                root.join("a"),
-                filetime::FileTime::from_last_modification_time(&directory),
-            )
-            .expect("the time is set");
-        }
-    );
+    given_back!(a_file_replaced_by_a_rename_is_given_back, |root| {
+        let file = root.join("a/top.txt");
+        let before = fs::metadata(&file).expect("exists");
+        let directory = fs::metadata(root.join("a")).expect("exists");
+        fs::write(root.join("a/other"), "x").expect("written");
+        fs::rename(root.join("a/other"), &file).expect("replaced");
+        filetime::set_file_mtime(
+            &file,
+            filetime::FileTime::from_last_modification_time(&before),
+        )
+        .expect("the time is set");
+        filetime::set_file_mtime(
+            root.join("a"),
+            filetime::FileTime::from_last_modification_time(&directory),
+        )
+        .expect("the time is set");
+    });
     given_back!(a_touched_directory_is_given_back, |root| {
         set_mtime(&root.join("a/sub"), 1_700_000_000);
     });
@@ -2962,6 +2959,32 @@ mod tests {
         let record = [lstat_of("", EntryKind::Directory, 5, 10)];
         let touched = tree_of(vec![timed_entry("", EntryKind::Directory, 6, 10)]);
         assert!(finish::differs(&record, &touched).is_some());
+    }
+
+    #[test]
+    fn a_file_with_another_inode_and_the_same_times_is_a_difference() {
+        let record = [
+            lstat_of("", EntryKind::Directory, 5, 10),
+            lstat_of("f", EntryKind::File, 5, 10),
+        ];
+        let replaced = tree_of(vec![
+            timed_entry("", EntryKind::Directory, 5, 10),
+            TreeEntry {
+                inode: 2,
+                ..timed_entry("f", EntryKind::File, 5, 10)
+            },
+        ]);
+        assert!(finish::differs(&record, &replaced).is_some_and(|text| text.contains("`f`")));
+    }
+
+    #[test]
+    fn a_top_with_another_inode_and_the_same_times_is_a_difference() {
+        let record = [lstat_of("", EntryKind::Directory, 5, 10)];
+        let replaced = tree_of(vec![TreeEntry {
+            inode: 2,
+            ..timed_entry("", EntryKind::Directory, 5, 10)
+        }]);
+        assert!(finish::differs(&record, &replaced).is_some());
     }
 
     #[test]
