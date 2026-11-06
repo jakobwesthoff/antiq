@@ -1834,6 +1834,11 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   The user's reason: the config explains itself where it is edited.
   Item C2; the spec's "init" and "Configuration" sections show the
   written file.
+  Lead refinement (2026-11-04, C2): the keys `init` sets (`id`, and
+  `patterns` or `exclude` when given) are active lines; every other
+  `[collection]` key is written commented out with its default value and
+  its comment, so a later change of a default still reaches existing
+  collections. The user is told and may veto.
 
 ### 8.9 Module names (user decision, 2026-11-04)
 
