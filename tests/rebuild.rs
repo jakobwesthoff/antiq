@@ -607,13 +607,16 @@ fn an_unknown_and_an_ambiguous_version_and_an_unknown_piece_are_refused() {
         let run = assert_refused(world, &["rebuild", PIECE, "2020"]);
         assert_all_in(
             &error_text(&run),
-            &["`2020` matches no version", "there are", STAMP, OLD_STAMP],
+            &[
+                "`2020` matches no version",
+                &format!("there are {STAMP}, {OLD_STAMP}"),
+            ],
         );
 
         let run = assert_refused(world, &["rebuild", PIECE, "2026"]);
         assert_all_in(
             &error_text(&run),
-            &["matches several versions", STAMP, OLD_STAMP],
+            &["matches several versions", &format!("{STAMP}, {OLD_STAMP}")],
         );
 
         let run = assert_refused(world, &["rebuild", "zzzzzz", STAMP]);

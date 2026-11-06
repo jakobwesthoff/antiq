@@ -740,12 +740,11 @@ never mixed:
 
 An exact match wins over prefix matches. Several matches are an error of
 the kind `other` that reads `` `<input>` matches several versions of
-<piece>: <stamps> ``, the stamps oldest first. An input that matches no
+<piece>: <stamps> ``, the stamps newest first. An input that matches no
 version is an error of the kind `other` that reads `` `<input>` matches no
 version of <piece>; there are <stamps> ``, listing the stamps of all the
-versions of the piece, incomplete ones included: newest first for `unearth`
-and `fork`, oldest first for `forget` and `rebuild`. When two versions of
-one piece render alike
+versions of the piece, incomplete ones included, newest first for every
+command. When two versions of one piece render alike
 in local time at different UTC offsets (the repeated hour when daylight
 saving time ends), text output adds the UTC offset. A local input matches
 the text with that offset where the output shows it
@@ -1226,8 +1225,9 @@ naming the files in the order they are deleted. On a terminal each version
 is an action line `would delete version <time> of <piece>, <n> files:`
 followed by one line for each file, indented by two columns, with its part
 (`archive`, `listing` or `checksum`) in front of its name. With `--all-versions` the
-versions come oldest first, incomplete ones among them, in both the `Deleted`
-and the `Would delete` lines.
+versions are deleted oldest first, incomplete ones among them. The
+`Deleted` and the `Would delete` lines, and `forgotten` and `actions` in
+JSON, list them newest first.
 
 ### rebuild
 
@@ -1981,7 +1981,7 @@ to <command>").
   each matching row, a row that does not match is dim in every column, and
   for an input without a `T` the part of the time that the input spelled
   is bold red. The "How to fix it" gives the command with the stamp of
-  the oldest matching version.
+  the newest matching version.
 
 When the listing cannot be read, the table is left out and the matches are
 listed in the "Why it happened" section instead. The JSON error does not
@@ -2201,11 +2201,12 @@ actions first, then `{"kind": "pin", "piece": ...}` or `{"kind": "unpin",
 `list`, plus the repairs that failed). Each forgotten version is `piece`, `stamp` (the version stamp),
 `version` (its time as RFC 3339 in UTC), `incomplete` and `files`, the bare
 names of its files in the order they were deleted. Each failed version is
-`piece`, `stamp` and `reason`. `repairs` lists the repairs that were done,
+`piece`, `stamp` and `reason`. `forgotten` and `failed` list their versions
+newest first. `repairs` lists the repairs that were done,
 each as `{"kind": "repair", "repair": ...}`. A dry run has `actions` and
 `warnings`: the repair actions first, then one action
-`{"kind": "forget_version", ...}` for each version, with the keys of a
-forgotten version.
+`{"kind": "forget_version", ...}` for each version, newest first, with the
+keys of a forgotten version.
 
 `rebuild` adds `piece`, `stamp` (the version stamp), `version` (its time as
 RFC 3339 in UTC), `basis` (what the archive was checked against:

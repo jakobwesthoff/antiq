@@ -160,7 +160,7 @@ fn the_json_of_an_ambiguous_version_is_pinned_byte_for_byte() {
     run.expect_code(1);
     assert_eq!(
         run.stdout,
-        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T090211, 2026-11-04T100000\"}}\n"
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\"}}\n"
     );
 }
 

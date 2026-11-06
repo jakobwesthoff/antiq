@@ -22,7 +22,7 @@ pub struct Candidate {
 pub enum Lookup {
     Found(Stamp),
     NoMatch,
-    /// Several versions match; their stamps in order.
+    /// Several versions match; their stamps, newest first.
     Several(Vec<Stamp>),
 }
 
@@ -46,28 +46,34 @@ pub enum VersionLookupError {
 impl HasKind for VersionLookupError {}
 
 /// The stamp of the one version of `piece` that `input` names, or the error
-/// that lists the stamps that were to choose from.
+/// that lists the stamps that were to choose from, newest first.
 pub fn resolve_version(
     piece: &str,
     input: &str,
     versions: &[Candidate],
     zone: &TimeZone,
 ) -> Result<Stamp, VersionLookupError> {
-    let texts = |stamps: &[Stamp]| stamps.iter().map(Stamp::to_string).collect();
+    let newest_first = |stamps: &[Stamp]| {
+        let mut sorted = stamps.to_vec();
+        sorted.sort_by_key(|stamp| std::cmp::Reverse(*stamp));
+        sorted.iter().map(Stamp::to_string).collect()
+    };
     match find_version(input, versions, zone) {
         Lookup::Found(stamp) => Ok(stamp),
         Lookup::NoMatch => Err(VersionLookupError::NoSuch {
             piece: piece.to_string(),
             input: input.to_string(),
-            stamps: versions
-                .iter()
-                .map(|version| version.stamp.to_string())
-                .collect(),
+            stamps: newest_first(
+                &versions
+                    .iter()
+                    .map(|version| version.stamp)
+                    .collect::<Vec<_>>(),
+            ),
         }),
         Lookup::Several(found) => Err(VersionLookupError::Ambiguous {
             piece: piece.to_string(),
             input: input.to_string(),
-            stamps: texts(&found),
+            stamps: newest_first(&found),
         }),
     }
 }
@@ -491,8 +497,8 @@ mod tests {
     #[test]
     fn resolving_an_input_that_matches_nothing_lists_the_stamps_to_choose_from() {
         let versions = [
-            complete("2026-11-04T090211"),
             incomplete("2026-11-03T100000"),
+            complete("2026-11-04T090211"),
         ];
         let error = resolve_version("tools/scan", "2020", &versions, &TimeZone::UTC)
             .expect_err("nothing matches");
@@ -505,13 +511,13 @@ mod tests {
 
     #[test]
     fn resolving_an_input_that_matches_several_lists_them() {
-        let versions = [complete("2026-11-04T090212"), complete("2026-11-04T090211")];
+        let versions = [complete("2026-11-04T090211"), complete("2026-11-04T090212")];
         let error = resolve_version("tools/scan", "2026-11-04", &versions, &TimeZone::UTC)
             .expect_err("two match");
         assert!(matches!(error, VersionLookupError::Ambiguous { .. }));
         assert_eq!(
             error.to_string(),
-            "`2026-11-04` matches several versions of tools/scan: 2026-11-04T090211, 2026-11-04T090212"
+            "`2026-11-04` matches several versions of tools/scan: 2026-11-04T090212, 2026-11-04T090211"
         );
     }
 

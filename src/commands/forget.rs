@@ -172,6 +172,8 @@ pub fn forget(
         })?;
     let mut forgotten = Vec::new();
     let mut failed = Vec::new();
+    // The versions are deleted oldest first, so a run that stops halfway
+    // leaves the newest ones in place.
     for version in &chosen.versions {
         match store::delete_version(&pieces, &chosen.folder, version) {
             Ok(()) => forgotten.push(VersionEntry::of(&chosen.folder, version)),
@@ -182,6 +184,10 @@ pub fn forget(
             }),
         }
     }
+
+    // The report lists stamps newest first like every other stamp list.
+    forgotten.reverse();
+    failed.reverse();
 
     let mut warnings = report::setting_notes(request.collection);
     warnings.extend(guard.warnings().iter().cloned());
@@ -261,6 +267,7 @@ pub fn plan(
         chosen
             .versions
             .iter()
+            .rev()
             .map(|version| Action::ForgetVersion(VersionEntry::of(&chosen.folder, version))),
     );
     let mut warnings = report::setting_notes(request.collection);

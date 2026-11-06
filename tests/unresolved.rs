@@ -156,7 +156,7 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
          ▌\n\
          ▌ How to fix it\n\
          ▌   Name one version by more of its stamp, for example antiq unearth\n\
-         ▌   projects/scanner --version 2025-06-01T103000.\n\
+         ▌   projects/scanner --version 2025-06-18T154509.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to find the version to unearth.\n\

@@ -265,13 +265,13 @@ fn several_matches_are_an_error_naming_each_stamp() {
         let before = state(&world);
         let run = world.run(&["forget", "scanner", "2026-11-04T"]);
         run.expect_code(1);
+        let newest_first = format!("{SCANNER_LATE}, {SCANNER_NEW}");
         run.text_only(|_| {
-            assert!(run.stderr.contains(SCANNER_NEW), "{:?}", run.stderr);
-            assert!(run.stderr.contains(SCANNER_LATE), "{:?}", run.stderr);
+            assert!(run.stderr.contains(&newest_first), "{:?}", run.stderr);
         });
         run.json_only(|json| {
             let message = json["error"]["message"].as_str().expect("a text");
-            assert!(message.contains(SCANNER_NEW) && message.contains(SCANNER_LATE));
+            assert!(message.contains(&newest_first), "{message:?}");
         });
         assert_eq!(state(&world), before);
     }
@@ -418,8 +418,8 @@ fn all_versions_goes_through_every_version_incomplete_ones_included() {
             assert_eq!(
                 out,
                 format!(
-                    "Deleted incomplete version {SCANNER_OLD} of projects/scanner\n\
-                     Deleted version {SCANNER_NEW} of projects/scanner\n"
+                    "Deleted version {SCANNER_NEW} of projects/scanner\n\
+                     Deleted incomplete version {SCANNER_OLD} of projects/scanner\n"
                 )
             );
         });
@@ -429,9 +429,9 @@ fn all_versions_goes_through_every_version_incomplete_ones_included() {
                 .iter()
                 .map(|entry| entry["stamp"].as_str().expect("a text"))
                 .collect();
-            assert_eq!(stamps, [SCANNER_OLD, SCANNER_NEW]);
-            assert_eq!(gone[0]["incomplete"], true);
-            assert_eq!(gone[1]["incomplete"], false);
+            assert_eq!(stamps, [SCANNER_NEW, SCANNER_OLD]);
+            assert_eq!(gone[0]["incomplete"], false);
+            assert_eq!(gone[1]["incomplete"], true);
         });
         assert!(!store(world, "projects").exists(), "the piece folder stays");
         assert!(exists(world, "tools/scan-old", SCAN_OLD));
@@ -782,14 +782,14 @@ fn a_dry_run_of_all_versions_lists_each_and_says_which_are_incomplete() {
                 assert_eq!(lines.len(), 2, "{out:?}");
                 assert!(
                     lines[0].starts_with(&format!(
-                        "Would delete incomplete version {SCANNER_OLD} of projects/scanner: "
+                        "Would delete version {SCANNER_NEW} of projects/scanner: "
                     )),
                     "{:?}",
                     lines[0]
                 );
                 assert!(
                     lines[1].starts_with(&format!(
-                        "Would delete version {SCANNER_NEW} of projects/scanner: "
+                        "Would delete incomplete version {SCANNER_OLD} of projects/scanner: "
                     )),
                     "{:?}",
                     lines[1]
@@ -797,8 +797,8 @@ fn a_dry_run_of_all_versions_lists_each_and_says_which_are_incomplete() {
             });
             run.json_only(|json| {
                 let actions = json["actions"].as_array().expect("a list");
-                assert_eq!(actions[0]["incomplete"], true);
-                assert_eq!(actions[1]["incomplete"], false);
+                assert_eq!(actions[0]["incomplete"], false);
+                assert_eq!(actions[1]["incomplete"], true);
             });
         });
     });
