@@ -469,6 +469,7 @@ mod tests {
             (
                 ReferenceError::Unknown {
                     reference: "01ABCD".into(),
+                    closest: Vec::new(),
                 }
                 .into(),
                 ErrorKind::UnknownReference,
@@ -588,6 +589,7 @@ mod tests {
     fn the_chain_walker_ignores_references_that_are_not_ambiguous() {
         let wrapped = WrappingReference::Reference(ReferenceError::Unknown {
             reference: "alpha".into(),
+            closest: Vec::new(),
         });
         assert_eq!(find_candidates(&wrapped), None);
     }
@@ -653,6 +655,7 @@ mod tests {
         );
         let other = Error::Reference(ReferenceError::Unknown {
             reference: "alpha".into(),
+            closest: Vec::new(),
         });
         assert_eq!(other.candidates(), None);
     }

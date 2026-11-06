@@ -1125,6 +1125,7 @@ mod tests {
             "b" => Ok(path("B")),
             _ => Err(ReferenceError::Unknown {
                 reference: "c".to_string(),
+                closest: Vec::new(),
             }),
         };
 

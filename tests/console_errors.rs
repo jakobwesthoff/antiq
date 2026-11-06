@@ -130,6 +130,40 @@ fn the_json_message_of_an_ambiguous_unearth_says_it_once() {
     );
 }
 
+/// Two versions of one piece whose local times both start with the same
+/// date, so the date names neither.
+fn two_versions_one_day(builder: &mut CollectionBuilder) {
+    builder
+        .version("projects/scanner", STAMP, &[("main.rs", "fn main() {}\n")])
+        .version(
+            "projects/scanner",
+            "2026-11-04T100000",
+            &[("main.rs", "fn main() {}\n")],
+        );
+}
+
+#[test]
+fn the_json_of_an_unknown_piece_is_pinned_byte_for_byte() {
+    let world = world(Mode::Json, stored_pieces);
+    let run = world.run(&["unearth", "scnaer"]);
+    run.expect_code(1);
+    assert_eq!(
+        run.stdout,
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"unknown_reference\",\"message\":\"cannot find the piece: `scnaer` matches no piece\"}}\n"
+    );
+}
+
+#[test]
+fn the_json_of_an_ambiguous_version_is_pinned_byte_for_byte() {
+    let world = world(Mode::Json, two_versions_one_day);
+    let run = world.run(&["unearth", "projects/scanner", "--version", "2026-11-04"]);
+    run.expect_code(1);
+    assert_eq!(
+        run.stdout,
+        "{\"format\":1,\"command\":\"unearth\",\"error\":{\"kind\":\"other\",\"message\":\"`2026-11-04` matches several versions of projects/scanner: 2026-11-04T090211, 2026-11-04T100000\"}}\n"
+    );
+}
+
 /// Makes `path` read-only, and writable again when dropped, also after a
 /// panic, so the temporary directory can always be removed.
 struct ReadOnly(PathBuf);

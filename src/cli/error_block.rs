@@ -79,7 +79,7 @@ impl Explanation {
 
 /// The typed error of kind `T` that `error` is or wraps. The wrappers of
 /// the library are transparent, so the walk starts at what they wrap.
-fn find<T: std::error::Error + 'static>(error: &antiq::Error) -> Option<&T> {
+pub(super) fn find<T: std::error::Error + 'static>(error: &antiq::Error) -> Option<&T> {
     let mut link = Some(error.wrapped());
     while let Some(current) = link {
         if let Some(found) = current.downcast_ref::<T>() {

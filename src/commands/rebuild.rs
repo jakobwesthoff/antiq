@@ -641,6 +641,7 @@ mod tests {
     fn a_reference_keeps_its_kind() {
         let unknown = RebuildError::Reference(ReferenceError::Unknown {
             reference: "zzz".to_string(),
+            closest: Vec::new(),
         });
         assert_eq!(unknown.kind(), ErrorKind::UnknownReference);
     }

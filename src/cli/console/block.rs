@@ -124,8 +124,8 @@ impl Block {
     }
 
     /// A match of an ambiguous reference. A pipe lists these as
-    /// `candidate:` lines; a terminal shows them in a table that the
-    /// caller prints.
+    /// `candidate:` lines. A terminal shows none: the caller prints a
+    /// table of the matches under the block.
     pub fn candidate(mut self, path: &str) -> Block {
         self.candidates.push(path.to_string());
         self

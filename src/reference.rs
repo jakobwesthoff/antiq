@@ -33,7 +33,12 @@ pub enum ReferenceError {
         candidates: Vec<Candidate>,
     },
     #[error("`{reference}` matches no piece")]
-    Unknown { reference: String },
+    Unknown {
+        reference: String,
+        /// The pieces nearest to the reference by spelling, nearest first.
+        /// The console offers them; they are not part of the JSON error.
+        closest: Vec<Candidate>,
+    },
     #[error(
         "`{reference}` matches no piece with an archive; {piece} holds only incomplete versions, and `forget` removes what is left of them"
     )]
@@ -247,7 +252,10 @@ pub fn resolve_piece(
         .filter(|candidate| query.score(&candidate.to_string()).is_some())
         .collect();
     match matches.len() {
-        0 => Err(ReferenceError::Unknown { reference }),
+        0 => Err(ReferenceError::Unknown {
+            closest: closest_pieces(&reference, &set.paths),
+            reference,
+        }),
         1 => Ok(matches.remove(0).clone()),
         _ => Err(ReferenceError::Ambiguous {
             reference,
@@ -259,6 +267,39 @@ pub fn resolve_piece(
                 .collect(),
         }),
     }
+}
+
+/// How many pieces an unknown reference offers as the ones it may have
+/// meant.
+const CLOSEST_LIMIT: usize = 3;
+
+/// The pieces of `paths` whose spelling is within a few edits of `reference`,
+/// nearest first and by path among equals.
+///
+/// A fuzzy match needs the letters in order, so a typo that swaps two
+/// letters finds nothing there; the edit distance catches it. The reference
+/// is compared with the whole path and with its last name, because people
+/// type either. A few edits is two, or a third of the reference when that
+/// is more, so short words stay strict and long paths forgive more.
+fn closest_pieces(reference: &str, paths: &[RelPath]) -> Vec<Candidate> {
+    let reference = reference.to_lowercase();
+    let allowed = (reference.chars().count() / 3).max(2);
+    let mut near: Vec<(usize, String)> = paths
+        .iter()
+        .filter_map(|path| {
+            let whole = path.to_string();
+            let lowered = whole.to_lowercase();
+            let last = lowered.rsplit('/').next().unwrap_or(&lowered);
+            let distance = strsim::osa_distance(&reference, &lowered)
+                .min(strsim::osa_distance(&reference, last));
+            (distance <= allowed).then_some((distance, whole))
+        })
+        .collect();
+    near.sort();
+    near.into_iter()
+        .take(CLOSEST_LIMIT)
+        .map(|(_, path)| Candidate { path })
+        .collect()
 }
 
 /// Resolves a piece of the store for a command that works on archives
@@ -276,14 +317,14 @@ pub fn resolve_stored_piece(
         given,
         &CandidateSet::store(collection, scan),
     ) {
-        Err(ReferenceError::Unknown { reference }) => {
+        Err(ReferenceError::Unknown { reference, closest }) => {
             let wider = CandidateSet::store_and_sidecar_only(collection, scan);
             Err(match resolve_piece(collection, cwd, given, &wider) {
                 Ok(piece) => ReferenceError::OnlyIncomplete {
                     reference,
                     piece: piece.to_string(),
                 },
-                Err(_) => ReferenceError::Unknown { reference },
+                Err(_) => ReferenceError::Unknown { reference, closest },
             })
         }
         other => other,
@@ -795,6 +836,44 @@ mod tests {
         let error = resolve_in(&fx, &set, "zzz").expect_err("unknown");
         assert_eq!(kind(&error), ErrorKind::UnknownReference);
         assert_eq!(error.to_string(), "`zzz` matches no piece");
+    }
+
+    fn closest_of(set: &CandidateSet, given: &str) -> Vec<String> {
+        let fx = Fixture::new();
+        match resolve_in(&fx, set, given).expect_err("unknown") {
+            ReferenceError::Unknown { closest, .. } => closest
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect(),
+            other => panic!("expected an unknown reference, got {other}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_word_names_the_pieces_spelled_nearly_like_it() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/alpha", "projects/beta", "other/x"]);
+        // Two letters swapped in the last name.
+        assert_eq!(closest_of(&set, "alpah"), ["projects/alpha"]);
+        // Two letters swapped in the whole path, which no fuzzy match finds.
+        assert_eq!(closest_of(&set, "projetcs/alpha"), ["projects/alpha"]);
+    }
+
+    #[test]
+    fn an_unknown_word_far_from_every_piece_has_no_closest_piece() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/alpha", "projects/beta"]);
+        assert!(closest_of(&set, "zzzzzz").is_empty());
+    }
+
+    #[test]
+    fn the_closest_pieces_are_at_most_three_nearest_first_then_by_path() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["a/scana", "b/scanb", "c/scanc", "d/scand", "e/scan"]);
+        // `scanx` is one change from the four spelled `scan?` and one
+        // insertion from `scan`; all five tie on distance one, so the path
+        // order decides and the fourth is cut.
+        assert_eq!(closest_of(&set, "scanx"), ["a/scana", "b/scanb", "c/scanc"]);
     }
 
     #[test]

@@ -430,10 +430,19 @@ fn an_error_on_a_stderr_terminal_is_a_block_coloured_unless_no_color_is_set() {
     assert_eq!(
         plain.stderr,
         " ✖ ERROR\n\
-         ▌ cannot find the piece: `no-such-piece` matches no piece\n\
+         ▌ No piece matches `no-such-piece`\n\
+         ▌\n\
+         ▌ Why it happened\n\
+         ▌   antiq compared the word with the path of every piece in the antiq\n\
+         ▌   collection, and none fits.\n\
+         ▌\n\
+         ▌ How to fix it\n\
+         ▌   Check the spelling, or name the piece by its path.\n\
          ▌\n\
          ▌ What antiq was doing\n\
-         ▌   Attempting to pin the piece.\n"
+         ▌   Attempting to find the piece to pin.\n\
+         \n\
+         \x20ℹ INFO  Nothing was pinned.\n"
     );
 }
 

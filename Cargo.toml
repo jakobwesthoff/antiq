@@ -23,6 +23,7 @@ rustix = { version = "1.1.6", features = ["fs", "process", "system", "termios"] 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
+strsim = "0.11.1"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"

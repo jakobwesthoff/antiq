@@ -41,6 +41,36 @@ pub fn render_blocks(blocks: &[Block], env: &Env) -> Vec<String> {
     lines
 }
 
+/// A piece of a group of output that belongs together, such as an error,
+/// the table it refers to and the info after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Part {
+    Block(Block),
+    /// Lines that only a terminal shows, such as a caption and a table. A
+    /// pipe gets the data in the plain lines of the blocks.
+    Terminal(Vec<String>),
+}
+
+/// `parts` one after the other, an empty line between them on a terminal.
+pub fn render_parts(parts: &[Part], env: &Env) -> Vec<String> {
+    let mut lines = Vec::new();
+    for part in parts {
+        let rendered = match part {
+            Part::Block(block) => render_blocks(std::slice::from_ref(block), env),
+            Part::Terminal(shown) if env.rich => shown.clone(),
+            Part::Terminal(_) => Vec::new(),
+        };
+        if rendered.is_empty() {
+            continue;
+        }
+        if env.rich && !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(rendered);
+    }
+    lines
+}
+
 pub(super) fn paint(env: &Env, style: Style, text: &str) -> String {
     if env.color && !text.is_empty() {
         format!("{style}{text}{style:#}")
@@ -187,9 +217,6 @@ impl Block {
                 }
                 self.section(env, &bar, "Why it happened", &self.why, &mut lines);
                 self.section(env, &bar, "How to fix it", &self.how, &mut lines);
-                let matches: Vec<Para> =
-                    self.candidates.iter().map(|path| Para::pre(path)).collect();
-                self.section(env, &bar, "Matches", &matches, &mut lines);
                 let steps: Vec<Para> = self
                     .doing
                     .iter()

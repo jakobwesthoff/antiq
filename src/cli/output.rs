@@ -12,7 +12,7 @@
 use crate::cli::console::block::Block;
 use crate::cli::console::dryrun;
 use crate::cli::console::env::Env;
-use crate::cli::console::render::render_blocks;
+use crate::cli::console::render::{Part, render_blocks, render_parts};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::Notice;
 use antiq::error::ErrorKind;
@@ -277,6 +277,16 @@ impl Output {
     /// exist only on a terminal.
     pub fn blocks(&mut self, blocks: &[Block]) -> io::Result<()> {
         for line in render_blocks(blocks, &self.stderr_env) {
+            self.stderr.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Writes a group of blocks and tables that belong together to stderr
+    /// as one unit, such as an error with the table of the matches it
+    /// names. A pipe gets the plain lines of the blocks and none of the rest.
+    pub fn group(&mut self, parts: &[Part]) -> io::Result<()> {
+        for line in render_parts(parts, &self.stderr_env) {
             self.stderr.write_line(&line)?;
         }
         Ok(())

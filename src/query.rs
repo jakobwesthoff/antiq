@@ -49,6 +49,27 @@ impl Query {
         let haystack = Utf32String::from(haystack);
         self.pattern.score(haystack.slice(..), &mut self.matcher)
     }
+
+    /// The positions, counted in characters, of the letters of `haystack`
+    /// that the query matched; empty when it does not match.
+    pub fn matched(&mut self, haystack: &str) -> Vec<usize> {
+        let haystack = Utf32String::from(haystack);
+        let mut positions = Vec::new();
+        if self
+            .pattern
+            .indices(haystack.slice(..), &mut self.matcher, &mut positions)
+            .is_none()
+        {
+            return Vec::new();
+        }
+        // Each word of the query reports its own positions, in no common order.
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+            .into_iter()
+            .map(|position| position as usize)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -57,6 +78,20 @@ mod tests {
 
     fn score(query: &str, haystack: &str) -> Option<u32> {
         Query::parse(query).score(haystack)
+    }
+
+    #[test]
+    fn the_matched_positions_are_the_letters_the_query_found() {
+        let mut query = Query::parse("scan");
+        assert_eq!(query.matched("projects/scanner"), [9, 10, 11, 12]);
+        assert!(query.matched("projects/other").is_empty());
+    }
+
+    #[test]
+    fn several_words_mark_every_letter_once_in_text_order() {
+        let mut query = Query::parse("proj scan");
+        let marked = query.matched("projects/scanner");
+        assert_eq!(marked, [0, 1, 2, 3, 9, 10, 11, 12]);
     }
 
     #[test]

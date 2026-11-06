@@ -1918,12 +1918,52 @@ input is a search word, matched with the same fuzzy pattern `list` uses
 (smart case, smart normalization) against the candidates' paths in their
 escaped form, and must match exactly one candidate.
 No match is the error kind `unknown_reference`; several matches are
-`ambiguous_reference`, listing the candidates. Both exit 1. On the
-console the error line is followed by one line `    candidate: <path>` per
-candidate, in the order and the escaped form of `error.candidates`. The
+`ambiguous_reference`, listing the candidates. Both exit 1. The
 candidates are the live pieces for `archive`, `pin` and `unpin`; the
 pieces of the store for `unearth`, `fork` and `rebuild`; the pieces of the
 store and the store folders that hold sidecars only for `forget`.
+
+On a pipe the error line is followed by one line `    candidate: <path>` per
+candidate, in the order and the escaped form of `error.candidates`. On a
+terminal the report is one group on stderr: the error block, a bold caption
+and a table, the info "Nothing was <done>." and, for a word that matches no
+piece, a hint. `<done>` is `archived`, `pinned`, `unpinned`, `unearthed`,
+`forked`, `deleted` or `rebuilt`, after the command. The error block says
+that the matches are listed below, and its "What antiq was doing" names
+the step "find the piece to <command>" (for a version, "find the version
+to <command>").
+
+- Several pieces match a word. The caption is "The N pieces that match
+  `<word>`". For `unearth`, `fork`, `rebuild` and `forget` the table is the
+  table of `antiq list` with all versions of the candidate pieces, in which
+  the letters the word matched are bold red. For `archive`, `pin` and
+  `unpin` it has the columns PIECE and VERSIONS, the number of stored
+  versions, which is 0 for a live piece without any. `forget` uses that
+  table too when a candidate is a folder that holds sidecars only.
+- No piece matches a word. The block says so; its "How to fix it" tells to
+  check the spelling and then to look for the piece with `antiq list`
+  (`unearth`, `fork`, `rebuild`, `forget`) or to name it by its path
+  (`archive`, `pin`, `unpin`). Pieces whose path or last
+  name is within two edits of the word, or within a third of its length
+  when that is more, are the closest pieces; a swapped pair of letters
+  counts as one edit. Up to three of them, nearest first and by path among
+  equals, are shown under the caption "The closest pieces" in the table
+  of the first case, followed by the hint "Did you mean <piece>? Run
+  <command>.", where the command is the one that ran with the nearest
+  piece in place of the word. Without a closest piece there is no table and
+  no hint.
+- Several versions match a `--version` or version argument. The caption is
+  "The versions of <piece>, the N matches marked". The table is the table
+  of `antiq list` with all versions of the piece. A `▸` stands in front of
+  each matching row, a row that does not match is dim in every column, and
+  for an input without a `T` the part of the time that the input spelled
+  is bold red. The "How to fix it" gives the command with the stamp of
+  the oldest matching version.
+
+When the listing cannot be read, the table is left out and the matches are
+listed in the "Why it happened" section instead. The JSON error does not
+change: `error.candidates` lists the candidates, and the closest pieces
+and the matching versions are not part of it.
 
 ### Console output
 
@@ -1990,8 +2030,9 @@ damaged or incomplete store, a target marker that names another host or
 path, a held run lock, a listing of a newer format, and a path outside the
 antiq collection. The `message` of the JSON error is the text it was
 before. The steps the run was in are listed innermost first under "What
-antiq was doing", and the candidates of an ambiguous reference under
-"Matches". A usage error of the command line parser is a block too. An
+antiq was doing". A reference that matches several pieces or versions, or
+no piece, adds a table and an info after the block (see "Piece references").
+A usage error of the command line parser is a block too. An
 unknown argument, an unknown command, a missing argument and two arguments
 that exclude each other get a title of their own and the parser's usage line
 and a pointer to `--help` under "How to fix it"; every other usage error

@@ -4,7 +4,7 @@
 
 use super::block::{Block, Para};
 use super::env::{Env, utf8_locale};
-use super::render::render_blocks;
+use super::render::{Part, render_blocks, render_parts};
 use super::rich::Rich;
 use super::symbols::Symbols;
 
@@ -361,19 +361,43 @@ fn a_rich_error_lists_every_step_under_the_heading() {
 }
 
 #[test]
-fn a_rich_error_lists_its_candidates_under_a_heading() {
+fn a_rich_error_leaves_its_candidates_to_the_table_under_it() {
     let block = Block::error(rich("Ambiguous"))
         .candidate("projects/scanner")
         .candidate("tools/scan-old");
+    assert_eq!(block.render(&bare(80)), [" ✖ ERROR", "▌ Ambiguous"]);
+}
+
+#[test]
+fn a_group_is_its_parts_with_an_empty_line_between_them_on_a_terminal() {
+    let parts = [
+        Part::Block(Block::error(rich("Ambiguous"))),
+        Part::Terminal(vec!["The 2 pieces".to_string(), "PIECE".to_string()]),
+        Part::Block(Block::info(rich("Nothing was unearthed."))),
+    ];
     assert_eq!(
-        block.render(&bare(80)),
+        render_parts(&parts, &bare(80)),
         [
             " ✖ ERROR",
             "▌ Ambiguous",
-            "▌",
-            "▌ Matches",
-            "▌   projects/scanner",
-            "▌   tools/scan-old",
+            "",
+            "The 2 pieces",
+            "PIECE",
+            "",
+            " ℹ INFO  Nothing was unearthed.",
         ]
+    );
+}
+
+#[test]
+fn a_group_on_a_pipe_keeps_the_plain_lines_of_its_blocks_only() {
+    let parts = [
+        Part::Block(Block::error(rich("Ambiguous")).candidate("projects/scanner")),
+        Part::Terminal(vec!["PIECE".to_string()]),
+        Part::Block(Block::info(rich("Nothing was unearthed."))),
+    ];
+    assert_eq!(
+        render_parts(&parts, &Env::pipe()),
+        ["error: Ambiguous", "    candidate: projects/scanner"]
     );
 }

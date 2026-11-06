@@ -1882,6 +1882,7 @@ mod tests {
     fn each_error_has_its_kind_and_names_its_cause_as_the_source() {
         let reference = ArchiveError::from(ReferenceError::Unknown {
             reference: "x".into(),
+            closest: Vec::new(),
         });
         assert_eq!(reference.kind(), ErrorKind::UnknownReference);
         assert!(

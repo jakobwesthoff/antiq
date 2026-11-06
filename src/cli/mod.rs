@@ -12,6 +12,7 @@ mod error_block;
 pub mod notice;
 pub mod output;
 pub mod table;
+mod unresolved;
 mod usage;
 
 use self::console::block::Block;
@@ -289,10 +290,16 @@ fn refuse_all_versions_without_force(cli: &Cli, out: &mut Output) -> Option<u8> 
     Some(ErrorKind::Usage.exit_code())
 }
 
-fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
+/// The directory the run starts in: the one `-C` names, else the current
+/// directory, resolved.
+fn start_directory(cli: &Cli) -> anyhow::Result<PathBuf> {
     let given = cli.directory.as_deref().unwrap_or(Path::new("."));
-    let start = std::fs::canonicalize(given)
-        .with_context(|| format!("resolve the directory {} to start from", given.display()))?;
+    std::fs::canonicalize(given)
+        .with_context(|| format!("resolve the directory {} to start from", given.display()))
+}
+
+fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
+    let start = start_directory(cli)?;
     let ctx = Context {
         json: cli.json,
         start,
@@ -365,6 +372,13 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     // When the output itself fails there is nowhere left to report that.
     let _ = if cli.json {
         out.json_error(Some(cli.command.name()), kind, &description.root, &details)
+    } else if let Some(parts) = out
+        .stderr_env()
+        .rich
+        .then(|| unresolved::group(cli, &description, &out.stderr_env()))
+        .flatten()
+    {
+        out.group(&parts)
     } else {
         out.blocks(&[error_block::block_for(&description)])
     };

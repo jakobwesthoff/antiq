@@ -36,6 +36,29 @@ pub(super) fn paint(style: Style, color: Color, text: &str) -> String {
     }
 }
 
+/// `text` in the look `base`, with the characters at the positions `matched`
+/// (counted in characters) in the look of a match. A run of characters of
+/// one look gets one escape sequence.
+pub(crate) fn painted(style: Style, text: &str, base: anstyle::Style, matched: &[usize]) -> String {
+    if !style.color {
+        return text.to_string();
+    }
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for (position, character) in text.chars().enumerate() {
+        let hit = matched.contains(&position);
+        match runs.last_mut() {
+            Some((last, run)) if *last == hit => run.push(character),
+            _ => runs.push((hit, character.to_string())),
+        }
+    }
+    runs.into_iter()
+        .map(|(hit, run)| {
+            let look = if hit { theme::MATCH } else { base };
+            format!("{look}{run}{look:#}")
+        })
+        .collect()
+}
+
 pub(super) fn spaces(count: usize) -> String {
     " ".repeat(count)
 }

@@ -4,9 +4,12 @@
 
 //! The `list` command: lists the versions.
 
+use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
-use crate::cli::table::{Color, WIDE_FROM, decimal_size, mid, pad, pad_left, paint, sanitize};
+use crate::cli::table::{
+    Color, WIDE_FROM, decimal_size, mid, pad, paint, painted, sanitize, spaces,
+};
 use crate::cli::{Context, ListArgs};
 use antiq::collection::Collection;
 use antiq::commands::list::{ListReport, Row, State, list};
@@ -57,7 +60,7 @@ const LEAST_PIECE_WIDTH: usize = 8;
 
 fn render(report: &ListReport, query: Option<&str>, style: Style, zone: &TimeZone) -> Lines {
     let stdout = if style.terminal {
-        table(&report.versions, style, zone)
+        table(&report.versions, style, zone, None)
     } else {
         report.versions.iter().map(pipe_line).collect()
     };
@@ -134,7 +137,7 @@ fn mark(state: State) -> Option<(&'static str, Color)> {
 /// with the UTC offset where another version of the piece renders alike. An
 /// incomplete version can be named by its stamp only, so it is shown by its
 /// stamp and takes no part in telling the others apart.
-fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<String> {
+pub(in crate::cli) fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<String> {
     let mut labels = vec![String::new(); rows.len()];
     let mut start = 0;
     while start < rows.len() {
@@ -159,7 +162,32 @@ fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<String> {
     labels
 }
 
-fn table(rows: &[Row], style: Style, zone: &TimeZone) -> Vec<String> {
+/// How a table draws a row that is not an ordinary row of a listing. The
+/// tables of an ambiguous reference use it to show which rows matched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::cli) struct RowLook {
+    /// The row is one of the matches.
+    pub chosen: bool,
+    /// Positions, in characters, of the piece name that the search matched.
+    pub piece_matched: Vec<usize>,
+    /// How many leading characters of the version label the search matched.
+    pub label_matched: usize,
+}
+
+/// The looks of the rows of a table, one for each row.
+pub(in crate::cli) struct Marking<'a> {
+    pub looks: &'a [RowLook],
+    /// The symbol put in front of the chosen rows. Giving one also adds
+    /// the column that holds it and dims the rows that are not chosen.
+    pub marker: Option<&'a str>,
+}
+
+pub(in crate::cli) fn table(
+    rows: &[Row],
+    style: Style,
+    zone: &TimeZone,
+    marking: Option<&Marking>,
+) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
     }
@@ -198,8 +226,14 @@ fn table(rows: &[Row], style: Style, zone: &TimeZone) -> Vec<String> {
 
     // A wide terminal shows the pieces whole. A narrow one cuts the longest
     // to what the other columns leave, but never below a few columns.
+    let lead = marking.and_then(|marking| marking.marker).map(|marker| {
+        // The marker and one space, as wide as the empty lead of the other rows.
+        (marker, 1 + unicode_width::UnicodeWidthStr::width(marker))
+    });
+    let lead_width = lead.map_or(0, |(_, width)| width);
     let gaps = if mark_width > 0 { 4 } else { 3 };
-    let others = version_width + size_width + files_width + mark_width + gaps * GAP.len();
+    let others =
+        lead_width + version_width + size_width + files_width + mark_width + gaps * GAP.len();
     let longest = widest("PIECE", &pieces);
     let piece_width = if style.width >= WIDE_FROM {
         longest
@@ -214,15 +248,54 @@ fn table(rows: &[Row], style: Style, zone: &TimeZone) -> Vec<String> {
         pad("FILES", files_width),
     ]
     .join(GAP);
-    let mut lines = vec![header.trim_end().to_string()];
+    let mut lines = vec![
+        format!("{}{header}", spaces(lead_width))
+            .trim_end()
+            .to_string(),
+    ];
+
+    // A cell is painted first and padded after, because the escape sequences
+    // of the paint have no width.
+    let cell = |text: &str, width: usize, right: bool, look: anstyle::Style, matched: &[usize]| {
+        let fill = spaces(width.saturating_sub(unicode_width::UnicodeWidthStr::width(text)));
+        let shown = painted(style, text, look, matched);
+        if right {
+            format!("{fill}{shown}")
+        } else {
+            format!("{shown}{fill}")
+        }
+    };
     for index in 0..rows.len() {
+        let look = marking.map(|marking| &marking.looks[index]);
+        let chosen = look.is_some_and(|look| look.chosen);
+        let base = if lead.is_some() && !chosen {
+            theme::DIM
+        } else {
+            anstyle::Style::new()
+        };
+        // Positions in the piece refer to the whole name, so a name cut
+        // short has none to mark.
+        let shown_piece = mid(&pieces[index], piece_width);
+        let piece_matched = look
+            .filter(|_| shown_piece == pieces[index])
+            .map_or(&[][..], |look| look.piece_matched.as_slice());
+        let label_matched = look.map_or(0, |look| look.label_matched);
+        let label_matched: Vec<usize> = (0..label_matched).collect();
         let mut line = [
-            pad(&mid(&pieces[index], piece_width), piece_width),
-            pad(&labels[index], version_width),
-            pad_left(&sizes[index], size_width),
-            pad_left(&files[index], files_width),
+            cell(&shown_piece, piece_width, false, base, piece_matched),
+            cell(&labels[index], version_width, false, base, &label_matched),
+            cell(&sizes[index], size_width, true, base, &[]),
+            cell(&files[index], files_width, true, base, &[]),
         ]
         .join(GAP);
+        if let Some((marker, width)) = lead {
+            let front = if chosen {
+                format!("{} ", painted(style, marker, theme::MATCH, &[]))
+            } else {
+                spaces(width)
+            };
+            line.insert_str(0, &front);
+        }
         if let Some((text, color)) = marks[index] {
             line.push_str(GAP);
             line.push_str(&paint(style, color, text));
@@ -334,6 +407,113 @@ mod tests {
         tools/scan-old     2025-02-11 19:40:07    40 MB      812
         ");
         assert!(lines.stderr.is_empty(), "{:?}", lines.stderr);
+    }
+
+    /// Five versions of one piece, newest first.
+    fn scanner_versions() -> Vec<Row> {
+        vec![
+            sound("projects/scanner", "2026-11-05T120211", 214, 3),
+            sound("projects/scanner", "2025-11-20T071530", 207, 3),
+            sound("projects/scanner", "2025-06-18T154509", 198, 2),
+            sound("projects/scanner", "2025-06-01T103000", 191, 2),
+            sound("projects/scanner", "2024-09-03T182205", 176, 2),
+        ]
+    }
+
+    fn two_chosen() -> Vec<RowLook> {
+        let chosen = RowLook {
+            chosen: true,
+            piece_matched: Vec::new(),
+            label_matched: 7,
+        };
+        let other = RowLook::default();
+        vec![other.clone(), other.clone(), chosen.clone(), chosen, other]
+    }
+
+    #[test]
+    fn chosen_rows_carry_a_marker_in_a_column_of_their_own() {
+        let looks = two_chosen();
+        let marking = Marking {
+            looks: &looks,
+            marker: Some("▸"),
+        };
+        let lines = table(&scanner_versions(), TERMINAL, &plus_one(), Some(&marking));
+        insta::assert_snapshot!(lines.join("\n"), @r"
+          PIECE              VERSION               SIZE    FILES
+          projects/scanner   2026-11-05 13:02:11   214 B       3
+          projects/scanner   2025-11-20 08:15:30   207 B       3
+        ▸ projects/scanner   2025-06-18 16:45:09   198 B       2
+        ▸ projects/scanner   2025-06-01 11:30:00   191 B       2
+          projects/scanner   2024-09-03 19:22:05   176 B       2
+        ");
+    }
+
+    #[test]
+    fn rows_that_are_not_chosen_are_dim_and_the_matched_stamp_is_red() {
+        let looks = two_chosen();
+        let marking = Marking {
+            looks: &looks,
+            marker: Some("▸"),
+        };
+        let style = Style {
+            color: true,
+            ..TERMINAL
+        };
+        let lines = table(&scanner_versions(), style, &plus_one(), Some(&marking));
+        let dim = "\x1b[2m";
+        let off = "\x1b[0m";
+        // Every column of a row that is not chosen is dim.
+        assert_eq!(
+            lines[1],
+            format!(
+                "  {dim}projects/scanner{off}   {dim}2026-11-05 13:02:11{off}   {dim}214 B{off}       {dim}3{off}"
+            )
+        );
+        // A chosen row is normal, with the matched start of the stamp in red.
+        let matched = format!("{}", crate::cli::console::theme::MATCH);
+        assert_eq!(
+            lines[3],
+            format!(
+                "{matched}▸{off} projects/scanner   {matched}2025-06{off}-18 16:45:09   198 B       2"
+            )
+        );
+    }
+
+    #[test]
+    fn the_matched_letters_of_a_piece_are_red_without_a_marker_column() {
+        let rows = vec![
+            sound("projects/scanner", "2026-11-05T120211", 214, 3),
+            sound("tools/scan-old", "2026-11-05T120211", 179, 2),
+        ];
+        let looks = vec![
+            RowLook {
+                piece_matched: vec![9, 10, 11, 12],
+                ..RowLook::default()
+            },
+            RowLook {
+                piece_matched: vec![6, 7, 8, 9],
+                ..RowLook::default()
+            },
+        ];
+        let marking = Marking {
+            looks: &looks,
+            marker: None,
+        };
+        let style = Style {
+            color: true,
+            ..TERMINAL
+        };
+        let lines = table(&rows, style, &plus_one(), Some(&marking));
+        let matched = format!("{}", crate::cli::console::theme::MATCH);
+        let off = "\x1b[0m";
+        assert_eq!(
+            lines[1],
+            format!("projects/{matched}scan{off}ner   2026-11-05 13:02:11   214 B       3")
+        );
+        assert_eq!(
+            lines[2],
+            format!("tools/{matched}scan{off}-old     2026-11-05 13:02:11   179 B       2")
+        );
     }
 
     #[test]
