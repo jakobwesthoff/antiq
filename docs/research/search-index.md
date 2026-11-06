@@ -383,3 +383,62 @@ field in the same process:
 
 Both indexes had been through the update rounds above when this was
 measured.
+
+## Where an index lives and how it goes stale
+
+What the repository does today (`docs/specs/spec-v1.md`, `src/index.rs`):
+
+- `.antiq/index/` is "derived, rebuildable, private to this machine". It
+  holds one file `<ULID>.json` per object whose listing is stored here:
+  the member paths and the file name of the listing they come from.
+- A listing's file name follows from its payload's checksum, so a cache
+  file that names the object's current listing is up to date. The object
+  table (which objects exist, their current listing) is computed from the
+  metadata and the tracking entries on every call and never stored.
+- `index::update` writes a cache file for every object that lacks a
+  current one, then removes every entry of `.antiq/index/` that is not
+  one of the wanted file names, files and directories alike. `rebuild`
+  empties the directory first. Read-only commands that find a file
+  missing or outdated read the listing and do not write the file.
+
+Measured above and relevant for a search index: replacing one piece takes
+0.26 to 0.63 s in every engine (tantivy 0.49 to 0.63 s, SQLite 0.26 to
+0.44 s), removing one takes 19 to 116 ms, and an index that is opened
+again in a new process answers its first query after 2.8 to 4.3 ms in
+tantivy and 0.5 to 0.6 ms in SQLite.
+
+Proposal, not measured:
+
+- The search index sits next to the member cache but not inside the
+  directory that `update` empties of unknown entries, or `update` learns
+  to leave it alone. For example `.antiq/search/`.
+- The index records, per piece, the listing file name it indexed. The
+  object table already says which listing is current, so a piece is stale
+  when the two names differ, missing from the index when it has none, and
+  extra in the index when the object table lacks it. A refresh deletes
+  the stale and extra pieces and adds the stale and missing ones in one
+  commit. With tantivy the names could travel in the commit (the source of
+  0.27.0 has `PreparedCommit::set_payload`; not tried) or in a small file
+  written after the commit.
+- A missing or unreadable index is rebuilt in the background while the
+  picker falls back to what it does now.
+
+## Summary of the figures
+
+All from the sections above, default data (300 pieces, 15 000 000 paths),
+size without the stored paths.
+
+| | Tantivy words | Tantivy trigrams | SQLite FTS5 `detail=none` | SQLite FTS5 `detail=full` | fst per piece |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Build | 14.2 s | 25.8 s | 92 s | 147 s | 31 s |
+| Size on disk | 165.8 MB | 715.8 MB | 979.3 MB | 2398.6 MB | 569.1 MB |
+| Query process, maximum resident set size | 44 MB | 49 MB | 7 MB | 7 MB | 575 MB (mapped) |
+| `ctr` (per piece counts) | 4.3 ms | 1.3 ms | 9.3 ms | 9.4 ms | 6242 ms |
+| `scan` (per piece counts) | 12.4 ms | 16.0 ms | 123 ms | 148 ms | 6149 ms |
+| `c` and `ct` | 37 and 17 ms | not possible | not possible | not possible | 6228 and 6260 ms |
+| Replace one piece | 0.49 to 0.57 s | 0.56 to 0.63 s | 0.26 to 0.33 s | 0.29 to 0.44 s | not measured |
+
+Where the stored paths are part of the index, add 482 MB (tantivy,
+document store). With 4.6 M distinct words, the tantivy word index
+answers substring queries of 2 to 4 characters in about 290 to 315 ms
+and its prefix and whole-word queries in the same time as before.
