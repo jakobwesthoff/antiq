@@ -280,17 +280,10 @@ accepts_and_needs_a_collection!(
         "--if-reachable"
     ]
 );
-accepts!(
-    import_takes_files_and_a_path,
+accepts_and_needs_a_collection!(
+    import_takes_a_file_and_a_path,
     "import",
-    [
-        "import",
-        "--path",
-        "dir",
-        "one.tar.zst",
-        "two.tar.zst",
-        "--dry-run"
-    ]
+    ["import", "--path", "dir", "one.tar.zst", "--dry-run"]
 );
 
 #[test]

@@ -274,8 +274,9 @@ pub struct ReconcileArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// Directory the archives are copied from, instead of the current one
-    #[arg(long, value_name = "DIR")]
+    /// Path of the piece in the collection, for one archive; by default the
+    /// archive's top-level folder at the collection root
+    #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
     /// Archives to register
     #[arg(required = true, value_name = "FILE")]

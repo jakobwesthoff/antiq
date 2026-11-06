@@ -2057,6 +2057,106 @@ mod tests {
         assert!(!CommandReport::warnings(&report).is_empty());
     }
 
+    #[test]
+    fn an_import_the_repairs_do_not_know_is_completed_with_the_version_pending() {
+        let world = World::new();
+        let file = world.simple("proj.tar.zst");
+        world.run(std::slice::from_ref(&file));
+        let id = rewrite_first_object(&world, |metadata| {
+            // Two history entries: not the shape the repairs recognise.
+            let first = metadata.history[0].clone();
+            metadata.history.push(first);
+        });
+        let report = world.run(&[file]);
+        assert_eq!(report.skipped[0].reason, SkipReason::EntryCompleted);
+        let entry = tracking::read(&world.collection, id)
+            .expect("reads")
+            .expect("written");
+        assert_eq!(entry.version_taken_out, VersionTakenOut::Pending);
+    }
+
+    #[test]
+    fn an_exclude_entry_that_does_not_apply_lets_the_import_through() {
+        let mut world = World::new();
+        world.configure("exclude = [\"archive\"]");
+        let file = world.simple("proj.tar.zst");
+        let report = world.run(&[file]);
+        assert_eq!(report.imported.len(), 1, "{report:?}");
+    }
+
+    /// Makes `dir` unwritable and checks that this keeps a file out, so a
+    /// user that mode bits do not bind fails the test with a reason.
+    fn lock_out(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let probe = dir.join("probe");
+        assert!(
+            fs::write(&probe, b"x").is_err(),
+            "this test needs a user that mode 555 keeps out of {}",
+            dir.display()
+        );
+    }
+
+    fn let_in(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_written_is_an_error_of_the_run() {
+        let world = World::new();
+        let file = world.simple("proj.tar.zst");
+        let objects = world.temp.root().join(".antiq/objects");
+        lock_out(&objects);
+        let result = world.run_with(&[file], None, &NoHooks);
+        let_in(&objects);
+        assert!(matches!(result, Err(ImportError::Store(_))), "{result:?}");
+        assert_eq!(world.names_in(".antiq/tmp"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_tmp_directory_that_cannot_be_written_is_an_error_of_the_run() {
+        let world = World::new();
+        let file = world.simple("proj.tar.zst");
+        let tmp = world.temp.root().join(".antiq/tmp");
+        // The repairs at the start of the run leave it as it is.
+        lock_out(&tmp);
+        let result = world.run_with(&[file], None, &NoHooks);
+        let_in(&tmp);
+        assert!(
+            matches!(result, Err(ImportError::Io { action: "copy", .. })),
+            "{result:?}"
+        );
+    }
+
+    /// Locks the object directory once the payload is in it.
+    struct LockAfterPayload(PathBuf);
+
+    impl Hooks for LockAfterPayload {
+        fn after(&self, step: Step) -> io::Result<()> {
+            if step == Step::PayloadPlaced {
+                use std::os::unix::fs::PermissionsExt;
+                for entry in fs::read_dir(&self.0)? {
+                    fs::set_permissions(entry?.path(), fs::Permissions::from_mode(0o555))?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_stored_is_an_error_of_the_run() {
+        let world = World::new();
+        let file = world.simple("proj.tar.zst");
+        let objects = world.temp.root().join(".antiq/objects");
+        let result = world.run_with(&[file], None, &LockAfterPayload(objects.clone()));
+        for entry in fs::read_dir(&objects).expect("lists") {
+            let_in(&entry.expect("an entry").path());
+        }
+        assert!(matches!(result, Err(ImportError::Store(_))), "{result:?}");
+        assert_eq!(world.names_in(".antiq/tmp"), Vec::<String>::new());
+    }
+
     // =========================================================
     // Dry runs, locks and changing inputs
     // =========================================================
