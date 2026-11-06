@@ -350,6 +350,23 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_that_can_be_entered_but_not_listed_is_granted_read_and_listed_again() {
+        let mut tree = Tree::new();
+        tree.file("t/sub/f", "x");
+        let sub = tree.path("t/sub");
+        let _guard = RestoreModes(vec![sub.clone()]);
+        fs::set_permissions(&sub, Permissions::from_mode(0o100)).expect("chmod");
+        let listing = fs::read_dir(&sub).expect_err("the test needs a non-root user");
+        assert_eq!(
+            listing.kind(),
+            io::ErrorKind::PermissionDenied,
+            "a search-only directory has to refuse its listing"
+        );
+        remove_tree(&root_of(&tree), &path("t")).expect("removes");
+        assert!(!tree.path("t").exists());
+    }
+
+    #[test]
     fn a_tree_deeper_than_the_path_limit_is_removed() {
         let tree = Tree::new();
         let root = root_of(&tree);
