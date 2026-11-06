@@ -28,6 +28,7 @@ fn config(cols: usize) -> Config {
     Config {
         counts: &[],
         name_prefix: "",
+        result_width: 12,
         style: Style::from_env(&env(cols, true)),
         directory: None,
     }

@@ -41,6 +41,9 @@ pub(super) const COUNTS: &[(Operation, Count)] = &[
     ),
 ];
 
+/// Fits `3 created, 1 deleted`.
+const RESULT_WIDTH: usize = 20;
+
 /// `2 of 3 entries` while rsync's total covers the count, `2 entries`
 /// otherwise.
 fn entries(done: u64, total: Option<u64>) -> String {
@@ -65,6 +68,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
     // card, and the table of the pieces replaces the report's lines.
     let mut description = Description::new(COUNTS);
     description.name_prefix = "Pushing to ";
+    description.result_width = RESULT_WIDTH;
     let cursor = out.stdout_env().cursor;
     let (result, shown) = progress::watch(
         ctx,

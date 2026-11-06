@@ -19,6 +19,9 @@ operation, which ends in the column where the second line ends, then a bar
 with a percentage and a count. A
 piece that has finished leaves one line with its result and its time, and
 a refused, skipped or unfinished piece keeps its reasons under that line.
+The name column of the finished lines is as wide as the longest name of the
+run, and the result column as wide as the command's longest usual result,
+so a line does not stretch over the terminal.
 The finished lines scroll away like any output. Below them stay the cards
 of the running pieces and one line `○ N waiting`.
 

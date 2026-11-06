@@ -2266,7 +2266,12 @@ window gets wider between the moment antiq reads its size and the moment
 the terminal draws the redraw.
 
 Counts group their thousands with a space, `1 203/2 931 files`. Lines are
-laid out for at most 100 columns. The size column is left out
+laid out for at most 100 columns. The name column of the finished lines is as
+wide as the longest name of the run: the names `archive` announces before
+its first piece finishes, the one name of every other command. A piece with a
+longer name widens its own line, and a card cuts a name to the same width.
+The result column is 12 columns wide, 18 for `rebuild` and 20 for `push`;
+a longer result widens its line. The size column is left out
 below 50 columns, the count below 60, and the bar is 40 cells wide from 70
 columns, 12 from 40 and 10 below. A name too long for its column is shortened
 in the middle; with the version of an `unearth` the name is shortened to as

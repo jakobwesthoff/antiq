@@ -24,6 +24,9 @@ use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 
+/// Fits `both files rebuilt`.
+const RESULT_WIDTH: usize = 18;
+
 /// What the cards of a rebuild count: the content bytes of the files in the
 /// archive, which the size on the card counts too. Where the size is not
 /// known the count shows the bytes checked so far and no total.
@@ -80,11 +83,13 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
     let style = out.stdout_style();
     // On a terminal the version shows as a card while it is checked, and its
     // line replaces the line of the pipe.
+    let mut description = description_with(COUNTS, style, &zone);
+    description.result_width = RESULT_WIDTH;
     let (result, shown) = progress::watch(
         ctx,
         out,
         false,
-        description_with(COUNTS, style, &zone),
+        description,
         |observer| rebuild_observed(&request, &SystemClock, &zone, observer),
         || rebuild(&request, &SystemClock, &zone),
         |_| Vec::new(),

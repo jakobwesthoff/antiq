@@ -23,9 +23,8 @@ use unicode_width::UnicodeWidthStr;
 
 /// Lines are laid out for at most this many columns.
 const MAX_WIDTH: usize = 100;
-/// The columns of the size, of the result and of the time of a line.
+/// The columns of the size and of the time of a line.
 const SIZE: usize = 8;
-const RESULT: usize = 20;
 const TIME: usize = 4;
 /// A name never gets less than this.
 const MIN_NAME: usize = 6;
@@ -75,6 +74,9 @@ const FILES: Count = Count {
 };
 
 pub(crate) struct Config {
+    /// The width of the result column of a finished line: the longest
+    /// result the command usually leaves. A longer one widens its own line.
+    pub result_width: usize,
     /// The count of the operations that do not read `N/M files`.
     pub counts: &'static [(Operation, Count)],
     /// Printed before the name on the card of a running piece, not on the
@@ -179,6 +181,9 @@ pub(crate) struct Cards {
     items: Vec<Item>,
     next_order: u64,
     ready: Vec<Ready>,
+    /// The widest name cell the run has announced or shown so far, which
+    /// the name column of a finished line is sized to.
+    widest: usize,
 }
 
 /// The columns of a line at a terminal width.
@@ -190,10 +195,10 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(cols: usize) -> Layout {
+    fn of(cols: usize, result: usize) -> Layout {
         let width = cols.min(MAX_WIDTH);
         let size = width >= 50;
-        let fixed = 4 + 2 + RESULT + 2 + TIME + if size { 2 + SIZE } else { 0 };
+        let fixed = 4 + 2 + result + 2 + TIME + if size { 2 + SIZE } else { 0 };
         Layout {
             name: width.saturating_sub(fixed).max(MIN_NAME),
             size,
@@ -268,7 +273,26 @@ impl Cards {
             items: Vec::new(),
             next_order: 0,
             ready: Vec::new(),
+            widest: 0,
         }
+    }
+
+    /// The columns the name of a piece takes with its version label.
+    fn full_width(name: &str, label: Option<&str>) -> usize {
+        let label = label.map_or(0, |label| 1 + "version ".len() + sanitize(label).width());
+        sanitize(name).width() + label
+    }
+
+    /// Makes room in the name column for a piece and its version label.
+    fn note_width(&mut self, name: &str, label: Option<&str>) {
+        self.widest = self.widest.max(Self::full_width(name, label));
+    }
+
+    /// The width of the name column at this layout: the widest name of the
+    /// run, cut to what the terminal leaves for it. A line whose own name is
+    /// wider than the column widens it for itself.
+    fn name_column(&self, own: usize, layout: &Layout) -> usize {
+        self.widest.max(own).min(layout.name)
     }
 
     fn position(&self, name: &str) -> Option<usize> {
@@ -315,6 +339,7 @@ impl Cards {
         match msg {
             Msg::Planned(planned) => {
                 for (name, bytes) in planned {
+                    self.note_width(&name, None);
                     if self.position(&name).is_none() {
                         let index = self.find_or_add(&name);
                         self.items[index].bytes = Some(bytes);
@@ -322,6 +347,7 @@ impl Cards {
                 }
             }
             Msg::Started { name, bytes, label } => {
+                self.note_width(&name, label.as_deref());
                 let index = self.find_or_add(&name);
                 self.open(index, now);
                 let item = &mut self.items[index];
@@ -354,6 +380,8 @@ impl Cards {
                 outcome,
             } => {
                 let index = self.find_or_add(&name);
+                let label = self.items[index].label.clone();
+                self.note_width(&name, label.as_deref());
                 let item = &mut self.items[index];
                 if matches!(item.phase, Phase::Done) {
                     return;
@@ -576,13 +604,17 @@ impl Cards {
     /// The one line of a finished piece and, under it, the reasons it did
     /// not finish cleanly, wrapped to the width and never cut.
     pub(crate) fn finished_lines(&self, ready: &Ready, cols: usize) -> Vec<String> {
-        let layout = Layout::of(cols);
+        let layout = Layout::of(cols, self.config.result_width);
+        let name_column = self.name_column(
+            Self::full_width(&ready.name, ready.label.as_deref()),
+            &layout,
+        );
         let tone = Self::outcome_tone(&ready.outcome);
-        let (cell, cell_width) = self.name_cell(&ready.name, ready.label.as_deref(), layout.name);
+        let (cell, cell_width) = self.name_cell(&ready.name, ready.label.as_deref(), name_column);
         let result = Self::result_text(&ready.outcome);
         let result = format!(
             "{}{}",
-            " ".repeat(RESULT.saturating_sub(result.width())),
+            " ".repeat(self.config.result_width.saturating_sub(result.width())),
             self.paint(
                 if tone == Tone::Ok {
                     Look::new()
@@ -600,7 +632,7 @@ impl Cards {
             "  {} {}{}{}  {}  {}",
             self.tone_symbol(tone),
             cell,
-            " ".repeat(layout.name.saturating_sub(cell_width)),
+            " ".repeat(name_column.saturating_sub(cell_width)),
             self.size_cell(ready.bytes, &layout),
             result,
             time
@@ -829,7 +861,7 @@ impl Cards {
     /// the width it is drawn for; how far a later redraw climbs is decided in
     /// `reflow::rows_to_climb`.
     pub(crate) fn region(&self, now: Duration, cols: usize, rows: usize) -> Vec<String> {
-        let layout = Layout::of(cols);
+        let layout = Layout::of(cols, self.config.result_width);
         let mut running: Vec<&Item> = self
             .items
             .iter()

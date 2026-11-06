@@ -18,12 +18,19 @@ use anyhow::Context as _;
 use std::path::Path;
 use std::time::Duration;
 
+/// Fits `12 345 files`, `unfinished` and `skipped`, the results of `archive`,
+/// `unearth` and `fork`.
+const DEFAULT_RESULT_WIDTH: usize = 12;
+
 /// How a command describes itself to the cards.
 pub(super) struct Description {
     /// The operations whose count does not read `N/M files`.
     pub counts: &'static [(Operation, Count)],
     /// Printed before the name on the card of a running piece.
     pub name_prefix: &'static str,
+    /// The width of the result column of a finished line, sized to the
+    /// longest result the command usually leaves.
+    pub result_width: usize,
     /// How the version of an unearth reads; the stamp for any other command.
     pub label: Label,
 }
@@ -33,6 +40,7 @@ impl Description {
         Description {
             counts,
             name_prefix: "",
+            result_width: DEFAULT_RESULT_WIDTH,
             label: Box::new(|stamp, _| stamp.to_string()),
         }
     }
@@ -86,6 +94,7 @@ pub(super) fn watch<T>(
         config: Config {
             counts: description.counts,
             name_prefix: description.name_prefix,
+            result_width: description.result_width,
             style: out.stdout_style(),
             directory: ctx.directory.clone(),
         },
@@ -296,6 +305,7 @@ pub(super) fn card_of(
     let mut cards = Cards::new(Config {
         counts,
         name_prefix: "",
+        result_width: DEFAULT_RESULT_WIDTH,
         style: Style {
             width: 96,
             color: false,

@@ -48,6 +48,7 @@ fn with_style(counts: Counts, style: Style) -> Cards {
     Cards::new(Config {
         counts,
         name_prefix: "",
+        result_width: 12,
         style,
         directory: None,
     })
@@ -150,12 +151,12 @@ fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
     assert_eq!(
         lines_of(&mut cards, MOCKUP),
         [
-            "  ✔ experiments/ray-marcher                                    222 B               3 files  0:01",
-            "  ✖ projects/antiq                                             220 B               refused  0:00",
+            "  ✔ experiments/ray-marcher                               222 B       3 files  0:01",
+            "  ✖ projects/antiq                                        220 B       refused  0:00",
             "    pinned, so it stays as it is. antiq unpin projects/antiq releases it",
-            "  ✔ projects/recipe-api                                        48 MB              15 files  0:05",
-            "  ✔ archive/2019/client-work/acme-warehouse-dashboard         1.8 GB             518 files  0:11",
-            "  ✔ tools/pdf-merge                                           3.1 MB               9 files  0:02",
+            "  ✔ projects/recipe-api                                   48 MB      15 files  0:05",
+            "  ✔ archive/2019/client-work/acme-warehouse-dashboard    1.8 GB     518 files  0:11",
+            "  ✔ tools/pdf-merge                                      3.1 MB       9 files  0:02",
         ]
     );
 }
@@ -163,6 +164,7 @@ fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
 #[test]
 fn a_push_run_leaves_the_lines_of_the_approved_mockup() {
     let mut cards = cards(PUSH);
+    cards.config.result_width = 20;
     let changes = |created, updated, deleted| Outcome::Changes {
         created,
         updated,
@@ -203,10 +205,10 @@ fn a_push_run_leaves_the_lines_of_the_approved_mockup() {
     assert_eq!(
         lines_of(&mut cards, MOCKUP),
         [
-            "  ✔ projects/antiq-site                                        12 kB             1 created  0:02",
-            "  ✔ tools/markdown-lint                                        86 kB  3 created, 1 deleted  0:06",
-            "  ✔ experiments/wasm-fun                                      410 kB             1 deleted  0:03",
-            "  ✔ archive/2019/client-work/acme-warehouse-dashboard         1.8 GB  1 created, 1 updated  1:31",
+            "  ✔ projects/antiq-site                                   12 kB             1 created  0:02",
+            "  ✔ tools/markdown-lint                                   86 kB  3 created, 1 deleted  0:06",
+            "  ✔ experiments/wasm-fun                                 410 kB             1 deleted  0:03",
+            "  ✔ archive/2019/client-work/acme-warehouse-dashboard    1.8 GB  1 created, 1 updated  1:31",
         ]
     );
 }
@@ -228,8 +230,85 @@ fn an_unearth_run_leaves_the_line_of_the_approved_mockup() {
     );
     assert_eq!(
         lines_of(&mut cards, MOCKUP),
+        ["  ✔ projects/recipe-api version 2026-11-05 13:02:11     48 MB      15 files  0:04"]
+    );
+}
+
+#[test]
+fn the_name_column_is_as_wide_as_the_longest_name_the_run_announced() {
+    let mut cards = cards(ARCHIVE);
+    cards.apply(
+        Msg::Planned(vec![
+            ("scan-old".to_string(), 60_000_000),
+            ("recipe-api".to_string(), 100_000_000),
+            ("projects/client-site".to_string(), 150_000_000),
+        ]),
+        secs(0),
+    );
+    run_piece(&mut cards, "scan-old", 60_000_000, Outcome::Files(3), 0, 4);
+    run_piece(
+        &mut cards,
+        "recipe-api",
+        100_000_000,
+        Outcome::Files(4),
+        4,
+        8,
+    );
+    assert_eq!(
+        lines_of(&mut cards, MOCKUP),
         [
-            "  ✔ projects/recipe-api version 2026-11-05 13:02:11            48 MB              15 files  0:04"
+            "  ✔ scan-old                 60 MB       3 files  0:04",
+            "  ✔ recipe-api              100 MB       4 files  0:08",
+        ]
+    );
+}
+
+#[test]
+fn a_piece_that_turns_up_with_a_longer_name_widens_its_own_line_only() {
+    let mut cards = cards(ARCHIVE);
+    run_piece(&mut cards, "scan-old", 60_000_000, Outcome::Files(3), 0, 4);
+    let first = lines_of(&mut cards, MOCKUP);
+    run_piece(
+        &mut cards,
+        "projects/client-site",
+        150_000_000,
+        Outcome::Files(4),
+        4,
+        5,
+    );
+    let second = lines_of(&mut cards, MOCKUP);
+    assert_eq!(first, ["  ✔ scan-old     60 MB       3 files  0:04"]);
+    assert_eq!(
+        second,
+        ["  ✔ projects/client-site    150 MB       4 files  0:05"]
+    );
+}
+
+#[test]
+fn the_result_column_has_the_width_of_the_command_and_a_longer_result_widens_its_line() {
+    let both = Outcome::Rebuilt {
+        listing: true,
+        checksum: true,
+    };
+    let mut wide = cards(ARCHIVE);
+    wide.config.result_width = 18;
+    wide.apply(finished("a", 5, Outcome::Files(1)), secs(1));
+    wide.apply(finished("b", 5, both.clone()), secs(1));
+    assert_eq!(
+        lines_of(&mut wide, MOCKUP),
+        [
+            "  ✔ a       5 B              1 file  0:00",
+            "  ✔ b       5 B  both files rebuilt  0:00",
+        ]
+    );
+    let mut narrow = cards(ARCHIVE);
+    narrow.apply(finished("a", 5, Outcome::Files(1)), secs(1));
+    narrow.apply(finished("b", 5, both), secs(1));
+    assert_eq!(
+        lines_of(&mut narrow, MOCKUP),
+        [
+            "  ✔ a       5 B        1 file  0:00",
+            "  ✔ b       5 B  both files rebuilt  0:00",
         ]
     );
 }
@@ -259,15 +338,15 @@ fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
         [
             format!(
                 "  \x1b[32m✔\x1b[0m \x1b[1mtools/pdf-merge\x1b[0m{}  {}3.1 MB  {}9 files  \x1b[2m0:02\x1b[0m",
-                pad(40),
-                pad(1),
-                pad(13)
+                pad(0),
+                pad(2),
+                pad(5)
             ),
             format!(
                 "  \x1b[1m\x1b[31m✖\x1b[0m \x1b[1mprojects/antiq\x1b[0m{}  {}220 B  {}\x1b[1m\x1b[31mrefused\x1b[0m  \x1b[2m0:00\x1b[0m",
-                pad(40),
+                pad(1),
                 pad(3),
-                pad(13)
+                pad(5)
             ),
             "    pinned, so it stays as it is. \x1b[1mantiq unpin projects/antiq\x1b[0m releases it"
                 .to_string(),
@@ -660,6 +739,7 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
     let mut cards = Cards::new(Config {
         counts: ARCHIVE,
         name_prefix: "",
+        result_width: 12,
         style: style(false, true),
         directory: Some(PathBuf::from("/data/my notes")),
     });
@@ -999,7 +1079,7 @@ fn a_line_without_size_and_time_keeps_its_columns() {
     assert_eq!(
         cards.finished_lines(&ready, MOCKUP),
         [
-            format!("  ✔ {:<54}  {:>8}  {:>20}", "late/piece", "", "4 files")
+            format!("  ✔ {:<10}  {:>8}  {:>12}", "late/piece", "", "4 files")
                 .trim_end()
                 .to_string()
         ]
@@ -1127,6 +1207,7 @@ fn prefixed(counts: Counts, prefix: &'static str) -> Cards {
     Cards::new(Config {
         counts,
         name_prefix: prefix,
+        result_width: 12,
         style: style(false, true),
         directory: None,
     })
