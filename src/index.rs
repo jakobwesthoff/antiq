@@ -20,7 +20,10 @@ use crate::relpath::{Name, RelPath};
 use crate::store::{Store, StoreError};
 use crate::tracking::{self, EntryState, TrackingError};
 use jiff::Timestamp;
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Matcher, Utf32String};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
@@ -468,6 +471,138 @@ fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Inde
     }
 }
 
+// =========================================================
+// Search
+// =========================================================
+
+/// A fuzzy query. It is the one place antiq scores text against what the
+/// user typed, so `find` and the picker rank alike.
+///
+/// Matching follows ntropy's picker: smart case (a capital makes the match
+/// case sensitive), smart normalisation, and several words that must all
+/// match the same text.
+pub struct Query {
+    pattern: Pattern,
+    matcher: Matcher,
+    empty: bool,
+}
+
+impl Query {
+    pub fn parse(text: &str) -> Query {
+        let text = text.trim();
+        Query {
+            pattern: Pattern::parse(text, CaseMatching::Smart, Normalization::Smart),
+            matcher: Matcher::new(Config::DEFAULT),
+            empty: text.is_empty(),
+        }
+    }
+
+    /// A query without atoms matches everything.
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
+
+    /// The score of `haystack`, or `None` when it does not match.
+    pub fn score(&mut self, haystack: &str) -> Option<u32> {
+        if self.empty {
+            return Some(0);
+        }
+        let haystack = Utf32String::from(haystack);
+        self.pattern.score(haystack.slice(..), &mut self.matcher)
+    }
+}
+
+/// An object that matched a query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match {
+    pub id: ObjectId,
+    pub score: u32,
+    /// The members that matched, in listing order. Empty when the piece's
+    /// own path matched, and for an empty query.
+    pub members: Vec<RelPath>,
+}
+
+/// The result of [`search`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Search {
+    pub matches: Vec<Match>,
+    /// Objects whose members could not be looked at, with the reason.
+    pub skipped: Vec<(ObjectId, String)>,
+}
+
+/// The objects that match `query`, best first.
+///
+/// The piece is matched on its path. A member is matched on its path below
+/// the piece's own, so a query can name the piece and the member together.
+/// Members are looked at only for pieces whose path does not match, since
+/// every member would match through the path of a piece that does.
+///
+/// A piece match ranks above a member-only match; within each, a better
+/// score first, then the newer object.
+pub fn search(collection: &Collection, index: &Index, text: &str) -> Result<Search, IndexError> {
+    let mut query = Query::parse(text);
+    let mut result = Search::default();
+
+    if query.is_empty() {
+        let mut entries: Vec<&IndexEntry> = index.entries().iter().collect();
+        entries.sort_by_key(|entry| (Reverse(entry.created), entry.id));
+        result.matches = entries
+            .into_iter()
+            .map(|entry| Match {
+                id: entry.id,
+                score: 0,
+                members: Vec::new(),
+            })
+            .collect();
+        return Ok(result);
+    }
+
+    // (member-only, score, created) sorts the way the result is ordered.
+    let mut ranked: Vec<(bool, u32, Timestamp, Match)> = Vec::new();
+    for entry in index.entries() {
+        let piece = entry.path.to_string();
+        if let Some(score) = query.score(&piece) {
+            let found = Match {
+                id: entry.id,
+                score,
+                members: Vec::new(),
+            };
+            ranked.push((false, score, entry.created, found));
+            continue;
+        }
+
+        let members = match index.members(collection, entry.id) {
+            Ok(Some(members)) => members,
+            Ok(None) => continue,
+            Err(error) => {
+                result.skipped.push((entry.id, error.to_string()));
+                continue;
+            }
+        };
+        let mut best = None;
+        let mut hits = Vec::new();
+        for member in members {
+            if let Some(score) = query.score(&format!("{piece}/{member}")) {
+                best = best.max(Some(score));
+                hits.push(member);
+            }
+        }
+        if let Some(score) = best {
+            let found = Match {
+                id: entry.id,
+                score,
+                members: hits,
+            };
+            ranked.push((true, score, entry.created, found));
+        }
+    }
+    ranked.sort_by_key(|(member_only, score, created, found)| {
+        (*member_only, Reverse(*score), Reverse(*created), found.id)
+    });
+    result.matches = ranked.into_iter().map(|(.., found)| found).collect();
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +703,8 @@ mod tests {
         collection: Collection,
         lock: RunLock,
         clock: FixedClock,
+        /// The ID time of the objects written next.
+        created: &'static str,
     }
 
     impl Fixture {
@@ -581,6 +718,7 @@ mod tests {
                 collection,
                 lock,
                 clock,
+                created: "2020-09-13T12:26:40Z",
             }
         }
 
@@ -591,13 +729,14 @@ mod tests {
             let document = format!(
                 concat!(
                     r#"{{"format":1,"id":"{}","collection":"{}","path":"{}","name":"{}","#,
-                    r#""created":"2020-09-13T12:26:40Z","created_source":"birth","#,
+                    r#""created":"{}","created_source":"birth","#,
                     r#""lifecycle":"{}","payloads":[{}],"history":[]}}"#
                 ),
                 object,
                 crate::testing::tree::COLLECTION_ID,
                 piece,
                 name,
+                self.created,
                 lifecycle,
                 payloads.join(",")
             );
@@ -1199,6 +1338,180 @@ mod tests {
         let rebuilt = fx.rebuild();
         assert_eq!(rebuilt.removed, 1);
         assert!(fx.content().is_empty());
+    }
+
+    // ---------------------------------------------------------
+    // Search
+    // ---------------------------------------------------------
+
+    impl Fixture {
+        fn search(&self, query: &str) -> Search {
+            search(&self.collection, &self.compute(), query).expect("searches")
+        }
+
+        /// An archived object with a stored listing of `members`.
+        fn archived(&mut self, object: &str, piece: &str, members: &[&str]) {
+            self.object(object, piece, "archived", &[PayloadSpec::archive(1, 5)]);
+            let paths: Vec<&[u8]> = members.iter().map(|member| member.as_bytes()).collect();
+            self.listing(object, 1, &paths);
+        }
+    }
+
+    fn found(search: &Search) -> Vec<ObjectId> {
+        search.matches.iter().map(|found| found.id).collect()
+    }
+
+    #[test]
+    fn an_empty_query_lists_every_object_newest_first() {
+        let mut fx = Fixture::new();
+        fx.created = "2020-01-01T00:00:00Z";
+        fx.object(A, "a", "live", &[]);
+        fx.created = "2022-01-01T00:00:00Z";
+        fx.object(B, "b", "live", &[]);
+        fx.created = "2021-01-01T00:00:00Z";
+        fx.object(C, "c", "live", &[]);
+        fx.track("01BX5ZZKBKACTAV9WEVGEMMVRA", "lost", EntryState::Gone);
+        fx.temp.tree().file(
+            ".antiq/objects/01BX5ZZKBKACTAV9WEVGEMMVRB/meta.1",
+            "garbage",
+        );
+        for query in ["", "   "] {
+            let result = fx.search(query);
+            assert_eq!(found(&result), vec![id(B), id(C), id(A)], "query {query:?}");
+            assert!(result.matches.iter().all(|found| found.members.is_empty()));
+            assert!(result.skipped.is_empty());
+        }
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_newest_first() {
+        let mut fx = Fixture::new();
+        fx.created = "2020-01-01T00:00:00Z";
+        fx.object(A, "p/x", "live", &[]);
+        fx.created = "2022-01-01T00:00:00Z";
+        fx.object(B, "q/x", "live", &[]);
+        let result = fx.search("x");
+        assert_eq!(result.matches[0].score, result.matches[1].score);
+        assert_eq!(found(&result), vec![id(B), id(A)]);
+    }
+
+    #[test]
+    fn a_query_matches_the_piece_path_fuzzily() {
+        let mut fx = Fixture::new();
+        fx.object(A, "projects/alpha", "live", &[]);
+        fx.object(B, "elsewhere/zed", "live", &[]);
+        let result = fx.search("prj");
+        assert_eq!(found(&result), vec![id(A)]);
+        assert!(result.matches[0].score > 0);
+        assert!(result.matches[0].members.is_empty());
+        assert_eq!(found(&fx.search("qqq")), vec![]);
+    }
+
+    #[test]
+    fn a_query_matches_member_paths_when_the_piece_path_does_not() {
+        let mut fx = Fixture::new();
+        fx.archived(A, "projects/alpha", &["src", "src/main.rs", "README.md"]);
+        fx.archived(B, "projects/beta", &["notes.txt"]);
+        let result = fx.search("readme");
+        assert_eq!(found(&result), vec![id(A)]);
+        assert_eq!(result.matches[0].members, vec![path("README.md")]);
+    }
+
+    #[test]
+    fn member_hits_come_in_listing_order() {
+        let mut fx = Fixture::new();
+        fx.archived(A, "p", &["b.rs", "a.rs", "c.txt", "d.rs"]);
+        let result = fx.search("rs");
+        assert_eq!(
+            result.matches[0].members,
+            vec![path("b.rs"), path("a.rs"), path("d.rs")]
+        );
+    }
+
+    #[test]
+    fn a_query_can_span_the_piece_and_a_member() {
+        let mut fx = Fixture::new();
+        fx.archived(A, "projects/alpha", &["src/main.rs"]);
+        fx.archived(B, "projects/beta", &["src/main.rs"]);
+        let result = fx.search("alpha main.rs");
+        assert_eq!(found(&result), vec![id(A)]);
+        assert_eq!(result.matches[0].members, vec![path("src/main.rs")]);
+    }
+
+    #[test]
+    fn a_piece_match_lists_no_member_hits() {
+        let mut fx = Fixture::new();
+        fx.archived(A, "projects/alpha", &["src/main.rs", "README.md"]);
+        let result = fx.search("alpha");
+        assert_eq!(found(&result), vec![id(A)]);
+        assert!(result.matches[0].members.is_empty());
+    }
+
+    #[test]
+    fn piece_matches_rank_above_member_only_matches() {
+        let mut fx = Fixture::new();
+        // The member matches far better than the piece path does.
+        fx.archived(A, "r/e/a/d/m/e", &[]);
+        fx.archived(B, "other/b", &["README.md"]);
+        let result = fx.search("readme");
+        assert_eq!(found(&result), vec![id(A), id(B)]);
+        assert!(result.matches[1].score > result.matches[0].score);
+    }
+
+    #[test]
+    fn case_is_ignored_unless_the_query_has_a_capital() {
+        let mut fx = Fixture::new();
+        fx.object(A, "Projects/Alpha", "live", &[]);
+        fx.object(B, "projects/alpha", "live", &[]);
+        assert_eq!(found(&fx.search("alpha")), vec![id(A), id(B)]);
+        assert_eq!(found(&fx.search("Alpha")), vec![id(A)]);
+    }
+
+    #[test]
+    fn only_objects_with_metadata_are_matches() {
+        let mut fx = Fixture::new();
+        fx.object(A, "lost-and-found", "live", &[]);
+        fx.track(B, "lost", EntryState::Gone);
+        fx.temp
+            .tree()
+            .file(&format!(".antiq/objects/{C}/meta.1"), "garbage");
+        assert_eq!(found(&fx.search("lost")), vec![id(A)]);
+    }
+
+    #[test]
+    fn an_unreadable_listing_is_reported_and_the_other_objects_still_match() {
+        let mut fx = Fixture::new();
+        fx.object(A, "plain", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.temp.tree().file(
+            &format!(".antiq/objects/{A}/0000000000000001.listing.zst"),
+            "garbage",
+        );
+        fx.archived(B, "projects/needle", &[]);
+        let result = fx.search("needle");
+        assert_eq!(found(&result), vec![id(B)]);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].0, id(A));
+    }
+
+    #[test]
+    fn search_works_without_an_index_directory_and_writes_nothing() {
+        let mut fx = Fixture::new();
+        fx.archived(A, "projects/alpha", &["README.md"]);
+        fs::remove_dir(fx.index_dir()).expect("the fixture's index directory is empty");
+        assert!(!fx.index_dir().exists(), "the precondition: no directory");
+        let result = fx.search("readme");
+        assert_eq!(found(&result), vec![id(A)]);
+        assert!(!fx.index_dir().exists(), "search made the index directory");
+    }
+
+    #[test]
+    fn a_query_scores_text_and_is_empty_without_atoms() {
+        let mut query = Query::parse("abc");
+        assert!(!query.is_empty());
+        assert!(query.score("a-b-c").is_some());
+        assert_eq!(query.score("xyz"), None);
+        assert!(Query::parse("  ").is_empty());
+        assert_eq!(Query::parse("").score("anything"), Some(0));
     }
 
     #[test]
