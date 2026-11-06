@@ -523,14 +523,14 @@ remotes; version 1 accepts exactly one.
 | `collection.idle_days` | 14 | archive tier |
 | `collection.remote_only_days` | 180 | remote-only tier, from the archive's commit |
 | `collection.backup_live` | `true` | back up live pieces |
-| `collection.live_exclude` | `[]` | paths left out of live packages only |
+| `collection.live_exclude` | `[]` | paths relative to the collection root, in the escaped form of the metadata, left out of live packages only; an empty entry is an error |
 | `collection.replace_without_asking` | `false` | ADR 0036 |
 | `collection.brake_percent` | 20 | ADR 0045, 0 to 100 |
 | `collection.grace_hours` | 24 | commit protocol |
 | `collection.away_warn_days` | 7 | see `--if-reachable` |
 | `collection.memory_percent` | 25 | compression memory limit, 1 to 100 |
 | `collection.remote_jobs` | 4 | remote operations at a time, at least 1 |
-| `collection.live_retries` | 3 | tolerant verify, at least 1 |
+| `collection.live_retries` | 3 | restarts of a live piece in the tolerant verify, at least 1 |
 | `machine.name` | ComputerName on macOS, hostname elsewhere | stored at `init` |
 | `machine.rsync` | resolved at `remote add` | absolute path |
 | `machine.remote_rsync` | none | passed as `--rsync-path` |
@@ -783,8 +783,10 @@ matching and a 128 MiB window, at the default job size of 64 MiB.
 (ADR 0051) Live packages are compressed at level 3 in rsyncable mode,
 with a job size of 512 KiB and no long-distance matching. The zstd
 version is pinned, and each package records the zstd version and
-parameters. (ADR 0018, ADR 0052) Every decoder antiq creates sets the
-maximum window to 128 MiB.
+parameters. (ADR 0018, ADR 0052) The `encoder` record holds `zstd` (the
+version), `level`, `rsyncable`, `job_size`, `long_distance_matching` and
+`checksum`. Every decoder antiq creates sets the maximum window to
+128 MiB.
 
 All compression in a run shares one pool of one worker per core. A
 piece smaller than one job gets one worker, larger pieces take up to the
@@ -792,14 +794,20 @@ free workers, and several pieces are compressed in parallel. The number
 of compressors in flight is also limited by memory against
 `memory_percent` of RAM: an archive encoder counts 448 MiB plus 160 MiB
 per worker, since zstd allocates a fixed round buffer for each encoder
-with long-distance matching. When nothing else is compressing, one
+with long-distance matching. A live encoder counts 4 MiB plus 2 MiB per
+worker. When nothing else is compressing, one
 worker is always granted, with a warning when the memory limit is below
 the cost of an encoder with one worker. A compressor that finds no free
 worker or not enough memory waits until another finishes, and waiting
 compressors are served in the order they asked.
 
-An optional exclude list, empty by default, applies to live packages
-only; archives hold the whole tree except junk files.
+An optional exclude list, `collection.live_exclude`, empty by default,
+applies to live packages only; archives hold the whole tree except junk
+files. Each entry is a path relative to the collection root. The entry
+and everything below it is left out of the live package and of its
+manifest. A piece whose top directory is an entry, or lies below one, has
+no live package. The packer reports the entries that left something out
+of a package.
 
 Symlinks are archived and restored as they are, whatever their target.
 An archive with a member whose path leads outside the piece is refused,

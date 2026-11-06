@@ -35,6 +35,10 @@ pub enum ConfigError {
     },
     #[error("version 1 accepts exactly one [[remote]] entry")]
     SecondRemote,
+    /// An empty path would name the collection root, which no list of
+    /// paths to leave out can mean.
+    #[error("{key} must not hold an empty entry")]
+    EmptyEntry { key: &'static str },
     #[error("{key} must be {}, found {value}", describe_range(*min, *max))]
     OutOfRange {
         key: &'static str,
@@ -98,8 +102,10 @@ pub struct CollectionConfig {
     pub remote_only_days: u32,
     #[serde(default = "defaults::backup_live")]
     pub backup_live: bool,
+    /// Paths relative to the collection root, in the escaped form of the
+    /// metadata, that live packages leave out.
     #[serde(default)]
-    pub live_exclude: Vec<String>,
+    pub live_exclude: Vec<RelPath>,
     #[serde(default)]
     pub replace_without_asking: bool,
     #[serde(default = "defaults::brake_percent")]
@@ -263,6 +269,11 @@ impl Config {
             return Err(ConfigError::SecondRemote);
         }
         config.check_ranges()?;
+        if config.collection.live_exclude.iter().any(RelPath::is_root) {
+            return Err(ConfigError::EmptyEntry {
+                key: "collection.live_exclude",
+            });
+        }
 
         // The typed read has dropped unknown `[collection]` keys, so they
         // are found in the plain table.
@@ -512,7 +523,7 @@ mod tests {
         assert_eq!(collection.idle_days, 14);
         assert_eq!(collection.remote_only_days, 180);
         assert!(collection.backup_live);
-        assert_eq!(collection.live_exclude, Vec::<String>::new());
+        assert_eq!(collection.live_exclude, Vec::<RelPath>::new());
         assert!(!collection.replace_without_asking);
         assert_eq!(collection.brake_percent, 20);
         assert_eq!(collection.grace_hours, 24);
@@ -596,7 +607,10 @@ host_key_alias = "nas"
         assert_eq!(collection.idle_days, 1);
         assert_eq!(collection.remote_only_days, 2);
         assert!(!collection.backup_live);
-        assert_eq!(collection.live_exclude, vec!["cache".to_string()]);
+        assert_eq!(
+            collection.live_exclude,
+            vec![RelPath::parse("cache").expect("valid path")]
+        );
         assert!(collection.replace_without_asking);
         assert_eq!(collection.brake_percent, 3);
         assert_eq!(collection.grace_hours, 4);
@@ -873,6 +887,32 @@ host_key_alias = "nas"
     fn an_exclude_entry_with_a_bad_escape_fails_naming_the_key() {
         let text = error_text(&with_collection_line("exclude = [\"a%ZZ\"]"));
         assert!(text.contains("exclude"), "{text}");
+    }
+
+    #[test]
+    fn a_live_exclude_entry_is_read_in_the_escaped_form() {
+        let config = parse(&with_collection_line(
+            "live_exclude = [\"a%FFb\", \"Ünï/cache\"]",
+        ));
+        let bytes: Vec<&[u8]> = config
+            .collection
+            .live_exclude
+            .iter()
+            .map(|entry| entry.as_bytes())
+            .collect();
+        assert_eq!(bytes, vec![&b"a\xFFb"[..], "Ünï/cache".as_bytes()]);
+    }
+
+    #[test]
+    fn a_live_exclude_entry_with_a_bad_escape_fails_naming_the_key() {
+        let text = error_text(&with_collection_line("live_exclude = [\"a%ZZ\"]"));
+        assert!(text.contains("live_exclude"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_live_exclude_entry_fails_naming_the_key() {
+        let text = error_text(&with_collection_line("live_exclude = [\"cache\", \"\"]"));
+        assert!(text.contains("collection.live_exclude"), "{text}");
     }
 
     #[test]

@@ -196,6 +196,21 @@ one synthetic input (75 % from a 10-letter alphabet, 25 % random bytes)
 were measured; small inputs peak lower (150 MB to 300 MB above), so the
 figures are a ceiling for large pieces, not a typical value.
 
+Measured 2026-11-04 for live packages (**measured**, release build,
+zstd 1.5.7 through the `zstd` crate, level 3 with `RSyncable(true)`,
+job size 512 KiB, no long-distance matching, content checksum, output to
+`io::sink`, peak resident memory from `/usr/bin/time -l`). The input was
+400 MiB of the same kind of synthetic data (75 % from a 10-letter
+alphabet, 25 % random bytes), generated in a loop of 1 MiB chunks, so no
+buffer of input size exists. A run that generates and discards the input
+without an encoder peaked at 6,914,048 bytes. With an encoder the peak was
+11,714,560 bytes for one worker, 14,729,216 for two, 17,891,328 for four
+and 24,084,480 for eight. Above the baseline that is 4.6, 7.5, 10.5 and
+16.4 MiB, about 3 MiB plus 1.7 MiB per worker. A 10 KB input peaked at
+6,963,200 bytes against a baseline of 5,881,856. antiq charges a live
+encoder 4 MiB plus 2 MiB per worker, the fit rounded up to whole MiB. One
+macOS machine and one synthetic input were measured.
+
 `zstd-sys` 2.1.2 has the default features `legacy` and
 `zdict_builder`; `zstd-safe` 8.2.0 depends on it with
 `default-features = false` (**read**, their `Cargo.toml`). A direct
