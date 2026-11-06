@@ -2782,6 +2782,24 @@ the same commit; the lead checks that at acceptance.
   at `remote add` is `remote_broken`. For I39: check on a real SMB
   mount that the read-back bypasses the client cache and that the probe
   file's time is the server clock; I23 claims neither for SMB.
+- 2026-11-04 (merged): for I27, `Remote` offers `create_exclusive`
+  (`Created::Yes|AlreadyExists`), `write_temp`, `rename_into_place`
+  (`Placement::Placed|TargetExists`, never replaces), `put_payload(&Upload)`
+  (a `seed` field the path remote ignores), `get_payload`, `delete`,
+  `delete_partial`, `list_objects`, `list_dir`, `list_partial`,
+  `read_file`, `checksum` (hex SHA-256 read back past the cache), `clock`,
+  `pull_metadata(&KnownVersions)`, and no-op `flush`, `begin_phase`,
+  `finish`. Every operation re-checks the marker (`RemoteError::Away` or
+  `Broken`); names must be one path component (`InvalidName`); a
+  `put_payload` onto an existing name needs a matching SHA-256.
+  `Durable` and its test recorder live in `remote/mod.rs`. For I28: wire
+  the ssh arm in `remote::open` and `remote::probe_state`, add the SSH
+  probes in `ops::remote::add_with` (a second `check_root` branch, an
+  `ssh` arm instead of `Unsupported`) and fill `ShowReport.probed`. For
+  I29/I30: `remote-state.json` is untouched by I23. For I35: `remote
+  remove` computes `remote_only` and parses `--force`. For I30:
+  `ops::remote::copy_metadata` is the pull loop. `Error::RemoteOp` is
+  boxed (the refusals made every crate `Result` too large).
 
 ### I24
 
