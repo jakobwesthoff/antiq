@@ -131,7 +131,7 @@ other files              1         0         0
 
 ```text
 $ antiq --help
-Archive what you no longer touch, find it when you need it
+Your idle folders, kept like antiques
 
 Usage: antiq [OPTIONS] <COMMAND>
 
