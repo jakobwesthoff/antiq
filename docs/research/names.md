@@ -87,10 +87,20 @@ named list and also covers the length limits. The strict verify stays
 as the backstop. An archive-time warning is cheap with the same check.
 Escaped extraction is worth building only once a real case appears.
 
+## What the probe found on other volumes
+
+antiq's probe (`TargetRules::probe`) creates names in a directory of its
+own on the staging volume and reads the answers. Disk images made with
+`hdiutil` (macOS, 2026-11-04) showed:
+
+- exFAT answers a name that is not UTF-8 with `EINVAL`, where APFS
+  answers `EILSEQ` (**measured**). The probe takes both as "the volume
+  refuses such names".
+
 ## Not verified
 
 - The strict verify on the collision trees.
-- The volume probe and an `lstat` check before each `unpack_in`.
+- An `lstat` check before each `unpack_in`.
 - A case-sensitive APFS volume; ext4 itself (the container used
   overlayfs).
 - How restic and borg restore colliding names.

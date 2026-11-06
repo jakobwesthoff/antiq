@@ -302,11 +302,13 @@ impl Drop for ProbeDirectory<'_> {
 
 /// Whether a failed attempt to create a file with a name that is not
 /// UTF-8 shows that the volume refuses such names. APFS answers with
-/// `EILSEQ`; any other failure says nothing about names.
+/// `EILSEQ` and exFAT with `EINVAL`; the probe has created two plain
+/// names before it asks, so the name is what `EINVAL` objects to. Any
+/// other failure says nothing about names.
 fn refuses_non_utf8(attempt: io::Result<File>) -> io::Result<bool> {
     match attempt {
         Ok(_) => Ok(false),
-        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => Ok(true),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EILSEQ | libc::EINVAL)) => Ok(true),
         Err(error) => Err(error),
     }
 }
@@ -724,7 +726,14 @@ mod probe_tests {
     }
 
     #[test]
-    fn only_an_illegal_byte_sequence_shows_that_the_volume_refuses_non_utf8() {
+    fn an_invalid_argument_shows_that_the_volume_refuses_non_utf8_as_exfat_answers_it() {
+        let invalid = io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(refuses_non_utf8(Err(invalid)).expect("a known answer"));
+    }
+
+    #[test]
+    fn only_an_illegal_byte_sequence_or_an_invalid_argument_shows_that_the_volume_refuses_non_utf8()
+    {
         let illegal = io::Error::from_raw_os_error(libc::EILSEQ);
         assert!(refuses_non_utf8(Err(illegal)).expect("a known answer"));
         let created = tempfile::tempfile().expect("a file");
@@ -771,5 +780,60 @@ mod probe_tests {
         assert_eq!(rules.requires_utf8, requires_utf8);
         assert_eq!(rules.name_limit.max, name_max);
         assert_eq!(rules.name_limit.unit, LengthUnit::Utf16Units);
+    }
+
+    /// A disk image with a file system of its own, attached below a temp
+    /// directory and detached when dropped. Needs `hdiutil`.
+    #[cfg(target_os = "macos")]
+    struct DiskImage {
+        _dir: tempfile::TempDir,
+        mount: std::path::PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl DiskImage {
+        fn attach(filesystem: &str) -> DiskImage {
+            use std::process::Command;
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let image = dir.path().join("volume.dmg");
+            let mount = dir.path().join("mount");
+            std::fs::create_dir(&mount).expect("a mount point");
+            let created = Command::new("hdiutil")
+                .args(["create", "-size", "10m", "-fs", filesystem])
+                .args(["-volname", "antiqprobe"])
+                .arg(&image)
+                .output()
+                .expect("hdiutil runs");
+            assert!(created.status.success(), "{created:?}");
+            let attached = Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-mountpoint"])
+                .arg(&mount)
+                .arg(&image)
+                .output()
+                .expect("hdiutil runs");
+            assert!(attached.status.success(), "{attached:?}");
+            DiskImage { _dir: dir, mount }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for DiskImage {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-force"])
+                .arg(&self.mount)
+                .output();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "attaches a disk image with hdiutil"]
+    fn the_probe_answers_and_reports_non_utf8_names_as_refused_on_a_real_exfat_volume() {
+        let volume = DiskImage::attach("ExFAT");
+        let root = TreeRoot::open(&volume.mount).expect("the volume opens");
+        let rules = TargetRules::probe(&root).expect("the probe runs");
+        assert!(rules.requires_utf8);
+        assert!(is_empty(&root));
     }
 }
