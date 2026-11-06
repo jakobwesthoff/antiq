@@ -636,7 +636,12 @@ fn settle(collection: &Collection, candidates: Vec<Candidate>) -> Result<Settled
     let mut paths_here: Vec<RelPath> = Vec::new();
     for candidate in candidates {
         if let Some(existing) = known.get(&candidate.sha256) {
-            let reason = match completion_of(collection, existing, &candidate.sha256)? {
+            let reason = match completion_of(
+                collection,
+                existing,
+                &candidate.sha256,
+                &mut settled.warnings,
+            ) {
                 Some(completion) => {
                     settled.completions.push(completion);
                     SkipReason::EntryCompleted
@@ -714,24 +719,34 @@ fn settle(collection: &Collection, candidates: Vec<Candidate>) -> Result<Settled
 /// Whether the object that has these bytes lacks only the tracking entry
 /// that this machine writes last: its own, with the archive file in the
 /// object directory and no entry.
+///
+/// An entry that cannot be read counts as present: nothing is completed
+/// over it, and the file is skipped as already imported with a warning
+/// that names the entry. One damaged entry does not end the run.
 fn completion_of(
     collection: &Collection,
     existing: &Known,
     sha256: &str,
-) -> Result<Option<Completion>, ImportError> {
+    warnings: &mut Vec<Warning>,
+) -> Option<Completion> {
     let metadata = &existing.metadata;
     if metadata.collection != collection.id() {
-        return Ok(None);
+        return None;
     }
-    let Some(payload) = metadata
+    let payload = metadata
         .payloads
         .iter()
-        .find(|payload| payload.kind == PayloadKind::Archive && payload.checksum.value == sha256)
-    else {
-        return Ok(None);
-    };
-    if tracking::read(collection, existing.id)?.is_some() {
-        return Ok(None);
+        .find(|payload| payload.kind == PayloadKind::Archive && payload.checksum.value == sha256)?;
+    match tracking::read(collection, existing.id) {
+        Ok(None) => {}
+        Ok(Some(_)) => return None,
+        Err(error) => {
+            warnings.push(Warning::new(format!(
+                "the tracking entry of {} cannot be read ({error}), so it is not completed",
+                existing.id
+            )));
+            return None;
+        }
     }
     let stored = Store::new(collection).file_path(existing.id, &payload.file);
     let intact = File::open(&stored)
@@ -742,15 +757,15 @@ fn completion_of(
         })
         .unwrap_or(false);
     if !intact {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(Completion {
+    Some(Completion {
         id: existing.id,
         path: metadata.path.clone(),
         version: payload.version,
         file: payload.file.clone(),
         source: existing.source,
-    }))
+    })
 }
 
 // =========================================================
@@ -1718,6 +1733,33 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("01D39ZY06FGSCTVN4T2V9PKHFZ") && m.contains("no metadata")),
             "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_damaged_tracking_entry_of_a_matching_object_skips_the_file_and_the_run_goes_on() {
+        let world = World::new();
+        let first = world.simple("proj.tar.zst");
+        world.run(std::slice::from_ref(&first));
+        let id = world.store().objects().expect("lists")[0];
+        let entry = world.collection.tracking_dir().join(format!("{id}.json"));
+        fs::write(&entry, "{ not json").expect("the entry is damaged");
+        let second = world.package("other.tar.zst", |tree| {
+            tree.file_with("proj/b.txt", "other", 0o644, 1_000_000_000);
+        });
+
+        let report = world.run(&[first, second]);
+
+        assert_eq!(report.imported.len(), 1, "{report:?}");
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SkipReason::AlreadyImported);
+        assert_eq!(report.skipped[0].id, Some(id));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains(&format!("{id}.json"))),
+            "{report:?}"
         );
     }
 
