@@ -166,7 +166,7 @@ fn an_ambiguous_version_marks_its_matches_among_all_versions() {
 }
 
 #[test]
-fn an_unknown_word_offers_the_closest_pieces_and_a_command_to_copy() {
+fn an_unknown_word_offers_the_closest_pieces_in_a_table() {
     let world = world(stored_pieces);
     assert_eq!(
         plain(&world, &["unearth", "scnaer"]),
@@ -184,10 +184,44 @@ fn an_unknown_word_offers_the_closest_pieces_and_a_command_to_copy() {
          projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
          projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
          \n\
-         \x20ℹ INFO  Nothing was unearthed.\n\
-         \n\
-         \x20→ HINT  Did you mean projects/scanner? Run antiq unearth projects/scanner.\n"
+         \x20ℹ INFO  Nothing was unearthed.\n"
     );
+}
+
+#[test]
+fn a_word_that_fits_one_piece_is_offered_in_a_table_and_nothing_is_done() {
+    let world = world(stored_pieces);
+    for command in ["unearth", "forget"] {
+        let args: Vec<&str> = if command == "forget" {
+            vec!["forget", "scaner", "2026-11-04"]
+        } else {
+            vec!["unearth", "scaner"]
+        };
+        let done = if command == "forget" {
+            "deleted"
+        } else {
+            "unearthed"
+        };
+        let expected = format!(
+            "\x20✖ ERROR\n\
+             ▌ scaner is not the path of a piece, and this command acts only on a path\n\
+             ▌\n\
+             ▌ How to fix it\n\
+             ▌   Run the command again with the path of the piece you mean, for example\n\
+             ▌   projects/scanner.\n\
+             ▌\n\
+             ▌ What antiq was doing\n\
+             ▌   Attempting to find the piece to {command}.\n\
+             \n\
+             The piece that matches `scaner`\n\
+             PIECE              VERSION               SIZE    FILES\n\
+             projects/scanner   2026-11-04 22:02:11   NNN B       1\n\
+             projects/scanner   2026-09-04 00:15:00   NNN B       1\n\
+             \n\
+             \x20ℹ INFO  Nothing was {done}.\n"
+        );
+        assert_eq!(plain(&world, &args), expected);
+    }
 }
 
 #[test]

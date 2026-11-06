@@ -118,7 +118,7 @@ pub struct ArchiveArgs {
 
 #[derive(Debug, Args)]
 pub struct UnearthArgs {
-    /// Path or search word of the piece
+    /// Path of the piece; a search word only lists the matches
     pub piece: OsString,
     /// Version to bring back
     #[arg(long, value_name = "VERSION")]
@@ -145,7 +145,7 @@ pub struct ForkArgs {
 
 #[derive(Debug, Args)]
 pub struct ForgetArgs {
-    /// Path or search word of the piece
+    /// Path of the piece; a search word only lists the matches
     pub piece: OsString,
     /// Version to delete
     #[arg(

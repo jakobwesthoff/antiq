@@ -25,7 +25,7 @@ use crate::markers::{self, Restored};
 use crate::markers::{MarkerError, RESTORED_FILE, RealSite, Site};
 use crate::pin::PIN_FILE;
 use crate::progress::{Operation, Tracker};
-use crate::reference::{self, ReferenceError};
+use crate::reference::{self, ReferenceError, SearchWord};
 use crate::relpath::{Name, RelPath};
 use crate::select::Rules;
 use crate::tree::{EntryKind, TreeEntry};
@@ -191,6 +191,17 @@ enum Policy {
     Damaged,
 }
 
+impl Policy {
+    /// `unearth` takes sound versions and removes the one it brings back,
+    /// so it acts only on the path of a piece. `fork` keeps the version.
+    fn search_word(self) -> SearchWord {
+        match self {
+            Policy::Sound => SearchWord::OnlyOffers,
+            Policy::Damaged => SearchWord::Acts,
+        }
+    }
+}
+
 /// Finds the piece `given` names in the store and the version of it to
 /// bring back, and refuses a version that cannot be: one without an
 /// archive, a damaged one, one of a newer format, and one whose top holds
@@ -256,7 +267,8 @@ fn pick(
     }
 
     let scan = store::scan(places.pieces_dir)?;
-    let piece = reference::resolve_stored_piece(collection, cwd, given, &scan)?;
+    let piece =
+        reference::resolve_stored_piece(collection, cwd, given, &scan, policy.search_word())?;
     let mut versions = scan
         .pieces
         .iter()
@@ -1745,8 +1757,32 @@ mod choice_tests {
     }
 
     #[test]
-    fn a_search_word_names_the_piece() {
-        assert_eq!(chosen_stamp(scanner().choose("scanner", None)), NEW);
+    fn a_search_word_that_fits_one_piece_is_only_offered_to_unearth() {
+        let world = scanner();
+        let error = world.choose("scanner", None).expect_err("only offered");
+        assert_eq!(error.kind(), ErrorKind::InexactReference);
+        let details = Error::from(error).details();
+        let candidates = details["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["path"], "projects/scanner");
+    }
+
+    #[test]
+    fn a_search_word_that_fits_one_piece_still_names_the_piece_to_fork() {
+        let world = scanner();
+        let collection =
+            Collection::find(world.collection.root()).expect("the collection is found");
+        let picked = choose_version_to_fork(
+            &collection,
+            &world.store.places(),
+            world.collection.root(),
+            OsStr::new("scanner"),
+            None,
+            &TimeZone::UTC,
+        )
+        .expect("chosen");
+        assert_eq!(picked.piece.to_string(), "projects/scanner");
+        assert_eq!(picked.stamp.to_string(), NEW);
     }
 
     #[test]
@@ -1782,14 +1818,17 @@ mod choice_tests {
     #[test]
     fn a_version_is_named_by_its_stamp() {
         let world = scanner();
-        assert_eq!(chosen_stamp(world.choose("scanner", Some(OLD))), OLD);
+        assert_eq!(
+            chosen_stamp(world.choose("projects/scanner", Some(OLD))),
+            OLD
+        );
     }
 
     #[test]
     fn a_version_is_named_by_a_prefix_of_its_utc_stamp() {
         let world = scanner();
         assert_eq!(
-            chosen_stamp(world.choose("scanner", Some("2026-11-03T08"))),
+            chosen_stamp(world.choose("projects/scanner", Some("2026-11-03T08"))),
             OLD
         );
     }
@@ -1799,22 +1838,22 @@ mod choice_tests {
         let world = scanner();
         let berlin = TimeZone::get("Europe/Berlin").expect("the zone exists");
         // 09:02:11 UTC is 10:02:11 in Berlin in November.
-        let by_date = world.choose_in("scanner", Some("2026-11-04"), &berlin);
+        let by_date = world.choose_in("projects/scanner", Some("2026-11-04"), &berlin);
         assert_eq!(chosen_stamp(by_date), NEW);
-        let by_time = world.choose_in("scanner", Some("2026-11-04 10:02"), &berlin);
+        let by_time = world.choose_in("projects/scanner", Some("2026-11-04 10:02"), &berlin);
         assert_eq!(chosen_stamp(by_time), NEW);
     }
 
     #[test]
     fn several_matches_list_every_stamp() {
-        let text = message(scanner().choose("scanner", Some("2026-11")));
+        let text = message(scanner().choose("projects/scanner", Some("2026-11")));
         assert!(text.contains(OLD) && text.contains(NEW), "{text}");
     }
 
     #[test]
     fn no_match_lists_the_versions_there_are() {
         let error = scanner()
-            .choose("scanner", Some("1999"))
+            .choose("projects/scanner", Some("1999"))
             .expect_err("no match");
         assert!(
             matches!(
@@ -1834,7 +1873,9 @@ mod choice_tests {
         world
             .add("projects/scanner", NEW)
             .remove(VersionFile::Archive);
-        let error = world.choose("scanner", Some(NEW)).expect_err("no archive");
+        let error = world
+            .choose("projects/scanner", Some(NEW))
+            .expect_err("no archive");
         assert!(
             matches!(error, RestoreError::Incomplete { .. }),
             "{error:?}"
@@ -1888,7 +1929,7 @@ mod choice_tests {
         world
             .add("projects/scanner", NEW)
             .remove(VersionFile::Archive);
-        assert_eq!(chosen_stamp(world.choose("scanner", None)), OLD);
+        assert_eq!(chosen_stamp(world.choose("projects/scanner", None)), OLD);
     }
 
     #[test]
@@ -1898,7 +1939,7 @@ mod choice_tests {
         world
             .add("projects/scanner", NEW)
             .remove(VersionFile::Listing);
-        let error = world.choose("scanner", None).expect_err("damaged");
+        let error = world.choose("projects/scanner", None).expect_err("damaged");
         assert!(matches!(error, RestoreError::Damaged { .. }), "{error:?}");
     }
 
@@ -1906,7 +1947,7 @@ mod choice_tests {
         let mut world = World::new();
         let version = world.add("projects/scanner", NEW);
         damage(&version);
-        let error = world.choose("scanner", None).expect_err("damaged");
+        let error = world.choose("projects/scanner", None).expect_err("damaged");
         let RestoreError::Damaged { reasons, .. } = &error else {
             panic!("expected damage, got {error:?}");
         };
@@ -1951,7 +1992,7 @@ mod choice_tests {
         let mut world = World::new();
         let version = world.add("projects/scanner", NEW);
         let twin = version.add_twin(VersionFile::Archive, "other");
-        let error = world.choose("scanner", None).expect_err("doubled");
+        let error = world.choose("projects/scanner", None).expect_err("doubled");
         let RestoreError::Doubled { files, .. } = &error else {
             panic!("expected a doubled slot, got {error:?}");
         };
@@ -1974,7 +2015,9 @@ mod choice_tests {
         let mut world = World::new();
         let version = world.add("projects/scanner", NEW);
         version.edit_listing(|text| text.replacen("# antiq listing 1", "# antiq listing 2", 1));
-        let error = world.choose("scanner", None).expect_err("newer format");
+        let error = world
+            .choose("projects/scanner", None)
+            .expect_err("newer format");
         assert_eq!(error.kind(), ErrorKind::FormatTooNew);
         assert!(
             matches!(error, RestoreError::FormatTooNew { .. }),
@@ -2031,7 +2074,9 @@ mod choice_tests {
                 .to_string();
             text.replacen(&line, &line.replace("src/", ".antiq-pin/"), 1)
         });
-        let error = world.choose("scanner", None).expect_err("a marker name");
+        let error = world
+            .choose("projects/scanner", None)
+            .expect_err("a marker name");
         assert!(
             matches!(error, RestoreError::MarkerNotAFile { .. }),
             "{error:?}"

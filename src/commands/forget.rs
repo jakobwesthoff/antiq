@@ -9,7 +9,7 @@ use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::plan::LockHeld;
-use crate::reference::{self, CandidateSet, ReferenceError};
+use crate::reference::{self, CandidateSet, ReferenceError, SearchWord};
 use crate::relpath::{RelPath, escape};
 use crate::repair::Repair;
 use crate::report::{self, CommandReport, Warning};
@@ -96,7 +96,7 @@ pub struct ForgetRequest<'a> {
     pub collection: &'a Collection,
     /// The directory a piece given as a relative path starts at.
     pub cwd: &'a Path,
-    /// A path or a search word.
+    /// A path. A search word is only offered, never acted on.
     pub piece: &'a OsStr,
     pub which: Which<'a>,
     /// Confirms [`Which::All`], which [`require_force`] refuses without it.
@@ -346,7 +346,13 @@ fn choose(
     let collection = request.collection;
     let scan = settled(collection, store::scan(&collection.pieces_dir())?, repaired)?;
     let candidates = CandidateSet::store_and_sidecar_only(collection, &scan);
-    let folder = reference::resolve_piece(collection, request.cwd, request.piece, &candidates)?;
+    let folder = reference::resolve_piece(
+        collection,
+        request.cwd,
+        request.piece,
+        &candidates,
+        SearchWord::OnlyOffers,
+    )?;
     let found: &StorePiece = scan
         .pieces
         .iter()

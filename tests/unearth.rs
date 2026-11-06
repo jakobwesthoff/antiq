@@ -86,9 +86,22 @@ fn a_piece_by_path_comes_back_and_its_newest_version_goes() {
 }
 
 #[test]
-fn a_search_word_names_the_piece() {
-    let world = world(Mode::Text, scanner);
-    world.run(&["unearth", "scan-old"]).expect_code(0);
+fn a_search_word_that_fits_one_piece_is_offered_and_nothing_is_unearthed() {
+    let world = world(Mode::Json, scanner);
+    let before = world.collection().versions("tools/scan-old");
+    let run = world.run(&["unearth", "scan-old"]);
+    run.expect_code(1);
+    assert_eq!(run.error_kind().as_deref(), Some("inexact_reference"));
+    run.json_only(|json| {
+        assert_eq!(
+            json["error"]["candidates"],
+            serde_json::json!([{"path": "tools/scan-old"}])
+        );
+    });
+    assert!(!world.collection().path("tools/scan-old").exists());
+    assert_eq!(world.collection().versions("tools/scan-old"), before);
+
+    world.run(&["unearth", "tools/scan-old"]).expect_code(0);
     assert!(world.collection().path("tools/scan-old/run.sh").exists());
 }
 

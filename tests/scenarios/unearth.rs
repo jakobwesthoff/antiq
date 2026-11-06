@@ -360,7 +360,7 @@ fn unearth_by_name_gives_the_folder_back_as_it_was() {
         let kept = world.collection().versions("tools/scan-old");
 
         world.assert_unchanged(|| {
-            let dry = world.run(&["unearth", "-n", "scanner"]);
+            let dry = world.run(&["unearth", "-n", SCANNER]);
             dry.expect_code(0);
             dry.keys(&["format", "command", "dry_run", "actions", "warnings"]);
             assert_eq!(dry.stderr, "");
@@ -409,7 +409,7 @@ fn unearth_by_name_gives_the_folder_back_as_it_was() {
             });
         });
 
-        let unearth = world.run(&["unearth", "scanner"]);
+        let unearth = world.run(&["unearth", SCANNER]);
         unearth.expect_code(0);
         assert_eq!(unearth.stderr, "");
         unearth.keys(&[
@@ -456,7 +456,7 @@ fn unearth_by_name_gives_the_folder_back_as_it_was() {
 
         // The piece is not in the store any more.
         world.assert_unchanged(|| {
-            let again = world.run(&["unearth", "scanner"]);
+            let again = world.run(&["unearth", SCANNER]);
             again.expect_code(1);
             again.keys(&["format", "command", "error"]);
             again.json_only(|_| {
@@ -662,7 +662,7 @@ fn an_unearthed_folder_that_is_archived_again_becomes_a_new_version() {
     both_modes(scanner_world, |world| {
         let original = folder(world, SCANNER);
         world.run(&["archive", SCANNER]).expect_code(0);
-        world.run(&["unearth", "scanner"]).expect_code(0);
+        world.run(&["unearth", SCANNER]).expect_code(0);
         original.assert_like(&unearthed(world, SCANNER));
         assert_eq!(world.collection().versions(SCANNER), Vec::<String>::new());
 
@@ -757,7 +757,7 @@ fn an_unearthed_folder_that_is_archived_again_becomes_a_new_version() {
         shasum_check(checksum.parent().expect("a store folder"), &checksum);
 
         // Unearthing it again gives the changed folder back.
-        world.run(&["unearth", "scanner"]).expect_code(0);
+        world.run(&["unearth", SCANNER]).expect_code(0);
         edited.assert_like(&unearthed(world, SCANNER));
         for name in ["src/main.rs", "src/main-copy.rs"] {
             let text = fs::read_to_string(root.join(name)).expect("the file reads");
@@ -783,5 +783,22 @@ fn unearth_without_c_resolves_a_path_from_the_current_directory() {
         let from_below = world.run_in(&projects, &["unearth", "-n", "../tools/scan-old"]);
         from_below.expect_code(0);
         from_below.json_only(|json| assert_eq!(json["actions"][0]["piece"], "tools/scan-old"));
+    });
+}
+
+#[test]
+fn a_word_that_fits_one_piece_offers_a_path_that_names_it_from_a_subdirectory() {
+    both_modes(scanner_world, |world| {
+        let projects = world.collection().path("projects");
+        let offered = world.run_in(&projects, &["unearth", "-n", "scan-old"]);
+        offered.expect_code(1);
+        offered.json_only(|json| {
+            assert_eq!(json["error"]["kind"], "inexact_reference");
+            let fix = json["error"]["fix"].as_str().expect("a text");
+            let example = fix.split('`').nth(1).expect("the path is a code span");
+            let named = world.run_in(&projects, &["unearth", "-n", example]);
+            named.expect_code(0);
+            named.json_only(|json| assert_eq!(json["actions"][0]["piece"], "tools/scan-old"));
+        });
     });
 }

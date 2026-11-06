@@ -201,8 +201,20 @@ fn unearth_refuses_a_word_that_matches_several_pieces_and_takes_a_path() {
                     assert_eq!(lines.len(), distinct.len(), "{:?}", several.stderr);
                 }
 
-                // A word that fits one piece names it.
-                let one = world.run(&["unearth", "-n", "scanner"]);
+                // A word that fits one piece only offers it, in a dry run too.
+                let offered = world.run(&["unearth", "-n", "scanner"]);
+                offered.expect_code(1);
+                assert!(
+                    !offered.stdout.contains("Would unearth"),
+                    "{:?}",
+                    offered.stdout
+                );
+                offered.json_only(|_| {
+                    assert_eq!(offered.error_kind().as_deref(), Some("inexact_reference"));
+                });
+
+                // The path of the piece names it.
+                let one = world.run(&["unearth", "-n", "projects/scanner"]);
                 one.expect_code(0);
                 one.text_only(|out| {
                     assert!(

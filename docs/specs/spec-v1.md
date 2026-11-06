@@ -1065,9 +1065,8 @@ verified. The folder is an ordinary live folder again. Archiving it later
 creates a new version. `-n` names the version, the destination path and the
 checks it would make. (ADR 0061)
 
-- `<piece>` is a path, or a search word that matches exactly one piece
-  (see "Piece references"); anything else is an error that lists the
-  candidates. Without `--version` the newest version is taken. A folder of
+- `<piece>` is the path of a piece (see "Piece references"). A search
+  word never acts: it lists the pieces it matches in an error. Without `--version` the newest version is taken. A folder of
   the store that holds only versions without an archive is no piece to
   unearth: the error is `unknown_reference` and says that the piece holds
   only incomplete versions, which `forget` removes. A version named by
@@ -1221,7 +1220,8 @@ is extracted with a warning` for a damaged version.
 
 ### forget
 
-`forget <piece> (<version> | --all-versions --force)` deletes exactly one
+`forget <piece> (<version> | --all-versions --force)` takes the path of the
+piece and never acts on a search word (see "Piece references"). It deletes exactly one
 version: the `.tar.zst` first, then the listing and the checksum file. It
 also takes the stamp of an incomplete version and removes its sidecars,
 saying that the version was incomplete. The store folders that the deletion
@@ -2012,9 +2012,14 @@ that treats other spellings of a name as the same (see "Spelling"), a path
 in another spelling names the candidate whose folder it leads to. Any other
 input is a search word, matched with the same fuzzy pattern `list` uses
 (smart case, smart normalization) against the candidates' paths in their
-escaped form, and must match exactly one candidate.
+escaped form. A command that removes nothing (`archive`, `pin`, `unpin`,
+`fork` and `rebuild`) acts on a search word that matches exactly one
+candidate. `unearth` and `forget` remove a version and act only on the path
+of a candidate; a search word that matches exactly one candidate is the
+error kind `inexact_reference`, which lists that candidate, and nothing is
+done. (ADR 0065)
 No match is the error kind `unknown_reference`; several matches are
-`ambiguous_reference`, listing the candidates. Both exit 1. The
+`ambiguous_reference`, listing the candidates. All three exit 1. The
 candidates are the live pieces for `archive`, `pin` and `unpin`; the
 pieces of the store for `unearth`, `fork` and `rebuild`; the pieces of the
 store and the store folders that hold sidecars only for `forget`.
@@ -2022,8 +2027,7 @@ store and the store folders that hold sidecars only for `forget`.
 On a pipe the error line is followed by one line `    candidate: <path>` per
 candidate, in the order and the escaped form of `error.candidates`. On a
 terminal the report is one group on stderr: the error block, a bold caption
-and a table, the info "Nothing was <done>." and, for a word that matches no
-piece, a hint. `<done>` is `archived`, `pinned`, `unpinned`, `unearthed`,
+and a table, and the info "Nothing was <done>.". `<done>` is `archived`, `pinned`, `unpinned`, `unearthed`,
 `forked`, `deleted` or `rebuilt`, after the command. The error block takes
 its title and its "How to fix it" from the error (the message and the help
 of the diagnostic), and its "What antiq was doing" names
@@ -2049,10 +2053,16 @@ terminal by the same info "Nothing was <done>.".
   when that is more, are the closest pieces; a swapped pair of letters
   counts as one edit. Up to three of them, nearest first and by path among
   equals, are shown under the caption "The closest pieces" in the table
-  of the first case, followed by the hint "Did you mean <piece>? Run
-  <command>.", where the command is the one that ran with the nearest
-  piece in place of the word. Without a closest piece there is no table and
-  no hint.
+  of the first case. Without a closest piece there is no table.
+- `unearth` or `forget` is given a search word that matches exactly one
+  piece. The error is `inexact_reference`; its message says that the word
+  is not the path of a piece and that the command acts only on a path. Its
+  "How to fix it" tells to run the command again with the path of the
+  piece and gives the path as an example: relative to the collection root
+  when the command runs there, absolute otherwise, so that it is a path
+  from the directory the command runs in. The caption is "The piece that
+  matches `<word>`" and the table is that of the first case, with the
+  matched letters bold red.
 - Several versions match a `--version` or version argument. The caption is
   "The versions of <piece>, the N matches marked". The table is the table
   of `antiq list` with all versions of the piece. A `▸` stands in front of
@@ -2065,10 +2075,16 @@ terminal by the same info "Nothing was <done>.".
 When the listing cannot be read, the table is left out and the matching
 pieces are listed under the help of the block as "These pieces match:";
 the matching stamps of a version are in the message of the error anyway.
+For a word that matches no piece, the nearest closest piece is then given
+in the hint "Did you mean <piece>? Run <command>.", where the command is
+the one that ran with that piece in place of the word.
 The JSON error carries `code` and `fix` besides `kind` and `message`
-(`antiq::reference::ambiguous` and `antiq::reference::unknown`, or
-`antiq::version::ambiguous`), and `error.candidates` lists the candidate
-pieces. The closest pieces and the matching versions are not part of it.
+(`antiq::reference::ambiguous`, `antiq::reference::inexact` and
+`antiq::reference::unknown`, or `antiq::version::ambiguous`), and
+`error.candidates` lists the candidate pieces, relative to the collection
+root, so a script that runs `unearth` or `forget` with one of them from
+another directory passes `-C <root>`. The closest pieces and the matching
+versions are not part of it.
 
 ### Console output
 
@@ -2142,8 +2158,8 @@ message is the title, with the first letter in upper case, and its help
 is the section "How to fix it". A help of several paragraphs separates
 them by an empty line, and a paragraph whose lines start with two spaces
 is shown as written. These errors have an explanation: outside an antiq
-collection, a piece reference that matches several pieces, no piece, or
-only pieces with incomplete versions, a path outside the antiq collection,
+collection, a piece reference that matches several pieces, one piece for a
+command that acts only on a path, no piece, or only pieces with incomplete versions, a path outside the antiq collection,
 a version input that matches several versions or none, a held run lock,
 `push` without a target, `push` refused for a damaged or incomplete store,
 a target marker that names another host or path, a target that cannot be
@@ -2152,8 +2168,8 @@ target marker of a newer format, and `forget --all-versions` without
 `--force`. The `message` of the JSON
 error is the chain text of the whole error, and its `fix` is the help of
 the explanation. The steps the run was in are listed innermost first under "What
-antiq was doing". A reference that matches several pieces or versions, or
-no piece, adds a table and an info after the block (see "Piece references").
+antiq was doing". A reference that matches several pieces or versions, one
+piece for a command that acts only on a path, or no piece, adds a table and an info after the block (see "Piece references").
 The title of the error for an unreachable target, and the title of the
 warnings about a filesystem that cannot be told and a lock file that cannot
 be read, hold system text; they show it as written, backticks included.
@@ -2178,7 +2194,7 @@ a version input or a stamp, stands in a code span; a value that holds
 backticks gets a fence one backtick longer than the longest run inside it,
 and a space inside each edge of the fence when the value starts or ends
 with a backtick, or starts and ends with a space. The line is followed by a `  fix:` line where the error has a help, one `    candidate: <path>` line per
-candidate of an ambiguous reference (for an ambiguous version, one per
+candidate of an ambiguous or inexact reference (for an ambiguous version, one per
 matching stamp) and one
 `  while attempting to <action>` line per context, the innermost first. The
 reasons why one piece is refused are joined with `, ` by `archive` and with
@@ -2388,6 +2404,7 @@ and its parent is a directory when the plan is made. The run decides.
 | `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `--init` or `--force` is given with `--if-reachable`, or `forget --all-versions` is given without `--force` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
+| `inexact_reference` | 1 | `unearth` or `forget` is given a search word that matches exactly one candidate | `candidates`: list of one `{path}` |
 | `unknown_reference` | 1 | a piece reference matches no candidate, or `unearth`, `fork` or `rebuild` is given a piece that holds only incomplete versions | |
 | `outside_collection` | 1 | a path given as a piece, `--as` or `--name` lies outside the collection | |
 | `lock_held` | 1 | another run holds the lock | `pid`, `started` (RFC 3339, whole seconds); neither while the holder has not written them yet |

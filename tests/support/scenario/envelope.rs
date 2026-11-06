@@ -8,10 +8,11 @@
 use serde_json::Value;
 
 /// The error kinds of the spec's table.
-const KINDS: [&str; 10] = [
+const KINDS: [&str; 11] = [
     "usage",
     "not_a_collection",
     "ambiguous_reference",
+    "inexact_reference",
     "unknown_reference",
     "outside_collection",
     "lock_held",
@@ -127,7 +128,7 @@ fn check_error(error: &Value, code: i32) -> Result<(), String> {
     if kind == "lock_held" && error.get("pid").is_some() != error.get("started").is_some() {
         return Err("lock_held carries pid and started together or neither".to_string());
     }
-    if kind == "ambiguous_reference" {
+    if kind == "ambiguous_reference" || kind == "inexact_reference" {
         let listed = error["candidates"].as_array().is_some_and(|candidates| {
             candidates
                 .iter()

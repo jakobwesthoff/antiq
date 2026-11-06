@@ -190,9 +190,10 @@ antiq grep 'main\.rs'
 
 `grep` reads the listings, so nothing is unpacked. A piece is named by its
 path or by a search word, and a search word has to match exactly one piece.
-`scan` matches two, so `list` shows both. Commands that take one piece, such
-as `unearth`, fail when the word matches none, and when it matches several
-they also list the candidates.
+`scan` matches two, so `list` shows both. Commands that take one piece fail
+when the word matches none, and when it matches several they also list the
+candidates. `unearth` and `forget` remove a version, so they act only on a
+path: a word that fits one piece lists that piece and does nothing.
 
 ## Bringing a version back
 
@@ -386,7 +387,9 @@ nothing. No command asks a question.
 
 A piece is named by its path or by a search word. A search word must
 match exactly one piece. The command fails when it matches none, and
-when it matches several it also lists the candidates.
+when it matches several it also lists the candidates. `unearth` and
+`forget` act only on a path: a word that fits one piece lists that piece
+and does nothing.
 
 ### Output in a pipe
 

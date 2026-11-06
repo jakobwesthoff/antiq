@@ -907,3 +907,12 @@ fn the_notes_on_the_settings_come_with_a_real_run_and_a_dry_run() {
         }
     }
 }
+
+#[test]
+fn a_search_word_that_fits_one_piece_still_names_the_piece_to_rebuild() {
+    let world = world(Mode::Text, one_version);
+    remove(&files(&world, STAMP).listing);
+    world
+        .run(&["rebuild", "scanner", STAMP, "-n"])
+        .expect_code(0);
+}

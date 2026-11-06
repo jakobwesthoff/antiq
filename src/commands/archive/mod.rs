@@ -32,7 +32,7 @@ use crate::plan::HeldDryRun;
 use crate::plan::Step;
 use crate::progress::{Event, Observer, Outcome as Progress, Planned, Silent, Tracker};
 use crate::reference::ReferenceError;
-use crate::reference::{CandidateSet, resolve_piece, stored_spelling};
+use crate::reference::{CandidateSet, SearchWord, resolve_piece, stored_spelling};
 use crate::relpath::{Name, RelPath};
 use crate::repair::RepairError;
 use crate::repair::{Destination, Repair};
@@ -265,7 +265,8 @@ impl Setup {
             Target::Due => (selection.pieces().to_vec(), false),
             Target::Piece { reference, cwd } => {
                 let candidates = CandidateSet::live(collection, &selection);
-                let piece = resolve_piece(collection, cwd, reference, &candidates)?;
+                let piece =
+                    resolve_piece(collection, cwd, reference, &candidates, SearchWord::Acts)?;
                 (vec![piece], true)
             }
         };

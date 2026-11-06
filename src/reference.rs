@@ -51,6 +51,26 @@ pub enum ReferenceError {
         candidates: Vec<Candidate>,
     },
     #[diagnostic(
+        code(antiq::reference::inexact),
+        help(
+            "Run the command again with the path of the piece you mean, for example {}.",
+            CodeSpan(.example)
+        )
+    )]
+    #[error(
+        "{} is not the path of a piece, and this command acts only on a path",
+        CodeSpan(.reference)
+    )]
+    Inexact {
+        reference: String,
+        candidates: Vec<Candidate>,
+        /// The first candidate spelled as a path that names it from the
+        /// directory the command runs in: relative to the collection root
+        /// at the root, absolute elsewhere. It is the raw text of the path
+        /// when that is UTF-8, so a `%` in a name is not read as an escape.
+        example: String,
+    },
+    #[diagnostic(
         code(antiq::reference::unknown),
         help("Check the spelling, or name the piece by its path.")
     )]
@@ -106,6 +126,7 @@ impl HasKind for ReferenceError {
     fn kind(&self) -> ErrorKind {
         match self {
             ReferenceError::Ambiguous { .. } => ErrorKind::AmbiguousReference,
+            ReferenceError::Inexact { .. } => ErrorKind::InexactReference,
             ReferenceError::Unknown { .. } | ReferenceError::OnlyIncomplete { .. } => {
                 ErrorKind::UnknownReference
             }
@@ -268,16 +289,28 @@ impl CandidateSet {
     }
 }
 
+/// What a command does with a search word that fits exactly one candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchWord {
+    /// The command acts on that candidate.
+    Acts,
+    /// The command removes something, so it acts only on the exact path of
+    /// a candidate and offers the one match in an error instead.
+    OnlyOffers,
+}
+
 /// The piece of `set` that the reference `given` means.
 ///
 /// An input that names a candidate as a path is that piece. Any other
 /// input is a search word, matched against the escaped paths of the
-/// candidates, and must match exactly one.
+/// candidates, and must match exactly one. What happens with that one
+/// match is up to `word`.
 pub fn resolve_piece(
     collection: &Collection,
     cwd: &Path,
     given: &OsStr,
     set: &CandidateSet,
+    word: SearchWord,
 ) -> Result<RelPath, ReferenceError> {
     let reference = escape(given.as_bytes());
     let path = resolve_path(collection, cwd, Path::new(given))?;
@@ -296,6 +329,16 @@ pub fn resolve_piece(
             closest: closest_pieces(&reference, &set.paths),
             reference,
         }),
+        1 if word == SearchWord::OnlyOffers => {
+            let offered = matches.remove(0);
+            Err(ReferenceError::Inexact {
+                example: exact_spelling(collection, cwd, offered),
+                candidates: vec![Candidate {
+                    path: offered.to_string(),
+                }],
+                reference,
+            })
+        }
         1 => Ok(matches.remove(0).clone()),
         _ => Err(ReferenceError::Ambiguous {
             reference,
@@ -306,6 +349,38 @@ pub fn resolve_piece(
                 })
                 .collect(),
         }),
+    }
+}
+
+/// `candidate` spelled so that it is an exact path from `cwd`, the
+/// directory the command runs in.
+///
+/// A path is read against that directory, so the root-relative path the
+/// output shows names the candidate only at the collection root. Anywhere
+/// else the absolute path does. The text is raw where the bytes are UTF-8:
+/// the escaped form of a name that holds a `%` is the name of another path.
+fn exact_spelling(collection: &Collection, cwd: &Path, candidate: &RelPath) -> String {
+    let at_root = matches!(
+        resolve_path(collection, cwd, Path::new(".")),
+        Ok(here) if here == RelPath::root()
+    );
+    let spelled = if at_root {
+        PathBuf::from(OsStr::from_bytes(candidate.as_bytes()))
+    } else {
+        collection
+            .root()
+            .join(OsStr::from_bytes(candidate.as_bytes()))
+    };
+    match spelled.into_os_string().into_string() {
+        Ok(text) => text,
+        Err(_) if at_root => candidate.to_string(),
+        Err(_) => escape(
+            collection
+                .root()
+                .join(OsStr::from_bytes(candidate.as_bytes()))
+                .as_os_str()
+                .as_bytes(),
+        ),
     }
 }
 
@@ -350,22 +425,28 @@ pub fn resolve_stored_piece(
     cwd: &Path,
     given: &OsStr,
     scan: &StoreScan,
+    word: SearchWord,
 ) -> Result<RelPath, ReferenceError> {
     match resolve_piece(
         collection,
         cwd,
         given,
         &CandidateSet::store(collection, scan),
+        word,
     ) {
         Err(ReferenceError::Unknown { reference, closest }) => {
+            // Whatever this finds only words the error, it never acts, so a
+            // search word may find its one folder here.
             let wider = CandidateSet::store_and_sidecar_only(collection, scan);
-            Err(match resolve_piece(collection, cwd, given, &wider) {
-                Ok(piece) => ReferenceError::OnlyIncomplete {
-                    reference,
-                    piece: piece.to_string(),
+            Err(
+                match resolve_piece(collection, cwd, given, &wider, SearchWord::Acts) {
+                    Ok(piece) => ReferenceError::OnlyIncomplete {
+                        reference,
+                        piece: piece.to_string(),
+                    },
+                    Err(_) => ReferenceError::Unknown { reference, closest },
                 },
-                Err(_) => ReferenceError::Unknown { reference, closest },
-            })
+            )
         }
         other => other,
     }
@@ -661,7 +742,13 @@ mod tests {
         set: &CandidateSet,
         given: impl AsRef<OsStr>,
     ) -> Result<RelPath, ReferenceError> {
-        resolve_piece(&fx.collection, &fx.root(), given.as_ref(), set)
+        resolve_piece(
+            &fx.collection,
+            &fx.root(),
+            given.as_ref(),
+            set,
+            SearchWord::Acts,
+        )
     }
 
     /// Whether the volume of the temp directory finds `LOWER` for `lower`.
@@ -754,7 +841,13 @@ mod tests {
         let fx = Fixture::new();
         let set = set_of(&fx, &["projects/alpha", "projects/beta"]);
         let cwd = fx.root().join("projects");
-        let found = resolve_piece(&fx.collection, &cwd, OsStr::new("beta"), &set);
+        let found = resolve_piece(
+            &fx.collection,
+            &cwd,
+            OsStr::new("beta"),
+            &set,
+            SearchWord::Acts,
+        );
         assert_eq!(found.expect("resolves"), path("projects/beta"));
     }
 
@@ -945,6 +1038,125 @@ mod tests {
         assert_eq!(kind(&error), ErrorKind::UnknownReference);
     }
 
+    // =====================================================
+    // Search words for commands that remove something
+    // =====================================================
+
+    fn resolve_offering(
+        fx: &Fixture,
+        cwd: &Path,
+        set: &CandidateSet,
+        given: impl AsRef<OsStr>,
+    ) -> Result<RelPath, ReferenceError> {
+        resolve_piece(
+            &fx.collection,
+            cwd,
+            given.as_ref(),
+            set,
+            SearchWord::OnlyOffers,
+        )
+    }
+
+    #[test]
+    fn a_word_matching_one_piece_is_only_offered_to_a_command_that_removes() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/alpha", "other/x"]);
+        let error = resolve_offering(&fx, &fx.root(), &set, "alph").expect_err("only offered");
+        assert_eq!(kind(&error), ErrorKind::InexactReference);
+        let error: crate::error::Error = error.into();
+        assert_eq!(
+            serde_json::Value::Object(error.details()),
+            serde_json::json!({"candidates": [{"path": "projects/alpha"}]})
+        );
+        assert_eq!(
+            resolve_in(&fx, &set, "alph").expect("acts"),
+            path("projects/alpha")
+        );
+    }
+
+    #[test]
+    fn the_exact_path_acts_for_a_command_that_removes() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/alpha", "projects/alphabet"]);
+        assert_eq!(
+            resolve_offering(&fx, &fx.root(), &set, "projects/alpha").expect("acts"),
+            path("projects/alpha")
+        );
+        let from_below = fx.root().join("projects");
+        assert_eq!(
+            resolve_offering(&fx, &from_below, &set, "alpha").expect("acts"),
+            path("projects/alpha")
+        );
+    }
+
+    fn example_of(fx: &Fixture, cwd: &Path, set: &CandidateSet, word: &str) -> String {
+        match resolve_offering(fx, cwd, set, word).expect_err("only offered") {
+            ReferenceError::Inexact { example, .. } => example,
+            other => panic!("expected an inexact reference, got {other}"),
+        }
+    }
+
+    #[test]
+    fn the_example_is_the_path_below_the_root_and_absolute_elsewhere() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["tools/scan-old"]);
+        assert_eq!(
+            example_of(&fx, &fx.root(), &set, "scanold"),
+            "tools/scan-old"
+        );
+        let from_below = fx.root().join("tools");
+        let example = example_of(&fx, &from_below, &set, "scanold");
+        assert_eq!(
+            example,
+            fx.root().join("tools/scan-old").to_string_lossy(),
+            "absolute from a subdirectory"
+        );
+        let again = resolve_offering(&fx, &from_below, &set, &example).expect("acts");
+        assert_eq!(again, path("tools/scan-old"));
+    }
+
+    #[test]
+    fn the_example_of_a_name_with_a_percent_sign_is_its_raw_text() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["notes/100%25"]);
+        let example = example_of(&fx, &fx.root(), &set, "notes");
+        assert_eq!(example, "notes/100%");
+        assert_eq!(
+            resolve_offering(&fx, &fx.root(), &set, &example).expect("acts"),
+            path("notes/100%25")
+        );
+    }
+
+    #[test]
+    fn several_matches_and_no_match_are_reported_as_before_for_a_command_that_removes() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/alpha", "projects/alphabet"]);
+        let error = resolve_offering(&fx, &fx.root(), &set, "alph").expect_err("several");
+        assert_eq!(kind(&error), ErrorKind::AmbiguousReference);
+        let error = resolve_offering(&fx, &fx.root(), &set, "zzz").expect_err("none");
+        assert_eq!(kind(&error), ErrorKind::UnknownReference);
+    }
+
+    #[test]
+    fn a_word_fitting_one_sidecar_only_folder_is_still_reported_as_incomplete() {
+        let mut fx = Fixture::new();
+        store_version(&mut fx, "projects/alpha", &VersionFile::ALL);
+        store_version(&mut fx, "projects/gone", &[VersionFile::Listing]);
+        let found = scan(&fx.collection.pieces_dir()).expect("scans");
+        let error = resolve_stored_piece(
+            &fx.collection,
+            &fx.root(),
+            OsStr::new("gone"),
+            &found,
+            SearchWord::OnlyOffers,
+        )
+        .expect_err("incomplete");
+        assert!(
+            matches!(error, ReferenceError::OnlyIncomplete { .. }),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn the_collection_root_is_a_word_not_a_candidate() {
         let fx = Fixture::new();
@@ -961,7 +1173,13 @@ mod tests {
         let fx = Fixture::new();
         let set = set_of(&fx, &["v1.0/a", "v1.0/b"]);
         let cwd = fx.root().join("v1.0/a");
-        let found = resolve_piece(&fx.collection, &cwd, OsStr::new("."), &set);
+        let found = resolve_piece(
+            &fx.collection,
+            &cwd,
+            OsStr::new("."),
+            &set,
+            SearchWord::Acts,
+        );
         assert_eq!(found.expect("resolves"), path("v1.0/a"));
     }
 
@@ -1026,7 +1244,8 @@ mod tests {
         let fx = Fixture::new();
         let gone = Collection::for_tests();
         let set = set_of(&fx, &["x"]);
-        let error = resolve_piece(&gone, &fx.root(), OsStr::new("x"), &set).expect_err("no root");
+        let error = resolve_piece(&gone, &fx.root(), OsStr::new("x"), &set, SearchWord::Acts)
+            .expect_err("no root");
         assert!(matches!(error, ReferenceError::Root { .. }), "{error:?}");
     }
 
@@ -1034,8 +1253,14 @@ mod tests {
     fn a_current_directory_that_is_not_absolute_is_a_path_error_through_resolve_piece() {
         let fx = Fixture::new();
         let set = set_of(&fx, &["x"]);
-        let error = resolve_piece(&fx.collection, Path::new("rel"), OsStr::new("x"), &set)
-            .expect_err("not absolute");
+        let error = resolve_piece(
+            &fx.collection,
+            Path::new("rel"),
+            OsStr::new("x"),
+            &set,
+            SearchWord::Acts,
+        )
+        .expect_err("not absolute");
         assert!(matches!(error, ReferenceError::Path(_)), "{error:?}");
     }
 

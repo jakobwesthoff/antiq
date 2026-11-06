@@ -32,6 +32,12 @@ enum Failure<'a> {
         reference: &'a str,
         candidates: &'a [Candidate],
     },
+    /// A search word that fits one piece, for a command that acts only on a
+    /// path.
+    Inexact {
+        reference: &'a str,
+        candidates: &'a [Candidate],
+    },
     Unknown {
         closest: &'a [Candidate],
     },
@@ -99,6 +105,17 @@ pub(super) fn group(cli: &Cli, description: &Description, env: &Env) -> Option<V
             reference,
             candidates,
         },
+        (
+            Some(ReferenceError::Inexact {
+                reference,
+                candidates,
+                ..
+            }),
+            _,
+        ) => Failure::Inexact {
+            reference,
+            candidates,
+        },
         (Some(ReferenceError::Unknown { closest, .. }), _) => Failure::Unknown { closest },
         (
             _,
@@ -136,8 +153,8 @@ fn all_rows(start: &Path) -> Option<Vec<Row>> {
 }
 
 /// The parts of the report: the error as `explained` words it, the table
-/// when there are `rows` to build it from, the info, and the hint that
-/// suggests a command.
+/// when there are `rows` to build it from, the info, and, for closest
+/// pieces without a table, the hint that suggests a command.
 fn build(
     failure: &Failure,
     explained: &dyn Diagnostic,
@@ -184,16 +201,35 @@ fn build(
                 })
             };
             block = unknown_piece(explained, action);
-            hint = closest.first().map(|nearest| {
-                Block::hint(
-                    Rich::new()
-                        .text("Did you mean ")
-                        .path(&nearest.path)
-                        .text("? Run ")
-                        .cmd(&command(Some(&nearest.path), None))
-                        .text("."),
-                )
+            // The table names the closest pieces; the hint stands in for it
+            // when the listing could not be read.
+            if table_lines.is_none() {
+                hint = closest.first().map(|nearest| {
+                    Block::hint(
+                        Rich::new()
+                            .text("Did you mean ")
+                            .path(&nearest.path)
+                            .text("? Run ")
+                            .cmd(&command(Some(&nearest.path), None))
+                            .text("."),
+                    )
+                });
+            }
+        }
+        Failure::Inexact {
+            reference,
+            candidates,
+        } => {
+            let listing = piece_table(candidates, reference, action, rows, style, zone);
+            table_lines = listing.map(|lines| {
+                let mut shown = vec![bold(
+                    &format!("The piece that matches `{reference}`"),
+                    style,
+                )];
+                shown.extend(lines);
+                shown
             });
+            block = ambiguous_piece(explained, candidates, action, table_lines.is_some());
         }
         Failure::Version {
             piece,

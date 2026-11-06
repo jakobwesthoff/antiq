@@ -563,3 +563,12 @@ fn a_terminal_names_the_version_by_its_local_time() {
         run.stdout
     );
 }
+
+#[test]
+fn a_search_word_that_fits_one_piece_still_names_the_piece_to_fork() {
+    let world = world(Mode::Text, scanner);
+    world
+        .run(&["fork", "scanner", "--name", "tools/copy"])
+        .expect_code(0);
+    assert!(world.collection().path("tools/copy/README").exists());
+}

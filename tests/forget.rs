@@ -233,20 +233,20 @@ fn the_version_is_named_by_local_date_stamp_prefix_or_exact_stamp() {
         // UTC date is 2026-11-04.
         let world = world(mode, build);
         world
-            .run(&["forget", "scanner", "2026-11-05"])
+            .run(&["forget", "projects/scanner", "2026-11-05"])
             .expect_code(0);
         assert!(!exists(&world, "projects/scanner", SCANNER_LATE));
         assert_eq!(world.collection().versions("projects/scanner").len(), 3);
 
         // A stamp prefix with a T that only one version has.
         world
-            .run(&["forget", "scanner", "2026-09-03T12"])
+            .run(&["forget", "projects/scanner", "2026-09-03T12"])
             .expect_code(0);
         assert!(!exists(&world, "projects/scanner", SCANNER_OLD));
 
         // The exact stamp wins over the stamp it is a prefix of.
         world
-            .run(&["forget", "scanner", SCANNER_NEW])
+            .run(&["forget", "projects/scanner", SCANNER_NEW])
             .expect_code(0);
         assert!(!exists(&world, "projects/scanner", SCANNER_NEW));
         assert!(exists(&world, "projects/scanner", SCANNER_NEW_2));
@@ -263,7 +263,7 @@ fn several_matches_are_an_error_naming_each_stamp() {
     for mode in [Mode::Text, Mode::Json] {
         let world = world(mode, build);
         let before = state(&world);
-        let run = world.run(&["forget", "scanner", "2026-11-04T"]);
+        let run = world.run(&["forget", "projects/scanner", "2026-11-04T"]);
         run.expect_code(1);
         let newest_first = format!("{SCANNER_LATE}, {SCANNER_NEW}");
         run.text_only(|_| {
@@ -1013,4 +1013,32 @@ fn all_versions_without_force_is_refused_also_as_a_dry_run_and_changes_nothing()
             assert!(exists(world, piece, stamp), "{piece} {stamp}");
         }
     });
+}
+
+#[test]
+fn a_search_word_that_fits_one_piece_is_offered_and_nothing_is_deleted() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, three_versions);
+        let before = state(&world);
+        for args in [
+            &["forget", "scanner", SCANNER_NEW][..],
+            &["forget", "-n", "scanner", SCANNER_NEW],
+            &["forget", "scanner", "--all-versions", "--force"],
+        ] {
+            let run = world.run(args);
+            run.expect_code(1);
+            run.json_only(|json| {
+                assert_eq!(json["error"]["kind"], "inexact_reference");
+                assert_eq!(
+                    json["error"]["candidates"],
+                    serde_json::json!([{"path": "projects/scanner"}])
+                );
+            });
+            assert_eq!(state(&world), before, "{args:?}");
+        }
+        world
+            .run(&["forget", "projects/scanner", SCANNER_NEW])
+            .expect_code(0);
+        assert!(!exists(&world, "projects/scanner", SCANNER_NEW));
+    }
 }

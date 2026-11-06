@@ -55,6 +55,8 @@ pub enum ErrorKind {
     Usage,
     NotACollection,
     AmbiguousReference,
+    /// A search word fits one piece, and the command acts only on a path.
+    InexactReference,
     UnknownReference,
     /// A path given as a piece, `--as` or `--name` lies outside the collection.
     OutsideCollection,
@@ -69,10 +71,11 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 10] = [
+    pub const ALL: [ErrorKind; 11] = [
         ErrorKind::Usage,
         ErrorKind::NotACollection,
         ErrorKind::AmbiguousReference,
+        ErrorKind::InexactReference,
         ErrorKind::UnknownReference,
         ErrorKind::OutsideCollection,
         ErrorKind::LockHeld,
@@ -88,6 +91,7 @@ impl ErrorKind {
             ErrorKind::Usage => "usage",
             ErrorKind::NotACollection => "not_a_collection",
             ErrorKind::AmbiguousReference => "ambiguous_reference",
+            ErrorKind::InexactReference => "inexact_reference",
             ErrorKind::UnknownReference => "unknown_reference",
             ErrorKind::OutsideCollection => "outside_collection",
             ErrorKind::LockHeld => "lock_held",
@@ -404,8 +408,8 @@ pub fn join_distinct(texts: impl IntoIterator<Item = String>) -> String {
     joined
 }
 
-/// The candidates of the ambiguous reference that `error` or one of its
-/// sources is.
+/// The candidates of the ambiguous or inexact reference that `error` or one
+/// of its sources is.
 ///
 /// The same rule as for [`find_held_lock`] holds: a command error that wraps
 /// a [`ReferenceError`] names it as its source and is not
@@ -413,7 +417,11 @@ pub fn join_distinct(texts: impl IntoIterator<Item = String>) -> String {
 fn find_candidates<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a [Candidate]> {
     let mut link = Some(error);
     while let Some(current) = link {
-        if let Some(ReferenceError::Ambiguous { candidates, .. }) = current.downcast_ref() {
+        if let Some(
+            ReferenceError::Ambiguous { candidates, .. }
+            | ReferenceError::Inexact { candidates, .. },
+        ) = current.downcast_ref()
+        {
             return Some(candidates);
         }
         link = current.source();
@@ -481,6 +489,7 @@ mod tests {
             (ErrorKind::Usage, "usage", 2),
             (ErrorKind::NotACollection, "not_a_collection", 1),
             (ErrorKind::AmbiguousReference, "ambiguous_reference", 1),
+            (ErrorKind::InexactReference, "inexact_reference", 1),
             (ErrorKind::UnknownReference, "unknown_reference", 1),
             (ErrorKind::OutsideCollection, "outside_collection", 1),
             (ErrorKind::LockHeld, "lock_held", 1),
@@ -603,6 +612,15 @@ mod tests {
                 }
                 .into(),
                 ErrorKind::AmbiguousReference,
+            ),
+            (
+                ReferenceError::Inexact {
+                    reference: "01ABCD".into(),
+                    candidates: vec![],
+                    example: "projects/a".into(),
+                }
+                .into(),
+                ErrorKind::InexactReference,
             ),
             (
                 ReferenceError::Unknown {

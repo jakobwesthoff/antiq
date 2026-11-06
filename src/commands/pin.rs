@@ -11,7 +11,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::markers::{RealSite, Site};
 use crate::pin::{self, PinError};
 use crate::plan::LockHeld;
-use crate::reference::{self, CandidateSet, ReferenceError};
+use crate::reference::{self, CandidateSet, ReferenceError, SearchWord};
 use crate::relpath::RelPath;
 use crate::repair::{Destination, Repair};
 use crate::report::{self, CommandReport, Warning};
@@ -301,7 +301,13 @@ fn locate(request: &PinRequest<'_>, coming: &[RelPath]) -> Result<Located, PinCo
         .cloned()
         .collect();
     let candidates = CandidateSet::live_with(collection, &selection, &selected);
-    let piece = reference::resolve_piece(collection, request.cwd, request.piece, &candidates)?;
+    let piece = reference::resolve_piece(
+        collection,
+        request.cwd,
+        request.piece,
+        &candidates,
+        SearchWord::Acts,
+    )?;
     let live = selection.pieces().contains(&piece);
     Ok(Located { root, piece, live })
 }
