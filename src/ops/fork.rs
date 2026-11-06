@@ -130,6 +130,9 @@ pub enum Refusal {
     NotUnearthed,
     /// The folder at the path is a new piece, next to an archived object.
     NewFolder,
+    /// The folder at the path belongs to another object, such as the fork
+    /// this object made.
+    ClaimedBy(ObjectId),
     /// There is no folder at the path.
     NoFolder,
     /// A live piece of another collection.
@@ -148,6 +151,7 @@ impl fmt::Display for Refusal {
             Refusal::NewFolder => f.write_str(
                 "the folder is a new piece next to an archived object; `archive` or `sync` gives it an ID",
             ),
+            Refusal::ClaimedBy(id) => write!(f, "the folder belongs to {id} now"),
             Refusal::NoFolder => f.write_str("there is no folder; `unearth` brings it back"),
             Refusal::AnotherCollectionsPiece => {
                 f.write_str("it is another collection's live piece; `unearth` makes the fork")
@@ -252,10 +256,15 @@ pub fn plan(collection: &Collection, request: &ForkRequest) -> Result<ForkPlan, 
         // Whatever is at the path of an object that is not unearthed does
         // not belong to it.
         PieceState::Archived | PieceState::RemoteOnly | PieceState::Gone | PieceState::New => {
-            return Err(refused(if is_folder(&shown) {
-                Refusal::NewFolder
-            } else {
-                Refusal::NoFolder
+            if !is_folder(&shown) {
+                return Err(refused(Refusal::NoFolder));
+            }
+            // After a fork the old ID is `gone` and the folder belongs to
+            // the new ID, so advice to give the folder an ID would be wrong.
+            let claimant = Index::compute(collection)?.at_path(&shown).claimant;
+            return Err(refused(match claimant {
+                Some(claimant) if claimant != id => Refusal::ClaimedBy(claimant),
+                _ => Refusal::NewFolder,
             }));
         }
     }
@@ -1305,13 +1314,40 @@ mod tests {
     }
 
     #[test]
-    fn a_new_folder_next_to_an_archived_object_is_a_new_piece() {
+    fn the_folder_of_a_finished_fork_belongs_to_the_new_id() {
         let fx = unearthed();
-        forked(&fx, None);
+        let report = forked(&fx, None);
+
+        let error = refusal(&fx, None);
+
+        assert_eq!(why(error), Refusal::ClaimedBy(report.id));
+    }
+
+    #[test]
+    fn a_new_folder_next_to_an_archived_object_is_a_new_piece() {
+        let mut fx = Fixture::new();
+        fx.archived(ID, PIECE, FILES);
+        fs::create_dir_all(fx.at(PIECE)).expect("the folder is created");
 
         let error = refusal(&fx, None);
 
         assert_eq!(why(error), Refusal::NewFolder);
+    }
+
+    #[test]
+    fn the_refusal_of_a_claimed_folder_names_the_claimant() {
+        let fx = unearthed();
+        let report = forked(&fx, None);
+
+        let error = refusal(&fx, None);
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot fork `{PIECE}`: the folder belongs to {} now",
+                report.id
+            )
+        );
     }
 
     #[test]
@@ -1361,6 +1397,7 @@ mod tests {
             Refusal::OtherCollection,
             Refusal::NotUnearthed,
             Refusal::NewFolder,
+            Refusal::ClaimedBy(id(OTHER_ID)),
             Refusal::NoFolder,
             Refusal::AnotherCollectionsPiece,
             Refusal::Entry(EntryState::Unearthing),
@@ -1376,6 +1413,7 @@ mod tests {
                 "the object belongs to another collection",
                 "it is not unearthed: nothing was archived from it, so there is nothing to fork from",
                 "the folder is a new piece next to an archived object; `archive` or `sync` gives it an ID",
+                format!("the folder belongs to {} now", id(OTHER_ID)).as_str(),
                 "there is no folder; `unearth` brings it back",
                 "it is another collection's live piece; `unearth` makes the fork",
                 "its tracking entry says `unearthing`, not `live`",

@@ -1361,8 +1361,10 @@ tracking entry says `live`, the folder is there, the metadata has an
 archive payload and its owning collection is this one. Every other piece
 is refused with the next step. A live piece without an archive has
 nothing to fork from. An archived, remote-only or gone piece has no
-folder, and `unearth` brings it back; where a folder is at its path, that
-folder is a new piece, and `archive` or `sync` gives it an ID. Another
+folder, and `unearth` brings it back. Where a folder is at its path, it
+is a new piece and `archive` or `sync` gives it an ID, unless another ID's
+tracking entry claims the path, as after a fork: then the refusal names
+that ID. Another
 collection's live piece is forked by `unearth`. A version of the metadata
 that cannot be written on top of, as under "Metadata changes", refuses
 before anything is renamed.
