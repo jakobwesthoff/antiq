@@ -339,9 +339,13 @@ flushed. The pin is checked before the idle and empty tests. (ADR 0024)
   `-` and repeated `-` collapsed. It is for people only: nothing parses
   it, it need not be unique, and it is cut from the front at a `-`
   boundary (inside a single over-long component at a character boundary)
-  so the longest file name stays within 200 bytes. A file name is parsed
-  only for its stamp and suffix: it is split at the last `--`, and the
-  suffix is `.tar.zst`, `.sha256.zst` or `.tar.zst.sha256`. (ADR 0060)
+  so the longest file name stays within 200 bytes. The cut counts the
+  longest stamp, one with the counter `-9999`, and the longest suffix,
+  `.tar.zst.sha256`, so `<name>` has at most 161 bytes and is the same for
+  every version of a piece. A file name is parsed only for its stamp and
+  suffix: it is split at the last `--`, whatever precedes that is not
+  read, and the suffix is `.tar.zst`, `.sha256.zst` or
+  `.tar.zst.sha256`. (ADR 0060)
 - A file in a store folder whose name does not parse is ignored by every
   command and by the repairs, keeps its folder from counting as empty,
   and `status` lists it as a note.
