@@ -525,3 +525,254 @@ fn output_must_end_in_a_newline_and_be_an_object() {
     );
     rejected(&["--json", "pin"], "[1]\n", 0, "object");
 }
+
+// =========================================================
+// End states
+// =========================================================
+
+use crate::support::scenario::state::{Entry, State};
+use std::path::Path;
+
+fn text_of(state: &State, path: &str) -> String {
+    match state.entry(path) {
+        Some(Entry::File { content, .. }) => String::from_utf8(content.clone()).expect("UTF-8"),
+        other => panic!("{path} is not a file in the state: {other:?}"),
+    }
+}
+
+fn normalised_state(collection: &Collection) -> State {
+    State::normalised(
+        &collection.root(),
+        &[(collection.root().as_path(), "<root>")],
+    )
+}
+
+#[test]
+fn a_raw_state_sees_modes_times_and_dangling_links() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock)
+        .piece("a", |piece| {
+            piece.file("f", "x").symlink("dangling", "missing");
+        })
+        .finish();
+    let before = State::raw(&collection.root());
+    assert!(before.paths().contains(&"a/dangling"));
+    assert_eq!(
+        before.entry("a/dangling"),
+        Some(&Entry::Link("missing".to_string()))
+    );
+    assert!(before.diff(&State::raw(&collection.root())).is_none());
+    filetime::set_file_mtime(
+        collection.path("a/f"),
+        filetime::FileTime::from_unix_time(clock.days_ago(1), 0),
+    )
+    .expect("the time can be set");
+    let diff = before
+        .diff(&State::raw(&collection.root()))
+        .expect("the time changed");
+    assert!(diff.contains("a/f"), "{diff}");
+}
+
+#[test]
+fn a_diff_names_added_removed_and_changed_paths() {
+    let clock = Clock::now();
+    let one = Collection::build(&clock)
+        .piece("a", |piece| {
+            piece
+                .file("same", "x")
+                .file("changed", "1")
+                .file("gone", "g");
+        })
+        .finish();
+    let two = Collection::build(&clock)
+        .piece("a", |piece| {
+            piece
+                .file("same", "x")
+                .file("changed", "2")
+                .file("new", "n");
+        })
+        .finish();
+    let diff = normalised_state(&one)
+        .diff(&normalised_state(&two))
+        .expect("the states differ");
+    assert!(diff.contains("only in the first: a/gone"), "{diff}");
+    assert!(diff.contains("only in the second: a/new"), "{diff}");
+    assert!(diff.contains("changed: a/changed"), "{diff}");
+    assert!(!diff.contains("a/same"), "{diff}");
+}
+
+#[test]
+fn the_world_root_is_replaced_in_text_and_link_targets() {
+    let clock = Clock::now();
+    let build = || {
+        let collection = Collection::build(&clock).finish();
+        let root = collection.root();
+        fs::write(collection.path("note"), format!("at {}\n", root.display())).expect("writes");
+        std::os::unix::fs::symlink(&root, collection.path("back")).expect("links");
+        collection
+    };
+    let (first, second) = (build(), build());
+    let state = normalised_state(&first);
+    assert_eq!(text_of(&state, "note"), "at <root>\n");
+    assert_eq!(
+        state.entry("back"),
+        Some(&Entry::Link("<root>".to_string()))
+    );
+    assert!(state.diff(&normalised_state(&second)).is_none());
+}
+
+fn write_store_file(collection: &Collection, name: &str, content: &str) {
+    let dir = collection.path(".antiq/pieces/a");
+    fs::create_dir_all(&dir).expect("the store folder is made");
+    fs::write(dir.join(name), content).expect("the file is written");
+}
+
+#[test]
+fn stamps_are_replaced_by_their_order_and_stay_distinct() {
+    let clock = Clock::now();
+    let build = |first: &str, second: &str| {
+        let collection = Collection::build(&clock).finish();
+        write_store_file(
+            &collection,
+            &format!("a--{first}.tar.zst.sha256"),
+            &format!("{first}\n"),
+        );
+        write_store_file(
+            &collection,
+            &format!("a--{second}.tar.zst.sha256"),
+            &format!("{second}\n"),
+        );
+        collection
+    };
+    let one = normalised_state(&build("2026-09-03T101500", "2026-09-03T101500-2"));
+    let two = normalised_state(&build("2026-11-04T090211", "2026-11-04T090211-2"));
+    assert_eq!(
+        one.paths()
+            .iter()
+            .filter(|path| path.contains("a--<v"))
+            .count(),
+        2
+    );
+    assert!(one.diff(&two).is_none(), "{:?}", one.diff(&two));
+    let swapped = normalised_state(&build("2026-11-04T090211", "2026-11-05T090211"));
+    assert!(swapped.paths().iter().any(|path| path.contains("<v2>")));
+}
+
+#[test]
+fn times_are_replaced_by_key_but_file_times_are_kept() {
+    let clock = Clock::now();
+    let build = |archived: &str, restored: &str| {
+        let collection = Collection::build(&clock).finish();
+        fs::write(
+            collection.path("listing.txt"),
+            format!(
+                "# piece a\n# archived {archived}\n# imported {archived}\n# rebuilt {archived}\n\
+                 file 0644 2026-10-30T17:44:02Z 5 f\n"
+            ),
+        )
+        .expect("writes");
+        fs::write(
+            collection.path("restored"),
+            format!("restored {restored}\n"),
+        )
+        .expect("writes");
+        collection
+    };
+    let one = normalised_state(&build("2026-09-03T10:15:00Z", "2026-09-03T10:15:00Z"));
+    let two = normalised_state(&build("2026-11-04T09:02:11Z", "2026-11-04T09:02:11Z"));
+    assert!(one.diff(&two).is_none());
+    assert!(text_of(&one, "listing.txt").contains("# archived <time>\n"));
+    assert!(text_of(&one, "listing.txt").contains("file 0644 2026-10-30T17:44:02Z 5 f"));
+    assert_eq!(text_of(&one, "restored"), "restored <time>\n");
+}
+
+fn tar_zst(members: &[(&str, &str, u64)], level: i32) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, content, mtime) in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(*mtime);
+        builder
+            .append_data(&mut header, path, content.as_bytes())
+            .expect("the member is appended");
+    }
+    let tar = builder.into_inner().expect("the tar is finished");
+    zstd::stream::encode_all(&tar[..], level).expect("the tar compresses")
+}
+
+#[test]
+fn archives_compare_by_members_not_by_bytes() {
+    let clock = Clock::now();
+    let members = [("a/f", "x", 100), ("a/g", "y", 200)];
+    let build = |level: i32, members: &[(&str, &str, u64)]| {
+        let collection = Collection::build(&clock).finish();
+        let dir = collection.path(".antiq/pieces/a");
+        fs::create_dir_all(&dir).expect("made");
+        fs::write(
+            dir.join("a--2026-09-03T101500.tar.zst"),
+            tar_zst(members, level),
+        )
+        .expect("writes");
+        collection
+    };
+    let fast = normalised_state(&build(1, &members));
+    let slow = normalised_state(&build(19, &members));
+    assert!(fast.diff(&slow).is_none());
+    let changed = normalised_state(&build(1, &[("a/f", "x", 100), ("a/g", "CHANGED", 200)]));
+    let diff = fast.diff(&changed).expect("a member differs");
+    assert!(diff.contains(".tar.zst"), "{diff}");
+    let retimed = normalised_state(&build(1, &[("a/f", "x", 100), ("a/g", "y", 201)]));
+    assert!(fast.diff(&retimed).is_some());
+}
+
+#[test]
+fn compressed_listings_and_checksums_are_compared_as_text() {
+    let clock = Clock::now();
+    let build = |hash: &str, archived: &str| {
+        let collection = Collection::build(&clock).finish();
+        let dir = collection.path(".antiq/pieces/a");
+        fs::create_dir_all(&dir).expect("made");
+        fs::write(
+            dir.join("a--2026-09-03T101500.tar.zst.sha256"),
+            format!("{hash}  a--2026-09-03T101500.tar.zst\n"),
+        )
+        .expect("writes");
+        let listing = format!("# archived {archived}\n{hash}  a/f\n");
+        fs::write(
+            dir.join("a--2026-09-03T101500.sha256.zst"),
+            zstd::stream::encode_all(listing.as_bytes(), 3).expect("compresses"),
+        )
+        .expect("writes");
+        collection
+    };
+    let one = normalised_state(&build(&"a".repeat(64), "2026-09-03T10:15:00Z"));
+    let two = normalised_state(&build(&"b".repeat(64), "2026-11-04T09:02:11Z"));
+    let sums = text_of(&one, ".antiq/pieces/a/a--<v1>.tar.zst.sha256");
+    assert_eq!(sums, "<sha256>  a--<v1>.tar.zst\n");
+    assert!(text_of(&one, ".antiq/pieces/a/a--<v1>.sha256.zst").contains("# archived <time>\n"));
+    assert!(
+        one.diff(&two).is_some(),
+        "entry hashes of the listing still differ"
+    );
+}
+
+#[test]
+fn the_lock_file_is_not_part_of_the_state() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    fs::write(collection.path(".antiq/lock"), "123").expect("writes");
+    assert!(
+        !normalised_state(&collection)
+            .paths()
+            .contains(&".antiq/lock")
+    );
+}
+
+#[test]
+fn a_missing_path_is_none() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    assert!(State::raw(&collection.root()).entry("nothing").is_none());
+    let _ = Path::new("");
+}
