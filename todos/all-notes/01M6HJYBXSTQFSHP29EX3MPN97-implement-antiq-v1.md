@@ -2062,12 +2062,6 @@ its finishing commit. Acceptance lines in an entry add to this.
 - Depends on: I40 and the investigation.
 - Size: M to L.
 
-#### I46 One integration test binary
-
-- Content: todo `01M6JR4THG5RRC5JEB6CRNBY0Y`. Touches every test file,
-  so it runs when no other item branch is open, before I39.
-- Size: M.
-
 ## 6. Dependency graph and waves
 
 The added dependency edges (I04 for I08, I09 and I17; I03 for I10; I28
@@ -2113,7 +2107,6 @@ I01 lands in two merges; wave 2 starts after part B.
 | I43 | I20, I22, I34, I42 | 10 |
 | I44 | I32, I35 | 10 |
 | I45 | I40 and the search investigation | 10 |
-| I46 | all items but I39 merged | 11, before I39 |
 
 Waves and the files that keep them apart:
 
@@ -2129,7 +2122,7 @@ Waves and the files that keep them apart:
 | 8 | I30, I34, I35, I40 | I40 only in `src/cli/picker/`; `ops/sync/*` and `cli/cmd/sync/mod.rs` to I30; `ops/unearth/*` and `cli/cmd/unearth.rs` to I34; `ops/reconcile.rs`, `cli/cmd/reconcile.rs`, `ops/remote.rs` and `cli/cmd/remote.rs` to I35 |
 | 9 | I31, I32, I33, I41 | one sync phase file and one `cli/cmd/sync` file each, behind I30's call sites; only I31 edits `cli/cmd/resolve.rs`; I41 adds progress parameters to the pack, verify, extract and transfer calls and threads them through their callers, rebased after the others |
 | 10 | I37, I38, I43, I44, I45 | I37 in `ops/resolve/` and `cli/cmd/resolve.rs`, I38 in `select.rs`, `pack/mod.rs`, `remote/mod.rs`; I43 in `shell/`, `cli/cmd/shell.rs` and the cd hooks of four commands; I44 in its own command and `ops` module; I45 in `src/cli/picker/` and `src/index.rs` |
-| 11 | I46, then I39 | I46 alone, since it moves every test file |
+| 11 | I39 | |
 
 The longest chain is I01, I03, I08, I17, I23, I27, I30, I31, I37,
 I39; with I23 placed in wave 6 it gives the 11 waves. I24 and I25

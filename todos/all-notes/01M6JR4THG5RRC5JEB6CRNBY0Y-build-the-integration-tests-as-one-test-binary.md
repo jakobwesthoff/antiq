@@ -35,11 +35,6 @@ per build instead of 19.
 
 ## Timing
 
-After the running wave 9 items (I32, I33, I35) are merged, as the
-change touches every test file. Discussed with the user on
-2026-11-04 as part of lowering the SSD writes of the builds; they
-asked for a todo and may want to discuss it again.
-
-## Relations
-
-- Part of: [Implement antiq v1](01M6HJYBXSTQFSHP29EX3MPN97-implement-antiq-v1.md)
+Not part of the v1 implementation run: the user decided on 2026-11-04
+to keep it for later. It touches every test file, so it needs a moment
+when no other branch is open.
