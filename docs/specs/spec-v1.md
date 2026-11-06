@@ -511,7 +511,7 @@ Local layout:
 ```
 .antiq/config.toml
 .antiq/lock
-.antiq/remote-state.json              when the remote was last reachable
+.antiq/remote-state.json              when the remote was last reachable, when the last sync finished
 .antiq/objects/<ulid>/...             same layout as on the remote
 .antiq/objects/<ulid>/meta.pending    a recorded change not committed yet
 .antiq/tracking/<ulid>.json           tracking entries
@@ -705,7 +705,9 @@ operations at a time; compression may run ahead of uploads.
 When the remote has been away for longer than `away_warn_days` while
 remote work is pending, `status` warns and `--if-reachable` no longer
 turns away into exit 0. The time the remote was last reachable is kept
-in `.antiq/remote-state.json`.
+in `.antiq/remote-state.json`, a JSON object. Its key `last_sync` holds the
+time the last `sync` finished (RFC 3339, whole seconds); a reader takes
+that key and ignores every other.
 
 ### Path remote
 
@@ -1437,7 +1439,12 @@ kinds add keys to the error object. A `--dry-run` plan carries
 `name`, `state` and `flags`, a list of the conditions `status` shows, such
 as `pinned`, `stale_backup`, `diverged`, `needs_decision`, `superseded`,
 `pending_upload`, `missing_on_remote`, `unreadable`, `mount_point`,
-`future_mtime`, and `remote_only_in_days` where it applies. `state` is one
+`future_mtime`, and `remote_only_in_days` where it applies: for an archived
+piece whose archive is on the remote, the days until the archive becomes
+remote-only, at least 0, counted from the commit of the current archive
+(the earliest history entry of an `archive`, `import`, `resolve` or `fork`
+action from the creation of the archive on); it is left out while the
+archive still has to go up or no remote is attached. `state` is one
 of the states under "States" (`new`, `live`, `unearthed`, `gone`,
 `archived`, `remote-only`, `live-on-another-machine`) or `error`, the
 state of a piece whose entry, metadata or object cannot be used; the
@@ -1447,7 +1454,8 @@ a state or flag needs to say and leaves out the keys that do not apply:
 folder is still in place), `below_unreadable` (the directory above a
 piece that selection could not read, which is neither walked nor judged)
 `machine` (the machine that backs up a live piece of another
-collection), `unreadable_first`, `mount_points`, `excluded_paths` and
+collection), `stale_since`, `decisions` (the pending decisions as `{kind,
+options}`), `unreadable_first`, `mount_points`, `excluded_paths` and
 `future_files` (paths relative to the collection root, the top directory of
 a piece being the piece's own path) and `idle_clock` (the time the idle
 clock counts from). `age_days` is the whole days from the idle clock to
@@ -1456,7 +1464,10 @@ now; it is left out for a piece without a verdict. The flags `empty`,
 piece that is not diverged and that the next `archive` archives. A piece
 the walk could not read completely has no verdict. A `junk` entry that is
 no file name and a `collection.ignore` line that is no valid rule each give
-a warning; with such a line no piece has a verdict. `status` also adds `recovered`, the names below
+a warning; with such a line no piece has a verdict. A piece is `pending_upload` when a recorded change is not committed, or
+when it holds its current archive locally and the metadata records no check
+of the remote copy. `status` adds `last_sync` (from `.antiq/remote-state.json`,
+left out when none is recorded) and also `recovered`, the names below
 `.antiq/recovered/`; `damaged`, a list of `{id, path, error}` for tracking
 files and objects that cannot be used, with the path relative to the
 collection root; `unreadable_directories`, the directories selection could

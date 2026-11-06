@@ -8,23 +8,29 @@
 //! `.antiq/`, so it can run while another run holds the collection.
 
 #![allow(unused)]
-use crate::clock::Clock;
+use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
+use crate::fsx::FsxError;
+use crate::fsx::device::{self, FsKind};
 use crate::fsx::tree::TreeRoot;
 use crate::id::ObjectId;
 use crate::idle::{self, IdleError, IdleVerdict};
-use crate::meta::{Lifecycle, Metadata};
+use crate::lock;
+use crate::meta::{HistoryAction, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::relpath::{Name, RelPath, escape};
+use crate::remote::away;
 use crate::remote::{self, RemoteState};
 use crate::report::{CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
-use crate::store::{Current, Store, StoreError};
-use crate::tracking::{self, EntryState, PieceState, TrackingEntry, TrackingError, derive_state};
+use crate::store::{Current, Source, Store, StoreError};
+use crate::tracking::{
+    self, Answer, DecisionKind, EntryState, PieceState, TrackingEntry, TrackingError, derive_state,
+};
 use crate::tree::{PieceTree, Problem};
 use crate::walk;
 use jiff::Timestamp;
-use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -87,6 +93,7 @@ impl Piece {
             name,
             state,
             flags: Vec::new(),
+            remote_only_in_days: None,
             age_days: None,
             detail: Detail::default(),
             unearthed: None,
@@ -162,6 +169,19 @@ pub struct Detail {
     /// The time the idle clock counts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_clock: Option<Timestamp>,
+    /// Since when the live backup fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_since: Option<Timestamp>,
+    /// The decisions waiting for an answer, with the answers that fit.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+}
+
+/// A decision `resolve` can answer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Decision {
+    pub kind: DecisionKind,
+    pub options: Vec<Answer>,
 }
 
 impl Detail {
@@ -179,6 +199,10 @@ pub struct Piece {
     pub name: Name,
     pub state: PieceKind,
     pub flags: Vec<Flag>,
+    /// Whole days left until the archive becomes remote-only, for an
+    /// archived piece whose archive is on the remote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_only_in_days: Option<i64>,
     /// Whole days since the idle clock, where the piece has a verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_days: Option<i64>,
@@ -235,6 +259,9 @@ pub struct Counts {
 pub struct StatusReport {
     pub collection: CollectionInfo,
     pub remote: RemoteInfo,
+    /// When the last `sync` finished, as `remote-state.json` records it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<Timestamp>,
     pub pieces: Vec<Piece>,
     /// Names below `.antiq/recovered/`.
     pub recovered: Vec<String>,
@@ -269,6 +296,18 @@ pub(crate) trait Probes {
     /// The filesystem calls the walk makes, so that a test can put a
     /// second device inside a piece.
     fn walk_hooks(&self) -> &dyn walk::Hooks;
+
+    /// What kind of filesystem the collection lies on.
+    fn fs_kind(&self, root: &Path) -> Result<FsKind, FsxError>;
+
+    /// The warning about a remote that stays away, if there is one.
+    fn away_warning(
+        &self,
+        collection: &Collection,
+        state: RemoteState,
+        pending_remote_work: bool,
+        now: Timestamp,
+    ) -> Option<Warning>;
 }
 
 struct RealProbes;
@@ -280,6 +319,20 @@ impl Probes for RealProbes {
 
     fn walk_hooks(&self) -> &dyn walk::Hooks {
         &walk::RealFs
+    }
+
+    fn fs_kind(&self, root: &Path) -> Result<FsKind, FsxError> {
+        device::fs_kind(root)
+    }
+
+    fn away_warning(
+        &self,
+        collection: &Collection,
+        state: RemoteState,
+        pending_remote_work: bool,
+        now: Timestamp,
+    ) -> Option<Warning> {
+        away::status_warning(collection, state, pending_remote_work, now)
     }
 }
 
@@ -303,6 +356,31 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     let own = collection.id();
     let config = &collection.config().collection;
     let mut warnings = Vec::new();
+    let mut unknown_keys = collection.config().unknown_collection_keys.clone();
+    unknown_keys.sort();
+    for key in &unknown_keys {
+        warnings.push(Warning::new(format!(
+            "the key `{key}` under [collection] is unknown and ignored"
+        )));
+    }
+    match request.probes.fs_kind(collection.root()) {
+        Ok(FsKind::Smb) => warnings.push(Warning::new("the collection is on an SMB mount")),
+        Ok(FsKind::Nfs) => warnings.push(Warning::new("the collection is on an NFS mount")),
+        Ok(FsKind::Local | FsKind::Other) => {}
+        Err(error) => warnings.push(Warning::new(format!(
+            "cannot tell what kind of filesystem the collection is on: {error}"
+        ))),
+    }
+    // The lock is only read: taking it would make `status` a run of its own.
+    match lock::holder(&collection.lock_path()) {
+        Ok(Some(holder)) => warnings.push(Warning::new(format!(
+            "another run holds the lock (pid {}, machine {}, started {})",
+            holder.pid, holder.machine, holder.started
+        ))),
+        Ok(None) => {}
+        Err(error) => warnings.push(Warning::new(format!("cannot read the lock file: {error}"))),
+    }
+    let last_sync = read_last_sync(collection, &mut warnings);
 
     // =====================================================
     // What the folders say
@@ -314,6 +392,11 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     let selected: HashSet<RelPath> = selection.pieces().iter().cloned().collect();
     let mut unreadable_directories = selection.unreadable().to_vec();
     unreadable_directories.sort();
+    for directory in &unreadable_directories {
+        warnings.push(Warning::new(format!(
+            "cannot read {directory}: pieces below it are neither new nor gone in this run"
+        )));
+    }
 
     // =====================================================
     // What the store and the tracking entries say
@@ -339,6 +422,14 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
                     error: error.to_string(),
                 });
             }
+        }
+    }
+    for (object, current) in &metadata {
+        for version in &current.unreadable {
+            warnings.push(Warning::new(format!(
+                "meta.{} of {object} cannot be read: {}",
+                version.number, version.reason
+            )));
         }
     }
     let tracked = tracking::read_all(collection)?;
@@ -476,6 +567,31 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
     // =====================================================
 
     let now = request.clock.now();
+    let entries: HashMap<ObjectId, &TrackingEntry> = tracked
+        .entries
+        .iter()
+        .map(|entry| (entry.id, entry))
+        .collect();
+    let remote_attached = !collection.config().remotes.is_empty();
+    for piece in &mut pieces {
+        let current = piece
+            .id
+            .filter(|_| piece.state != PieceKind::Error)
+            .and_then(|object| metadata.get(&object));
+        if let Some(current) = current {
+            let entry = piece.id.and_then(|object| entries.get(&object).copied());
+            note_fields(piece, entry, current);
+            if piece.state == PieceKind::Archived
+                && remote_attached
+                && !piece.flags.contains(&Flag::PendingUpload)
+            {
+                piece.remote_only_in_days = archive_commit_time(&current.metadata).map(|commit| {
+                    let elapsed = (now.as_second() - commit.as_second()).max(0) / 86_400;
+                    (i64::from(config.remote_only_days) - elapsed).max(0)
+                });
+            }
+        }
+    }
     let junk = junk_names(&config.junk, &mut warnings);
     let idle_settings = match idle::Settings::new(config.idle_days, &config.ignore) {
         Ok(settings) => Some(settings),
@@ -510,19 +626,30 @@ pub(crate) fn status_with(request: &StatusRequest<'_>) -> Result<StatusReport, S
 
     let recovered = recovered_names(collection, &mut warnings);
     let counts = count(&pieces);
+    let remote_state = request.probes.remote_state(collection);
+    let pending_remote_work = pieces.iter().any(|piece| {
+        piece.flags.contains(&Flag::PendingUpload) || piece.flags.contains(&Flag::StaleBackup)
+    });
+    warnings.extend(request.probes.away_warning(
+        collection,
+        remote_state,
+        pending_remote_work,
+        now,
+    ));
     Ok(StatusReport {
         collection: CollectionInfo {
             id: own,
             path: collection.root().display().to_string(),
         },
         remote: RemoteInfo {
-            state: request.probes.remote_state(collection),
+            state: remote_state,
             url: collection
                 .config()
                 .remotes
                 .first()
                 .map(|remote| remote.url.clone()),
         },
+        last_sync,
         pieces,
         recovered,
         damaged,
@@ -633,6 +760,122 @@ fn note_age(piece: &mut Piece, clock: Timestamp, now: Timestamp) {
     let seconds = (now.as_second() - clock.as_second()).max(0);
     piece.age_days = Some(seconds / 86_400);
     piece.detail.idle_clock = Some(clock);
+}
+
+/// The history actions that bring a new current archive.
+const ARCHIVING: [HistoryAction; 4] = [
+    HistoryAction::Archive,
+    HistoryAction::Import,
+    HistoryAction::Resolve,
+    HistoryAction::Fork,
+];
+
+/// The current archive of an object: its newest payload that is not
+/// superseded.
+fn current_archive(metadata: &Metadata) -> Option<&Payload> {
+    metadata
+        .payloads
+        .iter()
+        .filter(|payload| payload.kind == PayloadKind::Archive && !payload.superseded)
+        .max_by_key(|payload| payload.version)
+}
+
+/// The time the current archive was committed: the earliest history entry,
+/// from the creation of the archive on, that an archiving action wrote.
+/// The remote-only tier counts from it.
+pub(crate) fn archive_commit_time(metadata: &Metadata) -> Option<Timestamp> {
+    let archive = current_archive(metadata)?;
+    metadata
+        .history
+        .iter()
+        .filter(|entry| entry.time >= archive.created)
+        .filter(|entry| {
+            ARCHIVING
+                .iter()
+                .any(|action| action.as_str() == entry.action)
+        })
+        .map(|entry| entry.time)
+        .min()
+}
+
+/// The flags the entry and the metadata give a piece.
+fn note_fields(piece: &mut Piece, entry: Option<&TrackingEntry>, current: &Current) {
+    if let Some(entry) = entry {
+        if let Some(since) = entry.stale_backup_since {
+            piece.flags.push(Flag::StaleBackup);
+            piece.detail.stale_since = Some(since);
+        }
+        if entry.diverged {
+            piece.flags.push(Flag::Diverged);
+        }
+        if entry.missing_on_remote {
+            piece.flags.push(Flag::MissingOnRemote);
+        }
+        if !entry.pending_decisions.is_empty() {
+            piece.flags.push(Flag::NeedsDecision);
+            piece.detail.decisions = entry
+                .pending_decisions
+                .iter()
+                .map(|decision| Decision {
+                    kind: decision.kind,
+                    options: decision.options().to_vec(),
+                })
+                .collect();
+        }
+    }
+    let metadata = &current.metadata;
+    if metadata
+        .payloads
+        .iter()
+        .any(|payload| payload.kind == PayloadKind::Archive && payload.superseded)
+    {
+        piece.flags.push(Flag::Superseded);
+    }
+    // An archive that is only here, or whose copy on the remote was never
+    // checked, still has to go up; so has a change nobody committed yet.
+    let archive = current_archive(metadata);
+    let held = entry.zip(archive).is_some_and(|(entry, archive)| {
+        entry
+            .local_payloads
+            .iter()
+            .any(|held| held.kind == PayloadKind::Archive && held.file == archive.file)
+    });
+    let unconfirmed = archive.is_some_and(|archive| !matches!(archive.verified, Some(Some(_))));
+    if current.source == Source::Pending || (held && unconfirmed) {
+        piece.flags.push(Flag::PendingUpload);
+    }
+}
+
+/// When the last `sync` finished, from `.antiq/remote-state.json`. The file
+/// is written by runs, so a state that cannot be read is a warning and no
+/// failure of `status`.
+fn read_last_sync(collection: &Collection, warnings: &mut Vec<Warning>) -> Option<Timestamp> {
+    #[derive(Deserialize)]
+    struct StateFile {
+        last_sync: Option<Timestamp>,
+    }
+    let file = collection.remote_state_path();
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            warnings.push(Warning::new(format!(
+                "cannot read {}: {error}",
+                relative_to_collection(collection, &file)
+            )));
+            return None;
+        }
+    };
+    match serde_json::from_slice::<StateFile>(&bytes) {
+        Ok(state) => state.last_sync.map(whole_seconds),
+        Err(error) => {
+            warnings.push(Warning::new(format!(
+                "cannot read {}: {error}",
+                relative_to_collection(collection, &file)
+            )));
+            None
+        }
+    }
 }
 
 /// A path below the collection root, in the escaped form.
@@ -793,8 +1036,11 @@ fn exists_exact(root: &TreeRoot, path: &RelPath) -> bool {
 mod tests {
     use super::*;
     use crate::clock::FixedClock;
+    use crate::fsx::FsxError;
     use crate::meta::{Checksum, CreatedSource, FileName, Payload, PayloadKind};
+    use crate::meta::{HistoryAction, HistoryEntry};
     use crate::testing::tree::{COLLECTION_ID, TempCollection};
+    use crate::tracking::{DecisionKind, PendingDecision};
     use crate::tracking::{LocalPayload, VersionTakenOut};
     use jiff::Timestamp;
     use std::fs;
@@ -828,6 +1074,79 @@ mod tests {
         fn walk_hooks(&self) -> &dyn walk::Hooks {
             &walk::RealFs
         }
+
+        fn fs_kind(&self, _: &Path) -> Result<FsKind, FsxError> {
+            Ok(FsKind::Local)
+        }
+
+        fn away_warning(
+            &self,
+            _: &Collection,
+            _: RemoteState,
+            _: bool,
+            _: Timestamp,
+        ) -> Option<Warning> {
+            None
+        }
+    }
+
+    /// Probes whose filesystem is `kind`, or cannot be told.
+    struct Mounted(Option<FsKind>);
+
+    impl Probes for Mounted {
+        fn remote_state(&self, _: &Collection) -> RemoteState {
+            RemoteState::None
+        }
+
+        fn walk_hooks(&self) -> &dyn walk::Hooks {
+            &walk::RealFs
+        }
+
+        fn fs_kind(&self, root: &Path) -> Result<FsKind, FsxError> {
+            self.0.ok_or_else(|| FsxError::Io {
+                action: "stat",
+                path: root.display().to_string(),
+                source: io::Error::from_raw_os_error(5),
+            })
+        }
+
+        fn away_warning(
+            &self,
+            _: &Collection,
+            _: RemoteState,
+            _: bool,
+            _: Timestamp,
+        ) -> Option<Warning> {
+            None
+        }
+    }
+
+    /// Probes that remember what the away warning was asked.
+    struct Away(std::cell::RefCell<Vec<(RemoteState, bool)>>);
+
+    impl Probes for Away {
+        fn remote_state(&self, _: &Collection) -> RemoteState {
+            RemoteState::Away
+        }
+
+        fn walk_hooks(&self) -> &dyn walk::Hooks {
+            &walk::RealFs
+        }
+
+        fn fs_kind(&self, _: &Path) -> Result<FsKind, FsxError> {
+            Ok(FsKind::Local)
+        }
+
+        fn away_warning(
+            &self,
+            _: &Collection,
+            state: RemoteState,
+            pending: bool,
+            _: Timestamp,
+        ) -> Option<Warning> {
+            self.0.borrow_mut().push((state, pending));
+            Some(Warning::new("the remote has been away"))
+        }
     }
 
     /// Probes whose walk sees another device at some paths or fails.
@@ -840,6 +1159,20 @@ mod tests {
 
         fn walk_hooks(&self) -> &dyn walk::Hooks {
             self.0.as_ref()
+        }
+
+        fn fs_kind(&self, _: &Path) -> Result<FsKind, FsxError> {
+            Ok(FsKind::Local)
+        }
+
+        fn away_warning(
+            &self,
+            _: &Collection,
+            _: RemoteState,
+            _: bool,
+            _: Timestamp,
+        ) -> Option<Warning> {
+            None
         }
     }
 
@@ -1757,7 +2090,7 @@ mod tests {
         entry.diverged = true;
         world.write_entry(&entry);
         let piece = world.only();
-        assert_eq!(piece.flags, []);
+        assert_eq!(piece.flags, [Flag::Diverged]);
         assert_eq!(piece.age_days, Some(20));
     }
 
@@ -1912,6 +2245,625 @@ mod tests {
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("a mode");
         assert_eq!(piece.flags, []);
         assert_eq!(piece.age_days, None);
+    }
+
+    // =========================================================
+    // What the entries and the metadata say
+    // =========================================================
+
+    const REMOTE_ID: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
+
+    impl World {
+        fn configure_with_remote(&mut self) {
+            fs::write(
+                self.temp.root().join(".antiq/config.toml"),
+                format!(
+                    "[collection]\nid = \"{COLLECTION_ID}\"\n\n[[remote]]\nurl = \"ssh://nas/srv/antiq\"\nid = \"{REMOTE_ID}\"\n"
+                ),
+            )
+            .expect("a config can be written");
+            self.collection = Collection::find(self.temp.root()).expect("a collection");
+        }
+
+        /// A live piece with its folder, an entry and a hook to change both.
+        fn live_piece(&mut self, change: impl FnOnce(&mut TrackingEntry)) -> Piece {
+            self.file("work/note.txt", 1);
+            let mut entry = self.live_entry_of("work", false);
+            change(&mut entry);
+            self.write_entry(&entry);
+            self.only()
+        }
+
+        /// An archived piece held locally, with the archive payload and
+        /// the history entry that `change` makes.
+        fn archived_piece(
+            &mut self,
+            change: impl FnOnce(&mut Metadata, &mut TrackingEntry),
+        ) -> Piece {
+            let mut known = metadata(
+                1,
+                "old",
+                Lifecycle::Archived,
+                COLLECTION_ID,
+                vec![archive_payload()],
+            );
+            let mut entry = TrackingEntry::new(
+                id(1),
+                path("old"),
+                EntryState::Gone,
+                VersionTakenOut::Committed(1),
+                when(),
+            );
+            entry.local_payloads = vec![LocalPayload {
+                kind: PayloadKind::Archive,
+                version: 1,
+                file: FileName::new("0123456789abcdef-a.tar.zst").expect("a plain name"),
+            }];
+            change(&mut known, &mut entry);
+            self.put_meta(&known);
+            self.write_entry(&entry);
+            self.only()
+        }
+    }
+
+    fn committed(known: &mut Metadata, action: HistoryAction, time: &str) {
+        known.history.push(HistoryEntry::new(
+            time.parse().expect("a time"),
+            "laptop",
+            action,
+        ));
+    }
+
+    fn verified(known: &mut Metadata, time: Option<&str>) {
+        known.payloads[0].verified = Some(time.map(|time| time.parse().expect("a time")));
+    }
+
+    #[test]
+    fn a_stale_backup_names_since_when() {
+        let mut world = world();
+        let since: Timestamp = "2026-10-30T08:00:00Z".parse().expect("a time");
+        let piece = world.live_piece(|entry| entry.stale_backup_since = Some(since));
+        assert_eq!(piece.flags, [Flag::StaleBackup]);
+        assert_eq!(piece.detail.stale_since, Some(since));
+    }
+
+    #[test]
+    fn a_diverged_folder_is_flagged() {
+        let mut world = world();
+        let piece = world.live_piece(|entry| entry.diverged = true);
+        assert_eq!(piece.flags, [Flag::Diverged]);
+    }
+
+    #[test]
+    fn a_missing_archive_on_the_remote_is_flagged() {
+        let mut world = world();
+        let piece = world.live_piece(|entry| entry.missing_on_remote = true);
+        assert_eq!(piece.flags, [Flag::MissingOnRemote]);
+    }
+
+    fn decision(kind: DecisionKind, options: &[Answer]) {
+        let mut world = world();
+        let piece = world.live_piece(|entry| {
+            entry.pending_decisions = vec![PendingDecision { kind }];
+        });
+        assert!(
+            piece.flags.contains(&Flag::NeedsDecision),
+            "{:?}",
+            piece.flags
+        );
+        assert_eq!(
+            piece.detail.decisions,
+            [Decision {
+                kind,
+                options: options.to_vec()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_version_conflict_waits_for_a_decision() {
+        decision(
+            DecisionKind::VersionConflict,
+            &[Answer::Mine, Answer::Theirs, Answer::Fork],
+        );
+    }
+
+    #[test]
+    fn replacing_with_loss_waits_for_a_decision() {
+        decision(
+            DecisionKind::ReplacingWithLoss,
+            &[Answer::Replace, Answer::Fork, Answer::Skip],
+        );
+    }
+
+    #[test]
+    fn a_diverged_folder_decision_waits_for_an_answer() {
+        decision(
+            DecisionKind::DivergedFolder,
+            &[Answer::Theirs, Answer::Mine, Answer::Fork],
+        );
+    }
+
+    #[test]
+    fn a_superseded_archive_waits_for_a_decision() {
+        decision(DecisionKind::SupersededArchive, &[Answer::DropSuperseded]);
+    }
+
+    #[test]
+    fn a_superseded_archive_payload_is_flagged() {
+        let mut world = world();
+        let piece = world.archived_piece(|known, _| {
+            known.payloads[0].superseded = true;
+            verified(known, Some("2026-10-02T00:00:00Z"));
+        });
+        assert_eq!(piece.flags, [Flag::Superseded]);
+    }
+
+    #[test]
+    fn a_recorded_change_that_is_not_committed_is_pending_upload() {
+        let mut world = world();
+        let mut known = metadata(
+            1,
+            "old",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        );
+        verified(&mut known, Some("2026-10-02T00:00:00Z"));
+        let directory = world.collection.object_dir(known.id);
+        fs::create_dir_all(&directory).expect("a directory");
+        fs::write(
+            directory.join("meta.pending"),
+            crate::meta::to_bytes(&known).expect("metadata serialises"),
+        )
+        .expect("a file");
+        let piece = world.only();
+        assert_eq!(piece.flags, [Flag::PendingUpload]);
+    }
+
+    #[test]
+    fn a_local_archive_never_checked_on_the_remote_is_pending_upload() {
+        let mut world = world();
+        let piece = world.archived_piece(|known, _| verified(known, None));
+        assert_eq!(piece.flags, [Flag::PendingUpload]);
+    }
+
+    #[test]
+    fn a_local_archive_without_a_check_time_is_pending_upload() {
+        let mut world = world();
+        let piece = world.archived_piece(|_, _| {});
+        assert_eq!(piece.flags, [Flag::PendingUpload]);
+    }
+
+    #[test]
+    fn a_local_archive_checked_on_the_remote_is_not_pending() {
+        let mut world = world();
+        let piece = world.archived_piece(|known, _| verified(known, Some("2026-10-02T00:00:00Z")));
+        assert_eq!(piece.flags, []);
+    }
+
+    #[test]
+    fn an_archive_held_only_on_the_remote_is_not_pending() {
+        let mut world = world();
+        let piece = world.archived_piece(|_, entry| entry.local_payloads.clear());
+        assert_eq!(piece.flags, []);
+    }
+
+    fn remote_only_days(change: impl FnOnce(&mut Metadata)) -> Option<i64> {
+        let mut world = world();
+        world.configure_with_remote();
+        world
+            .archived_piece(|known, _| {
+                verified(known, Some("2026-10-02T00:00:00Z"));
+                change(known);
+            })
+            .remote_only_in_days
+    }
+
+    #[test]
+    fn days_until_remote_only_count_from_the_commit_of_the_archive() {
+        let days = remote_only_days(|known| {
+            committed(known, HistoryAction::Archive, "2026-10-02T12:00:00Z");
+        });
+        assert_eq!(days, Some(150));
+    }
+
+    #[test]
+    fn days_until_remote_only_never_go_below_zero() {
+        let days = remote_only_days(|known| {
+            known.payloads[0].created = "2024-12-31T00:00:00Z".parse().expect("a time");
+            committed(known, HistoryAction::Archive, "2025-01-01T00:00:00Z");
+        });
+        assert_eq!(days, Some(0));
+    }
+
+    #[test]
+    fn an_archive_without_a_commit_time_has_no_days() {
+        assert_eq!(remote_only_days(|_| {}), None);
+    }
+
+    #[test]
+    fn without_a_remote_no_archive_becomes_remote_only() {
+        let mut world = world();
+        let piece = world.archived_piece(|known, _| {
+            verified(known, Some("2026-10-02T00:00:00Z"));
+            committed(known, HistoryAction::Archive, "2026-10-02T12:00:00Z");
+        });
+        assert_eq!(piece.remote_only_in_days, None);
+    }
+
+    #[test]
+    fn a_pending_archive_has_no_days_yet() {
+        let mut world = world();
+        world.configure_with_remote();
+        let piece = world.archived_piece(|known, _| {
+            verified(known, None);
+            committed(known, HistoryAction::Archive, "2026-10-02T12:00:00Z");
+        });
+        assert_eq!(piece.remote_only_in_days, None);
+    }
+
+    #[test]
+    fn the_commit_time_of_an_archive_is_the_history_entry_that_brought_it() {
+        let mut known = metadata(
+            1,
+            "a",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        );
+        committed(&mut known, HistoryAction::Archive, "2026-10-02T00:00:00Z");
+        assert_eq!(
+            archive_commit_time(&known),
+            Some("2026-10-02T00:00:00Z".parse().expect("a time"))
+        );
+    }
+
+    #[test]
+    fn an_import_brings_an_archive_too() {
+        let mut known = metadata(
+            1,
+            "a",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        );
+        committed(&mut known, HistoryAction::Import, "2026-10-03T00:00:00Z");
+        assert_eq!(
+            archive_commit_time(&known),
+            Some("2026-10-03T00:00:00Z".parse().expect("a time"))
+        );
+    }
+
+    #[test]
+    fn a_resolve_after_an_older_archive_brings_the_newer_one() {
+        let mut older = archive_payload();
+        older.created = "2026-09-01T00:00:00Z".parse().expect("a time");
+        let mut newer = payload(PayloadKind::Archive, 2, "fedcba9876543210-a.tar.zst");
+        newer.created = "2026-10-05T00:00:00Z".parse().expect("a time");
+        let mut known = metadata(
+            1,
+            "a",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![older, newer],
+        );
+        committed(&mut known, HistoryAction::Archive, "2026-09-02T00:00:00Z");
+        committed(&mut known, HistoryAction::Resolve, "2026-10-06T00:00:00Z");
+        assert_eq!(
+            archive_commit_time(&known),
+            Some("2026-10-06T00:00:00Z".parse().expect("a time"))
+        );
+    }
+
+    #[test]
+    fn a_fork_brings_the_archive_of_its_new_id() {
+        let mut known = metadata(
+            1,
+            "a",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        );
+        committed(&mut known, HistoryAction::Fork, "2026-10-04T00:00:00Z");
+        assert_eq!(
+            archive_commit_time(&known),
+            Some("2026-10-04T00:00:00Z".parse().expect("a time"))
+        );
+    }
+
+    #[test]
+    fn other_actions_bring_no_archive() {
+        let mut known = metadata(
+            1,
+            "a",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        );
+        committed(&mut known, HistoryAction::Sync, "2026-10-04T00:00:00Z");
+        assert_eq!(archive_commit_time(&known), None);
+    }
+
+    #[test]
+    fn a_superseded_archive_is_not_the_current_one() {
+        let mut only = archive_payload();
+        only.superseded = true;
+        let mut known = metadata(1, "a", Lifecycle::Archived, COLLECTION_ID, vec![only]);
+        committed(&mut known, HistoryAction::Archive, "2026-10-04T00:00:00Z");
+        assert_eq!(archive_commit_time(&known), None);
+    }
+
+    // =========================================================
+    // The remote and the warnings
+    // =========================================================
+
+    #[test]
+    fn the_remote_state_and_url_come_from_the_probe_and_the_config() {
+        let mut world = world();
+        world.configure_with_remote();
+        let report = run_with(&world.collection, &Probed(RemoteState::Reachable)).expect("runs");
+        assert_eq!(report.remote.state, RemoteState::Reachable);
+        assert_eq!(report.remote.url.as_deref(), Some("ssh://nas/srv/antiq"));
+    }
+
+    fn last_sync_of(content: Option<&str>) -> StatusReport {
+        let world = world();
+        if let Some(content) = content {
+            fs::write(world.collection.remote_state_path(), content).expect("a file");
+        }
+        world.report()
+    }
+
+    #[test]
+    fn without_a_state_file_the_remote_was_never_synced() {
+        let report = last_sync_of(None);
+        assert_eq!(report.last_sync, None);
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_last_sync_is_read_in_whole_seconds_and_other_keys_are_ignored() {
+        let report = last_sync_of(Some(
+            r#"{"last_reachable": "2026-10-31T00:00:00Z", "last_sync": "2026-11-01T09:30:15.750Z"}"#,
+        ));
+        assert_eq!(
+            report.last_sync,
+            Some("2026-11-01T09:30:15Z".parse().expect("a time"))
+        );
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_state_file_without_the_key_has_no_last_sync() {
+        let report = last_sync_of(Some(r#"{"last_reachable": "2026-10-31T00:00:00Z"}"#));
+        assert_eq!(report.last_sync, None);
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_gives_a_warning_and_no_failure() {
+        let report = last_sync_of(Some("{not json"));
+        assert_eq!(report.last_sync, None);
+        assert!(
+            report.warnings[0].message.contains("remote-state.json"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_state_file_that_is_a_directory_gives_a_warning() {
+        let world = world();
+        fs::create_dir(world.collection.remote_state_path()).expect("a directory");
+        let report = world.report();
+        assert_eq!(report.last_sync, None);
+        assert!(report.warnings[0].message.contains("remote-state.json"));
+    }
+
+    #[test]
+    fn the_away_warning_is_asked_with_pending_work() {
+        let mut world = world();
+        world.file("work/note.txt", 1);
+        let mut entry = world.live_entry_of("work", false);
+        entry.stale_backup_since = Some(when());
+        world.write_entry(&entry);
+        let away = Away(Default::default());
+        let report = run_with(&world.collection, &away).expect("runs");
+        assert_eq!(*away.0.borrow(), [(RemoteState::Away, true)]);
+        assert_eq!(report.warnings[0].message, "the remote has been away");
+    }
+
+    #[test]
+    fn the_away_warning_is_asked_without_pending_work() {
+        let mut world = world();
+        world.file("work/note.txt", 1);
+        let mut entry = world.live_entry_of("work", false);
+        entry.missing_on_remote = true;
+        world.write_entry(&entry);
+        let away = Away(Default::default());
+        run_with(&world.collection, &away).expect("runs");
+        assert_eq!(*away.0.borrow(), [(RemoteState::Away, false)]);
+    }
+
+    #[test]
+    fn a_pending_upload_is_pending_remote_work() {
+        let mut world = world();
+        world.archived_piece(|_, _| {});
+        let away = Away(Default::default());
+        run_with(&world.collection, &away).expect("runs");
+        assert_eq!(*away.0.borrow(), [(RemoteState::Away, true)]);
+    }
+
+    #[test]
+    fn every_unknown_collection_key_is_a_warning_in_alphabetical_order() {
+        let mut world = world();
+        world.configure("idle_dyas = 3\nbogus = 1");
+        let report = world.report();
+        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+        assert!(report.warnings[0].message.contains("bogus"));
+        assert!(report.warnings[1].message.contains("idle_dyas"));
+    }
+
+    #[test]
+    fn a_collection_on_smb_or_nfs_gets_a_warning() {
+        let world = world();
+        let smb = run_with(&world.collection, &Mounted(Some(FsKind::Smb))).expect("runs");
+        assert!(
+            smb.warnings[0].message.contains("SMB"),
+            "{:?}",
+            smb.warnings
+        );
+    }
+
+    #[test]
+    fn a_collection_on_nfs_gets_a_warning() {
+        let world = world();
+        let nfs = run_with(&world.collection, &Mounted(Some(FsKind::Nfs))).expect("runs");
+        assert!(
+            nfs.warnings[0].message.contains("NFS"),
+            "{:?}",
+            nfs.warnings
+        );
+    }
+
+    #[test]
+    fn a_local_filesystem_gets_no_warning() {
+        let world = world();
+        let local = run_with(&world.collection, &Mounted(Some(FsKind::Local))).expect("runs");
+        let other = run_with(&world.collection, &Mounted(Some(FsKind::Other))).expect("runs");
+        assert!(local.warnings.is_empty());
+        assert!(other.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_filesystem_that_cannot_be_told_gives_a_warning_and_no_failure() {
+        let world = world();
+        let report = run_with(&world.collection, &Mounted(None)).expect("runs");
+        assert!(
+            report.warnings[0].message.contains("filesystem"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    fn lock_note(content: Option<&str>) -> Vec<Warning> {
+        let world = world();
+        if let Some(content) = content {
+            fs::write(world.collection.lock_path(), content).expect("a lock file");
+        }
+        let before = fs::read(world.collection.lock_path()).ok();
+        let warnings = world.report().warnings;
+        // Reading the note does not touch the file or take the lock.
+        assert_eq!(fs::read(world.collection.lock_path()).ok(), before);
+        if content.is_some() {
+            let clock = clock();
+            crate::lock::acquire(&world.collection.lock_path(), "laptop", &clock)
+                .expect("status took no lock");
+        }
+        warnings
+    }
+
+    fn holder_json(pid: u32) -> String {
+        format!(r#"{{"pid":{pid},"machine":"desktop","started":"2026-11-01T11:00:00Z"}}"#)
+    }
+
+    #[test]
+    fn a_run_that_holds_the_lock_is_named_in_a_note() {
+        let warnings = lock_note(Some(&holder_json(std::process::id())));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let message = &warnings[0].message;
+        assert!(
+            message.contains(&std::process::id().to_string())
+                && message.contains("desktop")
+                && message.contains("2026-11-01T11:00:00Z"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_lock_file_has_no_note() {
+        assert!(lock_note(Some("")).is_empty());
+    }
+
+    #[test]
+    fn a_lock_file_naming_a_dead_process_has_no_note() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("the true executable runs");
+        let pid = child.id();
+        child.wait().expect("the child ends");
+        assert!(lock_note(Some(&holder_json(pid))).is_empty());
+    }
+
+    #[test]
+    fn an_unparsable_lock_file_has_no_note() {
+        assert!(lock_note(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn a_missing_lock_file_has_no_note() {
+        assert!(lock_note(None).is_empty());
+    }
+
+    #[test]
+    fn a_lock_file_that_cannot_be_read_gives_a_warning_and_no_failure() {
+        let world = world();
+        fs::create_dir(world.collection.lock_path()).expect("a directory");
+        let report = world.report();
+        assert!(
+            report.warnings[0].message.contains("lock"),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_version_above_the_one_in_use_that_cannot_be_read_is_reported() {
+        let mut world = world();
+        world.dir("old");
+        world.put_meta(&metadata(
+            1,
+            "old",
+            Lifecycle::Archived,
+            COLLECTION_ID,
+            vec![archive_payload()],
+        ));
+        fs::write(
+            world.collection.object_dir(id(1)).join("meta.2"),
+            "not json",
+        )
+        .expect("a file");
+        let report = world.report();
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        let message = &report.warnings[0].message;
+        assert!(
+            message.contains(&id(1).to_string()) && message.contains("meta.2"),
+            "{message}"
+        );
+        assert!(
+            report
+                .pieces
+                .iter()
+                .any(|p| p.state == PieceKind::RemoteOnly)
+        );
+    }
+
+    #[test]
+    fn every_unreadable_directory_gets_a_warning() {
+        let mut world = world();
+        world.dir("group/work");
+        world.configure("patterns = [\"group/*\"]");
+        let blocked = world.temp.root().join("group");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("a mode");
+        assert!(
+            fs::read_dir(&blocked).is_err(),
+            "the test needs a directory that cannot be read; it must not run as root"
+        );
+        let report = world.report();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).expect("a mode");
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].message.contains("group"));
     }
 
     // =========================================================
