@@ -667,6 +667,24 @@ fn the_collection_id_of_the_config_is_replaced_and_other_keys_are_not() {
     assert!(one.diff(&other_days).is_some());
 }
 
+#[test]
+fn a_damaged_archive_is_compared_by_its_bytes() {
+    let clock = Clock::now();
+    let build = || {
+        let collection = Collection::build(&clock)
+            .version("a", "2026-09-03T101500", &[("f", "content")])
+            .finish();
+        collection.damage_truncate_archive("a", "2026-09-03T101500");
+        collection
+    };
+    let (one, two) = (build(), build());
+    assert!(
+        normalised_state(&one)
+            .diff(&normalised_state(&two))
+            .is_none()
+    );
+}
+
 fn write_store_file(collection: &Collection, name: &str, content: &str) {
     let dir = collection.path(".antiq/pieces/a");
     fs::create_dir_all(&dir).expect("the store folder is made");

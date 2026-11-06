@@ -132,7 +132,8 @@
 //! - 64-digit hex digests in `*.sha256` files become `<sha256>`;
 //! - a `.tar.zst` is compared by its members (path, type, mode, size, time,
 //!   content digest) and a `.sha256.zst` by its decompressed text, so
-//!   compression settings cannot fail a scenario;
+//!   compression settings cannot fail a scenario (an archive that does not
+//!   decode, such as a truncated one, is compared by its bytes);
 //! - file times are not compared, the lock file is left out.
 //!
 //! `State::raw` reads exactly what is there, without any of this.

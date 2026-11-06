@@ -71,15 +71,16 @@ fn read_tree(root: &Path) -> BTreeMap<String, Entry> {
 }
 
 /// The members of a zstd-compressed tar, one line each, so that archives
-/// compare by what they hold and not by how they are compressed.
-fn tar_members(compressed: &[u8]) -> Vec<u8> {
-    let tar = zstd::stream::decode_all(compressed).expect("the archive decompresses");
+/// compare by what they hold and not by how they are compressed. `None`
+/// for an archive that does not decode or read, such as a damaged one.
+fn tar_members(compressed: &[u8]) -> Option<Vec<u8>> {
+    let tar = zstd::stream::decode_all(compressed).ok()?;
     let mut archive = tar::Archive::new(&tar[..]);
     let mut lines = String::new();
-    for entry in archive.entries().expect("the archive lists") {
-        let mut entry = entry.expect("an entry");
+    for entry in archive.entries().ok()? {
+        let mut entry = entry.ok()?;
         let mut content = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut content).expect("the member reads");
+        std::io::Read::read_to_end(&mut entry, &mut content).ok()?;
         let header = entry.header();
         lines.push_str(&format!(
             "{} {:?} {:o} {} {} {:?} {}\n",
@@ -92,7 +93,7 @@ fn tar_members(compressed: &[u8]) -> Vec<u8> {
             hex(&Sha256::digest(&content)),
         ));
     }
-    lines.into_bytes()
+    Some(lines.into_bytes())
 }
 
 /// The ranges of `YYYY-MM-DDTHHMMSS[-N]` in `text`.
@@ -233,7 +234,7 @@ impl State {
                 Entry::Link(target) => Entry::Link(relabel(target)),
                 Entry::File { mode, content, .. } => {
                     let content = if name.ends_with(".tar.zst") {
-                        tar_members(&content)
+                        tar_members(&content).unwrap_or(content)
                     } else if name.ends_with(".sha256.zst") {
                         zstd::stream::decode_all(&content[..]).expect("the listing decompresses")
                     } else {
