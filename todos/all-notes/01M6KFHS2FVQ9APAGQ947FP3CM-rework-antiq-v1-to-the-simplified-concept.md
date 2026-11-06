@@ -1892,9 +1892,9 @@ Scenarios and the items each needs merged first:
 Not chosen: an interrupted run repaired by the next one, two runs at
 once.
 
-Work: item E0 builds the harness now (a collection builder with aged
-folders, a path target, running the binary in both modes and comparing
-end states, tree snapshots); the lead starts a scenario agent for each
+Work: item E0 built the harness (main 0693f5b, `tests/support/scenario/`,
+how to write a scenario is in its module documentation; scenarios go to
+`tests/scenarios/<group>.rs`); the lead starts a scenario agent for each
 group of scenarios once the items it needs are merged, extending the
 harness as scenarios need it, so the harness keeps one structure. All
 scenarios are in before Z.
