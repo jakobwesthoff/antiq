@@ -1092,7 +1092,7 @@ mod tests {
     fn example_of(fx: &Fixture, cwd: &Path, set: &CandidateSet, word: &str) -> String {
         match resolve_offering(fx, cwd, set, word).expect_err("only offered") {
             ReferenceError::Inexact { example, .. } => example,
-            other => panic!("expected an inexact reference, got {other}"),
+            other => unreachable!("only offered, not {other}"),
         }
     }
 
@@ -1124,6 +1124,22 @@ mod tests {
         assert_eq!(
             resolve_offering(&fx, &fx.root(), &set, &example).expect("acts"),
             path("notes/100%25")
+        );
+    }
+
+    #[test]
+    fn the_example_of_a_name_that_is_not_utf8_is_its_escaped_form() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["projects/d%FF"]);
+        assert_eq!(
+            example_of(&fx, &fx.root(), &set, "projects/d"),
+            "projects/d%FF"
+        );
+        let from_below = fx.root().join("projects");
+        let example = example_of(&fx, &from_below, &set, "projects/d");
+        assert_eq!(
+            example,
+            format!("{}/projects/d%FF", escape(fx.root().as_os_str().as_bytes()))
         );
     }
 

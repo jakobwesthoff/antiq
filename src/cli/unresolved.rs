@@ -743,6 +743,100 @@ mod tests {
     }
 
     #[test]
+    fn without_a_listing_the_closest_piece_stands_in_a_hint() {
+        let closest = candidates(&["projects/scanner"]);
+        let failure = Failure::Unknown { closest: &closest };
+        let action = action(&cli(&["unearth", "scnaer"]).command).expect("unearth is an action");
+        let error = ReferenceError::Unknown {
+            reference: "scnaer".into(),
+            closest: closest.clone(),
+        };
+        let command = |piece: Option<&str>, _: Option<&str>| {
+            format!("antiq unearth {}", piece.expect("a piece"))
+        };
+        let parts = build(
+            &failure,
+            &error,
+            action,
+            None,
+            &command,
+            &plain_env(),
+            &TimeZone::UTC,
+        );
+        let lines = render_parts(&parts, &plain_env());
+        assert_eq!(
+            lines[lines.len() - 1],
+            " → HINT  Did you mean projects/scanner? Run antiq unearth projects/scanner."
+        );
+    }
+
+    #[test]
+    fn with_a_table_the_closest_piece_has_no_hint() {
+        let closest = candidates(&["projects/scanner"]);
+        let failure = Failure::Unknown { closest: &closest };
+        let action = action(&cli(&["unearth", "scnaer"]).command).expect("unearth is an action");
+        let error = ReferenceError::Unknown {
+            reference: "scnaer".into(),
+            closest: closest.clone(),
+        };
+        let rows = [row("projects/scanner", "2026-11-04T090211")];
+        let parts = build(
+            &failure,
+            &error,
+            action,
+            Some(&rows[..]),
+            &no_command,
+            &plain_env(),
+            &TimeZone::UTC,
+        );
+        let lines = render_parts(&parts, &plain_env());
+        assert!(lines.iter().all(|line| !line.contains("HINT")), "{lines:?}");
+        assert_eq!(lines[lines.len() - 1], " ℹ INFO  Nothing was unearthed.");
+    }
+
+    #[test]
+    fn without_a_listing_the_one_match_of_an_inexact_word_stands_in_the_text_of_the_error() {
+        let pieces = candidates(&["projects/scanner"]);
+        let failure = Failure::Inexact {
+            reference: "scaner",
+            candidates: &pieces,
+        };
+        let action = action(&cli(&["forget", "scaner", "2025"]).command).expect("forget is one");
+        let error = ReferenceError::Inexact {
+            reference: "scaner".into(),
+            candidates: pieces.clone(),
+            example: "projects/scanner".into(),
+        };
+        let parts = build(
+            &failure,
+            &error,
+            action,
+            None,
+            &no_command,
+            &plain_env(),
+            &TimeZone::UTC,
+        );
+        assert_eq!(
+            render_parts(&parts, &plain_env()),
+            [
+                " ✖ ERROR",
+                "▌ scaner is not the path of a piece, and this command acts only on a path",
+                "▌",
+                "▌ How to fix it",
+                "▌   Run the command again with the path of the piece you mean, for example projects/scanner.",
+                "▌",
+                "▌   These pieces match:",
+                "▌     projects/scanner",
+                "▌",
+                "▌ What antiq was doing",
+                "▌   Attempting to find the piece to forget.",
+                "",
+                " ℹ INFO  Nothing was deleted.",
+            ]
+        );
+    }
+
+    #[test]
     fn without_a_listing_the_stamps_of_an_ambiguous_version_stand_in_the_error() {
         let stamps: Vec<String> = (10..21)
             .map(|day| format!("2025-06-{day}T101500"))
