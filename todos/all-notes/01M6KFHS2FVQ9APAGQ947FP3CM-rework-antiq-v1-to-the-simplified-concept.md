@@ -1842,6 +1842,12 @@ extraction, A on kernels before 5.8); A only where `F_FULLFSYNC` or
   `[collection]` key is written commented out with its default value and
   its comment, so a later change of a default still reaches existing
   collections. The user is told and may veto.
+- `archive` with named pieces (asqr 01M6M0JCV8HAZA8RH73NRWAFXE,
+  2026-11-04): a named piece that is pinned or refused makes the run exit
+  1; when some named pieces are archived and others are not, it exits 3.
+  `archive` without an argument keeps exit 0 for refused pieces. The
+  user's reason: a script that names a piece learns that nothing
+  happened. Item C4.
 
 ### 8.9 Module names (user decision, 2026-11-04)
 
