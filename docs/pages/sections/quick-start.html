@@ -1,0 +1,45 @@
+<section id="quickstart" class="quickstart">
+  <div class="container">
+    <h2>Quick Start</h2>
+
+    <div class="tabs">
+      <div class="tab-buttons">
+        <button class="tab-button active" data-tab="source">From Source</button>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-panel active" data-tab="source">
+          <div class="code-block">
+            <pre><code class="language-bash">git clone https://github.com/jakobwesthoff/antiq
+cd antiq
+cargo install --path .</code></pre>
+          </div>
+          <div style="padding: var(--space-md) var(--space-lg); border-top: 1px solid var(--color-border);">
+            <p style="margin: 0; color: var(--color-text-muted);">
+              Needs Rust 1.97 or newer. <code>antiq push</code> needs rsync 3.2.4 or newer.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3>Basic Usage</h3>
+    <div class="code-block">
+      <pre><code class="language-bash"># Make the current directory a collection of folders two levels down
+antiq init --pattern '*/*'
+
+# Show what is due, then archive it
+antiq status
+antiq archive
+
+# Find a version by piece name or by the files it holds
+antiq list scan
+antiq grep 'main\.rs'
+
+# Bring a version back as a folder
+antiq unearth scan-old
+
+# Mirror the collection to the target set in .antiq/config.toml
+antiq push --init</code></pre>
+    </div>
+  </div>
+</section>
