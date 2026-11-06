@@ -10,11 +10,12 @@
 Archive what you no longer touch, find it when you need it.
 
 antiq is a command-line tool written in Rust for directories where
-working folders pile up. It is in early development. `antiq init` makes a
-directory a collection, `antiq status` shows its pieces by state and
-`antiq archive` archives the idle ones. `antiq sync` exchanges metadata
-and archives with a path remote. The other commands are not implemented
-yet.
+working folders pile up. It archives the folders of a collection that
+nobody has touched for a while, finds them again by name or by the files
+they hold, brings them back, and mirrors the whole collection to one backup
+target. The code is being reworked to this design, which
+`docs/specs/spec-v1.md` specifies. Of the commands only `antiq init` works
+so far; it makes a directory a collection.
 
 The pangolin in the logo is [Archie](assets/archie-512.webp), antiq's
 mascot: a small idol of obsidian and gold. Archie shares its name with
@@ -22,17 +23,16 @@ the first internet search engine, released in 1990, which indexed the
 files on FTP archives so people could find them again. The search
 engine's name, too, was a shortening of "archive".
 
-The plan for version 1:
+Version 1:
 
-- Folders that have not changed for a set number of days get packed into
-  compressed archives.
-- An index of each archive's contents keeps it searchable, and a picker
-  restores it.
-- Archives move to a backup store, such as a NAS, in tiers. In the later
-  tier only the index stays local, and restoring fetches the archive from
-  the store.
-- Folders still in use are backed up to the same store as packages, and
-  several machines can share one store.
+- All work happens on one machine. The target is a plain copy of the
+  collection: copying it back restores the live folders and the versions.
+- Folders that have not changed for a set number of days become versions:
+  compressed `tar.zst` archives with a listing that `shasum -c` reads once
+  `zstd` has decompressed it.
+- `antiq list` and `antiq grep` find versions by piece name and by the
+  paths of the files they hold.
+- `antiq push` mirrors the collection to the target with rsync.
 
 ## License
 
