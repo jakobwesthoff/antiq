@@ -420,7 +420,7 @@ impl Run<'_> {
             .iter()
             .map(Stamp::to_string)
             .collect();
-        tracker.started(bytes, Some(&chosen.stamp.to_string()), &siblings);
+        tracker.started(Some(bytes), Some(&chosen.stamp.to_string()), &siblings);
         let brought = bring_back_to(
             self.collection,
             self.places,
@@ -461,7 +461,7 @@ impl Run<'_> {
                 tracker.finished(
                     bytes,
                     &Progress::NoRoom {
-                        needed: needed.expect("a sound version has a listing"),
+                        needed: Some(needed.expect("a sound version has a listing")),
                         available,
                     },
                 );
@@ -1538,7 +1538,7 @@ mod tests {
             recorder.lines(),
             [
                 "started projects/scanner 25 2026-11-03T081500",
-                "finished projects/scanner 25 NoRoom { needed: 25, available: 3 }",
+                "finished projects/scanner 25 NoRoom { needed: Some(25), available: 3 }",
             ]
         );
     }

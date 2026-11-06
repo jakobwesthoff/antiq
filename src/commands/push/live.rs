@@ -69,7 +69,7 @@ impl<'a> Progress<'a> {
         }
         self.observer.event(Event::Started {
             name: &self.name,
-            bytes: 0,
+            bytes: Some(0),
             stamp: None,
             siblings: &[],
         });

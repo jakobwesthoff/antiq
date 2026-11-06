@@ -15,7 +15,7 @@ pub enum Seen {
     Planned(Vec<Planned>),
     Started {
         name: String,
-        bytes: u64,
+        bytes: Option<u64>,
         stamp: Option<String>,
     },
     Operation {
@@ -48,10 +48,14 @@ impl Seen {
                 let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
                 format!("planned {}", names.join(" "))
             }
-            Seen::Started { name, bytes, stamp } => match stamp {
-                Some(stamp) => format!("started {name} {bytes} {stamp}"),
-                None => format!("started {name} {bytes}"),
-            },
+            Seen::Started { name, bytes, stamp } => {
+                // An unknown size reads `-`.
+                let bytes = bytes.map_or("-".to_string(), |bytes| bytes.to_string());
+                match stamp {
+                    Some(stamp) => format!("started {name} {bytes} {stamp}"),
+                    None => format!("started {name} {bytes}"),
+                }
+            }
             Seen::Operation {
                 name,
                 operation,

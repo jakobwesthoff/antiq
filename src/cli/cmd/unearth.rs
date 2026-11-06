@@ -4,9 +4,9 @@
 
 //! The `unearth` command: brings a version back and removes it.
 
-use super::progress::{self, Description};
+use super::progress::{self, Description, Restored};
 use crate::cli::console::block::Block;
-use crate::cli::console::cards::{Count, Summary, Tone};
+use crate::cli::console::cards::{Count, Summary};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
@@ -44,17 +44,12 @@ pub fn run(ctx: &Context, args: &UnearthArgs, out: &mut Output) -> anyhow::Resul
     let style = out.stdout_style();
     // On a terminal the piece shows as a card while it comes back, and its
     // line replaces the line of the pipe.
-    let label_zone = zone.clone();
-    let mut description = Description::new(COUNTS);
-    description.label = Box::new(move |stamp, siblings| {
-        let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
-        label(stamp, &siblings, style, &label_zone)
-    });
+    let cards = description(style, &zone);
     let (result, shown) = progress::watch(
         ctx,
         out,
         args.dry_run,
-        description,
+        cards,
         |observer| unearth_observed(&collection, &request, &SystemClock, &zone, observer),
         || unearth(&collection, &request, &SystemClock, &zone),
         |_| Vec::new(),
@@ -131,23 +126,30 @@ fn done_summary(
     cwd: &std::path::Path,
     took: std::time::Duration,
 ) -> Summary {
-    let piece = sanitize(&report.piece);
-    let (text, tone) = if report.skipped.is_some() {
-        (format!("Skipped {piece}"), Tone::Warn)
-    } else {
-        let destination = sanitize(&progress::destination(root, &report.path, cwd));
-        let tone = if report.unfinished {
-            Tone::Bad
-        } else {
-            Tone::Ok
-        };
-        (format!("Unearthed to {destination}"), tone)
-    };
-    Summary {
-        tone,
-        parts: vec![(text, tone)],
+    progress::restore_summary(
+        &Restored {
+            verb: "Unearthed",
+            piece: &report.piece,
+            path: &report.path,
+            skipped: report.skipped.is_some(),
+            unfinished: report.unfinished,
+        },
+        root,
+        cwd,
         took,
-    }
+    )
+}
+
+/// The description of the cards of a command that brings a version back:
+/// `unearth` and `fork` count and name their versions the same way.
+pub(super) fn description(style: Style, zone: &TimeZone) -> Description {
+    let zone = zone.clone();
+    let mut description = Description::new(COUNTS);
+    description.label = Box::new(move |stamp, siblings| {
+        let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
+        label(stamp, &siblings, style, &zone)
+    });
+    description
 }
 
 /// How the console names a version: its local time on a terminal, with
@@ -273,6 +275,7 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::console::cards::Tone;
     use antiq::commands::unearth::SkippedNote;
     use std::path::Path;
     use std::time::Duration;

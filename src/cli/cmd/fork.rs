@@ -4,8 +4,10 @@
 
 //! The `fork` command: extracts a working copy of a version.
 
-use super::unearth::label;
+use super::progress::{self, Restored};
+use super::unearth::{description, label};
 use crate::cli::console::block::Block;
+use crate::cli::console::cards::Summary;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
@@ -13,7 +15,9 @@ use crate::cli::table::{decimal_size, sanitize};
 use crate::cli::{Context, ForkArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
-use antiq::commands::fork::{DryRunPlan, ForkAction, ForkReport, ForkRequest, Outcome, fork};
+use antiq::commands::fork::{
+    DryRunPlan, ForkAction, ForkReport, ForkRequest, Outcome, fork, fork_observed,
+};
 use antiq::plan::Step;
 use antiq::report::CommandReport;
 use antiq::versions::naming::system_zone;
@@ -32,10 +36,21 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
         dry_run: args.dry_run,
     };
     let zone = system_zone();
-    let outcome = fork(&collection, &request, &SystemClock, &zone)
+    let style = out.stdout_style();
+    // On a terminal the piece shows as a card while the copy is made, as for
+    // an unearth, and its line replaces the line of the pipe.
+    let (result, shown) = progress::watch(
+        ctx,
+        out,
+        args.dry_run,
+        description(style, &zone),
+        |observer| fork_observed(&collection, &request, &SystemClock, &zone, observer),
+        || fork(&collection, &request, &SystemClock, &zone),
+        |_| Vec::new(),
+    )?;
+    let outcome = result
         .map_err(antiq::Error::from)
         .context("fork the version")?;
-    let style = out.stdout_style();
 
     match outcome {
         Outcome::Held(held) => {
@@ -74,17 +89,47 @@ pub fn run(ctx: &Context, args: &ForkArgs, out: &mut Output) -> anyhow::Result<u
                     .context("print the result")?;
             } else {
                 let lines = done_lines(&report, style, &zone);
-                for line in &lines.stdout {
-                    out.line(line).context("print the result")?;
+                if let Some(shown) = &shown {
+                    let summary =
+                        done_summary(&report, collection.root(), &ctx.start, shown.took());
+                    shown.print_summary(out, &summary)?;
+                } else {
+                    for line in &lines.stdout {
+                        out.line(line).context("print the result")?;
+                    }
                 }
                 out.notices(&lines.notices).context("print the notes")?;
-                for line in &lines.stderr {
-                    out.note(line).context("print the notes")?;
+                if shown.is_none() {
+                    for line in &lines.stderr {
+                        out.note(line).context("print the notes")?;
+                    }
                 }
             }
             Ok(if report.partial() { 3 } else { 0 })
         }
     }
+}
+
+/// The last line of a fork that showed cards: where the copy came about, or
+/// that the version was not forked.
+fn done_summary(
+    report: &ForkReport,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    took: std::time::Duration,
+) -> Summary {
+    progress::restore_summary(
+        &Restored {
+            verb: "Forked",
+            piece: &report.piece,
+            path: &report.path,
+            skipped: report.skipped.is_some(),
+            unfinished: report.unfinished,
+        },
+        root,
+        cwd,
+        took,
+    )
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -200,6 +245,7 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::console::cards::Tone;
     use antiq::commands::fork::SkippedNote;
     use antiq::plan::Plan;
     use antiq::relpath::RelPath;
@@ -227,6 +273,56 @@ mod tests {
             warnings: vec![Warning::new("a warning".to_string())],
             unfinished: false,
             siblings: Vec::new(),
+        }
+    }
+
+    fn summary(report: &ForkReport) -> (Tone, String) {
+        let root = std::path::Path::new("/data");
+        let summary = done_summary(report, root, root, std::time::Duration::from_secs(4));
+        (summary.tone, summary.parts[0].0.clone())
+    }
+
+    #[test]
+    fn a_fork_is_told_by_the_path_of_the_copy_and_not_by_the_piece() {
+        assert_eq!(
+            summary(&report(None)),
+            (Tone::Ok, "Forked to ./tools/copy".to_string())
+        );
+    }
+
+    #[test]
+    fn a_copy_in_place_that_is_not_durable_is_told_as_a_failure() {
+        let mut unfinished = report(None);
+        unfinished.unfinished = true;
+        assert_eq!(
+            summary(&unfinished),
+            (Tone::Bad, "Forked to ./tools/copy".to_string())
+        );
+    }
+
+    #[test]
+    fn a_skipped_fork_is_told_by_its_piece() {
+        let skipped = report(Some(SkippedNote {
+            reason: "no_space",
+            needed: Some(9),
+            available: 3,
+        }));
+        assert_eq!(
+            summary(&skipped),
+            (Tone::Warn, "Skipped projects/scanner".to_string())
+        );
+    }
+
+    #[test]
+    fn the_cards_of_a_fork_count_files_in_every_operation() {
+        use antiq::progress::Operation;
+        for (operation, word) in [
+            (Operation::Extracting, "extracting"),
+            (Operation::Verifying, "verifying"),
+        ] {
+            let [first, second] = progress::card_of(super::super::unearth::COUNTS, operation, 1, 4);
+            assert!(first.ends_with(&format!("  {word}")), "{first:?}");
+            assert!(second.ends_with("25%  1/4 files"), "{second:?}");
         }
     }
 

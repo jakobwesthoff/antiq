@@ -33,6 +33,7 @@ impl Observer for Lines {
             }
             Event::Started { name, bytes, .. } => {
                 let name = name.to_string();
+                let bytes = bytes.map_or("-".to_string(), |bytes| bytes.to_string());
                 Box::new(move || format!("started {name} {bytes}"))
             }
             Event::Operation {

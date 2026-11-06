@@ -69,7 +69,7 @@ impl Watcher {
 fn started(name: &str, bytes: u64) -> Msg {
     Msg::Started {
         name: name.to_string(),
-        bytes,
+        bytes: Some(bytes),
         label: None,
     }
 }
@@ -203,7 +203,7 @@ fn the_bytes_of_a_measured_item_reach_its_card_through_the_feed() {
     let sent = Counter::new();
     feed.event(Event::Started {
         name: "nas",
-        bytes: 0,
+        bytes: Some(0),
         stamp: None,
         siblings: &[],
     });
@@ -889,7 +889,7 @@ fn a_run_with_a_session_leaves_the_lines_and_hands_back_its_value_and_cards() {
             });
             observer.event(Event::Started {
                 name: "a",
-                bytes: 10,
+                bytes: Some(10),
                 stamp: Some("2026-11-05T13-02-11Z"),
                 siblings: &[],
             });
@@ -946,7 +946,7 @@ fn an_error_of_the_run_leaves_no_region_behind() {
         |observer| -> Result<(), &'static str> {
             observer.event(Event::Started {
                 name: "a",
-                bytes: 10,
+                bytes: Some(10),
                 stamp: None,
                 siblings: &[],
             });
@@ -1015,7 +1015,7 @@ fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
             |observer| {
                 observer.event(Event::Started {
                     name: "a",
-                    bytes: 10,
+                    bytes: Some(10),
                     stamp: None,
                     siblings: &[],
                 });
@@ -1073,7 +1073,7 @@ fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling
             |observer| {
                 observer.event(Event::Started {
                     name: "a",
-                    bytes: 10,
+                    bytes: Some(10),
                     stamp: None,
                     siblings: &[],
                 });

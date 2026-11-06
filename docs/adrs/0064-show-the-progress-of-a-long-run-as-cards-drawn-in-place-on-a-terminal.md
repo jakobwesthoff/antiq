@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-`archive`, `push` and `unearth` printed nothing until they ended. The
+`archive`, `push`, `unearth` and `fork` printed nothing until they ended. The
 lines scripts read must stay as they are (ADR 0020).
 
 ## Decision

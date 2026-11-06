@@ -443,12 +443,12 @@ impl Run<'_> {
         // The card names the piece that is extracted, not the copy.
         let name = picked.piece.to_string();
         let tracker = Tracker::new(self.observer.unwrap_or(&Silent), &name);
-        let bytes = picked.listing.as_ref().map_or(0, |listing| listing.bytes);
+        let size = picked.listing.as_ref().map(|listing| listing.bytes);
         let siblings: Vec<String> = complete_stamps(self.places, &picked.piece)
             .iter()
             .map(Stamp::to_string)
             .collect();
-        tracker.started(bytes, Some(&picked.stamp.to_string()), &siblings);
+        tracker.started(size, Some(&picked.stamp.to_string()), &siblings);
         let brought = bring_back_to(
             self.collection,
             self.places,
@@ -487,17 +487,7 @@ impl Run<'_> {
                     available,
                 });
                 warnings.extend(more.into_iter().map(Warning::new));
-                tracker.finished(
-                    bytes,
-                    &match needed {
-                        Some(needed) => Progress::NoRoom { needed, available },
-                        // TODO: the console words the free space in decimal
-                        // units once `NoRoom` can carry an unknown `needed`.
-                        None => Progress::Skipped(format!(
-                            "out of space during the extraction, {available} bytes free"
-                        )),
-                    },
-                );
+                tracker.finished(size.unwrap_or(0), &Progress::NoRoom { needed, available });
             }
             Brought::Done {
                 warnings: more,
@@ -521,7 +511,7 @@ impl Run<'_> {
                     outcome = Progress::Unfinished(warning.message.clone());
                     warnings.push(warning);
                 }
-                tracker.finished(bytes, &outcome);
+                tracker.finished(size.unwrap_or(0), &outcome);
             }
         }
         report.warnings = warnings;
@@ -807,7 +797,7 @@ mod tests {
             recorder.lines(),
             [
                 "started projects/scanner 25 2026-11-04T090211",
-                "finished projects/scanner 25 NoRoom { needed: 25, available: 3 }",
+                "finished projects/scanner 25 NoRoom { needed: Some(25), available: 3 }",
             ]
         );
     }
@@ -827,7 +817,7 @@ mod tests {
         assert_eq!(
             recorder.lines(),
             [
-                "started projects/scanner 0 2026-11-04T090211",
+                "started projects/scanner - 2026-11-04T090211",
                 "projects/scanner Extracting 2/0",
                 "finished projects/scanner 0 Files(2)",
             ]
@@ -856,9 +846,7 @@ mod tests {
         let lines = recorder.lines();
         let last = lines.last().expect("events came");
         assert!(
-            last.starts_with(
-                "finished projects/scanner 0 Skipped(\"out of space during the extraction"
-            ),
+            last.starts_with("finished projects/scanner 0 NoRoom { needed: None, available: "),
             "{last}"
         );
     }

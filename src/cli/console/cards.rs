@@ -79,7 +79,7 @@ pub(crate) enum Msg {
     Planned(Vec<(String, u64)>),
     Started {
         name: String,
-        bytes: u64,
+        bytes: Option<u64>,
         label: Option<String>,
     },
     Operation {
@@ -148,7 +148,8 @@ enum Phase {
 
 struct Item {
     name: String,
-    bytes: u64,
+    /// `None` where the size of the piece is not known.
+    bytes: Option<u64>,
     /// The bytes sent so far, when the piece reports them: its card shows
     /// them in place of `bytes`.
     measured: Option<Counter>,
@@ -268,7 +269,7 @@ impl Cards {
         self.position(name).unwrap_or_else(|| {
             self.items.push(Item {
                 name: name.to_string(),
-                bytes: 0,
+                bytes: None,
                 measured: None,
                 label: None,
                 phase: Phase::Waiting,
@@ -305,7 +306,7 @@ impl Cards {
                 for (name, bytes) in planned {
                     if self.position(&name).is_none() {
                         let index = self.find_or_add(&name);
-                        self.items[index].bytes = bytes;
+                        self.items[index].bytes = Some(bytes);
                     }
                 }
             }
@@ -346,11 +347,19 @@ impl Cards {
                 if matches!(item.phase, Phase::Done) {
                     return;
                 }
+                // A piece that started keeps the size it started with, which
+                // may be unknown. One that never started has the size of its
+                // finish.
+                let size = if matches!(item.phase, Phase::Waiting) {
+                    Some(bytes)
+                } else {
+                    item.bytes
+                };
                 Self::close_segment(item, now);
                 item.phase = Phase::Done;
                 self.ready.push(Ready {
                     name,
-                    bytes: Some(bytes),
+                    bytes: size,
                     label: item.label.clone(),
                     outcome,
                     elapsed: Some(item.elapsed),
@@ -516,11 +525,17 @@ impl Cards {
                 vec![(sanitize(message), None)]
             }
             Outcome::NoRoom { needed, available } => vec![(
-                format!(
-                    "{} needed, {} free",
-                    decimal_size(*needed),
-                    decimal_size(*available)
-                ),
+                match needed {
+                    Some(needed) => format!(
+                        "{} needed, {} free",
+                        decimal_size(*needed),
+                        decimal_size(*available)
+                    ),
+                    None => format!(
+                        "out of space during the extraction, {} free",
+                        decimal_size(*available)
+                    ),
+                },
                 None,
             )],
             Outcome::Files(_) | Outcome::Changes { .. } => Vec::new(),
@@ -654,7 +669,10 @@ impl Cards {
         );
         let cell = format!("{prefix}{cell}");
         let cell_width = cell_width + prefix.width();
-        let bytes = item.measured.as_ref().map_or(item.bytes, Counter::done);
+        let bytes = item
+            .measured
+            .as_ref()
+            .map_or(item.bytes, |sent| Some(sent.done()));
         let current = match &item.phase {
             Phase::Running(Some((operation, counter))) => Some((*operation, counter)),
             _ => None,
@@ -665,7 +683,7 @@ impl Cards {
             self.paint(theme::CYAN, spinner),
             cell,
             " ".repeat(layout.name.saturating_sub(cell_width)),
-            self.size_cell(Some(bytes), layout),
+            self.size_cell(bytes, layout),
             self.paint(theme::CYAN, word)
         );
 

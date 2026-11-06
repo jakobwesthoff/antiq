@@ -85,8 +85,9 @@ pub enum Outcome {
     /// The item was not processed; the text says why.
     Skipped(String),
     /// The item was not processed for lack of room: it needs `needed` bytes
-    /// and `available` are free.
-    NoRoom { needed: u64, available: u64 },
+    /// and `available` are free. `needed` is `None` where the volume ran full
+    /// during an extraction whose size was not known.
+    NoRoom { needed: Option<u64>, available: u64 },
     /// The item is partly done and the repairs of the next run finish it.
     Unfinished(String),
 }
@@ -98,7 +99,8 @@ pub enum Event<'a> {
     /// The item starts. `stamp` names the version of an unearth.
     Started {
         name: &'a str,
-        bytes: u64,
+        /// The size of the item, or `None` where it is not known.
+        bytes: Option<u64>,
         stamp: Option<&'a str>,
         /// The stamps of the complete versions of the piece, so that the
         /// observer can tell apart two that read alike.
@@ -160,7 +162,7 @@ impl<'a> Tracker<'a> {
         }
     }
 
-    pub(crate) fn started(&self, bytes: u64, stamp: Option<&str>, siblings: &[String]) {
+    pub(crate) fn started(&self, bytes: Option<u64>, stamp: Option<&str>, siblings: &[String]) {
         self.observer.event(Event::Started {
             name: self.name,
             bytes,
@@ -237,7 +239,12 @@ mod tests {
         fn event(&self, event: Event<'_>) {
             let text = match event {
                 Event::Planned { items } => format!("planned {}", items.len()),
-                Event::Started { name, bytes, .. } => format!("started {name} {bytes}"),
+                Event::Started { name, bytes, .. } => {
+                    format!(
+                        "started {name} {}",
+                        bytes.map_or("-".to_string(), |bytes| bytes.to_string())
+                    )
+                }
                 Event::Operation {
                     name,
                     operation,
@@ -264,7 +271,7 @@ mod tests {
         counter.set_total(3);
         observer.event(Event::Started {
             name: "projects/scanner",
-            bytes: 4211,
+            bytes: Some(4211),
             stamp: None,
             siblings: &[],
         });

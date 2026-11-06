@@ -60,7 +60,7 @@ fn secs(seconds: u64) -> Duration {
 fn started(name: &str, bytes: u64) -> Msg {
     Msg::Started {
         name: name.to_string(),
-        bytes,
+        bytes: Some(bytes),
         label: None,
     }
 }
@@ -217,7 +217,7 @@ fn an_unearth_run_leaves_the_line_of_the_approved_mockup() {
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
-            bytes: 48_300_000,
+            bytes: Some(48_300_000),
             label: Some("2026-11-05 13:02:11".to_string()),
         },
         secs(0),
@@ -685,7 +685,7 @@ fn a_skipped_piece_shows_its_message_in_yellow_and_no_room_shows_sizes() {
             "p",
             25,
             Outcome::NoRoom {
-                needed: 25,
+                needed: Some(25),
                 available: 3,
             },
         ),
@@ -695,6 +695,63 @@ fn a_skipped_piece_shows_its_message_in_yellow_and_no_room_shows_sizes() {
     assert!(lines[0].starts_with("  \x1b[33m⚠\x1b[0m "));
     assert!(lines[0].contains("\x1b[33mskipped\x1b[0m"));
     assert_eq!(lines[1], "    25 B needed, 3 B free");
+}
+
+#[test]
+fn a_run_that_ran_full_without_knowing_the_size_says_so_under_the_skip() {
+    let mut cards = cards(UNEARTH);
+    cards.apply(
+        finished(
+            "p",
+            0,
+            Outcome::NoRoom {
+                needed: None,
+                available: 3,
+            },
+        ),
+        secs(0),
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert_eq!(lines[1], "    out of space during the extraction, 3 B free");
+}
+
+#[test]
+fn an_unknown_size_is_blank_on_the_card_and_on_the_finished_line_while_a_real_zero_is_not() {
+    let mut cards = cards(UNEARTH);
+    for (name, size) in [("unknown", None), ("empty", Some(0))] {
+        cards.apply(
+            Msg::Started {
+                name: name.to_string(),
+                bytes: size,
+                label: None,
+            },
+            secs(0),
+        );
+    }
+    let (extracting, _a) = operation("unknown", Operation::Extracting, 1, 4);
+    cards.apply(extracting, secs(0));
+    let (extracting, _b) = operation("empty", Operation::Extracting, 1, 4);
+    cards.apply(extracting, secs(0));
+    let region = cards.region(secs(1), MOCKUP, 24);
+    assert!(
+        region
+            .iter()
+            .any(|line| line.contains("empty") && line.contains("0 B")),
+        "{region:#?}"
+    );
+    assert!(
+        region
+            .iter()
+            .any(|line| line.contains("unknown") && !line.contains(" B ")),
+        "{region:#?}"
+    );
+    // The finished line keeps the size the piece started with, whatever the
+    // message of the finish carries.
+    cards.apply(finished("unknown", 0, Outcome::Files(2)), secs(2));
+    cards.apply(finished("empty", 0, Outcome::Files(0)), secs(2));
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(!lines[0].contains(" B "), "{}", lines[0]);
+    assert!(lines[1].contains("0 B"), "{}", lines[1]);
 }
 
 #[test]
@@ -855,7 +912,7 @@ fn a_line_of_the_region_that_is_still_too_wide_is_cut_without_breaking_its_colou
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
-            bytes: 5,
+            bytes: Some(5),
             label: Some("2026-11-05 13:02:11".to_string()),
         },
         secs(0),
@@ -976,7 +1033,7 @@ fn the_version_of_an_unearth_keeps_its_place_by_cutting_the_name_and_goes_last()
     cards.apply(
         Msg::Started {
             name: "projects/recipe-api".to_string(),
-            bytes: 5,
+            bytes: Some(5),
             label: Some("2026-11-05 13:02:11".to_string()),
         },
         secs(0),

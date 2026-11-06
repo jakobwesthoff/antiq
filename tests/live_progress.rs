@@ -2,12 +2,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push` and `unearth` show on a terminal while they work
+//! What `archive`, `push`, `unearth` and `fork` show on a terminal while they work
 //! and what stays after they end. The bytes of a run on a pseudo-terminal
 //! are replayed on a screen, so the tests read what a person would see.
 
 mod support;
 
+use std::fs;
 use support::cmd::hold_lock;
 use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};
@@ -390,6 +391,145 @@ fn unearth_on_a_dumb_terminal_prints_the_line_once() {
     run.expect_code(0);
     assert!(!run.stdout.contains('\x1b'));
     assert_eq!(run.stdout.lines().count(), 3, "{:?}", run.stdout);
+}
+
+// =========================================================
+// fork
+// =========================================================
+
+#[test]
+fn fork_leaves_the_line_of_the_piece_and_a_summary_with_the_copy() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["fork", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines[0].starts_with("  ✔ projects/scanner version 2026-11-04 "),
+        "{lines:#?}"
+    );
+    assert!(lines[0].contains("2 files"));
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(
+        is_summary(&lines[2], "✔ Forked to ./projects/scanner"),
+        "{:?}",
+        lines[2]
+    );
+    assert!(!run.stdout.contains("Forked projects/scanner (version"));
+}
+
+#[test]
+fn fork_with_a_name_names_the_copy_in_the_summary_and_the_piece_on_the_card() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(
+        &["fork", "projects/scanner", "--name", "projects/copy"],
+        100,
+        24,
+        &[],
+    );
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines[0].starts_with("  ✔ projects/scanner version "),
+        "{lines:#?}"
+    );
+    assert!(
+        is_summary(&lines[2], "✔ Forked to ./projects/copy"),
+        "{:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn a_json_fork_on_a_terminal_prints_the_json_and_no_cards() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["--json", "fork", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "fork");
+}
+
+#[test]
+fn a_fork_dry_run_on_a_terminal_shows_no_cards() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["fork", "projects/scanner", "-n"], 100, 24, &[]);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('╸') && !run.stdout.contains("waiting"));
+    assert!(!run.stdout.contains("\x1b[1A") && !run.stdout.contains("\x1b[J"));
+    assert!(run.stdout.contains("would fork"), "{:?}", run.stdout);
+}
+
+#[test]
+fn fork_on_a_dumb_terminal_prints_the_line_once() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["fork", "projects/scanner"], 100, 24, &[("TERM", "dumb")]);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('\x1b'));
+    assert_eq!(run.stdout.lines().count(), 3, "{:?}", run.stdout);
+}
+
+#[test]
+fn a_skipped_fork_leaves_its_line_its_reason_and_a_warning_summary() {
+    let clock = Clock::now();
+    let mut builder: CollectionBuilder = Collection::build(&clock);
+    builder
+        .patterns(&["projects/*"])
+        .version("projects/scanner", NEW, &[("a.txt", "hello\n")]);
+    let world = World::new(Setup::new(builder.finish()), Mode::Text);
+    world.oversize_listing("projects/scanner", NEW);
+    let run = world.run_tty_sized(&["fork", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(3);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines[0].starts_with("  ⚠ projects/scanner version "),
+        "{lines:#?}"
+    );
+    assert!(lines[0].contains("skipped"), "{lines:#?}");
+    assert!(
+        lines[1].contains("needed,") && lines[1].trim_end().ends_with("free"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .last()
+            .expect("a summary")
+            .starts_with("⚠ Skipped projects/scanner"),
+        "{lines:#?}"
+    );
+    assert!(
+        !run.stderr.contains("Skipped projects/scanner:"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_fork_of_a_damaged_version_shows_the_warning_after_the_summary() {
+    let world = unearth_world();
+    let store = world.collection().path(".antiq/pieces/projects/scanner");
+    for entry in fs::read_dir(&store).expect("the store folder") {
+        let path = entry.expect("an entry").path();
+        if path.to_string_lossy().ends_with(".tar.zst.sha256") {
+            fs::remove_file(path).expect("removes the checksum file");
+        }
+    }
+    let run = world.run_tty_sized(&["fork", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        is_summary(&lines[2], "✔ Forked to ./projects/scanner"),
+        "{lines:#?}"
+    );
+    assert!(run.stderr.contains("is damaged"), "{:?}", run.stderr);
+}
+
+#[test]
+fn a_fork_to_a_taken_path_leaves_no_card_and_names_the_name_option() {
+    let world = unearth_world();
+    fs::create_dir_all(world.collection().path("projects/scanner")).expect("takes the place");
+    let run = world.run_tty_sized(&["fork", "projects/scanner"], 100, 24, &[]);
+    run.expect_code(1);
+    let screen = replay(&run.stdout, 100, 24).lines().join("\n");
+    assert!(!screen.contains('✔') && !screen.contains('╸'), "{screen:?}");
+    assert!(run.stderr.contains("`--name`"), "{:?}", run.stderr);
 }
 
 // =========================================================

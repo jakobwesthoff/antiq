@@ -553,8 +553,12 @@ fn a_terminal_names_the_version_by_its_local_time() {
     run.expect_code(0);
     // 09:02:11 UTC is 22:02:11 at +13:00.
     assert!(
+        run.stdout.contains("version 2026-11-04 22:02:11"),
+        "{:?}",
         run.stdout
-            .contains("Forked projects/scanner (version 2026-11-04 22:02:11) to tools/copy"),
+    );
+    assert!(
+        run.stdout.contains("Forked to ./tools/copy"),
         "{:?}",
         run.stdout
     );

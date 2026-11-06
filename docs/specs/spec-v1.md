@@ -1192,8 +1192,14 @@ volume that runs full during the extraction: exit 3, `forked` false,
 listing to read the size from. A version without one is not measured
 beforehand.
 
-On the console a run prints `Forked <piece> (version <version>) to <path>`
-on stdout. The repairs that were done (`note: repaired: <repair>`) and the
+On a pipe a run prints `Forked <piece> (version <version>) to <path>`
+on stdout. On a terminal it shows a card named after the piece and its
+version and leaves one finished line and the summary `Forked to <path>`
+with the path of the copy (see "Progress cards"); the stdout line and the
+`Skipped` line of a skipped version stay out, as the finished line carries
+them, and on a terminal a skipped version reads `skipped` with `<size>
+needed, <size> free` or `out of space during the extraction, <size> free`
+under it and the summary `⚠ Skipped <piece>`. The repairs that were done (`note: repaired: <repair>`) and the
 warnings (`warning: <warning>`) go to stderr. A skipped version prints
 `Skipped <piece>: <size> needed, <size> free` on stderr and no stdout line,
 or `Skipped <piece>: out of space during the extraction, <size> free` where
@@ -2159,7 +2165,7 @@ that stream without a panic, and the run ends with the exit code it would have h
 
 #### Progress cards
 
-A real run of `archive`, `push` or `unearth` on a rich stdout shows its
+A real run of `archive`, `push`, `unearth` or `fork` on a rich stdout shows its
 progress as cards (ADR 0064). A dry run, `--json` and a stdout that is not a
 terminal print the lines they print without cards. The warnings and notes
 of the run follow the result as always.
@@ -2168,7 +2174,7 @@ A piece that is working has a card of two lines. The first has a mark that
 turns, the piece in bold, its size and the operation: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
-`unearth`. The second has a bar, the percentage and a count: `N/M files`,
+`unearth`, `extracting` and `verifying` for `fork`. The second has a bar, the percentage and a count: `N/M files`,
 and `N/M entries` for the removing of `archive`. A `push` has a card of its
 own kind, described below. An operation whose total is not
 known yet has a bar with a moving lit part and no percentage or count. The
@@ -2177,16 +2183,19 @@ percentage is rounded and stays at 99 until the operation is done.
 A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
 refused or unfinished piece, `⚠` yellow for a skipped one), the piece in
 bold, its size, its result and the time as `m:ss`. The result is `N files`
-for `archive` and `unearth`, the non-zero ones of `N created`, `N updated`
+for `archive`, `unearth` and `fork`, the non-zero ones of `N created`, `N updated`
 and `N deleted` for the pieces of a `push` on a terminal that does not move
 the cursor, and `refused`, `skipped` or `unfinished`. The
-line of an `unearth` has `version <local time>` after the piece, in the
-form `unearth` uses on a terminal. A refused, skipped or unfinished piece
+line of an `unearth` or a `fork` has `version <local time>` after the
+piece, in the form `unearth` uses on a terminal. A `fork` of a version
+without a listing has no size. A refused, skipped or unfinished piece
 has its reasons under the line, indented by four columns and wrapped to the
 width, one paragraph for each reason. A named piece that carries a pin
 reads `pinned, so it stays as it is. antiq unpin <piece> releases it`, with
 the `-C` of the run in the command when it had one. A skip for lack of room
-reads `<size> needed, <size> free`.
+reads `<size> needed, <size> free`, and a volume that ran full during the
+extraction of a version without a listing reads `out of space during the
+extraction, <size> free`.
 
 The finished lines scroll away like any output, so that the scrollback
 holds all of them in the order the pieces finished. At the bottom stay the
@@ -2220,6 +2229,8 @@ mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
   that says what the marker is for.
 - `unearth`: `Unearthed to ./projects/recipe-api`, the path from the
   directory the command runs in, or `Skipped <piece>` with a `⚠`.
+- `fork`: `Forked to ./projects/recipe-api-copy`, the path of the copy from
+  the directory the command runs in, or `Skipped <piece>` with a `⚠`.
 
 A run with no piece to tell about prints the line of the pipe form, such as
 `Archived 0, skipped 0, refused 0.`. A piece that never reported progress, as

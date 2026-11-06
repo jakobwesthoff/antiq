@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push` and `unearth` share when they show cards on a
+//! What `archive`, `push`, `unearth` and `fork` share when they show cards on a
 //! terminal: when to show them, how they are set up, and the summary line
 //! and the pieces that never sent an event.
 
@@ -10,6 +10,7 @@ use crate::cli::Context;
 use crate::cli::console::cards::{Cards, Config, Count, Ready, Summary, Tone};
 use crate::cli::console::live::{Label, Setup, observed};
 use crate::cli::output::Output;
+use crate::cli::table::sanitize;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::push::PushReport;
 use antiq::progress::{Observer, Operation, Outcome};
@@ -241,6 +242,43 @@ pub(super) fn destination(root: &Path, path: &str, cwd: &Path) -> String {
     }
 }
 
+/// What a command that brings a version back tells at the end of a run.
+pub(super) struct Restored<'a> {
+    /// `Unearthed` or `Forked`.
+    pub verb: &'a str,
+    pub piece: &'a str,
+    /// The folder that came about, relative to the collection root.
+    pub path: &'a str,
+    pub skipped: bool,
+    pub unfinished: bool,
+}
+
+/// The closing line of an unearth or a fork that showed cards: where the
+/// folder came back to, or that the version stayed in the store.
+pub(super) fn restore_summary(
+    restored: &Restored,
+    root: &Path,
+    cwd: &Path,
+    took: Duration,
+) -> Summary {
+    let (text, tone) = if restored.skipped {
+        (format!("Skipped {}", sanitize(restored.piece)), Tone::Warn)
+    } else {
+        let destination = sanitize(&destination(root, restored.path, cwd));
+        let tone = if restored.unfinished {
+            Tone::Bad
+        } else {
+            Tone::Ok
+        };
+        (format!("{} to {destination}", restored.verb), tone)
+    };
+    Summary {
+        tone,
+        parts: vec![(text, tone)],
+        took,
+    }
+}
+
 /// The two lines of the card of a piece whose `operation` has counted
 /// `done` of `total`, on a terminal of 96 columns without colour. The
 /// tests of the commands use it to pin the words and counts their cards show.
@@ -269,7 +307,7 @@ pub(super) fn card_of(
     cards.apply(
         Msg::Started {
             name: "projects/scanner".to_string(),
-            bytes: 10,
+            bytes: Some(10),
             label: None,
         },
         Duration::ZERO,
