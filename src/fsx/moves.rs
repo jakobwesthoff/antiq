@@ -35,7 +35,8 @@ type Restore<'a> = &'a dyn Fn(&TreeRoot, &RelPath, u32) -> io::Result<()>;
 /// directory itself, so owner write is added first and the recorded mode
 /// restored right after, whether the rename worked or not. Only the two
 /// handles are used, so a directory deeper than the path limit moves like
-/// any other.
+/// any other. The root path of either handle is refused as an
+/// `InvalidInput` failure before any mode changes.
 pub(crate) fn move_dir(
     from_root: &TreeRoot,
     from: &RelPath,
@@ -60,6 +61,17 @@ fn move_dir_with(
     rename: Rename<'_>,
     restore: Restore<'_>,
 ) -> Result<Moved, FsxError> {
+    // A root path has no directory above it to be renamed in or out of;
+    // refusing before the mode is touched leaves nothing to restore.
+    for (root, path) in [(from_root, from), (to_root, to)] {
+        if path.is_root() {
+            let source = io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it is the root of the tree itself",
+            );
+            return Err(failure("move", root, path)(source));
+        }
+    }
     let source = from_root
         .lstat(from)
         .map_err(failure("stat", from_root, from))?;
@@ -288,6 +300,65 @@ mod tests {
         }
         assert!(tree.path("outside/keep").exists());
         assert!(!tree.path("b/x").exists());
+    }
+
+    /// Runs `move_dir_with` with the real rename and a restore that counts
+    /// its calls: the restore runs exactly when the move had changed the
+    /// mode of the source, so a refusal before any change leaves it at 0.
+    fn restores_during(
+        from_root: &TreeRoot,
+        from: &RelPath,
+        to_root: &TreeRoot,
+        to: &RelPath,
+    ) -> (Result<Moved, FsxError>, usize) {
+        let restores = std::cell::Cell::new(0);
+        let real_rename =
+            |from_root: &TreeRoot, from: &RelPath, to_root: &TreeRoot, to: &RelPath| {
+                from_root.rename(from, to_root, to)
+            };
+        let counting = |root: &TreeRoot, path: &RelPath, mode: u32| {
+            restores.set(restores.get() + 1);
+            root.set_mode(path, mode)
+        };
+        let result = move_dir_with(from_root, from, to_root, to, &real_rename, &counting);
+        (result, restores.get())
+    }
+
+    #[test]
+    fn the_root_of_the_tree_is_not_moved_and_its_mode_is_not_touched() {
+        let mut tree = Tree::new();
+        tree.dir("r");
+        tree.dir("b");
+        let _guard = RestoreModes(vec![tree.path("r")]);
+        chmod(&tree.path("r"), 0o555);
+        let from_root = TreeRoot::open(&tree.path("r")).expect("opens");
+        let to_root = TreeRoot::open(&tree.path("b")).expect("opens");
+        let (result, restores) =
+            restores_during(&from_root, &RelPath::root(), &to_root, &path("moved"));
+        let error = result.expect_err("refused");
+        assert!(
+            matches!(error, FsxError::Io { action: "move", .. }),
+            "{error}"
+        );
+        assert_eq!(restores, 0, "the mode was changed before the refusal");
+        assert_eq!(mode_of(&tree.path("r")), 0o555);
+    }
+
+    #[test]
+    fn the_root_of_the_target_tree_is_not_a_target_and_the_source_mode_is_not_touched() {
+        let mut tree = Tree::new();
+        tree.file("a/ro/f", "x");
+        let _guard = RestoreModes(vec![tree.path("a/ro")]);
+        chmod(&tree.path("a/ro"), 0o555);
+        let root = root_of(&tree);
+        let (result, restores) = restores_during(&root, &path("a/ro"), &root, &RelPath::root());
+        let error = result.expect_err("refused");
+        assert!(
+            matches!(error, FsxError::Io { action: "move", .. }),
+            "{error}"
+        );
+        assert_eq!(restores, 0, "the mode was changed before the refusal");
+        assert_eq!(mode_of(&tree.path("a/ro")), 0o555);
     }
 
     #[test]

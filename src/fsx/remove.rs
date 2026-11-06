@@ -26,7 +26,9 @@ use std::path::Path;
 /// changed. Nothing is followed across a device boundary: a top or a
 /// directory on another device than `root` fails with
 /// [`FsxError::ForeignDevice`], leaving what it holds untouched. An entry
-/// that is gone already counts as removed.
+/// that is gone already counts as removed. The root path is refused as an
+/// `InvalidInput` failure, before anything is looked at: the tree cannot
+/// remove itself.
 pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FsxError> {
     remove_tree_with(root, path, &|entry| entry.device, &|dir| {
         dir.read_dir(&RelPath::root())
@@ -75,6 +77,16 @@ fn remove_tree_with(
     device_of: DeviceOf<'_>,
     list: List<'_>,
 ) -> Result<(), FsxError> {
+    // The root path names the tree itself, which has no directory above it
+    // to take the last `remove_dir` from. Refusing here keeps the removal
+    // from emptying the tree and failing only afterwards.
+    if path.is_root() {
+        let source = io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "it is the root of the tree itself",
+        );
+        return Err(failure("remove", root, path)(source));
+    }
     // The device the removal has to stay on is the one of the directory
     // holding the top, so a top that is itself a mount point is refused.
     let holder = root
@@ -376,6 +388,26 @@ mod tests {
         let device = |entry: &TreeEntry| entry.device;
         remove_tree_with(&root_of(&tree), &path("t"), &device, &ghost).expect("removes");
         assert!(!tree.path("t").exists());
+    }
+
+    #[test]
+    fn the_root_of_the_tree_is_refused_and_everything_in_it_stays() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        tree.file("b", "y");
+        let error = remove_tree(&root_of(&tree), &RelPath::root()).expect_err("refused");
+        assert!(
+            matches!(
+                error,
+                FsxError::Io {
+                    action: "remove",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(tree.path("t/a").exists(), "the tree was emptied");
+        assert!(tree.path("b").exists(), "the tree was emptied");
     }
 
     #[test]
