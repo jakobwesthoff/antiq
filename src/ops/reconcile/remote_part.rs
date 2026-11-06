@@ -188,6 +188,33 @@ fn reach(
         }
     }
 
+    // An object without an entry, such as one that was only pulled, has
+    // versions that cannot be read as well. Marks and the versions other
+    // machines wrote concern the entries and stay with them.
+    let with_entry: BTreeSet<ObjectId> = tracked.entries.iter().map(|entry| entry.id).collect();
+    for id in store.objects()? {
+        if with_entry.contains(&id) {
+            continue;
+        }
+        let extra = part.would_pull.get(&id).cloned().unwrap_or_default();
+        match store.current_with(id, &extra) {
+            Ok(Some(current)) => {
+                for version in &current.unreadable {
+                    unreadable_note(part, id, version.number, &version.reason);
+                }
+            }
+            Err(StoreError::NothingReadable { unreadable }) => {
+                for version in unreadable {
+                    unreadable_note(part, id, version.number, &version.reason);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => part.warnings.push(Warning::new(format!(
+                "the metadata of {id} cannot be read: {error}"
+            ))),
+        }
+    }
+
     let settings = Settings {
         machine: &machine,
         collection: collection.id(),

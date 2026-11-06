@@ -1222,3 +1222,75 @@ fn a_dry_run_with_force_reports_no_hold_of_the_brake() {
     let actions = run.json()["actions"].to_string();
     assert!(actions.contains("\"action\":\"drop\""), "{actions}");
 }
+
+// ---------------------------------------------------------
+// Unreadable versions of objects without an entry
+// ---------------------------------------------------------
+
+#[test]
+fn a_version_that_cannot_be_read_is_listed_for_an_object_without_an_entry() {
+    let world = world();
+    world.archived(1, "alpha", Archive::Remote);
+    fs::remove_file(
+        world
+            .root()
+            .join(".antiq/tracking")
+            .join(format!("{}.json", id(1))),
+    )
+    .expect("no entry");
+    fs::write(world.remote_dir(1).join("meta.2"), b"{ not json").expect("a damaged version");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    assert_eq!(
+        run.json()["unreadable_versions"][0]["version"],
+        2,
+        "{}",
+        run.stdout
+    );
+}
+
+impl World {
+    /// Takes the entry of `number` away, so that its object has none.
+    fn untrack(&self, number: u8) {
+        fs::remove_file(
+            self.root()
+                .join(".antiq/tracking")
+                .join(format!("{}.json", id(number))),
+        )
+        .expect("no entry");
+    }
+}
+
+#[test]
+fn an_object_without_an_entry_and_with_nothing_readable_is_listed() {
+    let world = world();
+    world.archived(1, "alpha", Archive::Remote);
+    world.untrack(1);
+    fs::write(world.local_dir(1).join("meta.1"), b"{ not json").expect("damaged");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    let listed = run.json()["unreadable_versions"].clone();
+    assert_eq!(listed[0]["id"], id(1).to_string(), "{}", run.stdout);
+    assert_eq!(listed[0]["version"], 1);
+}
+
+#[test]
+fn a_recorded_change_that_cannot_be_read_is_a_warning_for_an_object_without_an_entry() {
+    let world = world();
+    world.archived(1, "alpha", Archive::Remote);
+    world.untrack(1);
+    fs::write(world.local_dir(1).join("meta.pending"), b"{ not json").expect("damaged");
+
+    let run = world.reconcile_json(&[]);
+
+    succeeded(&run);
+    let warnings = run.json()["warnings"].to_string();
+    assert!(
+        warnings.contains(&format!("the metadata of {} cannot be read", id(1))),
+        "{warnings}"
+    );
+}
