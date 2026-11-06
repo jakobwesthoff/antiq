@@ -821,6 +821,45 @@ mod tests {
     }
 
     #[test]
+    fn a_store_note_names_the_place_below_the_collection_and_any_other_error_as_it_is() {
+        let io = |path: &str| VersionsError::Io {
+            action: "list",
+            path: path.to_string(),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+
+        assert_eq!(
+            store_note(&io("notes")),
+            "cannot read the store: pieces/notes: permission denied"
+        );
+        assert_eq!(
+            store_note(&io(".")),
+            "cannot read the store: pieces: permission denied"
+        );
+        assert_eq!(
+            store_note(&io("/work/.antiq/pieces")),
+            "cannot read the store: /work/.antiq/pieces: permission denied"
+        );
+        assert_eq!(
+            store_note(&VersionsError::InvalidStamp("x".to_string())),
+            "cannot read the store: `x` is not a version stamp"
+        );
+    }
+
+    #[test]
+    fn a_collection_without_a_store_folder_has_no_versions_and_no_spelling() {
+        let mut temp = world("");
+        temp.tree().file_with("live/f", "x", 0o644, NOW - DAY);
+        fs::remove_dir(antiq(&temp, "pieces")).expect("the store folder is removed");
+
+        let found = reported(&temp);
+
+        assert_eq!(found.versions, Some(0));
+        assert!(found.spelling.is_empty());
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    #[test]
     fn a_store_that_cannot_be_read_is_a_note_and_the_live_pieces_stay() {
         let mut temp = world("");
         temp.tree().file_with("live/f", "x", 0o644, NOW - 40 * DAY);

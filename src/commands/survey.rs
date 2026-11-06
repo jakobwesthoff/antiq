@@ -790,6 +790,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_kind_has_its_json_name() {
+        let names = [
+            (RefusalKind::MountPoint, "mount_point"),
+            (RefusalKind::NestedCollection, "nested_collection"),
+            (RefusalKind::UnreadableEntry, "unreadable_entry"),
+            (RefusalKind::ExcludeEntry, "exclude_entry"),
+            (RefusalKind::Locked, "locked"),
+            (RefusalKind::RuleFile, "rule_file"),
+            (RefusalKind::NotAFile, "not_a_file"),
+            (RefusalKind::UnreadableMarker, "unreadable_marker"),
+        ];
+        for (kind, name) in names {
+            assert_eq!(kind.as_str(), name);
+        }
+    }
+
     // =========================================================
     // Times in the future
     // =========================================================

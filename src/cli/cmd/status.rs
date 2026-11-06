@@ -73,11 +73,7 @@ const MIN_WHAT: usize = 24;
 
 fn render(report: &StatusReport, style: Style, zone: &TimeZone, now: Timestamp) -> Rendered {
     let mut stdout = vec![header(report)];
-    let rows: Vec<&SurveyedPiece> = report
-        .pieces
-        .iter()
-        .filter(|piece| piece.verdict != Verdict::Plain)
-        .collect();
+    let rows = rows_of(report);
     if !rows.is_empty() {
         stdout.push(String::new());
         stdout.extend(table(&rows, style, now));
@@ -128,10 +124,50 @@ fn header(report: &StatusReport) -> String {
     parts.join(" · ")
 }
 
-fn table(rows: &[&SurveyedPiece], style: Style, now: Timestamp) -> Vec<String> {
+/// A piece that has a state, as the table and the JSON list it.
+struct Row<'a> {
+    piece: &'a SurveyedPiece,
+    state: &'static str,
+    color: Color,
+    what: String,
+}
+
+/// The pieces that have a state; plain ones are only counted in the header.
+fn rows_of(report: &StatusReport) -> Vec<Row<'_>> {
+    report.pieces.iter().filter_map(row_of).collect()
+}
+
+fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
+    let (state, color, what) = match &piece.verdict {
+        Verdict::Plain => return None,
+        Verdict::Due => ("due", Color::Yellow, "archives next run".to_string()),
+        Verdict::Soon { days_left } => (
+            "soon",
+            Color::Cyan,
+            format!("archives in {}", plural(*days_left as usize, "day", "days")),
+        ),
+        Verdict::Pinned => ("pinned", Color::Magenta, "kept by .antiq-pin".to_string()),
+        Verdict::Refused(reasons) => {
+            let joined = reasons
+                .iter()
+                .map(|reason| sanitize(&reason.to_string()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            ("refused", Color::Red, joined)
+        }
+    };
+    Some(Row {
+        piece,
+        state,
+        color,
+        what,
+    })
+}
+
+fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
     let names: Vec<String> = rows
         .iter()
-        .map(|row| sanitize(&row.piece.to_string()))
+        .map(|row| sanitize(&row.piece.piece.to_string()))
         .collect();
     let longest = names.iter().map(|name| name.width()).max().unwrap_or(0);
     let wide = style.width >= WIDE_FROM;
@@ -164,13 +200,6 @@ fn table(rows: &[&SurveyedPiece], style: Style, now: Timestamp) -> Vec<String> {
         "WHAT"
     )];
     for (row, name) in rows.iter().zip(&names) {
-        let (word, color) = match row.verdict {
-            Verdict::Due => ("due", Color::Yellow),
-            Verdict::Soon { .. } => ("soon", Color::Cyan),
-            Verdict::Pinned => ("pinned", Color::Magenta),
-            Verdict::Refused(_) => ("refused", Color::Red),
-            Verdict::Plain => unreachable!("plain pieces are not rows"),
-        };
         let shown = if wide {
             name.clone()
         } else {
@@ -178,18 +207,17 @@ fn table(rows: &[&SurveyedPiece], style: Style, now: Timestamp) -> Vec<String> {
         };
         let prefix = format!(
             "{}{}{}{}{}{}",
-            paint(style, color, word),
-            spaces(STATE_WIDTH - word.len() + GAP),
+            paint(style, row.color, row.state),
+            spaces(STATE_WIDTH - row.state.len() + GAP),
             pad(&shown, piece_width),
             spaces(GAP),
-            pad_left(&idle_text(row, now), IDLE_WIDTH),
+            pad_left(&idle_text(row.piece, now), IDLE_WIDTH),
             spaces(GAP),
         );
-        let what = what_text(&row.verdict);
         let mut wrapped = if wide {
-            vec![what]
+            vec![row.what.clone()]
         } else {
-            wrap(&what, what_width)
+            wrap(&row.what, what_width)
         };
         lines.push(format!("{prefix}{}", wrapped.remove(0)));
         lines.extend(
@@ -210,22 +238,6 @@ fn idle_text(row: &SurveyedPiece, now: Timestamp) -> String {
             format!("{}d", days.max(0))
         }
         None => "-".to_string(),
-    }
-}
-
-fn what_text(verdict: &Verdict) -> String {
-    match verdict {
-        Verdict::Due => "archives next run".to_string(),
-        Verdict::Soon { days_left } => {
-            format!("archives in {}", plural(*days_left as usize, "day", "days"))
-        }
-        Verdict::Pinned => "kept by .antiq-pin".to_string(),
-        Verdict::Refused(reasons) => reasons
-            .iter()
-            .map(|reason| sanitize(&reason.to_string()))
-            .collect::<Vec<_>>()
-            .join("; "),
-        Verdict::Plain => String::new(),
     }
 }
 
@@ -397,23 +409,14 @@ fn timestamp_text(time: Timestamp) -> String {
     whole_seconds(time).to_string()
 }
 
-fn state_name(verdict: &Verdict) -> &'static str {
-    match verdict {
-        Verdict::Plain => "plain",
-        Verdict::Soon { .. } => "soon",
-        Verdict::Due => "due",
-        Verdict::Pinned => "pinned",
-        Verdict::Refused(_) => "refused",
-    }
-}
-
-fn piece_json(row: &SurveyedPiece, now: Timestamp) -> Value {
-    let idle_for_days = row.clock.map(|clock| {
+fn piece_json(row: &Row<'_>, now: Timestamp) -> Value {
+    let piece = row.piece;
+    let idle_for_days = piece.clock.map(|clock| {
         (now.as_second() - clock.as_second())
             .div_euclid(86_400)
             .max(0)
     });
-    let reasons: Vec<Value> = match &row.verdict {
+    let reasons: Vec<Value> = match &piece.verdict {
         Verdict::Refused(reasons) => reasons
             .iter()
             .map(|reason| {
@@ -431,11 +434,11 @@ fn piece_json(row: &SurveyedPiece, now: Timestamp) -> Value {
         _ => Vec::new(),
     };
     let mut found = json!({
-        "piece": row.piece,
-        "state": state_name(&row.verdict),
+        "piece": piece.piece,
+        "state": row.state,
         "idle_for_days": idle_for_days,
     });
-    if let Verdict::Soon { days_left } = row.verdict {
+    if let Verdict::Soon { days_left } = piece.verdict {
         found["due_in_days"] = json!(days_left);
     }
     found["reasons"] = Value::Array(reasons);
@@ -471,10 +474,8 @@ fn payload(report: &StatusReport, now: Timestamp) -> Value {
         "archive_bytes": report.archive_bytes,
         "idle_days": report.idle_days,
         "soon_days": report.soon_days,
-        "pieces": report
-            .pieces
+        "pieces": rows_of(report)
             .iter()
-            .filter(|row| row.verdict != Verdict::Plain)
             .map(|row| piece_json(row, now))
             .collect::<Vec<_>>(),
         "future_times": future
@@ -1039,11 +1040,18 @@ mod tests {
             stamp: stamp("2026-11-04T090211"),
             reasons: Vec::new(),
         }];
-        report.doomed = vec![Doomed {
-            path: path("doomed/2026-11-04T090211/notes"),
-            first_entry: path("doomed/2026-11-04T090211/notes/f"),
-            cause: Some(DoomedCause::Locked),
-        }];
+        report.doomed = vec![
+            Doomed {
+                path: path("doomed/2026-11-04T090211/notes"),
+                first_entry: path("doomed/2026-11-04T090211/notes/f"),
+                cause: Some(DoomedCause::Locked),
+            },
+            Doomed {
+                path: path("doomed/2026-11-04T090211/ro"),
+                first_entry: path("doomed/2026-11-04T090211/ro/d/f"),
+                cause: Some(DoomedCause::DirectoryNotWritable),
+            },
+        ];
         report.spelling = vec![SpellingDifference {
             live: path("projects"),
             stored: path("Projects"),
@@ -1084,7 +1092,10 @@ mod tests {
                 "recovered": [],
                 "trash": [],
                 "doomed": [{"path": "doomed/2026-11-04T090211/notes",
-                            "first_entry": "doomed/2026-11-04T090211/notes/f", "cause": "locked"}],
+                            "first_entry": "doomed/2026-11-04T090211/notes/f", "cause": "locked"},
+                           {"path": "doomed/2026-11-04T090211/ro",
+                            "first_entry": "doomed/2026-11-04T090211/ro/d/f",
+                            "cause": "directory_not_writable"}],
                 "spelling": [{"live": "projects", "stored": "Projects"}],
                 "unreadable_directories": [],
                 "unparsable_files": [],
