@@ -63,17 +63,19 @@ impl Marker {
         let invalid = |reason: String| MarkerError::Invalid { reason };
         let value: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
-        let format = value
-            .get("format")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| invalid("format is missing or no unsigned integer".to_string()))?;
-        if format > CURRENT {
+        // A newer antiq may have changed the other keys, so only `format`
+        // decides before they are read.
+        if let Some(format) = value.get("format").and_then(serde_json::Value::as_u64)
+            && format > CURRENT
+        {
             return Err(MarkerError::TooNew { found: format });
         }
-        if format == 0 {
+        let marker: Marker =
+            serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
+        if marker.format == 0 {
             return Err(invalid("format is 0".to_string()));
         }
-        serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
+        Ok(marker)
     }
 }
 
