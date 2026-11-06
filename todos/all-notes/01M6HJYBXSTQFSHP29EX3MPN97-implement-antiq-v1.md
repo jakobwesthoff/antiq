@@ -2801,6 +2801,22 @@ the same commit; the lead checks that at acceptance.
   `ops::remote::copy_metadata` is the pull loop. `Error::RemoteOp` is
   boxed (the refusals made every crate `Result` too large).
 
+### I29
+
+- 2026-11-04 (merged): nothing sets `overdue` or records times yet.
+  `sync` (I30), `unearth` through the remote (I34) and `reconcile`'s
+  remote part (I35) pass their remote result through
+  `away::with_overdue(result, collection, || has_pending_remote_work(&pieces),
+  now)`, a dry run included. A call site that skips it fails open: an
+  overdue remote exits 0 under `--if-reachable`. I30's binary exit test
+  therefore covers each of these commands, `--dry-run` included, with an
+  eight-day gap and pending work (exit 4) and a one-day gap (exit 0). A
+  run holding the lock calls `away::record_reachable` when its probe
+  finds the remote reachable and `away::record_away` when away. I30
+  writes `last_sync` and must keep the other keys of
+  `remote-state.json` (`last_reachable`, `away_first_seen`); ask for a
+  `pub(crate)` setter of `away.rs`'s read-modify-write helper.
+
 ### I24
 
 - 2026-11-04 (merged): for I23 and I28, `Session::new(SessionSettings)`
