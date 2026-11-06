@@ -20,8 +20,12 @@ is the oldest modification time among its members (ADR 0039, source
 `import`), its name from the archive's single top-level folder, a
 listing generated from the archive, and the archive as its first
 version. An archive that does not have exactly one top-level folder is
-refused. The command is not tied to the layout of `archive.sh` (ADR
-0009).
+refused. An archive with a zstd window above 128 MiB is refused, because
+every decoder of antiq sets its maximum window to 128 MiB (ADR 0051). An
+archive with a frame that has no content checksum is refused, because every
+stored payload carries one. The archives that the macOS `tar --zstd`
+writes have no checksum. The command is not tied to the layout of
+`archive.sh` (ADR 0009).
 
 ## Consequences
 

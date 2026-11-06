@@ -512,14 +512,14 @@ pub fn unpack(
     // Two passes write nothing, so a package that is refused for what its
     // headers say, or for names the volume cannot hold, leaves staging as
     // it was.
-    scan(package)?;
-    let names = gather(package)?;
+    scan(open_file(package)?)?;
+    let names = gather(open_file(package)?)?;
     let problems = check_members(&names, rules);
     if !problems.is_empty() {
         return Err(PackError::UnholdableNames(problems));
     }
 
-    let mut archive = open(package)?;
+    let mut archive = open(open_file(package)?)?;
     let mut extraction = Extraction::new(staging);
     for entry in archive.entries().map_err(PackError::Archive)? {
         let mut entry = entry.map_err(PackError::Archive)?;
@@ -530,9 +530,24 @@ pub fn unpack(
     extraction.finish()
 }
 
-fn open(package: &Path) -> Result<Archive<impl Read>, PackError> {
-    let file = File::open(package).map_err(PackError::Archive)?;
-    let decoder = zstd::decoder(file).map_err(PackError::Archive)?;
+/// Runs the passes of [`unpack`] that read and write nothing on the
+/// package `open` hands out once per pass, and returns the members below
+/// the container for the name check. A package that `unpack` would refuse
+/// for what its headers say is refused with the same error. The rules of
+/// a target volume are not applied.
+pub(crate) fn check_structure<R: Read>(
+    mut open: impl FnMut() -> io::Result<R>,
+) -> Result<Vec<MemberName>, PackError> {
+    scan(open().map_err(PackError::Archive)?)?;
+    gather(open().map_err(PackError::Archive)?)
+}
+
+fn open_file(package: &Path) -> Result<File, PackError> {
+    File::open(package).map_err(PackError::Archive)
+}
+
+fn open<R: Read>(source: R) -> Result<Archive<impl Read>, PackError> {
+    let decoder = zstd::decoder(source).map_err(PackError::Archive)?;
     Ok(Archive::new(decoder))
 }
 
@@ -563,8 +578,8 @@ fn pax_size<R: Read>(entry: &mut Entry<'_, R>) -> Result<Option<Option<u64>>, io
 /// and a pax `size` that differs from the header's. With that size
 /// applied the crate would find the records that follow at other places
 /// than this pass does.
-fn scan(package: &Path) -> Result<(), PackError> {
-    let mut archive = open(package)?;
+fn scan<R: Read>(source: R) -> Result<(), PackError> {
+    let mut archive = open(source)?;
     // The size a pax record set for the next member; `Some(None)` when
     // the record's value is not a number.
     let mut pending: Option<Option<u64>> = None;
@@ -613,8 +628,8 @@ fn scan(package: &Path) -> Result<(), PackError> {
 
 /// The second pass classifies and places every member and returns their
 /// paths below the container, in archive order, for the name check.
-fn gather(package: &Path) -> Result<Vec<MemberName>, PackError> {
-    let mut archive = open(package)?;
+fn gather<R: Read>(source: R) -> Result<Vec<MemberName>, PackError> {
+    let mut archive = open(source)?;
     let mut container = None;
     let mut placement = Placement::new();
     let mut paths = Vec::new();
@@ -1377,6 +1392,71 @@ mod tests {
                 "a pax size record disagrees with the size in its header",
             ]
         );
+    }
+
+    // =========================================================
+    // The structure check import runs
+    // =========================================================
+
+    fn structure_of(archive: &RawArchive) -> Result<Vec<MemberName>, PackError> {
+        let bytes = archive.finish();
+        check_structure(|| Ok(&bytes[..]))
+    }
+
+    fn structure_refusal(archive: &RawArchive) -> Refusal {
+        match structure_of(archive).expect_err("the structure is refused") {
+            PackError::Refused { refusal, .. } => refusal,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_crate_made_package_passes_the_structure_check_with_its_members() {
+        let mut tree = Tree::new();
+        tree.file("a/b", "x");
+        tree.symlink("a/link", "b");
+        let packaged = crate::testing::package::pack_piece(&tree, "a");
+        let members =
+            check_structure(|| Ok(&packaged.bytes[..])).expect("antiq's own format passes");
+        let paths: Vec<String> = members
+            .iter()
+            .map(|member| member.path.to_string())
+            .collect();
+        assert_eq!(paths, ["b", "link"]);
+        assert_eq!(members[1].kind, MemberKind::Symlink { target_len: 1 });
+    }
+
+    #[test]
+    fn the_structure_check_refuses_a_member_whose_parent_is_missing() {
+        let mut archive = container();
+        archive.file("proj/missing/x", 0o644, 1_000_000_000, b"x");
+        assert_eq!(structure_refusal(&archive), Refusal::ParentMissing);
+    }
+
+    #[test]
+    fn the_structure_check_refuses_a_symlink_without_a_target() {
+        let mut archive = container();
+        archive.member(b"proj/s", b'2', 0o777, 1_000_000_000, b"", b"");
+        assert_eq!(structure_refusal(&archive), Refusal::InvalidLink);
+    }
+
+    #[test]
+    fn the_structure_check_refuses_a_record_above_the_cap() {
+        let mut archive = container();
+        archive
+            .file("proj/f", 0o644, 1_000_000_000, b"x")
+            .long_link(&vec![b'a'; 70_000])
+            .member(b"proj/h", b'1', 0o644, 1_000_000_000, b"proj/f", b"");
+        assert_eq!(structure_refusal(&archive), Refusal::OversizedRecord);
+    }
+
+    #[test]
+    fn the_structure_check_refuses_what_unpack_refuses_at_a_read_error() {
+        let error = check_structure(|| Ok(&b"not a package"[..])).expect_err("not zstd");
+        assert!(matches!(error, PackError::Archive(_)), "{error:?}");
+        let error = check_structure(|| Err::<&[u8], _>(io::Error::other("no file")))
+            .expect_err("cannot open");
+        assert!(matches!(error, PackError::Archive(_)), "{error:?}");
     }
 
     // =========================================================

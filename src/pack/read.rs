@@ -8,23 +8,27 @@ use super::hashing::HashingReader;
 use super::{PackError, zstd};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::relpath::{Name, RelPath, escape};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::rc::Rc;
 use tar::EntryType;
 
 /// Mode and modification time of the top-level directory, which has no
 /// line in the listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Container {
+pub(crate) struct Container {
     pub mode: u32,
     pub mtime: i64,
 }
 
 /// What reading a package to its end found.
 #[derive(Debug)]
-pub(super) struct Package {
+pub(crate) struct Package {
+    /// The name of the top-level directory.
+    pub name: Name,
     pub container: Container,
     /// One entry per member below the top-level directory, in archive
     /// order, with the SHA-256 of every file computed from the stream.
@@ -68,11 +72,45 @@ fn modification_time(header: &tar::Header) -> Result<i64, PackError> {
     Ok(i64::try_from(seconds).expect("twelve octal digits are below 2^63"))
 }
 
+/// Counts the bytes that pass through, so the end of the tar stream can
+/// be told from the end of the data that precedes it.
+struct Counted<R> {
+    inner: R,
+    count: Rc<Cell<u64>>,
+}
+
+impl<R: io::Read> io::Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        self.count.set(self.count.get() + count as u64);
+        Ok(count)
+    }
+}
+
+/// The two zero blocks that end a tar archive.
+const END_MARKER: u64 = 1024;
+
 /// Reads `package` to its end.
-pub(super) fn read_package(package: &Path) -> Result<Package, PackError> {
+pub(crate) fn read_package(package: &Path) -> Result<Package, PackError> {
     let file = File::open(package).map_err(PackError::OpenPackage)?;
-    let decoder = zstd::decoder(file).map_err(damaged)?;
-    let mut archive = tar::Archive::new(decoder);
+    read_package_from(file)
+}
+
+/// Reads the package `source` holds to its end.
+///
+/// A tar reader takes the end of its input on a header boundary for the
+/// end of the archive, so a stream of several frames that was cut between
+/// two frames would read as a smaller, complete archive. The end blocks
+/// are what tells the two apart.
+pub(crate) fn read_package_from<R: io::Read>(source: R) -> Result<Package, PackError> {
+    let decoder = zstd::decoder(source).map_err(damaged)?;
+    let count = Rc::new(Cell::new(0));
+    let mut archive = tar::Archive::new(Counted {
+        inner: decoder,
+        count: Rc::clone(&count),
+    });
+    // Where the data of the last member ends, padded to a whole block.
+    let mut members_end = 0;
     let mut container = None;
     let mut entries = Vec::new();
     let mut seen: HashMap<RelPath, EntryType> = HashMap::new();
@@ -83,6 +121,7 @@ pub(super) fn read_package(package: &Path) -> Result<Package, PackError> {
         let mode = member.header().mode().map_err(damaged)? & 0o7777;
         let mtime = modification_time(member.header())?;
         let size = member.size();
+        members_end = member.raw_file_position() + size.next_multiple_of(512);
         let link = member.link_name_bytes().map(|name| name.into_owned());
         let Some((name, _)) = container.as_ref() else {
             if kind != EntryType::Directory {
@@ -164,10 +203,20 @@ pub(super) fn read_package(package: &Path) -> Result<Package, PackError> {
             sha256,
         });
     }
-    let (_, container) =
+    let (name, container) =
         container.ok_or_else(|| PackError::Damaged("the package is empty".into()))?;
     finish_stream(archive.into_inner())?;
-    Ok(Package { container, entries })
+    if count.get() < members_end + END_MARKER {
+        return Err(PackError::Damaged(
+            "the archive ends without its end-of-archive marker; the file may be cut".into(),
+        ));
+    }
+    let name = Name::from_bytes(name).expect("the name was checked when the container was read");
+    Ok(Package {
+        name,
+        container,
+        entries,
+    })
 }
 
 /// Reads what is left of the stream after the tar reader stopped. The zstd
@@ -426,6 +475,75 @@ mod tests {
     #[test]
     fn a_file_that_is_not_zstd_is_damaged() {
         damaged_by(b"this is not a compressed stream");
+    }
+
+    /// The tar of a directory and a file, without its end blocks and with
+    /// `zero_blocks` zero blocks in their place.
+    fn tar_ending_in(zero_blocks: usize) -> Vec<u8> {
+        let mut tar = raw_tar(&[RawMember::dir(b"proj/"), RawMember::file(b"proj/a", b"1")]);
+        tar.truncate(tar.len() - 1024);
+        tar.resize(tar.len() + 512 * zero_blocks, 0);
+        tar
+    }
+
+    #[test]
+    fn a_tar_without_its_end_blocks_is_damaged() {
+        let reason = damaged_by(&compress(&tar_ending_in(0)));
+        assert!(reason.contains("end-of-archive"), "{reason}");
+    }
+
+    #[test]
+    fn a_tar_with_one_end_block_is_damaged() {
+        let reason = damaged_by(&compress(&tar_ending_in(1)));
+        assert!(reason.contains("end-of-archive"), "{reason}");
+    }
+
+    #[test]
+    fn one_end_block_and_zeros_short_of_a_second_are_damaged() {
+        let mut tar = tar_ending_in(1);
+        tar.resize(tar.len() + 511, 0);
+        let reason = damaged_by(&compress(&tar));
+        assert!(reason.contains("end-of-archive"), "{reason}");
+    }
+
+    #[test]
+    fn the_package_has_the_name_of_its_top_level_directory() {
+        let (_dir, path) = on_disk(&compress(&tar_ending_in(2)));
+        let package = read_package(&path).expect("reads");
+        assert_eq!(package.name.as_bytes(), b"proj");
+    }
+
+    #[test]
+    fn a_tar_with_two_end_blocks_is_read() {
+        let (_dir, path) = on_disk(&compress(&tar_ending_in(2)));
+        assert_eq!(list(&path).expect("lists").len(), 1);
+    }
+
+    #[test]
+    fn a_two_frame_archive_cut_at_the_frame_boundary_is_damaged() {
+        let mut tar = raw_tar(&[RawMember::dir(b"proj/"), RawMember::file(b"proj/a", b"1")]);
+        tar.truncate(tar.len() - 1024);
+        // The first frame ends where the first member ends.
+        let (first, second) = tar.split_at(512);
+        let both = [compress(first), compress(second)].concat();
+        let reason = damaged_by(&both);
+        assert!(reason.contains("end-of-archive"), "{reason}");
+    }
+
+    #[test]
+    fn a_package_antiq_packs_ends_with_the_end_blocks() {
+        use std::io::Read;
+        let packaged = pack_piece(&mixed_piece(), "proj");
+        let mut tar = Vec::new();
+        crate::pack::zstd::decoder(&packaged.bytes[..])
+            .expect("a decoder")
+            .read_to_end(&mut tar)
+            .expect("decodes");
+        assert!(tar.len() >= 1024);
+        assert!(
+            tar[tar.len() - 1024..].iter().all(|byte| *byte == 0),
+            "the last two blocks are zeros"
+        );
     }
 
     #[test]

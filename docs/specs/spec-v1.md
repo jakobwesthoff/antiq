@@ -1026,8 +1026,9 @@ records, once for the members and once to extract. (ADR 0050)
 ### Verifying
 
 A strict verify gates archiving and unearthing. It reads the stream to
-its end and checks its integrity. A cut or corrupt stream, nonzero data
-after the end of the archive, an empty archive, a first member that is
+its end and checks its integrity. A cut or corrupt stream, a tar stream
+without its end marker (two zero blocks after the last member), nonzero
+data after the end of the archive, an empty archive, a first member that is
 not a directory, a member outside the top-level directory, a member path
 that is not a plain relative path, a path that occurs twice, a hard link
 that does not name a file listed before it, a member that is neither
@@ -1472,34 +1473,65 @@ the repair at the start of the next run writes the new entry without it.
 
 ### import
 
-`import [--path <dir>] <file>...` registers compressed tar archives as
-archived pieces. For each file it:
+`import [--path <path>] <file>...` registers compressed tar archives as
+archived pieces. Each file stands alone: a file that is refused is named
+with its reason and skipped, the other files are imported, and the run
+exits 3. Everything that can refuse a file is checked before anything of
+that file is written, and a run in which every file is refused takes no
+lock. For each file it:
 
-- refuses anything but tar compressed with zstd (by magic bytes), naming
-  the codec;
-- refuses a frame whose window exceeds 128 MiB, naming
-  `zstd -19 --long=27` to recompress it, and any frame without the
-  content checksum;
+- refuses anything but a regular file holding tar compressed with zstd (by
+  magic bytes), naming the codec of anything else;
+- walks the zstd frames over their headers and block headers, without
+  holding a frame in memory, and refuses a frame whose window exceeds
+  128 MiB or that has no content checksum, giving
+  `zstd -dc <file> | zstd -19 --long=27 -o <new>.tar.zst` to recompress
+  it (the macOS `tar --zstd` writes no content checksum). Skippable frames
+  are walked over; a frame that needs a dictionary, a reserved header bit
+  or block type, bytes after the last frame and a cut frame are refused;
 - reads the whole stream, computes size and SHA-256 and builds the
-  listing as `archive` does;
-- refuses an archive without exactly one top-level folder, and members
-  whose path leads outside the piece; that folder is the archive's
-  top-level directory of "Packaging", and the listing holds the paths
-  below it;
-- warns about names as `archive` does (ADR 0054);
+  listing as `archive` does. The frame walk and the passes over the tar
+  read one open file, and a file whose bytes differ between them is
+  refused;
+- refuses an archive without exactly one top-level folder, members whose
+  path leads outside it, a tar stream without its end marker, and any
+  archive that `unearth` could not extract for what its headers say;
+  that folder is the archive's top-level directory of "Packaging", and the
+  listing holds the paths below it;
+- warns about names as `archive` does (ADR 0054), the piece's own name
+  included;
 - skips and reports a file whose SHA-256 is already a payload of the
-  collection;
+  collection, counted from the metadata only: a payload file in an object
+  directory that no metadata names does not count. A repeated import
+  therefore exits 0. When the object that has the bytes is this
+  collection's, has its archive file in the object directory and has no
+  tracking entry, the entry is written and the file is reported as
+  skipped with its entry completed;
 - copies the file (a clone where the filesystem supports one, never a
-  hard link) into `.antiq/tmp/`, flushes it, renames it to its payload
-  name and records a new ID: the oldest member modification time as its
-  time (source `import`), the top-level folder's name, and the archive as
-  payload version 1.
+  hard link) into `.antiq/tmp/`, checks the copy against the SHA-256, and
+  stores it under its payload name, then its listing, then records the
+  metadata and the tracking entry (state `gone`, local archive at payload
+  version 1, version taken out `pending`) in that order. Its metadata is a
+  new ID with the oldest member modification time, the top-level
+  directory's included, as its time, the source `import`, the piece's
+  name and the archive as payload version 1. Times before 1990 are ignored
+  as for `archive`; when no time from 1990 on remains, the ID time is the
+  time of minting, with a warning, and the source is `minted`.
 
 The relative path is `--path`, by default the top-level folder's name at
-the collection root; a path the patterns do not select refuses. A path
-that a folder or another object already has gives a warning, and both
-objects are listed by `find`. The input file is never moved or deleted.
-The archive goes up at the next `sync`. (ADR 0055)
+the collection root; `--path` takes exactly one file. The piece's name is
+the last component of the path. A path is refused when it is the
+collection root or below `.antiq/`, when it is or lies below a
+`collection.exclude` entry, when the patterns do not select it, when a
+selected path or the path of an existing object lies above it, and when
+an existing object lies below it. A path that a folder or another object
+already has gives a warning, and both objects are listed by `find`.
+An input file that lies below `.antiq/` is refused, since the repairs at
+the start of a run empty `tmp/`, `staging/` and `trash/`. The input file is
+never moved or deleted. The archive goes up at the next `sync`. A piece
+whose payload and listing were stored but whose metadata was not written
+because the run died leaves files that no metadata names; a rerun imports
+the archive under a new ID. (ADR 0055)
 
 ### reconcile
 
@@ -1588,7 +1620,7 @@ at the default: it asks on a terminal and needs `--force` without one.
 | `resolve [<piece> <answer>]` | answers pending decisions |
 | `remote add [--init] [--host-key-alias <alias>] <url>`, `remote show`, `remote remove` | attach, show and detach the remote |
 | `reconcile [--prune]` | brings the index in line with the stored metadata |
-| `import [--path <dir>] <file>...` | registers existing compressed tar archives as archived pieces |
+| `import [--path <path>] <file>...` | registers existing compressed tar archives as archived pieces |
 
 (ADR 0023, ADR 0055)
 
