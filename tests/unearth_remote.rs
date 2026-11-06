@@ -741,6 +741,70 @@ fn a_fork_prints_the_piece_it_came_from() {
 }
 
 #[test]
+fn a_dry_run_of_a_restore_from_a_live_package_plans_it_and_changes_nothing() {
+    let mut world = world_with_remote();
+    world.put(&Object::live(OBJECT, "alpha", Owner::Own));
+    let before = world.snapshot();
+
+    let run = world.antiq(&["unearth", "--dry-run", "alpha"]);
+
+    succeeded(&run);
+    insta::assert_snapshot!(run.stdout, @"Would unearth alpha from its live package");
+    assert_eq!(world.snapshot(), before);
+}
+
+#[test]
+fn a_dry_run_of_a_restore_from_a_live_package_prints_the_plan_as_json() {
+    let mut world = world_with_remote();
+    world.put(&Object::live(OBJECT, "alpha", Owner::Own));
+
+    let run = world.antiq(&["--json", "unearth", "--dry-run", "alpha"]);
+
+    succeeded(&run);
+    assert_eq!(
+        run.json()["actions"][0],
+        serde_json::json!({
+            "action": "unearth",
+            "id": OBJECT,
+            "path": "alpha",
+            "source": "live_package",
+        })
+    );
+}
+
+#[test]
+fn a_dry_run_of_a_fork_plans_it_and_changes_nothing() {
+    let mut world = world_with_remote();
+    world.put(&Object::live(OTHER_OBJECT, "alpha", Owner::Foreign));
+    let before = world.snapshot();
+
+    let run = world.antiq(&["unearth", "--dry-run", "alpha"]);
+
+    succeeded(&run);
+    insta::assert_snapshot!(run.stdout, @"Would unearth alpha from the live package of another collection's piece, as a fork with a new ID");
+    assert_eq!(world.snapshot(), before);
+}
+
+#[test]
+fn a_dry_run_of_a_fork_prints_the_plan_as_json() {
+    let mut world = world_with_remote();
+    world.put(&Object::live(OTHER_OBJECT, "alpha", Owner::Foreign));
+
+    let run = world.antiq(&["--json", "unearth", "--dry-run", "alpha"]);
+
+    succeeded(&run);
+    assert_eq!(
+        run.json()["actions"][0],
+        serde_json::json!({
+            "action": "unearth",
+            "id": OTHER_OBJECT,
+            "path": "alpha",
+            "source": "fork",
+        })
+    );
+}
+
+#[test]
 fn a_live_piece_of_another_collection_without_a_package_has_nothing_to_unearth_from() {
     let mut world = world_with_remote();
     let mut piece = Object::live(OTHER_OBJECT, "alpha", Owner::Foreign);

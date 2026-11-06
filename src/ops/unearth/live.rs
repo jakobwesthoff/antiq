@@ -150,8 +150,9 @@ mod tests {
     use crate::meta::{CreatedSource, FileName, HistoryAction, Lifecycle, PayloadKind};
     use crate::ops::fork::forked_new;
     use crate::ops::unearth::remote::tests::{Full, after_tmp};
+    use crate::ops::unearth::remote::{Refreshed, refresh_with};
     use crate::ops::unearth::tests::{FILES, Fixture, ID, NOW, OTHER_ID, id, path, time};
-    use crate::ops::unearth::{Skipped, UnearthRequest, UnearthSource};
+    use crate::ops::unearth::{Planned, Skipped, UnearthRequest, UnearthSource};
     use crate::pack::live::LiveError;
     use crate::pack::{TarZstd, TargetRules};
     use crate::remote::testing::{FaultRemote, Op, path_remote, remote_root};
@@ -792,6 +793,37 @@ mod tests {
             .expect("unearths");
 
         assert!(report.unearthed, "{report:?}");
+    }
+
+    #[test]
+    fn a_dry_run_counts_the_room_of_a_live_package_as_the_real_run_checks_it() {
+        let live = Live::own();
+        let refresh = |lock| {
+            refresh_with(
+                Ok(Box::new(FaultRemote::new(path_remote(
+                    live.root.path(),
+                    "imperius",
+                )))),
+                &live.fx.collection,
+                lock,
+                id(ID),
+                live.fx.clock.now(),
+            )
+            .expect("refreshed")
+        };
+        let needed = |refreshed: &Refreshed| match refreshed
+            .plan(&live.fx.collection, &live.fx.request(ID))
+            .expect("planned")
+        {
+            Planned::Unearth(plan) => plan.needed,
+            other => panic!("{other:?}"),
+        };
+
+        let dry = needed(&refresh(None));
+        let real = needed(&refresh(Some(&live.fx.lock)));
+
+        assert_eq!(dry, real);
+        assert_eq!(dry, 2 * live.plan(&live.fx.request(ID)).payload.size);
     }
 
     #[test]

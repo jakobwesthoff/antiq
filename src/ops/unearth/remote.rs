@@ -557,13 +557,18 @@ impl Refreshed {
         let Some(remote) = self.remote().filter(|_| self.dry_run) else {
             return Ok(Planned::Unearth(plan));
         };
+        // Only an archive has a listing; the room for a live package is
+        // known from the metadata.
+        if plan.source != UnearthSource::RemoteArchive {
+            return Ok(Planned::Unearth(plan));
+        }
         let name = plan
             .payload
             .listing
             .as_ref()
             .expect("planning refuses an archive without a listing");
         let held = Store::new(collection).file_path(plan.id, name);
-        if plan.source != UnearthSource::RemoteArchive || held.exists() {
+        if held.exists() {
             return Ok(Planned::Unearth(plan));
         }
         let bytes = remote.read_file(plan.id, name.as_str())?;
