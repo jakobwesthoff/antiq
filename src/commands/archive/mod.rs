@@ -513,6 +513,11 @@ fn process(shared: &Shared<'_>, piece: &RelPath) -> Done {
             done
         }
         Removed::Kept(error) => skipped(piece, SkipReason::Error, chain_text(error.as_ref())),
+        Removed::KeptOutOfDescriptors { error, cause } => {
+            let mut done = skipped(piece, SkipReason::Error, chain_text(error.as_ref()));
+            done.exhausted = Some(cause);
+            done
+        }
     };
     done.warnings = stored.notes;
     done.warnings.extend(removal.warnings);
@@ -1272,6 +1277,47 @@ mod tests {
             3,
             "the version stays"
         );
+    }
+
+    #[test]
+    fn a_give_back_that_fails_after_a_rewalk_out_of_descriptors_also_stops_the_run() {
+        let mut world = world("");
+        for piece in ["a", "b"] {
+            add(&mut world, piece, 40);
+        }
+        let root = world.root().to_path_buf();
+        let seams = Probe {
+            exhausts_rewalk: true,
+            after_trash_rename: Some(Box::new(move |_| {
+                // The path is taken, and `recovered/` cannot be made.
+                fs::create_dir(root.join("a")).expect("the path is taken");
+                let recovered = root.join(".antiq/recovered");
+                fs::remove_dir_all(&recovered).ok();
+                fs::write(&recovered, "in the way").expect("recovered/ is a file");
+            })),
+            ..Probe::default()
+        };
+
+        let report = execute_with(&world, &Target::Due, &seams, 1).expect("the run ends");
+
+        let skipped: Vec<&str> = report
+            .skipped
+            .iter()
+            .map(|item| item.piece.as_str())
+            .collect();
+        assert_eq!(
+            skipped,
+            ["a", "b"],
+            "the piece that is not started is skipped"
+        );
+        assert!(report.skipped[1].message.starts_with("not started"));
+        let warnings = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.message.contains("file descriptors"))
+            .count();
+        assert_eq!(warnings, 1, "{:?}", report.warnings);
+        assert_eq!(report.exit_code(), 3);
     }
 
     // =========================================================

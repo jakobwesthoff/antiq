@@ -74,6 +74,12 @@ pub(crate) enum Outcome {
     /// The folder, or a copy of it, is where the error says and the
     /// repairs of the next run finish or undo the step.
     Kept(Box<ArchiveError>),
+    /// As `Kept`, and the re-walk that led to the give-back ran out of file
+    /// descriptors, which ends the run.
+    KeptOutOfDescriptors {
+        error: Box<ArchiveError>,
+        cause: String,
+    },
 }
 
 pub(crate) struct Removal {
@@ -448,14 +454,22 @@ fn give_back(
             }
         }
         // The tree stays in trash/, where repair 4 gives it back.
-        Err(source) => Outcome::Kept(Box::new(ArchiveError::GiveBack {
-            piece: request.live.to_string(),
-            stamp: request.stamp.to_string(),
-            reason: match mismatch {
-                Mismatch::Differs(reason) | Mismatch::OutOfDescriptors(reason) => reason,
-            },
-            source: Box::new(source),
-        })),
+        Err(source) => {
+            let (reason, exhausted) = match mismatch {
+                Mismatch::Differs(reason) => (reason, None),
+                Mismatch::OutOfDescriptors(reason) => (reason.clone(), Some(reason)),
+            };
+            let error = Box::new(ArchiveError::GiveBack {
+                piece: request.live.to_string(),
+                stamp: request.stamp.to_string(),
+                reason,
+                source: Box::new(source),
+            });
+            match exhausted {
+                Some(cause) => Outcome::KeptOutOfDescriptors { error, cause },
+                None => Outcome::Kept(error),
+            }
+        }
     }
 }
 
@@ -795,6 +809,7 @@ mod tests {
             Outcome::Differs { reason, .. } => format!("the folder differs: {reason}"),
             Outcome::OutOfDescriptors { cause, .. } => format!("out of descriptors: {cause}"),
             Outcome::Kept(error) => format!("{error:?}"),
+            Outcome::KeptOutOfDescriptors { error, .. } => format!("kept, exhausted: {error:?}"),
         }
     }
 
@@ -1352,6 +1367,44 @@ mod tests {
             .join("piece/a.txt");
         assert!(trashed.exists(), "the tree stays in trash/");
         assert_eq!(store_files(&world).len(), 3, "the version stays");
+    }
+
+    #[test]
+    fn a_folder_that_cannot_go_back_after_a_walk_out_of_descriptors_ends_the_run() {
+        let world = world(&["piece"]);
+        let stored = store(&world, "piece");
+        let root = world.temp.root().to_path_buf();
+        let seams = Probe {
+            out_of_descriptors: true,
+            after_trash_rename: Some(Box::new(move |_| {
+                // The path is taken, and `recovered/` cannot be made.
+                fs::create_dir(root.join("piece")).expect("the path is taken");
+                let recovered = root.join(".antiq/recovered");
+                fs::remove_dir_all(&recovered).ok();
+                fs::write(&recovered, "in the way").expect("recovered/ is a file");
+            })),
+            ..Probe::default()
+        };
+
+        let removal = remove(&world, "piece", &stored, &seams, &[]);
+
+        match &removal.outcome {
+            Outcome::KeptOutOfDescriptors { error, cause } => {
+                assert!(
+                    error.to_string().contains("cannot give piece back"),
+                    "{error}"
+                );
+                assert!(cause.contains("descriptors"), "{cause}");
+            }
+            other => panic!(
+                "the folder is kept and the run ends, but {}",
+                name_of(other)
+            ),
+        }
+        let trashed = antiq(&world, "trash")
+            .join(stored.stamp.to_string())
+            .join("piece/a.txt");
+        assert!(trashed.exists(), "the tree stays in trash/");
     }
 
     #[test]
