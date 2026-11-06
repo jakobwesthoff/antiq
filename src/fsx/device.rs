@@ -301,6 +301,26 @@ mod tests {
         assert!(!is_mount_point(&tree.path("p")).expect("answers"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs CAP_SYS_ADMIN to mount; run in the privileged Linux container"]
+    fn removing_a_tree_stops_at_a_bind_mount_and_leaves_its_source_alone() {
+        use crate::fsx::{FsxError, remove::remove_tree};
+        let mut tree = Tree::new();
+        tree.file("src/precious", "x");
+        tree.file("p/before", "y");
+        tree.dir("p/mnt");
+        let _mount = BindMount::new(&tree.path("src"), &tree.path("p/mnt"));
+
+        let root = TreeRoot::open(tree.root()).expect("opens");
+        let error = remove_tree(&root, &RelPath::parse("p").expect("valid")).expect_err("stops");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "p/mnt"),
+            "{error}"
+        );
+        assert!(tree.path("src/precious").exists(), "the source was emptied");
+    }
+
     #[test]
     fn macos_type_names_map_to_kinds() {
         for (name, kind) in [

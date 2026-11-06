@@ -33,8 +33,10 @@ pub enum FsxError {
         source: io::Error,
     },
     /// A removal met a directory on another device than the tree it was
-    /// asked to remove.
-    #[error("{path} is on another device than the tree being removed")]
+    /// asked to remove, or the root of another mount.
+    #[error(
+        "{path} is on another device than the tree being removed, or is the root of another mount"
+    )]
     ForeignDevice { path: String },
     /// A removal met a directory nested deeper than it descends.
     #[error("{path} is nested more than {limit} levels below the tree being removed")]
@@ -103,7 +105,7 @@ mod tests {
         let foreign = FsxError::ForeignDevice { path: "mnt".into() };
         assert_eq!(
             foreign.to_string(),
-            "mnt is on another device than the tree being removed"
+            "mnt is on another device than the tree being removed, or is the root of another mount"
         );
         let crossing = FsxError::CrossesDevices {
             from: "a".into(),

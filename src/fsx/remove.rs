@@ -26,7 +26,8 @@ use std::path::Path;
 /// again, the top included; the directory holding the top is never
 /// changed. Nothing is followed across a device boundary: a top or a
 /// directory on another device than `root` fails with
-/// [`FsxError::ForeignDevice`], leaving what it holds untouched. An entry
+/// [`FsxError::ForeignDevice`], leaving what it holds untouched. So does the
+/// root of another mount on the same device, such as a bind mount. An entry
 /// that is gone already counts as removed. A directory more than
 /// [`MAX_DEPTH`] levels below the top is not entered: the removal fails
 /// with [`FsxError::TooDeep`] naming it, each level holding one directory
@@ -38,6 +39,7 @@ pub(crate) fn remove_tree(root: &TreeRoot, path: &RelPath) -> Result<(), FsxErro
         root,
         path,
         &|entry| entry.device,
+        &|entry| entry.mount_root,
         &|dir| dir.read_dir(&RelPath::root()),
         MAX_DEPTH,
     )
@@ -75,16 +77,19 @@ fn split_path(path: &Path) -> Option<(&Path, &OsStr)> {
 }
 
 type DeviceOf<'a> = &'a dyn Fn(&TreeEntry) -> u64;
+type MountRootOf<'a> = &'a dyn Fn(&TreeEntry) -> bool;
 type List<'a> = &'a dyn Fn(&TreeRoot) -> io::Result<Vec<DirEntry>>;
 
-/// `device_of` and `list` are seams: tests report other devices than the
-/// filesystem has, and entries the directory does not describe truthfully.
+/// `device_of`, `mount_root_of` and `list` are seams: tests report other
+/// devices and mount roots than the filesystem has, and entries the
+/// directory does not describe truthfully.
 /// `max_depth` is the deepest level of directories below the top that is
 /// entered.
 fn remove_tree_with(
     root: &TreeRoot,
     path: &RelPath,
     device_of: DeviceOf<'_>,
+    mount_root_of: MountRootOf<'_>,
     list: List<'_>,
     max_depth: usize,
 ) -> Result<(), FsxError> {
@@ -99,7 +104,8 @@ fn remove_tree_with(
         return Err(failure("remove", root, path)(source));
     }
     // The device the removal has to stay on is the one of the directory
-    // holding the top, so a top that is itself a mount point is refused.
+    // holding the top, so a top that is itself a mount point is refused,
+    // and so is the root of a mount on that same device.
     let holder = root
         .lstat(&RelPath::root())
         .map_err(failure("stat", root, &RelPath::root()))?;
@@ -112,7 +118,7 @@ fn remove_tree_with(
             .map(|_| ())
             .map_err(failure("remove", root, path));
     }
-    if device_of(&top) != reference {
+    if device_of(&top) != reference || mount_root_of(&top) {
         return Err(foreign_device(root, path));
     }
 
@@ -120,7 +126,7 @@ fn remove_tree_with(
     // the call stack, so a deep tree costs no deep recursion. `max_depth`
     // keeps the open directories few.
     let mut frames: Vec<Frame> = Vec::new();
-    frames.extend(open_frame(root, path, top.mode, list)?);
+    frames.extend(open_frame(root, path, top.mode, mount_root_of, list)?);
     while let Some(innermost) = frames.len().checked_sub(1) {
         let Some(entry) = frames[innermost].entries.next() else {
             let finished = frames.pop().expect("a frame was just looked at");
@@ -150,7 +156,7 @@ fn remove_tree_with(
             skip_if_missing(removal).map_err(failure("remove", directory, &name))?;
             continue;
         }
-        if device_of(&stat) != reference {
+        if device_of(&stat) != reference || mount_root_of(&stat) {
             return Err(foreign_device(directory, &name));
         }
         if frames.len() > max_depth {
@@ -159,7 +165,7 @@ fn remove_tree_with(
                 limit: max_depth,
             });
         }
-        if let Some(child) = open_frame(directory, &name, stat.mode, list)? {
+        if let Some(child) = open_frame(directory, &name, stat.mode, mount_root_of, list)? {
             frames.push(child);
         }
     }
@@ -183,18 +189,41 @@ struct Frame {
 /// access once where either is denied. `None` when it has vanished. The
 /// kind and device of every entry are read later from its own `lstat`, as
 /// a directory listing may leave the kind open.
+///
+/// A directory that could not be opened before it was given owner access
+/// may have been a mount root whose flag the `lstat` could not read, as on
+/// macOS for a directory that cannot be searched. The flag is read again
+/// once the directory is open; a mount root gets its mode back and fails as
+/// [`FsxError::ForeignDevice`], with nothing inside it listed.
 fn open_frame(
     parent: &TreeRoot,
     name: &RelPath,
     mode: u32,
+    mount_root_of: MountRootOf<'_>,
     list: List<'_>,
 ) -> Result<Option<Frame>, FsxError> {
+    let granted_to_open = std::cell::Cell::new(false);
     let grant = &mut || grant_owner(parent, name, mode);
-    let opened = retry_once_with_access(grant, &mut || parent.sub(name));
+    let grant_to_open = &mut || {
+        granted_to_open.set(true);
+        grant_owner(parent, name, mode)
+    };
+    let opened = retry_once_with_access(grant_to_open, &mut || parent.sub(name));
     let opened = skip_if_missing(opened).map_err(failure("open", parent, name))?;
     let Some(directory) = opened else {
         return Ok(None);
     };
+    if granted_to_open.get() {
+        let itself = RelPath::root();
+        let entry = directory
+            .lstat(&itself)
+            .map_err(failure("stat", &directory, &itself))?;
+        if mount_root_of(&entry) {
+            // Best effort: the refusal is the result worth reporting.
+            let _ = parent.set_mode(name, mode & 0o7777);
+            return Err(foreign_device(parent, name));
+        }
+    }
     // The directory is given access through the one that holds it: asking
     // the directory itself fails once it has lost its search permission.
     let entries = retry_once_with_access(grant, &mut || list(&directory)).map_err(failure(
@@ -279,6 +308,10 @@ mod tests {
 
     fn real_list(dir: &TreeRoot) -> io::Result<Vec<DirEntry>> {
         dir.read_dir(&RelPath::root())
+    }
+
+    fn not_a_mount_root(_: &TreeEntry) -> bool {
+        false
     }
 
     fn last_name(entry: &TreeEntry) -> &[u8] {
@@ -403,8 +436,15 @@ mod tests {
         tree.file("t/mnt/file", "x");
         tree.file("t/other", "y");
         let device = |entry: &TreeEntry| if last_name(entry) == b"mnt" { 9 } else { 8 };
-        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list, MAX_DEPTH)
-            .expect_err("stops");
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("stops");
         assert!(
             matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
             "{error}"
@@ -417,13 +457,105 @@ mod tests {
         let mut tree = Tree::new();
         tree.file("t/a", "x");
         let device = |entry: &TreeEntry| if last_name(entry) == b"t" { 9 } else { 8 };
-        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &real_list, MAX_DEPTH)
-            .expect_err("refused");
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("refused");
         assert!(
             matches!(&error, FsxError::ForeignDevice { path } if path == "t"),
             "{error}"
         );
         assert!(tree.path("t/a").exists());
+    }
+
+    #[test]
+    fn a_mount_root_in_the_tree_stops_the_removal_on_the_same_device() {
+        let mut tree = Tree::new();
+        tree.file("t/mnt/file", "x");
+        tree.file("t/other", "y");
+        let device = |entry: &TreeEntry| entry.device;
+        let mount_root = |entry: &TreeEntry| last_name(entry) == b"mnt";
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("stops");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "t/mnt"),
+            "{error}"
+        );
+        assert!(tree.path("t/mnt/file").exists());
+    }
+
+    #[test]
+    fn a_top_that_is_a_mount_root_is_not_entered() {
+        let mut tree = Tree::new();
+        tree.file("t/a", "x");
+        let device = |entry: &TreeEntry| entry.device;
+        let mount_root = |entry: &TreeEntry| last_name(entry) == b"t";
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &mount_root,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("refused");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "t"),
+            "{error}"
+        );
+        assert!(tree.path("t/a").exists());
+    }
+
+    /// The directory could not be opened before it was given owner access,
+    /// so its mount root flag could not be read. It is read again once it
+    /// is open, and a mount root gets its mode back and is not entered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mount_root_found_after_the_grant_gets_its_mode_back_and_is_not_entered() {
+        let mut tree = Tree::new();
+        tree.file("t/locked/f", "x");
+        let locked = tree.path("t/locked");
+        let _guard = RestoreModes(vec![locked.clone()]);
+        fs::set_permissions(&locked, Permissions::from_mode(0o000)).expect("chmod");
+        fs::read_dir(&locked).expect_err("the test needs a non-root user");
+        let asked = std::cell::Cell::new(0);
+        let device = |entry: &TreeEntry| entry.device;
+        let hidden_at_first = |entry: &TreeEntry| {
+            if last_name(entry) != b"locked" {
+                return false;
+            }
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &hidden_at_first,
+            &real_list,
+            MAX_DEPTH,
+        )
+        .expect_err("refused");
+        assert!(
+            matches!(&error, FsxError::ForeignDevice { path } if path == "t/locked"),
+            "{error}"
+        );
+        assert_eq!(mode_of(&locked), 0o000);
+        assert!(tree.path("t").exists());
+        fs::set_permissions(&locked, Permissions::from_mode(0o755)).expect("chmod");
+        assert!(locked.join("f").exists());
     }
 
     #[test]
@@ -439,8 +571,15 @@ mod tests {
             Ok(entries)
         };
         let device = |entry: &TreeEntry| entry.device;
-        remove_tree_with(&root_of(&tree), &path("t"), &device, &unknown, MAX_DEPTH)
-            .expect("removes");
+        remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &unknown,
+            MAX_DEPTH,
+        )
+        .expect("removes");
         assert!(!tree.path("t").exists());
     }
 
@@ -459,7 +598,15 @@ mod tests {
             Ok(entries)
         };
         let device = |entry: &TreeEntry| entry.device;
-        remove_tree_with(&root_of(&tree), &path("t"), &device, &ghost, MAX_DEPTH).expect("removes");
+        remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &ghost,
+            MAX_DEPTH,
+        )
+        .expect("removes");
         assert!(!tree.path("t").exists());
     }
 
@@ -539,7 +686,8 @@ mod tests {
         let root = root_of(&tree);
         chain(&root, 4);
         let device = |entry: &TreeEntry| entry.device;
-        let error = remove_tree_with(&root, &path("t"), &device, &real_list, 2).expect_err("deep");
+        let error = remove_tree_with(&root, &path("t"), &device, &not_a_mount_root, &real_list, 2)
+            .expect_err("deep");
         let first_past = chain_path(3).to_string();
         assert!(
             matches!(&error, FsxError::TooDeep { path, limit } if *path == first_past && *limit == 2),
@@ -589,8 +737,15 @@ mod tests {
         tree.file("t/a", "x");
         let broken = |_: &TreeRoot| Err(io::Error::from(io::ErrorKind::Other));
         let device = |entry: &TreeEntry| entry.device;
-        let error = remove_tree_with(&root_of(&tree), &path("t"), &device, &broken, MAX_DEPTH)
-            .expect_err("fails");
+        let error = remove_tree_with(
+            &root_of(&tree),
+            &path("t"),
+            &device,
+            &not_a_mount_root,
+            &broken,
+            MAX_DEPTH,
+        )
+        .expect_err("fails");
         assert!(
             matches!(&error, FsxError::Io { action: "list", path, .. } if path == "t"),
             "{error}"
