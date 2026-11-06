@@ -6,8 +6,8 @@
 
 use super::commit::{self, Class, Versions};
 use super::{
-    MintedPiece, RemovedLive, SkipReason, SyncAction, SyncContext, SyncError, SyncReport,
-    UnbackedPiece, UnbackedReason, ends_run, path_of, skip,
+    MintedPiece, RemovedLive, SyncAction, SyncContext, SyncError, SyncReport, UnbackedPiece,
+    UnbackedReason, ends_run, path_of,
 };
 use crate::clock::{Clock, whole_seconds};
 use crate::collection::Collection;
@@ -280,13 +280,7 @@ fn mint(
             // The commit must not settle an object whose entry is
             // missing. The next run's repairs write the entry.
             let message = error.to_string();
-            skip(
-                ctx.collection,
-                report,
-                id,
-                SkipReason::Error,
-                message.clone(),
-            );
+            report.held_back.insert(id);
             report.unbacked.push(UnbackedPiece {
                 id: Some(id),
                 path: path.clone(),
@@ -372,7 +366,7 @@ impl Backup<'_> {
         let ctx = self.ctx;
         // Nothing may be built on metadata the pull could not read
         // completely.
-        if self.pull_failed || report.skipped.iter().any(|skipped| skipped.id == id) {
+        if self.pull_failed || report.leaves_alone(id) {
             return Ok(());
         }
         let store = Store::new(ctx.collection);
@@ -831,7 +825,7 @@ fn names_live(metadata: &Metadata) -> bool {
 fn strip_archives(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), SyncError> {
     let store = Store::new(ctx.collection);
     for id in store.objects()? {
-        if report.skipped.iter().any(|skipped| skipped.id == id) {
+        if report.leaves_alone(id) {
             continue;
         }
         if let Err(error) = strip(ctx, &store, id) {
@@ -1153,6 +1147,30 @@ mod tests {
         assert!(second.minted.is_empty(), "{second:?}");
         assert_eq!(only_object(&anna), minted);
         assert_eq!(anna.entry(minted).state, EntryState::Live);
+    }
+
+    #[test]
+    fn a_mint_that_fails_is_reported_once_as_unbacked_and_names_no_skipped_object() {
+        let shared = Shared::new();
+        let anna = Machine::new(&shared, "anna");
+        anna.folder("proj", "a.txt", "hello");
+        let tracking = anna.collection.tracking_dir();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o555)).expect("read-only");
+        assert!(
+            fs::File::create(tracking.join("probe")).is_err(),
+            "the precondition: the tracking directory refuses writes"
+        );
+
+        let report = anna.sync();
+        fs::set_permissions(&tracking, fs::Permissions::from_mode(0o755)).expect("writable");
+
+        let minted = only_object(&anna);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.unbacked.len(), 1, "{:?}", report.unbacked);
+        assert_eq!(report.unbacked[0].id, Some(minted));
+        assert_eq!(report.unbacked[0].reason, UnbackedReason::Error);
+        assert!(report.committed.is_empty(), "{report:?}");
+        assert!(crate::report::CommandReport::partial(&report));
     }
 
     #[test]

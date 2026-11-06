@@ -37,6 +37,7 @@ use crate::store::{Store, StoreError};
 use crate::tracking::TrackingError;
 use jiff::SignedDuration;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 /// Errors of the `sync` command.
@@ -221,6 +222,18 @@ pub struct SyncReport {
     pub unbacked: Vec<UnbackedPiece>,
     pub cleanup: CleanupReport,
     pub warnings: Vec<Warning>,
+    /// Objects this run leaves alone for a reason that is reported under
+    /// `unbacked`, so that no later phase commits or changes them.
+    #[serde(skip)]
+    held_back: BTreeSet<ObjectId>,
+}
+
+impl SyncReport {
+    /// Whether the later phases of this run leave the object alone, as it
+    /// is skipped or held back.
+    pub(super) fn leaves_alone(&self, id: ObjectId) -> bool {
+        self.held_back.contains(&id) || self.skipped.iter().any(|skipped| skipped.id == id)
+    }
 }
 
 impl CommandReport for SyncReport {

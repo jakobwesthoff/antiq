@@ -465,7 +465,7 @@ pub(super) fn run(ctx: &SyncContext<'_>, report: &mut SyncReport) -> Result<(), 
     for id in pending_objects(ctx.collection)? {
         // An object the pull left alone is not committed on top of what
         // could not be taken from the remote.
-        if report.skipped.iter().any(|skipped| skipped.id == id) {
+        if report.leaves_alone(id) {
             continue;
         }
         match classify(ctx.collection, id, &Versions::new()) {
