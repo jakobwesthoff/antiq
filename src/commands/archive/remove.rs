@@ -837,7 +837,7 @@ mod tests {
         assert!(!world.temp.root().join("piece").exists());
         assert_eq!(entries(&antiq(&world, "trash")), Vec::<String>::new());
         assert_eq!(entries(&antiq(&world, "doomed")), Vec::<String>::new());
-        assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
+        assert!(!antiq(&world, "tmp/pack").exists(), "tmp/pack/ is gone");
         assert_eq!(store_files(&world).len(), 3, "the version stays");
     }
 
@@ -868,7 +868,7 @@ mod tests {
             Vec::<String>::new(),
             "the version is taken back"
         );
-        assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
+        assert!(!antiq(&world, "tmp/pack").exists(), "tmp/pack/ is gone");
     }
 
     #[test]
@@ -1103,7 +1103,7 @@ mod tests {
 
         assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
         assert_eq!(outcome.done.len(), 1, "{:?}", outcome.done);
-        assert_eq!(entries(&antiq(&world, "tmp/pack")), Vec::<String>::new());
+        assert!(!antiq(&world, "tmp/pack").exists(), "tmp/pack/ is gone");
         assert_eq!(store_files(&world).len(), 3, "the version stays");
         assert!(world.temp.root().join("piece/a.txt").exists());
     }

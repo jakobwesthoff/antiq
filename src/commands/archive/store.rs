@@ -443,10 +443,12 @@ fn stage_and_store(
 }
 
 /// Removes the staging of a version and the folders above it that are
-/// empty, up to and including `<stamp>/`.
+/// empty, up to and including `pack/`.
 ///
-/// A failure leaves the folder for repair 2, which deletes what `tmp/` holds,
-/// so it is not reported.
+/// Pieces of one run share `pack/` and a stamp folder. The last one to finish
+/// finds them empty and removes them, so a run leaves `tmp/` empty. A failure
+/// leaves the folder for repair 2, which deletes what `tmp/` holds, so it is
+/// not reported.
 pub(super) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPath) {
     let Ok(tmp) = TreeRoot::open(tmp_dir) else {
         return;
@@ -455,9 +457,9 @@ pub(super) fn remove_staging(run_dirs: &Mutex<()>, tmp_dir: &Path, chain: &RelPa
     if remove_tree(&tmp, chain).is_err() {
         return;
     }
-    // `pack/<stamp>` are the first two components of the chain.
+    // `pack` and `<stamp>` are the first two components of the chain.
     let components: Vec<&[u8]> = chain.components().collect();
-    for length in (2..components.len()).rev() {
+    for length in (1..components.len()).rev() {
         let mut folder = RelPath::root();
         for component in &components[..length] {
             let name = Name::from_bytes(component.to_vec()).expect("a component is a name");
@@ -726,11 +728,37 @@ mod tests {
 
     fn staging_is_gone(world: &World) {
         let pack = world.temp.root().join(".antiq/tmp/pack");
+        assert!(!pack.exists(), "tmp/pack/ is gone");
+    }
+
+    /// Two pieces staged under one stamp, as parallel pieces of a run are.
+    fn stage_two_chains(world: &World) -> (RelPath, RelPath) {
+        let stamp: Stamp = "2026-11-04T090211".parse().expect("a stamp");
+        let first = staging_chain(&stamp, &path("one"));
+        let second = staging_chain(&stamp, &path("two"));
+        for chain in [&first, &second] {
+            fs::create_dir_all(world.temp.root().join(".antiq/tmp").join(chain.to_string()))
+                .expect("the chain is made");
+        }
+        (first, second)
+    }
+
+    #[test]
+    fn removing_the_last_staging_removes_pack_too() {
+        let world = world();
+        let (first, second) = stage_two_chains(&world);
+        let tmp = world.temp.root().join(".antiq/tmp");
+
+        remove_staging(&world.run_dirs, &tmp, &first);
         assert_eq!(
-            entries_of(&pack),
-            Vec::<String>::new(),
-            "tmp/pack/ holds nothing"
+            entries_of(&tmp.join("pack/2026-11-04T090211")),
+            ["two"],
+            "the sibling piece stays staged"
         );
+        remove_staging(&world.run_dirs, &tmp, &second);
+
+        assert!(!tmp.join("pack").exists(), "pack/ goes with the last one");
+        assert!(tmp.is_dir(), "tmp/ itself stays");
     }
 
     /// The staging of a stored version is still there, empty, until the
