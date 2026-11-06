@@ -35,6 +35,10 @@ coverage base:
 shots:
     scripts/render.sh
 
+# Render the social preview image from assets/social/og.html with Chrome.
+og:
+    scripts/og.sh
+
 # Render Archie's emblem as terminal text, one file per cell shape and glyph set.
 emblem-ansi:
     scripts/emblem-ansi.sh

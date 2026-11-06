@@ -1,0 +1,78 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+     License, v. 2.0. If a copy of the MPL was not distributed with this
+     file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<!doctype html><html><head><meta charset="utf-8">
+<title>antiq social preview</title>
+<style>
+/* Both faces are vendored under fonts/ (SIL Open Font License 1.1) so that
+   scripts/og.sh renders the same pixels without a network. */
+@font-face { font-family: "Inter"; src: url("fonts/Inter-Variable.ttf") format("truetype"); font-weight: 100 900; }
+@font-face { font-family: "Victor Mono"; src: url("fonts/VictorMono-Variable.ttf") format("truetype"); font-weight: 100 700; }
+:root { --mono: "Victor Mono", monospace; --sans: "Inter", sans-serif; }
+:root { --accent: #b49cff; --glow: #8b5cf6; --fg: #e5e5e5;
+  --c1: #ef6487; --c2: #5eca89; --c3: #f0c24b; --c4: #65aef7; --c5: #a78bfa; --c6: #43c1be; --c7: #e5e5e5; --c8: #9ca3af;
+  --c9: #ef6487; --c10: #5eca89; --c11: #fee767; --c12: #65aef7; --c13: #a78bfa; --c14: #43c1be; --c15: #fff;
+  }
+* { margin: 0; box-sizing: border-box; font-optical-sizing: none; }
+html, body { width: 1280px; height: 640px; overflow: hidden; background: #0b0b12; }
+body { position: relative; font-family: var(--sans); color: #fff; }
+.bg { position: absolute; inset: 0; background: radial-gradient(760px 520px at 50% 46%, rgba(139, 92, 246, .42), transparent 68%),radial-gradient(520px 420px at 4% 14%, rgba(79, 109, 245, .26), transparent 70%),radial-gradient(560px 460px at 98% 96%, rgba(20, 184, 198, .24), transparent 70%),radial-gradient(420px 320px at 16% 104%, rgba(20, 184, 198, .16), transparent 70%),radial-gradient(460px 320px at 90% -4%, rgba(79, 109, 245, .18), transparent 70%),linear-gradient(112deg, transparent 30%, rgba(255,255,255,.05) 41%, rgba(139, 92, 246, .09) 50%, transparent 60%),linear-gradient(160deg, #0a0a12 0%, #10101c 48%, #090d15 100%); }
+.vignette { position: absolute; inset: 0; background: radial-gradient(ellipse 80% 85% at 50% 48%, transparent 55%, rgba(0, 0, 0, .5) 100%); }
+
+.hero { position: absolute; z-index: 5; display: flex; align-items: center; justify-content: center; }
+.hero.stack { left: 0; top: 0; width: 1280px; height: 640px; flex-direction: column; }
+.hero.row { left: 0; top: 0; width: 1280px; height: 640px; gap: 30px; padding-bottom: 0; }
+.mascot { flex: none; filter: drop-shadow(0 18px 34px rgba(0,0,0,.55)) drop-shadow(0 0 44px rgba(139,92,246,.5)); }
+.stack .mascot { width: 330px; height: 330px; margin-top: 4px; }
+.row .mascot { width: 400px; height: 400px; }
+.mark { font: 700 150px/1 var(--sans); letter-spacing: -0.03em; white-space: nowrap; padding-bottom: .12em; }
+.stack .mark { margin-top: -22px; }
+.aq { background-image: linear-gradient(135deg, #e6dcff 0%, #b49cff 45%, #6c4fd8 100%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; padding-right: .04em;
+  filter: drop-shadow(0 6px 22px rgba(139, 92, 246, .38)); }
+.ue { -webkit-text-fill-color: #14122a; -webkit-text-stroke: 3px rgba(180, 156, 255, .55); paint-order: stroke fill; }
+.tag { font: 500 25px/1 var(--sans); letter-spacing: .02em; color: #b9b7cc; }
+.stack .tag { margin-top: -6px; }
+.row .mark { font-size: 138px; }
+.row .tag { margin-top: 2px; }
+
+.side { position: absolute; inset: 0; z-index: 1; }
+.side.l { -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 18%, transparent 40%); mask-image: linear-gradient(90deg, #000 0%, #000 18%, transparent 40%); }
+.side.r { -webkit-mask-image: linear-gradient(270deg, #000 0%, #000 18%, transparent 40%); mask-image: linear-gradient(270deg, #000 0%, #000 18%, transparent 40%); }
+
+.gcard { position: absolute; width: 400px; height: 96px; display: flex; align-items: center; gap: 16px; padding-left: 24px; border-radius: 16px;
+  background: linear-gradient(135deg, rgba(40, 36, 66, .6), rgba(16, 16, 26, .5)); box-shadow: 0 0 0 1px rgba(139, 92, 246, .35), 0 0 50px rgba(139, 92, 246, .12);
+  opacity: .7; filter: blur(.6px); }
+.gstem { font: 600 24px/1.2 var(--mono); color: #fff; } .gmeta { font: 500 14px/1.6 var(--mono); color: #9ca3af; }
+
+.trail { position: absolute; top: 0; width: 2px; height: 640px; background: linear-gradient(180deg, transparent, rgba(180, 156, 255, .7) 20%, rgba(139, 92, 246, .5) 80%, transparent); }
+.tdot { position: absolute; width: 20px; height: 20px; border-radius: 50%; background: #12121c; border: 3px solid var(--accent); box-shadow: 0 0 18px rgba(139, 92, 246, .8); }
+.tdot.a { border-color: var(--c3); box-shadow: 0 0 18px rgba(240, 194, 75, .6); }
+.tdot.g { border-color: var(--c2); background: var(--c2); box-shadow: 0 0 18px rgba(94, 202, 137, .6); }
+.tlabel { position: absolute; font: 600 17px/1 var(--mono); color: rgba(201, 205, 224, .75); }
+.year { position: absolute; font: 800 230px/1 var(--sans); letter-spacing: -0.04em; color: transparent; -webkit-text-stroke: 2px rgba(139, 92, 246, .3); }
+
+.board { position: absolute; height: 5px; border-radius: 3px; background: linear-gradient(90deg, rgba(180, 156, 255, .15), rgba(180, 156, 255, .75), rgba(180, 156, 255, .15)); box-shadow: 0 0 26px rgba(139, 92, 246, .7); }
+.abox { position: absolute; border-radius: 6px; border: 2px solid rgba(180, 156, 255, .55); background: linear-gradient(160deg, rgba(60, 48, 110, .5), rgba(20, 18, 36, .5));
+  box-shadow: 0 0 30px rgba(139, 92, 246, .22); overflow: hidden; }
+.abox::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 16%; background: rgba(180, 156, 255, .22); border-bottom: 2px solid rgba(180, 156, 255, .4); }
+.abox span { position: absolute; left: 10px; bottom: 8px; font: 600 15px/1 var(--mono); color: rgba(229, 229, 229, .7); }
+.abox.solid { background: linear-gradient(160deg, rgba(48, 40, 84, .92), rgba(16, 15, 28, .94)); }
+.boxes { -webkit-mask-image: linear-gradient(0deg, #000 0%, #000 30%, transparent 80%) !important; mask-image: linear-gradient(0deg, #000 0%, #000 30%, transparent 80%) !important; }
+
+
+.shafts { position: absolute; inset: 0; z-index: 1; mix-blend-mode: screen; }
+.mote { position: absolute; border-radius: 50%; background: #e6dcff; z-index: 2; box-shadow: 0 0 8px rgba(200, 180, 255, .9); }
+
+.stack .mascot { width: 296px; height: 296px; margin-top: 0; }
+.stack .mark { font-size: 128px; margin-top: 24px; }
+.stack .tag { margin-top: 18px; }
+.abox span { font-size: 11px; letter-spacing: 0; line-height: 1.25; }
+.abox span small { display: block; font-size: 9.2px; margin-top: 2px; opacity: .75; }
+.abox.hole::after { content: ""; position: absolute; left: 50%; top: 34%; width: 26px; height: 8px; margin-left: -13px;
+  border-radius: 4px; background: rgba(10, 10, 18, .7); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .8); }
+.stack .mascot{width:250px;height:250px} .stack .mark{font-size:114px;margin-top:-16px} .stack .tag{font-size:21px}</style></head><body>
+<div class="bg"></div><svg width="1280" height="640" style="position:absolute;inset:0"><polygon points="735,435 836,407 548,568" fill="rgba(139, 92, 246,0.046)" stroke="rgba(255,255,255,0.073)" stroke-width="1"/><polygon points="1205,540 1408,707 1443,650" fill="rgba(139, 92, 246,0.029)" stroke="rgba(255,255,255,0.047)" stroke-width="1"/><polygon points="1291,176 1349,553 1127,523" fill="rgba(139, 92, 246,0.034)" stroke="rgba(255,255,255,0.055)" stroke-width="1"/><polygon points="1319,599 1216,606 1085,321" fill="rgba(255, 255, 255,0.050)" stroke="rgba(255,255,255,0.079)" stroke-width="1"/><polygon points="1067,128 1012,80 771,135" fill="rgba(255, 255, 255,0.042)" stroke="rgba(255,255,255,0.067)" stroke-width="1"/><polygon points="775,646 535,672 462,614" fill="rgba(255, 255, 255,0.026)" stroke="rgba(255,255,255,0.042)" stroke-width="1"/><polygon points="5,37 217,404 192,316" fill="rgba(139, 92, 246,0.034)" stroke="rgba(255,255,255,0.054)" stroke-width="1"/><polygon points="434,255 869,-4 425,279" fill="rgba(139, 92, 246,0.044)" stroke="rgba(255,255,255,0.070)" stroke-width="1"/><polygon points="1211,262 1328,-67 1183,112" fill="rgba(139, 92, 246,0.038)" stroke="rgba(255,255,255,0.061)" stroke-width="1"/><polygon points="107,373 352,193 261,396" fill="rgba(139, 92, 246,0.025)" stroke="rgba(255,255,255,0.040)" stroke-width="1"/><polygon points="-163,359 -162,313 -0,334" fill="rgba(255, 255, 255,0.038)" stroke="rgba(255,255,255,0.061)" stroke-width="1"/><polygon points="866,467 892,799 892,580" fill="rgba(255, 255, 255,0.041)" stroke="rgba(255,255,255,0.066)" stroke-width="1"/><polygon points="894,103 915,152 1183,125" fill="rgba(255, 255, 255,0.017)" stroke="rgba(255,255,255,0.027)" stroke-width="1"/><polygon points="252,203 388,189 78,152" fill="rgba(255, 255, 255,0.025)" stroke="rgba(255,255,255,0.040)" stroke-width="1"/><polygon points="233,-11 343,3 402,-65" fill="rgba(255, 255, 255,0.045)" stroke="rgba(255,255,255,0.072)" stroke-width="1"/><polygon points="699,303 795,386 1065,234" fill="rgba(255, 255, 255,0.027)" stroke="rgba(255,255,255,0.044)" stroke-width="1"/></svg><div class="vignette"></div>
+<div class="side l"><div class="board" style="left:-20px;width:350px;top:190px"></div><div class="abox" style="left:-10px;top:120px;width:96px;height:70px;border-color:rgba(144,140,170,0.24);background:linear-gradient(160deg,rgba(68,62,105,0.28),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.07)"><span style="left:20px;color:rgba(229,229,229,0.26)">ray-tracer<small>Aug 2024</small></span></div><div class="abox" style="left:96px;top:94px;width:70px;height:96px;border-color:rgba(146,141,174,0.26);background:linear-gradient(160deg,rgba(68,63,107,0.29),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.08)"><span style="left:10px;color:rgba(229,229,229,0.28)">notes<small>Nov 2024</small></span></div><div class="abox" style="left:176px;top:132px;width:110px;height:58px;border-color:rgba(150,142,184,0.30);background:linear-gradient(160deg,rgba(70,63,112,0.33),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.10)"><span style="left:10px;color:rgba(229,229,229,0.33)">scan-old<small>Jan 2025</small></span></div><div class="board" style="left:-20px;width:400px;top:370px"></div><div class="abox" style="left:10px;top:270px;width:80px;height:100px;border-color:rgba(156,145,198,0.36);background:linear-gradient(160deg,rgba(72,64,119,0.37),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.13)"><span style="left:10px;color:rgba(229,229,229,0.39)">sketches<small>Mar 2025</small></span></div><div class="abox" style="left:100px;top:306px;width:120px;height:64px;border-color:rgba(160,147,208,0.40);background:linear-gradient(160deg,rgba(73,65,124,0.40),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.15)"><span style="left:10px;color:rgba(229,229,229,0.43)">pixel-clock<small>Jun 2025</small></span></div><div class="abox" style="left:230px;top:284px;width:84px;height:86px;border-color:rgba(164,149,217,0.44);background:linear-gradient(160deg,rgba(74,65,128,0.43),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.17)"><span style="left:10px;color:rgba(229,229,229,0.47)">mail-sort<small>Sep 2025</small></span></div><div class="board" style="left:-20px;width:320px;top:550px"></div><div class="abox" style="left:-20px;top:472px;width:120px;height:78px;border-color:rgba(170,152,231,0.50);background:linear-gradient(160deg,rgba(76,66,135,0.47),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.20)"><span style="left:30px;color:rgba(229,229,229,0.54)">podcast-feed<small>Oct 2025</small></span></div><div class="abox" style="left:112px;top:446px;width:76px;height:104px;border-color:rgba(176,154,246,0.56);background:linear-gradient(160deg,rgba(78,67,143,0.52),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.23)"><span style="left:10px;color:rgba(229,229,229,0.60)">dotfiles<small>Feb 2026</small></span></div></div><div class="side r"><div class="board" style="left:950px;width:350px;top:190px"></div><div class="abox" style="left:1000px;top:98px;width:84px;height:92px;border-color:rgba(145,140,171,0.25);background:linear-gradient(160deg,rgba(68,62,105,0.29),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.07)"><span style="left:10px;color:rgba(229,229,229,0.27)">scanner<small>Sep 2024</small></span></div><div class="abox" style="left:1092px;top:130px;width:94px;height:60px;border-color:rgba(148,142,179,0.28);background:linear-gradient(160deg,rgba(69,63,109,0.31),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.09)"><span style="left:10px;color:rgba(229,229,229,0.30)">tide-chart<small>Dec 2024</small></span></div><div class="abox" style="left:1190px;top:112px;width:90px;height:78px;border-color:rgba(154,144,193,0.34);background:linear-gradient(160deg,rgba(71,64,116,0.35),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.12)"><span style="left:10px;color:rgba(229,229,229,0.37)">slidegen<small>Apr 2025</small></span></div><div class="board" style="left:900px;width:400px;top:370px"></div><div class="abox" style="left:930px;top:308px;width:110px;height:62px;border-color:rgba(158,146,203,0.38);background:linear-gradient(160deg,rgba(72,64,121,0.39),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.14)"><span style="left:10px;color:rgba(229,229,229,0.41)">photo-tags<small>May 2025</small></span></div><div class="abox" style="left:1050px;top:272px;width:76px;height:98px;border-color:rgba(162,148,212,0.42);background:linear-gradient(160deg,rgba(74,65,126,0.42),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.16)"><span style="left:10px;color:rgba(229,229,229,0.45)">ledger<small>Jul 2025</small></span></div><div class="abox" style="left:1136px;top:300px;width:130px;height:70px;border-color:rgba(168,151,226,0.48);background:linear-gradient(160deg,rgba(76,66,133,0.46),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.19)"><span style="left:10px;color:rgba(229,229,229,0.51)">backup-run<small>Nov 2025</small></span></div><div class="board" style="left:980px;width:320px;top:550px"></div><div class="abox" style="left:1010px;top:466px;width:76px;height:84px;border-color:rgba(172,152,236,0.52);background:linear-gradient(160deg,rgba(77,66,138,0.49),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.21)"><span style="left:10px;color:rgba(229,229,229,0.56)">wasm-lab<small>Dec 2025</small></span></div><div class="abox" style="left:1092px;top:488px;width:80px;height:62px;border-color:rgba(176,154,246,0.56);background:linear-gradient(160deg,rgba(78,67,143,0.52),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.23)"><span style="left:10px;color:rgba(229,229,229,0.60)">cli-kit<small>Mar 2026</small></span></div><div class="abox" style="left:1180px;top:450px;width:100px;height:100px;border-color:rgba(180,156,255,0.60);background:linear-gradient(160deg,rgba(80,68,147,0.55),rgba(20,18,36,.5));box-shadow:0 0 30px rgba(139,92,246,0.25)"><span style="left:10px;color:rgba(229,229,229,0.64)">mini-forth<small>Jun 2026</small></span></div></div>
+<div class="hero stack"><img class="mascot" src="../mascot-1536.png" alt=""><div class="mark"><span class="aq">antiq</span><span class="ue">ue</span></div><div class="tag">Your idle folders, kept like antiques</div></div>
+</body></html>
