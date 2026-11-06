@@ -2625,7 +2625,6 @@ the same commit; the lead checks that at acceptance.
   superseded, else the newest live package. A path that names an object
   wins over a ULID prefix; a folder without an object is an unknown
   reference; I15 exposes `resolve_path` for `pin` on new pieces (I18).
-
 - 2026-11-04 (I15 plan review, 11 agreed): the member cache lives as
   long as its local listing; `at_path` gives the claimant of a path
   (entry `unearthing`, `live` or `removing`), so after a fork a path
@@ -2635,6 +2634,14 @@ the same commit; the lead checks that at acceptance.
   is `outside_collection`; search scores the piece path and members as
   `<piece path>/<member>`; I20 and I21 refuse the collection root and
   `.antiq/...` themselves.
+- 2026-11-04 (merged): for I18, `resolve` returns the archived object
+  when a new folder shares its path (tell them apart with
+  `Index::at_path` and the folder's presence), `resolve_path` serves
+  `pin` on a new piece, and the current directory passed in is the
+  canonical `-C` directory, else `current_dir` (I18 tests the wiring).
+  I36 reuses `index::Query::score`. `ErrorKind::ALL` has 14 kinds;
+  exhaustive matches on `ErrorKind` need the `OutsideCollection` arm.
+  References take 6 to 26 Crockford characters.
 
 ### I16
 
