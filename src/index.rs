@@ -13,7 +13,7 @@ use crate::collection::Collection;
 use crate::fsx::FsxError;
 use crate::fsx::atomic::{flush_dir, write_atomic};
 use crate::id::ObjectId;
-use crate::listing::{self, ListingError};
+use crate::listing::{self, ListingEntry, ListingError};
 use crate::lock::RunLock;
 use crate::meta::{FileName, Lifecycle, Metadata, Payload, PayloadKind};
 use crate::relpath::{Name, RelPath};
@@ -289,6 +289,25 @@ impl Index {
         read_listing(collection, id, listing)
     }
 
+    /// The entries of the object's current listing: path, type and size of
+    /// every member, in listing order. `None` when the object has no
+    /// listing or its listing is not stored on this machine.
+    ///
+    /// The member cache holds paths only, so this always reads the listing.
+    pub fn listing_entries(
+        &self,
+        collection: &Collection,
+        id: ObjectId,
+    ) -> Result<Option<Vec<ListingEntry>>, IndexError> {
+        let Some(listing) = self.get(id).and_then(|entry| entry.listing.as_ref()) else {
+            return Ok(None);
+        };
+        match open_listing(&Store::new(collection), id, listing)? {
+            Some(file) => read_entries(id, file).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The known IDs that start with `prefix`, compared in upper case.
     pub fn ids_with_prefix(&self, prefix: &str) -> Vec<ObjectId> {
         let prefix = prefix.to_ascii_uppercase();
@@ -447,8 +466,12 @@ fn open_listing(
     }
 }
 
+fn read_entries(id: ObjectId, file: File) -> Result<Vec<ListingEntry>, IndexError> {
+    listing::read_all(file).map_err(|source| IndexError::Listing { id, source })
+}
+
 fn read_members(id: ObjectId, file: File) -> Result<Vec<RelPath>, IndexError> {
-    let entries = listing::read_all(file).map_err(|source| IndexError::Listing { id, source })?;
+    let entries = read_entries(id, file)?;
     Ok(entries.into_iter().map(|entry| entry.path).collect())
 }
 
@@ -1005,6 +1028,16 @@ mod tests {
             listing::write(&entries, file).expect("writes");
         }
 
+        /// Stores the listing of archive `version` of `object` with exactly
+        /// `entries`.
+        fn listing_with(&mut self, object: &str, version: u32, entries: &[ListingEntry]) {
+            let name = format!("{version:016x}.listing.zst");
+            let target = self.collection.object_dir(id(object)).join(name);
+            fs::create_dir_all(target.parent().expect("in an object directory")).expect("dir");
+            let file = fs::File::create(target).expect("creates");
+            listing::write(entries, file).expect("writes");
+        }
+
         fn update(&self) -> Updated {
             update(&self.collection, &self.lock).expect("updates")
         }
@@ -1149,6 +1182,98 @@ mod tests {
         assert_eq!(fx.members(A), None);
         assert_eq!(fx.update(), Updated::default());
         assert!(fx.content().is_empty());
+    }
+
+    #[test]
+    fn listing_entries_give_path_type_and_size_of_the_current_listing() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        let entries = vec![
+            ListingEntry {
+                path: path("src"),
+                kind: ListingType::Dir,
+                size: 0,
+                mtime: 0,
+                mode: 0o755,
+                link: None,
+                sha256: None,
+            },
+            ListingEntry {
+                path: path("src/main.rs"),
+                kind: ListingType::File,
+                size: 12,
+                mtime: 0,
+                mode: 0o644,
+                link: None,
+                sha256: Some("0".repeat(64)),
+            },
+        ];
+        fx.listing_with(A, 1, &entries);
+        let found = fx
+            .compute()
+            .listing_entries(&fx.collection, id(A))
+            .expect("reads");
+        assert_eq!(found, Some(entries));
+        assert!(fx.content().is_empty(), "reading must not write the cache");
+    }
+
+    #[test]
+    fn listing_entries_ignore_a_cache_file_and_read_the_listing() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.listing(A, 1, &[b"from-the-listing"]);
+        fx.update();
+        fs::write(
+            fx.cache_file(A),
+            br#"{"format":1,"listing":"0000000000000001.listing.zst","members":["from-the-cache"]}"#,
+        )
+        .expect("writes");
+        let found = fx
+            .compute()
+            .listing_entries(&fx.collection, id(A))
+            .expect("reads")
+            .expect("has entries");
+        assert_eq!(found[0].path.to_string(), "from-the-listing");
+    }
+
+    #[test]
+    fn an_object_without_a_listing_has_no_entries() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "live", &[PayloadSpec::live(1, 5)]);
+        assert_eq!(
+            fx.compute()
+                .listing_entries(&fx.collection, id(A))
+                .expect("reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_listing_that_is_not_stored_here_has_no_entries() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        assert_eq!(
+            fx.compute()
+                .listing_entries(&fx.collection, id(A))
+                .expect("reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_read_gives_no_entries_but_an_error_naming_it() {
+        let mut fx = Fixture::new();
+        fx.object(A, "a", "archived", &[PayloadSpec::archive(1, 5)]);
+        fx.temp.tree().file(
+            &format!(".antiq/objects/{A}/0000000000000001.listing.zst"),
+            "garbage",
+        );
+        let error = fx
+            .compute()
+            .listing_entries(&fx.collection, id(A))
+            .expect_err("garbage is not a listing");
+        assert!(matches!(error, IndexError::Listing { .. }), "{error:?}");
+        assert!(error.to_string().contains(A), "{error}");
     }
 
     #[test]
