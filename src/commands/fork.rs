@@ -1057,6 +1057,17 @@ mod tests {
         .expect("the lock is free after the run");
     }
 
+    #[test]
+    fn a_dry_run_of_an_unknown_piece_is_refused() {
+        let world = World::new(&[NEW]);
+        let mut request = world.request(None, true);
+        request.piece = OsString::from("nothing-like-it");
+        let error = world
+            .run_with(&request, &Probe::default())
+            .expect_err("unknown");
+        assert_eq!(error.kind(), ErrorKind::UnknownReference);
+    }
+
     // ----- repairs a dry run plans
 
     /// An unearth that died after the rename: the folder is in place with a
