@@ -9,19 +9,36 @@
 
 Your idle folders, kept like antiques.
 
-antiq is a command-line tool written in Rust for directories where
-working folders pile up, such as `~/playground`. It archives the folders
-of a collection that nobody has touched for a while, finds them again by
-name or by the files they hold, brings them back, and mirrors the whole
-collection to one backup target. Everything it writes can be read
-without antiq: archives are `tar.zst` files, and a listing is a checksum
-list that `shasum -c` reads once `zstd` has decompressed it.
+Many developers have a folder where experiments pile up: spikes,
+half-finished tools, a clone made to check one thing. The same happens in
+the context directories of AI conversations and coding agents, where every
+run leaves transcripts, intermediate files and scratch output you may want
+again. You do not delete them, so they stay, and the folder grows.
 
-The pangolin in the logo is [Archie](assets/archie-512.webp), antiq's
-mascot: a small idol of obsidian and gold. Archie shares its name with
-the first internet search engine, released in 1990, which indexed the
-files on FTP archives so people could find them again. The search
-engine's name, too, was a shortening of "archive".
+antiq turns such a folder into a collection. A folder of it that nobody has
+touched for 30 days (the default, configurable) is packed into a `tar.zst`
+archive, read back and compared with the folder, and only then removed. You
+find it again by the name of the folder or by the path of a file it held,
+and bring it back. The whole collection, live folders and versions, can be
+mirrored to one target with rsync.
+
+![antiq archiving three folders: a card with a progress bar for each, finished lines above them](docs/pages/assets/shots/archive-live.gif)
+
+antiq runs on macOS and Linux. Everything it writes can be read without it:
+archives are `tar.zst` files, and a listing is a checksum list that
+`shasum -c` reads once `zstd` has decompressed it.
+
+## Where it helps
+
+- **The folder where your experiments pile up.** Whatever its name, a
+  folder with one subfolder per experiment is a collection. Old
+  experiments leave the folder, and the search by name or by file finds
+  them again.
+- **The context directories of AI conversations and agent work.** Each run
+  of a coding agent or each conversation leaves a folder of transcripts and
+  intermediate data. A pattern in the collection's configuration selects
+  whichever folders your tools write, and the ones nobody has touched for a
+  while are archived instead of deleted.
 
 ## Installation
 
@@ -39,95 +56,282 @@ real one, for example with `brew install rsync`. antiq takes the first
 `rsync` that is new enough from `PATH`, then `/opt/homebrew/bin` and
 `/usr/local/bin`. `[target] rsync` names one by its absolute path.
 
-## Quick start
+<!-- docs:start -->
+## Tutorial
 
-Make a directory a collection. `--pattern` says which folders are pieces,
-here the folders two levels down:
+The tutorial goes from a first collection to a mirror on another disk. Each
+step uses what the one before left behind, so read it front to back. The
+images show the output of antiq on a terminal.
 
-```console
-$ cd ~/playground
-$ antiq init --pattern '*/*'
-Created the collection at /home/me/playground
-  id: 01M6P3PAQ5PQDFEXENXAQMET70
-  patterns: */*
-The next archive would archive 2 folders.
+### 1. Make a folder a collection
+
+A collection is a folder that antiq looks after. Each folder inside it that
+you want archived is a piece. To try antiq without touching your own
+folders, paste this. It makes a collection of six pieces, with file times
+that put them 2 to 200 days in the past:
+
+```bash
+mkdir experiments && cd experiments
+age() { touch -t "$(date -d "$1 days ago" +%Y%m%d%H%M 2>/dev/null || date -v-"$1"d +%Y%m%d%H%M)" "${@:2}"; }
+for file in scanner/src/main.rs scanner/Cargo.toml scan-old/cli/main.rs \
+    recipe-api/server.py recipe-api/requirements.txt ledger-cli/src/lib.rs \
+    fresh-idea/notes.md keep-me/draft.txt; do
+  mkdir -p "$(dirname "$file")" && echo "contents of $file" > "$file"
+done
+age 90 scanner/src/main.rs scanner/Cargo.toml
+age 200 scan-old/cli/main.rs
+age 45 recipe-api/server.py recipe-api/requirements.txt
+age 28 ledger-cli/src/lib.rs
+age 2 fresh-idea/notes.md
+age 100 keep-me/draft.txt
 ```
 
-See what is due, then archive it. A folder that nobody has touched for
-30 days is due:
+The folders in the images hold a few hundred megabytes, so their sizes
+differ from the ones you see. Everything else is the same, and the steps
+work on your own experiments folder too: run the dry run of step 4 first
+and read what it would archive.
 
-```console
-$ antiq status
-3 folders · 0 versions (0 B) · archive after 30 days idle
+Make the folder a collection. `--pattern` says which folders are pieces:
+`*` selects the folders directly inside it.
 
-STATE    PIECE             IDLE  WHAT
-due      projects/scanner  430d  archives next run
-due      tools/scan-old    430d  archives next run
-
- → HINT  Run antiq archive -n to see what the next run would archive.
-$ antiq archive
-archived projects/scanner
-archived tools/scan-old
-Archived 2, skipped 0, refused 0.
+```bash
+antiq init --pattern '*'
 ```
 
-That is the output into a pipe or a file. On a terminal, `archive`, `push`
-and `unearth` show each piece working as a card with a progress bar, and
-leave one line per piece and a summary behind:
+![antiq init prints the collection's path and ID and says that the next archive would archive 4 folders](docs/pages/assets/shots/init.png)
 
-```console
-$ antiq archive
-  ✔ projects/scanner                            13 B                1 file  0:00
-  ✔ tools/scan-old                              13 B                1 file  0:00
+`init` wrote `.antiq/config.toml`, the configuration of the collection.
+Commands find the collection by searching upwards from the current
+directory, or from the path given with `-C`.
 
-✔ 2 archived · 0 skipped · 0 refused   took 0:00
+### 2. See what is idle
+
+```bash
+antiq status
 ```
 
-Find a version by piece name or by the files it holds, and bring it back:
+![antiq status shows a table: scan-old, scanner, recipe-api and keep-me are due, ledger-cli archives in 2 days](docs/pages/assets/shots/status.png)
 
-```console
-$ antiq list scan
-PIECE              VERSION               SIZE    FILES
-projects/scanner   2026-11-05 16:02:01   129 B       1
-tools/scan-old     2026-11-05 16:02:01   124 B       1
-$ antiq grep 'main\.rs'
-projects/scanner   1 version, 2026-11-05
-  src/main.rs      2026-11-05
-tools/scan-old     1 version, 2026-11-05
-  cli/main.rs      2026-11-05
+A piece is due when its idle clock is older than 30 days. The idle clock is
+the newest modification time of the piece's regular files. `ledger-cli`,
+28 days idle, is `soon`: `status` shows that from 3 days before due.
+`fresh-idea` has no state, so it is not listed. `status` lists the pieces
+that are `due`, `soon`, `pinned` or `refused`, each with the reason.
 
-2 files in 2 pieces · antiq unearth <piece> [--version <version>]
-$ antiq unearth scan-old
-Unearthed tools/scan-old (version 2026-11-05 16:02:01)
+### 3. Keep what must stay
+
+`keep-me` is due, but it is a draft you are still using. Pin it:
+
+```bash
+antiq pin keep-me
+antiq status
 ```
 
-On a terminal the last command prints the line of the piece and
-`✔ Unearthed to ./tools/scan-old   took 0:00` instead.
+![antiq pin confirms, and status now lists keep-me as pinned, kept by .antiq-pin](docs/pages/assets/shots/keep.png)
 
-To mirror the collection, add a `[target]` block to
-`.antiq/config.toml`, create an empty folder on the target, and let
-`push --init` claim it:
+`pin` creates a `.antiq-pin` file in the piece. A pinned piece is never
+archived, and `push` still mirrors it. `unpin` removes the file.
+
+Other ways to keep files out of the way are in the configuration, which
+`init` wrote with a comment for every key:
+
+- `collection.ignore` lists gitignore lines for paths that are not packed,
+  not listed and not counted for the idle check. The default is
+  `[".DS_Store"]`.
+- `collection.timeless` lists gitignore lines for paths that are packed but
+  not counted for the idle check, such as `.git/`. A piece whose only
+  recent change is in `.git/` stays due.
+- `collection.exclude` lists literal paths that are never pieces.
+- `idle_days` and `soon_days` change the 30 and 3 days.
+
+A piece can also carry `.antiqignore` and `.antiq-timeless` files with the
+same gitignore lines. The reference below has the whole table.
+
+### 4. Archive
+
+Look at what the next run would do before it does it. A dry run, with `-n`,
+changes nothing:
+
+```bash
+antiq archive -n
+```
+
+![antiq archive -n lists the three would archive lines in magenta and ends with a note that nothing was archived](docs/pages/assets/shots/dry-run.png)
+
+Now archive. On a terminal each piece that is working has a card with a
+progress bar, and a line stays behind for each piece that finished:
+
+```bash
+antiq archive
+```
+
+![the cards of recipe-api, scan-old and scanner while they pack](docs/pages/assets/shots/archive-live.png)
+
+![the finished lines of the three pieces and the closing line](docs/pages/assets/shots/archive-done.png)
+
+For each due piece `archive` packs a `tar.zst` version, reads the archive
+back and compares it with the folder, and only then moves the folder away
+and deletes it. A folder that changed in the meantime is skipped and its
+files are kept. `archive <piece>` archives one piece now, however recently
+it changed.
+
+A piece is refused and never archived when its folder holds a mount point,
+a nested collection, an unreadable or locked entry, an exclude entry, or a
+control file that is not a regular file. `status` names the reason. A piece
+without a file that counts for the idle check is empty and is not archived
+either.
+
+### 5. Find it again
+
+The folders are gone from `experiments`, and every piece has a version.
+`list` prints one row per version, and `grep` matches a regular expression
+against the paths of all archived files:
+
+```bash
+antiq list scan
+antiq grep 'main\.rs'
+```
+
+![antiq list scan shows the versions of scan-old and scanner; antiq grep lists the main.rs files with the version they are in](docs/pages/assets/shots/find.png)
+
+`grep` reads the listings, so nothing is unpacked. A piece is named by its
+path or by a search word, and a search word has to match exactly one piece.
+`scan` matches two, so `list` shows both. Commands that take one piece, such
+as `unearth`, fail when the word matches none, and when it matches several
+they also list the candidates.
+
+### 6. Bring a version back
+
+`fork` extracts a working copy of a version and keeps the version:
+
+```bash
+antiq fork scanner
+```
+
+![antiq fork scanner prints the version it extracted and the path it wrote to](docs/pages/assets/shots/fork.png)
+
+Change a file in the copy and archive the piece again. `archive <piece>`
+works on a piece that is not due, and a piece can have several versions
+side by side:
+
+```bash
+echo '// edited' >> scanner/src/main.rs
+antiq archive scanner
+antiq list scanner
+```
+
+![antiq list scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
+
+`unearth <piece> [--version <version>]` brings a version back as a folder
+at the piece's path and **removes that version** once the folder is
+complete and verified. Without `--version` the newest version is taken. A
+version is named by a prefix of its time, such as `2026-11-05` or
+`2026-11-05T00`. `fork [--name <new path>]` writes the copy to another path
+instead.
+
+`forget <piece> <version>` deletes one version, and `forget <piece>
+--all-versions --force` deletes all of them.
+
+`import <folder> [--as <path>]` packs a folder from outside the collection
+directly as a version and leaves the source in place.
+
+### 7. Mirror the collection
+
+Everything in the collection, the live folders and the versions, can be
+mirrored to one target. Add a `[target]` block to `.antiq/config.toml`,
+create an empty folder for it, and let `push --init` claim it. The target
+is an absolute path, such as a mounted disk or share, or `[user@]host:path`
+reached over ssh. The path of the block below is the folder the images use:
+
+```bash
+mkdir -p /tmp/antiq-demo/target
+```
 
 ```toml
 [target]
-url = "/Volumes/nas/antiq/playground"
+url = "/tmp/antiq-demo/target"
 ```
+
+```bash
+antiq push --init
+```
+
+![antiq push --init claims the target and prints one line for each piece with what was created](docs/pages/assets/shots/push.png)
+
+`--init` wrote the marker `.antiq-target` at the target's root. It holds
+the collection ID, the machine name and the collection path, and keeps
+another collection from pushing there by mistake. Later runs are `antiq
+push`. `push -n` lists what would change, per piece, and changes nothing.
+
+For an ssh target, `url = "backup@nas.local:/volume1/antiq/projects"`, the
+ssh options such as a port go into `~/.ssh/config`. ssh is the recommended
+way to reach a NAS.
+
+The target is a mirror, not a backup: whatever is deleted in the
+collection is deleted on the target by the next push. The reference below
+says more under "Good to know".
+
+### 8. Run it unattended
+
+Run the two commands one after the other from a scheduler:
+
+```bash
+antiq archive; antiq push --if-reachable
+```
+
+The push runs after a partial archive too. The scheduler sees only the
+push's exit status. `--if-reachable` makes an unreachable target exit 0
+instead of 4. A held lock, a damaged version or any failure after the
+target was reached still exits 1. The exit codes are in the reference.
+
+### 9. When something is damaged
+
+A version is damaged when, among other causes, its archive lacks its
+listing or checksum file. Files deleted by hand and incomplete copies from
+the target cause this. Delete the listing of `scan-old` in the practice
+collection to see what that looks like:
+
+```bash
+rm .antiq/pieces/scan-old/*.sha256.zst
+antiq push
+```
+
+![antiq push is refused: the collection holds damaged versions, and the error names antiq rebuild with the version](docs/pages/assets/shots/error-damaged.png)
+
+`push` is stopped by a damaged or incomplete version until you repair it,
+and the error names the command. `rebuild` writes the missing listing after
+checking the archive against what survives:
+
+```bash
+antiq rebuild scan-old 20
+```
+
+![antiq rebuild scan-old writes the missing listing](docs/pages/assets/shots/rebuild.png)
+
+The version argument is a prefix of the version's time, so `20` is the one
+version here. The reference lists what makes a version damaged or
+incomplete, and `forget` removes an incomplete one.
+
+### 10. Read it without antiq
+
+Everything antiq writes can be read without it. The files of a version are
+in `.antiq/pieces/<piece>/`. Unpack the archive into a scratch directory,
+go into the unpacked folder and check it against the listing. The names carry
+the stamp of your version in place of the one shown:
 
 ```console
-$ antiq push --init
-✔ Claimed the push target /Volumes/nas/antiq/playground: 7 created, 0 updated, 0 deleted
-The marker file .antiq-target on the target now records this antiq collection and host, so another
-antiq collection cannot push there by mistake.
-
-PIECE              CREATED   UPDATED   DELETED
-projects/antiq           1         0         0
-projects/scanner         3         0         0
-tools/scan-old           2         0         0
-other files              1         0         0
+$ store=experiments/.antiq/pieces/scan-old
+$ mkdir /tmp/check && cd /tmp/check
+$ zstd -dc $store/scan-old--2026-11-05T150201.tar.zst | tar -x
+$ cd scan-old
+$ zstd -dc $store/scan-old--2026-11-05T150201.sha256.zst | shasum -a 256 -c -
+cli/main.rs: OK
 ```
 
-<!-- docs:start -->
-## Documentation
+Use `shasum`: the `sha256sum` that macOS ships is not GNU's and fails on a
+listing.
+
+## Reference
 
 ### Concepts
 
@@ -139,7 +343,7 @@ other files              1         0         0
   the collection is its identity.
 - **Version:** one archived state of a piece. A piece can have several
   versions side by side.
-- **Target:** the backup location, an absolute path (a mounted disk or
+- **Target:** the mirror location, an absolute path (a mounted disk or
   share) or `[user@]host:path` reached over ssh by rsync.
 
 ### Commands
@@ -180,6 +384,35 @@ A piece is named by its path or by a search word. A search word must
 match exactly one piece. The command fails when it matches none, and
 when it matches several it also lists the candidates.
 
+### Output in a pipe
+
+The images above are the output on a terminal. Into a pipe or a file
+antiq prints plain lines, which scripts can read. `archive` prints one line
+for each piece and a summary:
+
+```console
+$ antiq archive | cat
+archived recipe-api
+archived scan-old
+archived scanner
+Archived 3, skipped 0, refused 0.
+```
+
+`unearth` prints one line:
+
+```console
+$ antiq unearth scan-old | cat
+Unearthed scan-old (version 2026-11-05T214151)
+```
+
+On a terminal `unearth` shows a card, leaves the line of the piece and ends
+with `✔ Unearthed to ./scan-old   took 0:00` instead. The progress cards of `archive`,
+`push`, `unearth`, `fork` and `rebuild` appear only on a terminal. A dry
+run, `--json` and a stdout that is not a terminal print the plain lines.
+
+`list` and `grep` print one tab-separated line per version or hit when they
+do not write to a terminal.
+
 ### Configuration
 
 The configuration is `.antiq/config.toml`. `init` writes it with a
@@ -218,8 +451,8 @@ with the reason.
 `archive` packs each due piece into a `tar.zst` version, reads the
 archive back and compares it with the folder, and only then moves the
 folder away and deletes it. A folder that changed meanwhile is skipped
-and its files are kept. `archive <piece>` archives one piece now, however recently it
-changed.
+and its files are kept. `archive <piece>` archives one piece now, however
+recently it changed.
 
 `pin <piece>` creates a `.antiq-pin` file in the piece, which keeps it
 from being archived while `push` still mirrors it. `unpin` removes it.
@@ -229,8 +462,8 @@ collection directly as a version and leaves the source in place.
 A piece is refused, and never archived, when its folder holds a mount
 point, a nested collection, an unreadable or locked entry, an exclude
 entry, or a control file that is not a regular file. `status` names the
-reason. A piece without a file that counts for
-the idle check is empty and is not archived either.
+reason. A piece without a file that counts for the idle check is empty and
+is not archived either.
 
 ### Finding and bringing back
 
@@ -264,26 +497,7 @@ version after checking the archive against what survives, and
 `forget` removes an incomplete one. A damaged or incomplete version
 stops `push`, scheduled runs included, until you run `rebuild` or
 `forget` or copy the missing file back from the target. The error names
-the command:
-
-```console
-$ antiq push
- ✖ ERROR
-▌ Push is refused: the antiq collection holds versions that are damaged or incomplete, and push
-▌ copies them as they are
-▌
-▌ How to fix it
-▌   Repair or remove these versions first:
-▌
-▌     projects/scanner 2026-11-05T150201: the listing is missing. Run `antiq rebuild projects/scanner 2026-11-05T150201`.
-▌
-▌ What antiq was doing
-▌   Attempting to push the antiq collection.
-$ antiq rebuild projects/scanner 2026-11-05
-Rebuilt version 2026-11-05 16:02:01 of projects/scanner: wrote projects-scanner--2026-11-05T150201.sha256.zst
-
- ℹ INFO  The archive is the one checksummed when it was stored
-```
+the command.
 
 ### Setting up a target
 
@@ -344,21 +558,9 @@ versions and come back fully allocated.
 **Symlinks on the target.** A symlink in a piece is copied as a symlink
 and points to whatever its path names on the target.
 
-**Checking a version by hand.** The files of a version are in
-`.antiq/pieces/<piece>/`. Unpack the archive into a scratch directory,
-go into the unpacked folder and check it against the listing:
-
-```console
-$ store=~/playground/.antiq/pieces/projects/scanner
-$ mkdir /tmp/check && cd /tmp/check
-$ zstd -dc $store/projects-scanner--2026-11-05T150201.tar.zst | tar -x
-$ cd scanner
-$ zstd -dc $store/projects-scanner--2026-11-05T150201.sha256.zst | shasum -a 256 -c -
-src/main.rs: OK
-```
-
-Use `shasum`: the `sha256sum` that macOS ships is not GNU's and fails
-on a listing.
+**Checking a version by hand.** Step 10 of the tutorial shows the
+commands. Use `shasum`: the `sha256sum` that macOS ships is not GNU's and
+fails on a listing.
 
 **rsync compares only what it transfers.** rsync checks a whole-file
 checksum of each file it sends. A file whose size and modification time
@@ -393,16 +595,7 @@ directory of the collection, it deletes nothing on the target at all
 until the directory is readable. `push` says that no deletion reached
 the target and names the directories.
 
-**Scheduling.** Run the two commands one after the other:
-
-```bash
-antiq archive; antiq push --if-reachable
-```
-
-The push runs after a partial archive too. The scheduler sees only the
-push's exit status. `--if-reachable` makes an unreachable target exit 0
-instead of 4. A held lock, a damaged version or any failure after the
-target was reached still exits 1.
+**Scheduling.** See step 8 of the tutorial.
 
 ### Exit codes
 
@@ -435,6 +628,20 @@ Coverage needs `cargo-llvm-cov`. After a change, `just coverage
 `docs/specs/spec-v1.md` specifies version 1, `docs/adrs/` records the
 decisions behind it and `docs/research/` the research. Deferred work is
 in the todo vault at `todos/`.
+
+The images of this README and of the project page are rendered from real
+runs of antiq in a demo world. `just shots` renders them again into
+`docs/pages/assets/shots/`; it needs `vhs`, `ttyd`, `ffmpeg`, `oxipng` and
+an rsync of 3.2.4 or newer. `just shots-test` tests the script that builds
+the demo world.
+
+## About the name
+
+The pangolin in the logo is [Archie](assets/archie-512.webp), antiq's
+mascot: a small idol of obsidian and gold. Archie shares its name with
+the first internet search engine, released in 1990, which indexed the
+files on FTP archives so people could find them again. The search
+engine's name, too, was a shortening of "archive".
 
 ## License
 
