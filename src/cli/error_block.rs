@@ -102,8 +102,10 @@ fn explain(error: &antiq::Error) -> Option<Explanation> {
     if let Some(CollectionError::NotACollection { start }) = find(error) {
         return Some(not_a_collection(&start.display().to_string()));
     }
-    if let Some(push) = find::<PushError>(error) {
-        return explain_push(push);
+    // A push error that has no explanation of its own may still wrap one
+    // that has, such as the held lock of the run it could not start.
+    if let Some(explanation) = find::<PushError>(error).and_then(explain_push) {
+        return Some(explanation);
     }
     if let Some(ReferenceError::Outside { path, root }) = find(error) {
         return Some(outside(path, root));
@@ -248,6 +250,7 @@ mod tests {
     use antiq::listing::ListingError;
     use antiq::lock::LockError;
     use antiq::reference::ReferenceError;
+    use antiq::run::RunError;
 
     /// The rich lines of the block for `error`, run through the steps
     /// `doing` (innermost first), on a terminal 100 columns wide.
@@ -330,6 +333,16 @@ mod tests {
                 "       Then run antiq push --init once on an empty directory of the target to claim it.",
                 "  while attempting to push the antiq collection",
             ]
+        );
+    }
+
+    #[test]
+    fn a_push_that_found_the_lock_held_explains_the_lock() {
+        let held = PushError::Run(RunError::Lock(LockError::HeldUnknown));
+        assert_eq!(
+            rich(held, &[]),
+            rich(LockError::HeldUnknown, &[]),
+            "a lock held under a push is the lock, not a push error"
         );
     }
 
