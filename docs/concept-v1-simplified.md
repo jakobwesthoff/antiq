@@ -16,9 +16,9 @@ them back, and mirrors the whole collection to one backup target.
 - All work happens on one machine. The target is a plain copy of the
   collection: copying it back restores the live folders and the
   versions. Not kept, neither in versions nor on the target: extended
-  attributes, ACLs, access and creation times. Hard links are kept
-  inside versions; in the mirror of live folders they arrive as
-  separate files.
+  attributes, ACLs, access and creation times. Hard links are kept,
+  in versions and in the mirror of live folders; copying the target back
+  keeps them only with `rsync -aH`.
 - Everything antiq writes can be understood and used without antiq:
   archive files are `tar.zst`, and a listing is a checksum list that
   `shasum -c` reads once `zstd` has decompressed it. Inside an unpacked
@@ -652,16 +652,15 @@ Mirrors the collection to the target. **Proposal for the flow:**
    | directory present, no `.antiq-target`, empty | unreachable with a warning naming `push --init`, unless `--init` |
    | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
    | `.antiq-target` of another collection, or not readable | exit 1 |
-   | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--take-over` pushes anyway and rewrites the marker |
+   | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is |
 
    When the listing shows `.antiq-target` on an ssh target, it is
    fetched with one rsync run of `<target>/.antiq-target` into
    `.antiq/tmp/`, with the same options as the marker run below; a
    fetch that fails, or content that does not parse, is "not
-   readable". `--take-over` changes nothing in the other rows: no
-   marker still needs `--init`, another collection's marker is still
-   exit 1, and with a matching marker it is a plain push, noted in the
-   output.
+   readable". `--force` changes nothing in the other rows: no marker
+   still needs `--init`, another collection's marker is still exit 1,
+   and with a matching marker it is a plain push, noted in the output.
 
    rsync runs with `LC_ALL=C`. Over ssh, exit 255 counts as "cannot
    connect" only when ssh's line starts with `ssh: connect to host` or
@@ -686,14 +685,16 @@ Mirrors the collection to the target. **Proposal for the flow:**
    The machine name is the one `machine.rs` detects (the ComputerName
    on macOS, the hostname elsewhere), never a network-dependent host
    name; the path is the canonical collection root, compared byte for
-   byte. A renamed machine or a moved collection therefore needs one
-   `push --take-over`;
-   unknown keys are ignored, a higher `format` is refused as written by
-   a newer antiq. It is created only by `push --init` and rewritten
-   only by `push --take-over`; both are refused together with
-   `--if-reachable`. `--init` is the user's statement that this empty
-   target is the right one, `--take-over` that the other host or path
-   may overwrite the target after the user made sure. The marker is
+   byte. Unknown keys are ignored, a higher `format` is refused as
+   written by a newer antiq. It is created only by `push --init` and
+   never rewritten by antiq; after a renamed machine or a moved
+   collection the user edits its `host` or `path` by hand, or pushes
+   with `--force` each time. `--init` and `--force` are refused
+   together with `--if-reachable`. `--init` is the user's statement
+   that this empty target is the right one; `--force` that this copy
+   may overwrite the target once, after the user made sure the target
+   holds nothing newer. A forced push leaves the marker as it was, so
+   the machine it names pushes on as before. The marker is
    sent by its own rsync run, as a temp directory in `.antiq/tmp/`
    holding only `.antiq-target`, sent to `<target>/` with
    `rsync -r --chmod=F644` (no `-a`, `-p`, `-t` or `--delete`, so the
@@ -705,7 +706,7 @@ Mirrors the collection to the target. **Proposal for the flow:**
    of `[target] rsync_args` verbatim, then the two paths:
 
    ```text
-   rsync -a -x --delete --delete-delay --itemize-changes
+   rsync -a -H -x --delete --delete-delay --itemize-changes
          --exclude=/.antiq-target --exclude=/.antiq/tmp/
          --exclude=/.antiq/trash/ --exclude=/.antiq/doomed/
          --exclude=/.antiq/lock --exclude=/.DS_Store
@@ -881,7 +882,7 @@ The modules below exist on main today (`src/`). How each fares,
 | `machine.rs` | kept, adapted | machine name for the target marker; keeps only `detect` (no configured name) |
 | `repair.rs` | rewritten | the repairs above only |
 | `remote/rsync.rs` | kept, adapted | resolves and runs rsync; `--ignore-times`, `--no-whole-file` and the stats options go; the command is the one in `push`; floor 3.2.4; `machine.rsync` becomes `[target] rsync`; the ssh options of `remote/ssh/` move here |
-| `remote/marker.rs` | kept, adapted | renamed to `.antiq-target`, `layout` dropped, `host` and `path` added, rewrite allowed (`--take-over`) |
+| `remote/marker.rs` | kept, adapted | renamed to `.antiq-target`, `layout` dropped, `host` and `path` added; written only by `--init` |
 | `remote/url.rs` | rewritten | an absolute path (any characters) or `[user@]host:path` |
 | `cli/` (without `cli/picker/`), `main.rs`, `lib.rs` | adapted | new command set |
 | `testing/` | kept, adapted | fixtures for the new store |
@@ -909,7 +910,8 @@ The user documentation, once written, must say:
 - that the target is a mirror, not a backup, and what that means for
   deletions;
 - what is not kept (extended attributes, ACLs, access and creation
-  times) and that hard links of live folders arrive as separate files;
+  times), and that copying the target back keeps hard links only with
+  `rsync -aH`;
 - that symlinks on the target point to whatever their paths name
   there;
 - how to check a version by hand (`zstd -dc <listing> | shasum -a 256
@@ -929,9 +931,9 @@ The user documentation, once written, must say:
 - that a damaged or incomplete version stops `push`, scheduled runs
   included, until the user runs `rebuild` or `forget` or copies the
   file back;
-- what `push --init` and `push --take-over` do and when to use them,
-  and that a renamed machine or a moved collection needs one
-  `push --take-over`;
+- what `push --init` and `push --force` do and when to use them, and
+  that after renaming the machine or moving the collection the marker's
+  `host` or `path` is edited by hand;
 - that the scheduling line `antiq archive; antiq push --if-reachable`
   reports only the push's exit status;
 - that a path target must be a folder on a volume, not the volume's

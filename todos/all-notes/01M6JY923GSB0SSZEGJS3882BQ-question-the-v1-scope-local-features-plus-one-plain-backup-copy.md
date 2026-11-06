@@ -391,6 +391,16 @@ until a round brings no question for the user) the concept is clean.
 Next: an opus agent writes the detailed rework plan, then an
 adversarial review of the plan, then conductor implementation.
 
+Decided after the plan review (AskUserQuestion in chat, 2026-11-04):
+
+- `--take-over` goes; `push --force` pushes despite a host or path
+  mismatch and leaves the marker unchanged. The user's reason: a copy
+  used for a while elsewhere and pushed back once must not take the
+  target over; the user knows to be careful that the target has not
+  changed meanwhile.
+- The mirror keeps hard links (`rsync -H`). The user's reason: otherwise
+  space is wasted.
+
 ## Presented
 
 - The grep study was presented in round 8

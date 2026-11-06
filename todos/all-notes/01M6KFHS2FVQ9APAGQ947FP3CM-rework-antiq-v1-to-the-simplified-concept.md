@@ -316,7 +316,7 @@ changing command takes `-n`/`--dry-run` (concept "Dry runs"). clap's
 | `list` | `[<query>]` |
 | `grep` | `<pattern>` |
 | `pin`, `unpin` | `<piece> [-n]` |
-| `push` | `[--init] [--take-over] [--if-reachable] [-n]`; `--init` and `--take-over` are each refused together with `--if-reachable` (concept "push" step 5) |
+| `push` | `[--init] [--force] [--if-reachable] [-n]`; `--init` and `--force` are each refused together with `--if-reachable` (concept "push" step 5) |
 
 `--version` takes a string; F7 matches it. `--time` takes a string;
 C5 parses it (O11). S1 creates, as stubs, `src/cli/cmd/<name>.rs` for
@@ -663,7 +663,7 @@ Concept "push", "Configuration".
   mount root via `fsx::device::is_mount_point`, errno classes of
   `src/remote/path.rs:145-163` at beb748f; ssh target: `--list-only`,
   exit 255 and 23 rules); marker read, compare, `--init`,
-  `--take-over`; mirror; second pass on `*deleting`; result codes 0,
+  `--force` (marker untouched); mirror with `-H`; second pass on `*deleting`; result codes 0,
   24, 23 with the IO-error line, 12 with the `--fsync` texts, 30;
   `-n` summary per piece from `--itemize-changes`; `--if-reachable`.
 - No usable target (PS3): without `[target] url`, `push` fails with
@@ -835,7 +835,7 @@ D0 applies this table, which the lead confirmed for the review (O17,
 | 0027 symlinks as they are | rewrite | add: on the target a link points to whatever its path names there |
 | 0029 `.antiqignore`, markers out of the idle check | rewrite | ignore now means not packed and deleted with the folder; timeless rules; control files only at the top |
 | 0030 commit by claiming a number | rewrite | a version exists if and only if its `.tar.zst` exists; moved in last, deleted first |
-| 0031 remote marker | rewrite | `.antiq-target`, its fields, `push --init`, `push --take-over` |
+| 0031 remote marker | rewrite | `.antiq-target`, its fields, `push --init`, `push --force` (marker never rewritten by antiq) |
 | 0032 verified local archive, upload at next sync | rewrite | the archive flow with `trash/`, `doomed/`, rollback; `push` mirrors later |
 | 0033 strict verify | rewrite | reclaim paragraph goes |
 | 0034 unearth into staging | rewrite | no fetch; flush before rename; "already unearthed" sentence goes |
@@ -885,7 +885,7 @@ what it transfers; `fsync = false`, macOS targets, SMB and exFAT
 `rsync_args`, ssh recommended; case-only renames and strict targets;
 directories that became mount points; unreadable directories stop
 deletions; damaged or incomplete versions stop `push`; `push --init`
-and `--take-over`; the scheduling line and its exit status; a path
+and `--force`, and editing the marker's `host`/`path` by hand after a rename or move; copying back with `rsync -aH`; the scheduling line and its exit status; a path
 target is a folder, not a volume root. Beyond the concept's list: how to
 set up a target (`[target] url`, `push --init`; PS3), and that the hand
 check uses `shasum`, since the `sha256sum` that macOS ships is not GNU's
@@ -1127,7 +1127,7 @@ neighbouring-hunk conflicts.
 - Depends on: R1.
 - Tests first: `tests/cli.rs`: the help lists the 13 commands; each flag
   of 4.1 parses, `init --yes` included until C2; `push --init
-  --if-reachable` and `push --take-over --if-reachable` are usage
+  --if-reachable` and `push --force --if-reachable` are usage
   errors; `forget p` without a version and without `--all-versions
   --force` is a usage error; `forget p v --all-versions` is a usage
   error; every command but `init` outside a collection answers
@@ -1515,8 +1515,9 @@ neighbouring-hunk conflicts.
   between store folders refuses (case-sensitive volume needed, so a seam
   or Linux); a tree in `trash/` refuses; `--init` writes the marker with
   mode 0644 under a test umask of 022 (PF8) and leaves the root's mode
-  and time; `--take-over` rewrites it; a mismatching host refuses naming
-  both; the mirror with a real rsync keeps the target marker and deletes
+  and time; `--force` pushes despite a mismatching host or path and
+  leaves the marker byte for byte as it was; a mismatching host refuses
+  naming both; hard links of a live folder arrive as hard links (`-H`); the mirror with a real rsync keeps the target marker and deletes
   what the collection lost; the second pass after a case-only rename;
   exit 24 notes the vanished paths; exit 23 with the IO-error line says
   no deletion reached the target; exit 12 with the `--fsync` text names
@@ -1742,6 +1743,18 @@ During the review (ledger `plans/rework-plan-review-ledger.md`):
 - PH7: `init` prints the due count from C1's survey; C2 depends on C1.
 - PF4: Linux uses `syncfs` without a measurement; M1 runs on macOS only.
 - PO20: the lead files the new plan todo on main before R1, M1 and D0.
+
+### 8.5 User decisions after the plan review (2026-11-04)
+
+- `--take-over` goes. `push --force` pushes despite a host or path
+  mismatch and leaves the marker unchanged, so the machine it names
+  pushes on as before; antiq never rewrites the marker; after renaming
+  the machine or moving the collection the user edits the marker's
+  `host` or `path` by hand. The user's reason: a hand copy used for a
+  while and pushed back once must not take the target over.
+- The mirror keeps hard links: `rsync -a -H`. The user's reason: without
+  it hard links of live folders become separate files and waste space.
+  Copying the target back keeps them only with `rsync -aH`.
 
 ## Appendix A. Code map (evidence for the sections above)
 
