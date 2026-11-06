@@ -5,6 +5,7 @@
 //! zstd settings for archives and for tests, and the decoder every reader
 //! of antiq uses.
 
+use super::tar_write::ContentClock;
 use crate::progress::Counter;
 use ::zstd::stream::raw::{CParameter, InBuffer, Operation, OutBuffer, WriteBuf};
 use ::zstd::stream::read::Decoder;
@@ -92,13 +93,25 @@ pub fn encoder_counted<W: Write>(
     settings: &ZstdSettings,
     counter: Option<&Counter>,
 ) -> io::Result<ProgressEncoder<W>> {
-    encoder_with(out, &parameters(settings), counter)
+    encoder_with(out, &parameters(settings), counter, None)
+}
+
+/// An encoder that raises `counter` to the content bytes of the files among
+/// the input bytes the compressor has consumed, as `clock` maps them.
+pub fn encoder_clocked<W: Write>(
+    out: W,
+    settings: &ZstdSettings,
+    counter: &Counter,
+    clock: ContentClock,
+) -> io::Result<ProgressEncoder<W>> {
+    encoder_with(out, &parameters(settings), Some(counter), Some(clock))
 }
 
 fn encoder_with<W: Write>(
     out: W,
     parameters: &[CParameter],
     counter: Option<&Counter>,
+    clock: Option<ContentClock>,
 ) -> io::Result<ProgressEncoder<W>> {
     let mut context = CCtx::create();
     for parameter in parameters {
@@ -109,6 +122,7 @@ fn encoder_with<W: Write>(
     let operation = Counting {
         context,
         counter: counter.cloned(),
+        clock,
         fed: 0,
         #[cfg(test)]
         reads: 0,
@@ -163,6 +177,9 @@ impl<W: Write> Write for ProgressEncoder<W> {
 struct Counting {
     context: CCtx<'static>,
     counter: Option<Counter>,
+    /// Maps the consumed bytes to the count, when the count is not the
+    /// consumed bytes themselves.
+    clock: Option<ContentClock>,
     /// Input bytes taken since the progress was last read.
     fed: u64,
     #[cfg(test)]
@@ -170,7 +187,8 @@ struct Counting {
 }
 
 impl Counting {
-    /// Raises the counter to the bytes the compressor has consumed.
+    /// Raises the counter to the bytes the compressor has consumed, or to
+    /// the content bytes among them when there is a clock.
     fn report(&mut self) {
         self.fed = 0;
         let Some(counter) = &self.counter else {
@@ -180,7 +198,11 @@ impl Counting {
         {
             self.reads += 1;
         }
-        counter.raise_to(self.context.get_frame_progression().consumed);
+        let consumed = self.context.get_frame_progression().consumed;
+        counter.raise_to(match &self.clock {
+            Some(clock) => clock.content_done(consumed),
+            None => consumed,
+        });
     }
 }
 
@@ -369,7 +391,7 @@ mod tests {
         // progression is read, which the bytes must not depend on.
         let counter = Counter::new();
         let mut encoder =
-            encoder_with(Vec::new(), &parameters, Some(&counter)).expect("an encoder starts");
+            encoder_with(Vec::new(), &parameters, Some(&counter), None).expect("an encoder starts");
         for chunk in input.chunks(WRITE_CHUNK) {
             encoder.write_all(chunk).expect("a vec accepts the stream");
         }
@@ -456,7 +478,8 @@ mod tests {
             counter: counter.clone(),
             seen: Vec::new(),
         };
-        let mut encoder = encoder_with(sink, &parameters, Some(&counter)).expect("an encoder");
+        let mut encoder =
+            encoder_with(sink, &parameters, Some(&counter), None).expect("an encoder");
         for chunk in input.chunks(64 * 1024) {
             encoder.write_all(chunk).expect("the sink accepts");
         }
@@ -491,7 +514,8 @@ mod tests {
             counter: counter.clone(),
             seen: Vec::new(),
         };
-        let mut encoder = encoder_with(sink, &parameters, Some(&counter)).expect("an encoder");
+        let mut encoder =
+            encoder_with(sink, &parameters, Some(&counter), None).expect("an encoder");
         encoder
             .write_all(&sample(32 << 20))
             .expect("the sink accepts");
@@ -529,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_parameter_zstd_refuses_is_an_error_of_the_encoder_start() {
-        let error = encoder_with(Vec::new(), &[CParameter::WindowLog(99)], None)
+        let error = encoder_with(Vec::new(), &[CParameter::WindowLog(99)], None, None)
             .err()
             .expect("a window of 2^99 is out of range");
         assert!(error.to_string().contains("out of bound"), "{error}");

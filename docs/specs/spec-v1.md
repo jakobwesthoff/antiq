@@ -2174,11 +2174,22 @@ A piece that is working has a card of two lines. The first has a mark that
 turns, the piece in bold, its size and the operation: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
-`unearth`, `extracting` and `verifying` for `fork`. The second has a bar, the percentage and a count: `N/M files`,
-`N/M entries` for the removing of `archive`, and sizes such as `412 MB/1.2 GB` for the operations whose bar follows bytes: the `packing` and `verifying` of `archive` and the `verifying` of `unearth`. A `push` has a card of its
-own kind, described below. An operation whose total is not
-known yet has a bar with a moving lit part and no percentage or count. The
-percentage is rounded and stays at 99 until the operation is done.
+`unearth`. The second has a bar, the percentage and a count: `N/M files`,
+`N/M created` and `N/M deleted` for the storing and removing of `push`,
+`N/M entries` for the removing of `archive`. A count shows numbers only in
+units that match the card (its size, files, entries); an operation whose
+numbers do not match shows the bar and the percentage alone. That holds for
+the `verifying` of `archive` and `unearth`; the `packing` of `archive` shows
+the content bytes done and the size of the files, such as `412 MB/1.2 GB`.
+The bar of `packing` follows the content bytes of the files among the bytes
+of the tar stream that the compressor has consumed, against the size of the
+files; the headers and the padding of the stream count for nothing. The bar of `verifying` in
+`archive` follows the bytes read: the archive twice (its checksum, then its
+members) and the files of the folder, which are more than the piece holds.
+In `unearth` it follows the bytes of the files compared. An operation whose total is not known yet, and the `verifying` of
+an `unearth` whose files hold no bytes, has a bar with a moving lit part and
+no percentage or count. The percentage is rounded and
+stays at 99 until the operation is done.
 
 A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
 refused or unfinished piece, `⚠` yellow for a skipped one), the piece in

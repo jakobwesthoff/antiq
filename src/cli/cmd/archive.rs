@@ -6,7 +6,7 @@
 
 use super::progress;
 use super::progress::{Description, Shown};
-use crate::cli::console::cards::{Count, items, sizes};
+use crate::cli::console::cards::{BAR_ONLY, Count, items, sizes};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{ArchiveArgs, Context};
@@ -19,9 +19,10 @@ use antiq::plan::{PlanAction, Step};
 use antiq::progress::Operation;
 use anyhow::Context as _;
 
-/// The packing and the verifying of a piece follow bytes and show them as
-/// sizes, the removing of a piece counts the entries of its listing, and
-/// every other operation counts files.
+/// The packing of a piece counts the content bytes of its files, as the size
+/// on the card does. The verifying reads the archive twice, so it shows the
+/// bar and the percentage and no count. The removing of a piece counts the
+/// entries of its listing, and every other operation counts files.
 pub(super) const COUNTS: &[(Operation, Count)] = &[
     (
         Operation::Packing,
@@ -30,13 +31,7 @@ pub(super) const COUNTS: &[(Operation, Count)] = &[
             percent: true,
         },
     ),
-    (
-        Operation::Verifying,
-        Count {
-            text: sizes,
-            percent: true,
-        },
-    ),
+    (Operation::Verifying, BAR_ONLY),
     (
         Operation::Removing,
         Count {
@@ -200,13 +195,18 @@ mod tests {
     fn the_cards_of_an_archive_name_each_operation_and_what_it_counts() {
         for (operation, word, count) in [
             (Operation::Packing, "packing", "1 B/4 B"),
-            (Operation::Verifying, "verifying", "1 B/4 B"),
+            (Operation::Verifying, "verifying", ""),
             (Operation::Storing, "storing", "1/4 files"),
             (Operation::Removing, "removing", "1/4 entries"),
         ] {
             let [first, second] = progress::card_of(COUNTS, operation, 1, 4);
             assert!(first.ends_with(&format!("  {word}")), "{first:?}");
-            assert!(second.ends_with(&format!("25%  {count}")), "{second:?}");
+            let expected = if count.is_empty() {
+                "25%".to_string()
+            } else {
+                format!("25%  {count}")
+            };
+            assert!(second.ends_with(&expected), "{second:?}");
         }
     }
 }

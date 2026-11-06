@@ -57,13 +57,21 @@ pub(crate) fn items(done: u64, total: Option<u64>, noun: &str) -> String {
     })
 }
 
-/// `412 MB/1.2 GB`, and nothing while the total is not known. For the
-/// operations whose bar follows bytes.
+/// `412 MB/1.2 GB`, and nothing while the total is not known. For an
+/// operation whose numbers are the content bytes of the piece, which the
+/// size on the card counts too.
 pub(crate) fn sizes(done: u64, total: Option<u64>) -> String {
     total.map_or_else(String::new, |total| {
         format!("{}/{}", decimal_size(done), decimal_size(total))
     })
 }
+
+/// The bar and the percentage alone, for an operation whose numbers are not
+/// in units that match the card: bytes that no size on the card equals.
+pub(crate) const BAR_ONLY: Count = Count {
+    text: |_, _| String::new(),
+    percent: true,
+};
 
 /// The count of an operation that its command does not list.
 const FILES: Count = Count {

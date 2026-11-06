@@ -2483,17 +2483,6 @@ mod tests {
 
     use crate::testing::recording::Recorder;
 
-    /// The length of the tar stream in the one archive the run stored: what
-    /// the packing counts.
-    fn stored_stream_length(world: &TempCollection) -> u64 {
-        let archive = find_archive(world.root()).expect("the run stored an archive");
-        let mut stream = Vec::new();
-        let mut decoder = crate::archive::zstd::decoder(fs::File::open(archive).expect("opens"))
-            .expect("a zstd stream");
-        io::Read::read_to_end(&mut decoder, &mut stream).expect("the stream decodes");
-        stream.len() as u64
-    }
-
     #[test]
     fn a_lone_piece_reports_its_operations_with_counters_that_reach_their_totals() {
         let mut world = world("");
@@ -2506,12 +2495,11 @@ mod tests {
         // The read-back reads the archive twice and the 9 bytes of content
         // once.
         let read = 2 * report.archived[0].archive_bytes + 9;
-        let packed = stored_stream_length(&world);
         assert_eq!(
             recorder.lines(),
             [
                 "started piece 9",
-                &format!("piece Packing {packed}/{packed}"),
+                "piece Packing 9/9",
                 &format!("piece Verifying {read}/{read}"),
                 "piece Storing 0/0",
                 "piece Removing 4/4",
@@ -2539,7 +2527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_link_adds_no_bytes_to_the_verify() {
+    fn a_hard_link_adds_no_bytes_to_the_packing_and_the_verify() {
         let mut world = world("");
         add(&mut world, "piece", 40);
         world.tree().hard_link("piece/a.txt", "piece/link.txt");
@@ -2548,14 +2536,13 @@ mod tests {
         let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
-        // The link is a member that the verify does not read again, so the
-        // 9 bytes of content are read once.
+        // The link is a member that neither the packing nor the verify reads
+        // again, so the 9 bytes of content count once.
         let read = 2 * report.archived[0].archive_bytes + 9;
-        let packed = stored_stream_length(&world);
         assert_eq!(
             recorder.lines_of("piece")[1..3],
             [
-                format!("piece Packing {packed}/{packed}"),
+                "piece Packing 9/9".to_string(),
                 format!("piece Verifying {read}/{read}")
             ]
         );

@@ -249,14 +249,20 @@ impl Packager for TarZstd {
         let container =
             Name::from_bytes(folder.to_vec()).expect("a component of a valid path is a valid name");
 
-        // The bar follows the bytes the compressor has consumed of the tar
-        // stream, whose exact length is known before the first byte.
-        if let Some(counter) = settings.counter {
-            counter.set_total(tar_write::stream_bytes(tree.packed_entries(), &container));
-        }
+        // The bar follows the content bytes of the files among the tar
+        // stream bytes the compressor has consumed. Where the content lies
+        // in the stream is known before the first byte.
         let compressed = HashingWriter::new(out);
-        let encoder = zstd::encoder_counted(compressed, &settings.zstd, settings.counter)
-            .map_err(PackError::Write)?;
+        let encoder = match settings.counter {
+            Some(counter) => {
+                let layout = tar_write::layout(tree.packed_entries(), &container);
+                let clock = tar_write::ContentClock::new(layout.spans);
+                counter.set_total(clock.total());
+                zstd::encoder_clocked(compressed, &settings.zstd, counter, clock)
+            }
+            None => zstd::encoder(compressed, &settings.zstd),
+        }
+        .map_err(PackError::Write)?;
         let mut writer = TarWriter::new(encoder, container);
         let mut directories = DirectoryStack::new(root);
         let mut content = |entry: &TreeEntry| directories.open(entry);
@@ -509,7 +515,7 @@ mod pack_tests {
     }
 
     #[test]
-    fn packing_sets_the_total_to_the_tar_stream_and_ends_at_it() {
+    fn packing_counts_the_content_bytes_of_the_files_and_ends_at_their_sum() {
         let mut tree = Tree::new();
         tree.file("proj/a.txt", "alpha");
         tree.file("proj/src/big.bin", "0123456789".repeat(5_000));
@@ -527,15 +533,9 @@ mod pack_tests {
             .pack(&root, &walked, &settings, &mut out)
             .expect("the piece packs");
 
-        let mut stream = Vec::new();
-        zstd::decoder(&out[..])
-            .expect("a zstd stream")
-            .read_to_end(&mut stream)
-            .expect("the stream decodes");
-        assert_eq!(
-            (counter.done(), counter.total()),
-            (stream.len() as u64, stream.len() as u64)
-        );
+        // The 5 bytes of a.txt once, whatever its second name, and the
+        // 50 000 of big.bin.
+        assert_eq!((counter.done(), counter.total()), (50_005, 50_005));
     }
 
     #[test]

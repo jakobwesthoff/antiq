@@ -395,12 +395,31 @@ impl<W: Write> TarWriter<W> {
 /// are whole blocks.
 const BLOCK: u64 = 512;
 
-/// Bytes the tar stream of `entries` has once `TarWriter` has written them
-/// below `container`, so that a bar can show how far the compressor is
-/// through it before the last entry is read.
-pub fn stream_bytes<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container: &Name) -> u64 {
-    // The end of the stream is two zero blocks.
-    let mut bytes = 2 * BLOCK;
+/// Where the content of one regular file lies in the tar stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// The offset of the file's first content byte in the uncompressed
+    /// stream.
+    pub start: u64,
+    pub len: u64,
+}
+
+/// The shape of the tar stream of some entries, known before the first
+/// byte is written.
+pub struct Layout {
+    /// The length of the whole stream.
+    pub stream_bytes: u64,
+    /// The content of each file that holds bytes and is stored by its first
+    /// name, in stream order. A hard link repeats no content.
+    pub spans: Vec<Span>,
+}
+
+/// The layout the tar stream of `entries` gets once `TarWriter` has written
+/// them below `container`, so that a bar can show how far the compressor is
+/// through the content of the files before the last entry is read.
+pub fn layout<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container: &Name) -> Layout {
+    let mut bytes = 0;
+    let mut spans = Vec::new();
     // The length of the archive path of the first name of each file with
     // several links, which later names point to.
     let mut first_link: HashMap<(u64, u64), u64> = HashMap::new();
@@ -423,7 +442,14 @@ pub fn stream_bytes<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container:
                         if entry.nlink > 1 {
                             first_link.insert((entry.device, entry.inode), member);
                         }
-                        bytes += BLOCK + long_record(member) + entry.size.next_multiple_of(BLOCK);
+                        bytes += BLOCK + long_record(member);
+                        if entry.size > 0 {
+                            spans.push(Span {
+                                start: bytes,
+                                len: entry.size,
+                            });
+                        }
+                        bytes += entry.size.next_multiple_of(BLOCK);
                     }
                 }
             }
@@ -435,7 +461,53 @@ pub fn stream_bytes<'a>(entries: impl Iterator<Item = &'a TreeEntry>, container:
             _ => {}
         }
     }
-    bytes
+    // The end of the stream is two zero blocks.
+    Layout {
+        stream_bytes: bytes + 2 * BLOCK,
+        spans,
+    }
+}
+
+/// Turns the bytes of the tar stream that the compressor has consumed into
+/// the content bytes of the files among them. Headers and padding count for
+/// nothing, so the total is the size of the piece's files.
+#[derive(Debug, Clone)]
+pub struct ContentClock {
+    spans: Vec<Span>,
+    /// The content bytes of the spans before each one, and in all at the
+    /// end.
+    before: Vec<u64>,
+}
+
+impl ContentClock {
+    pub fn new(spans: Vec<Span>) -> ContentClock {
+        let mut before = Vec::with_capacity(spans.len() + 1);
+        let mut sum = 0;
+        before.push(sum);
+        for span in &spans {
+            sum += span.len;
+            before.push(sum);
+        }
+        ContentClock { spans, before }
+    }
+
+    /// The content bytes of all files.
+    pub fn total(&self) -> u64 {
+        self.before.last().copied().unwrap_or(0)
+    }
+
+    /// The content bytes among the first `consumed` bytes of the stream.
+    pub fn content_done(&self, consumed: u64) -> u64 {
+        // The spans that end at or before `consumed` are done whole.
+        let finished = self
+            .spans
+            .partition_point(|span| span.start + span.len <= consumed);
+        let current = self
+            .spans
+            .get(finished)
+            .map_or(0, |span| consumed.saturating_sub(span.start));
+        self.before[finished] + current
+    }
 }
 
 /// The bytes of the GNU long-name or long-link record that precedes a
@@ -680,7 +752,7 @@ mod tests {
     /// The decompressed-size check below needs real streams, so a test
     /// writes the entries with the writer and compares with the estimate.
     fn estimate(entries: &[(TreeEntry, Vec<u8>)]) -> u64 {
-        stream_bytes(entries.iter().map(|(entry, _)| entry), &container())
+        layout(entries.iter().map(|(entry, _)| entry), &container()).stream_bytes
     }
 
     #[test]
@@ -748,6 +820,82 @@ mod tests {
         entries.push(second);
         let (tar, _, _) = pack(&entries);
         assert_eq!(estimate(&entries), tar.len() as u64);
+    }
+
+    #[test]
+    fn the_spans_are_where_the_members_hold_their_content() {
+        let hard = |name: &str, content: &[u8]| {
+            let (mut linked, data) = file(name, content);
+            linked.nlink = 2;
+            linked.inode = 7;
+            (linked, data)
+        };
+        let long = "n".repeat(120);
+        let entries = vec![
+            plain(entry("", EntryKind::Directory)),
+            file("empty", b""),
+            file("one", b"x"),
+            file(&long, &[7u8; 700]),
+            hard("first", b"shared"),
+            hard("second", b"shared"),
+            plain(symlink("link", &[b't'; 101])),
+            file("tail", &[9u8; 512]),
+        ];
+        let (tar, _, _) = pack(&entries);
+
+        let mut archive = tar::Archive::new(&tar[..]);
+        let real: Vec<Span> = archive
+            .entries()
+            .expect("a tar stream")
+            .filter_map(|member| {
+                let member = member.expect("a member");
+                (member.header().entry_type() == EntryType::Regular && member.size() > 0).then(
+                    || Span {
+                        start: member.raw_file_position(),
+                        len: member.size(),
+                    },
+                )
+            })
+            .collect();
+        let laid = layout(entries.iter().map(|(entry, _)| entry), &container());
+        assert_eq!(laid.spans, real);
+        assert_eq!(ContentClock::new(laid.spans).total(), 1 + 700 + 6 + 512);
+    }
+
+    #[test]
+    fn the_clock_counts_content_bytes_only() {
+        // Headers of 512 bytes, files of 100 and 600 bytes padded to whole
+        // blocks: the first file's content lies in 512..612, the second's
+        // in 1536..2136.
+        let clock = ContentClock::new(vec![
+            Span {
+                start: 512,
+                len: 100,
+            },
+            Span {
+                start: 1536,
+                len: 600,
+            },
+        ]);
+        for (consumed, expected) in [
+            (0, 0),
+            (512, 0),
+            (562, 50),
+            (612, 100),
+            (1100, 100),
+            (1536, 100),
+            (1836, 400),
+            (2136, 700),
+            (3072, 700),
+        ] {
+            assert_eq!(
+                clock.content_done(consumed),
+                expected,
+                "consumed {consumed}"
+            );
+        }
+        assert_eq!(clock.total(), 700);
+        assert_eq!(ContentClock::new(Vec::new()).content_done(5), 0);
     }
 
     #[test]
