@@ -31,10 +31,11 @@ pub fn split(line: &str) -> Option<(&str, &str)> {
 /// One action of a dry run. A terminal gets the magenta tag
 /// `○ would <verb>` and `rest` behind it, the verb padded to
 /// `verb_width` columns so that the rests of several actions line up. A
-/// pipe keeps `Would <verb> <rest>`, the line scripts read.
-pub fn line(env: &Env, verb: &str, verb_width: usize, rest: &Rich) -> String {
+/// pipe keeps `Would <verb> <rest>`, the line scripts read. `rest` is
+/// written as it is, as the spaces of a path in it are part of the path.
+pub fn line(env: &Env, verb: &str, verb_width: usize, rest: &str) -> String {
     if !env.rich {
-        return format!("Would {verb} {}", rest.to_plain());
+        return format!("Would {verb} {rest}");
     }
     let symbols = Symbols::for_env(env);
     let tag = paint(
@@ -43,7 +44,6 @@ pub fn line(env: &Env, verb: &str, verb_width: usize, rest: &Rich) -> String {
         &format!("{} would {verb}", symbols.dry_run),
     );
     let fill = " ".repeat(verb_width.saturating_sub(verb.width()));
-    let rest = flow(env, rest, Style::new(), usize::MAX).join(" ");
     format!("{tag}{fill}  {rest}")
 }
 

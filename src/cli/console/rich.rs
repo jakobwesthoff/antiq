@@ -71,26 +71,35 @@ impl Rich {
     }
 
     /// The words of the text, where a word may change its look in the
-    /// middle (a command followed by a full stop).
+    /// middle (a command followed by a full stop). Plain text breaks at
+    /// whitespace. A command or path is one word whatever it contains, as
+    /// a name with a space in it is not two names and its spaces are its
+    /// own.
     pub fn words(&self) -> Vec<Word> {
         let mut words: Vec<Word> = Vec::new();
         let mut open = false;
+        let add = |words: &mut Vec<Word>, open: &mut bool, role: Role, part: &str| {
+            if *open {
+                words
+                    .last_mut()
+                    .expect("an open word exists")
+                    .push((role, part.to_string()));
+            } else {
+                words.push(vec![(role, part.to_string())]);
+                *open = true;
+            }
+        };
         for (role, text) in &self.spans {
+            if *role == Role::Strong {
+                add(&mut words, &mut open, *role, text);
+                continue;
+            }
             for (index, part) in text.split(char::is_whitespace).enumerate() {
                 if index > 0 {
                     open = false;
                 }
-                if part.is_empty() {
-                    continue;
-                }
-                if open {
-                    words
-                        .last_mut()
-                        .expect("an open word exists")
-                        .push((*role, part.to_string()));
-                } else {
-                    words.push(vec![(*role, part.to_string())]);
-                    open = true;
+                if !part.is_empty() {
+                    add(&mut words, &mut open, *role, part);
                 }
             }
         }

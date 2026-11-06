@@ -13,7 +13,6 @@ use crate::cli::console::block::Block;
 use crate::cli::console::dryrun;
 use crate::cli::console::env::Env;
 use crate::cli::console::render::{Part, render_blocks, render_parts};
-use crate::cli::console::rich::Rich;
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::Notice;
 use antiq::error::ErrorKind;
@@ -342,7 +341,7 @@ impl Output {
                 continue;
             };
             actions += 1;
-            let shown = dryrun::line(&self.stdout_env, verb, width, &Rich::new().text(rest));
+            let shown = dryrun::line(&self.stdout_env, verb, width, rest);
             self.stdout.write_line(&shown)?;
         }
         Ok(actions)
@@ -482,6 +481,7 @@ pub mod testing {
 mod tests {
     use super::testing::{Capture, FailsOnFlush};
     use super::*;
+    use crate::cli::console::rich::Rich;
     use antiq::report::Warning;
     use serde_json::json;
 
@@ -644,6 +644,18 @@ mod tests {
             capture.stdout(),
             "○ would archive  projects/scanner\n\n\
              Dry run: nothing was archived. Run again without -n to archive these pieces.\n"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_line_keeps_the_spaces_of_a_path() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.dry_lines(&["Would archive notes/two  spaces /and trailing ".to_string()])
+            .expect("memory accepts writes");
+        assert_eq!(
+            capture.stdout(),
+            "○ would archive  notes/two  spaces /and trailing \n"
         );
     }
 

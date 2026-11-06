@@ -105,6 +105,32 @@ fn an_error_has_a_badge_line_a_bar_and_labelled_sections() {
 }
 
 #[test]
+fn a_path_in_a_title_keeps_its_spaces() {
+    let title = Rich::new()
+        .path(" notes/two  spaces ")
+        .text(" is not  an antiq collection");
+    assert_eq!(
+        Block::error(title).render(&bare(80)),
+        [
+            " ✖ ERROR",
+            "▌  notes/two  spaces  is not an antiq collection"
+        ]
+    );
+}
+
+#[test]
+fn a_path_with_spaces_is_not_broken_across_lines() {
+    let title = Rich::new().text("Cannot read").path("some dir/with  gaps");
+    let lines = Block::error(title).render(&bare(30));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("some dir/with  gaps")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn an_error_leaves_out_sections_without_content() {
     let block = Block::error(rich("Broken")).doing("do it");
     assert_eq!(

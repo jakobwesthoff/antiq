@@ -685,8 +685,9 @@ fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
          ▌   incomplete ones included, and that cannot be undone.\n\
          ▌\n\
          ▌ How to fix it\n\
-         ▌   Add --force to confirm: antiq forget projects/scanner --all-versions\n\
-         ▌   --force. Check the effect first with -n.\n\
+         ▌   Add --force to confirm:\n\
+         ▌   antiq forget projects/scanner --all-versions --force. Check the effect first\n\
+         ▌   with -n.\n\
          ▌\n\
          ▌ What antiq was doing\n\
          ▌   Attempting to forget all versions of projects/scanner.\n\
