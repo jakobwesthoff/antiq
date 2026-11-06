@@ -461,11 +461,7 @@ impl<'c, T> PickerState<'c, T> {
     /// and the cut line. Half the list, at least three lines, and always one
     /// line less than the list so the piece's own row stays.
     fn cap(&self) -> usize {
-        if self.height < 2 {
-            0
-        } else {
-            (self.height - 1).min(3.max(self.height / 2))
-        }
+        (self.height - 1).min(3.max(self.height / 2))
     }
 
     /// Build the tree of the expanded piece again for the current query and
@@ -841,7 +837,7 @@ impl<'c, T> PickerState<'c, T> {
                     highlights: &line.highlights,
                 })
             }));
-            if expanded.tree.more > 0 && self.cap() > 0 {
+            if expanded.tree.more > 0 {
                 let what = if expanded.whole { "members" } else { "matches" };
                 block.push(ListLine::Cut(format!(
                     "… {} more {what}",
@@ -1696,9 +1692,11 @@ mod tests {
             if self.unreadable.contains(item) {
                 return Err("boom".to_string());
             }
-            let Some((_, paths)) = self.members.iter().find(|(name, _)| name == item) else {
-                return Ok(None);
-            };
+            let (_, paths) = self
+                .members
+                .iter()
+                .find(|(name, _)| name == item)
+                .expect("has is true only for listed pieces");
             // A piece listed without members has a listing that is gone by
             // the time it is read.
             if paths.is_empty() {
@@ -2118,6 +2116,20 @@ mod tests {
         assert_eq!(lines.len(), 11);
         assert_eq!(lines[9], "    file9");
         assert_eq!(lines[10], "      … 21 more members");
+    }
+
+    #[test]
+    fn the_piece_keeps_its_own_row_in_a_list_two_lines_tall() {
+        let mut s = first_expandable(&numbered("file", 30), &["alpha"], 2);
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ alpha", "      … 30 more members"]);
+    }
+
+    #[test]
+    fn a_list_one_line_tall_shows_the_row_alone() {
+        let mut s = first_expandable(&numbered("file", 30), &["alpha"], 1);
+        s.toggle_contents();
+        assert_eq!(screen(&s), [">▾ alpha"]);
     }
 
     #[test]

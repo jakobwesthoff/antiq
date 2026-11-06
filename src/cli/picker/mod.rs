@@ -1497,7 +1497,7 @@ mod tests {
         }
 
         fn entries(&mut self, _: &String) -> Result<Option<Entries>, String> {
-            unimplemented!("no test expands")
+            Ok(None)
         }
 
         fn members(&mut self, item: &String) -> Option<Members> {
@@ -1748,29 +1748,31 @@ mod tests {
         assert!(open.contains("5 B"), "{open:?}");
     }
 
+    /// Every item has thirty one-byte files.
+    struct Many;
+    impl Contents<String> for Many {
+        fn has(&self, _: &String) -> bool {
+            true
+        }
+        fn entries(&mut self, item: &String) -> Result<Option<Entries>, String> {
+            Ok(Some(Entries {
+                prefix: format!("{item}/"),
+                members: (0..30)
+                    .map(|n| tree::Member {
+                        path: format!("f{n}"),
+                        dir: false,
+                        size: 1,
+                    })
+                    .collect(),
+            }))
+        }
+        fn members(&mut self, _: &String) -> Option<Members> {
+            None
+        }
+    }
+
     #[test]
     fn the_frame_shows_the_cut_line_dimmed() {
-        struct Many;
-        impl Contents<String> for Many {
-            fn has(&self, _: &String) -> bool {
-                true
-            }
-            fn entries(&mut self, item: &String) -> Result<Option<Entries>, String> {
-                Ok(Some(Entries {
-                    prefix: format!("{item}/"),
-                    members: (0..30)
-                        .map(|n| tree::Member {
-                            path: format!("f{n}"),
-                            dir: false,
-                            size: 1,
-                        })
-                        .collect(),
-                }))
-            }
-            fn members(&mut self, _: &String) -> Option<Members> {
-                None
-            }
-        }
         let mut s = picker(10).with_contents(Box::new(Many));
         feed(&mut s, &[ctrl('o')]);
         let frame = drawn(&s, 80);
@@ -1947,5 +1949,71 @@ mod tests {
     #[test]
     fn the_expanded_tree_at_120_columns() {
         insta::assert_snapshot!(expanded_tree_at(120));
+    }
+
+    /// A writer whose one write that crosses `limit` bytes fails and whose
+    /// later writes succeed, so that only the code that wrote the failing
+    /// bytes can report the error.
+    struct FailsAfter {
+        written: usize,
+        limit: usize,
+        failed: bool,
+    }
+
+    impl Write for FailsAfter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.failed && self.written + bytes.len() > self.limit {
+                self.failed = true;
+                return Err(io::Error::other("the terminal is gone"));
+            }
+            self.written += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_frame_that_cannot_be_written_is_an_error_wherever_it_breaks() {
+        let mut s = picker(10).with_contents(Box::new(Many));
+        feed(&mut s, &[ctrl('o')]);
+        let length = drawn(&s, 80).len();
+        for limit in 0..length {
+            let mut tty = FailsAfter {
+                written: 0,
+                limit,
+                failed: false,
+            };
+            assert!(
+                draw(&mut tty, &s, 80, false, "").is_err(),
+                "a frame cut after {limit} of {length} bytes"
+            );
+        }
+        let mut tty = FailsAfter {
+            written: 0,
+            limit: length,
+            failed: false,
+        };
+        draw(&mut tty, &s, 80, false, "").expect("a frame that fits is written");
+    }
+
+    #[test]
+    fn a_notice_frame_that_cannot_be_written_is_an_error() {
+        let mut s = recording_picker().0;
+        let mut tty = FailsAfter {
+            written: 0,
+            limit: 0,
+            failed: false,
+        };
+        let mut on_stay = |_: &String, _: Action| -> String { unreachable!("no stay key") };
+        let screen = Screen {
+            tty: &mut tty,
+            cols: 80,
+            hints: "",
+        };
+        let key = press(KeyCode::Char('z'));
+        assert!(react(screen, &mut s, None, &KEYS, key, &mut on_stay).is_err());
     }
 }
