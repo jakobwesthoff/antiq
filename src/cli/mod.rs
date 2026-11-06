@@ -7,11 +7,6 @@
 
 pub mod cmd;
 pub mod output;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the picker is opened by `find` in a later commit"
-)]
 pub mod picker;
 pub mod tty;
 

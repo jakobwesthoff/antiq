@@ -21,7 +21,7 @@ pub fn run(ctx: &Context, args: &PieceArgs, out: &mut Output) -> anyhow::Result<
 /// The directory that relative piece references start at: the canonical
 /// form of `-C`, which is the directory the collection is found from, else
 /// the current directory.
-fn reference_directory(directory: Option<&PathBuf>) -> anyhow::Result<PathBuf> {
+pub(super) fn reference_directory(directory: Option<&PathBuf>) -> anyhow::Result<PathBuf> {
     match directory {
         Some(directory) => std::fs::canonicalize(directory)
             .with_context(|| format!("resolve {}", directory.display())),
@@ -91,7 +91,7 @@ pub(super) fn run_direction(
 }
 
 /// What a finished run says.
-fn sentence(report: &PinReport, direction: Direction) -> String {
+pub(super) fn sentence(report: &PinReport, direction: Direction) -> String {
     let path = sanitize(&report.path.to_string());
     match (direction, report.changed) {
         (Direction::Pin, true) => format!("Pinned {path}"),

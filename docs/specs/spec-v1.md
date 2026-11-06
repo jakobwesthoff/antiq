@@ -1801,9 +1801,20 @@ tree of its contents, read from its listing; when the query matches
 member paths,
 the matching members show as the expanded piece's children. After
 pinning, unpinning or printing the picker stays open; unearthing and
-forking close it. (ADR 0057)
+forking close it. (ADR 0057) The keys are Enter, Ctrl-F, Ctrl-K and
+Ctrl-X. Enter unearths the selected piece and closes the picker; with
+`--print` it prints the piece instead and the picker stays open. Ctrl-F
+forks the piece, keeping its path, and closes the picker. Ctrl-K pins and
+Ctrl-X unpins, and the picker stays open. The result of a pin, an unpin
+or a print, or the error that stopped it, replaces the counter in the
+status line until the next key. Esc and Ctrl-C close the picker without
+an action and the exit code is 0. Unearthing and forking run after the
+picker has closed, as the commands of the same name, and print what they
+print.
 `--print` prints the absolute path of the picked piece's folder, for an
-archived piece the path it would be unearthed to. Without a terminal it
+archived piece the path it would be unearthed to. In the picker each path
+is written to stdout when the picker closes, in the order picked, also
+when stdout is the terminal. Without a terminal it
 prints the path of every match, one per line. The path is written as the
 filesystem holds it, not in the escaped form of "Metadata", so that a
 shell can use it; the table and the JSON use the escaped form. With

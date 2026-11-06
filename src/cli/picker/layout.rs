@@ -26,9 +26,6 @@ use crate::cli::cmd::status::{mid, sanitize};
 /// The separator between two columns.
 const SEPARATOR: &str = "  ";
 
-/// The piece column keeps at least this many columns when the row allows it.
-const PIECE_MIN: usize = 20;
-
 /// Render every piece into an aligned [`Row`] for a row `width` columns wide
 /// (the terminal width less the selection pointer).
 pub fn align_pieces(pieces: &[FoundPiece], width: usize) -> Vec<Row> {

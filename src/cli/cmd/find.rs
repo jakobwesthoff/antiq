@@ -4,17 +4,23 @@
 
 //! The `find` command.
 //!
-//! The matches come from the library. This file lists them for a console:
-//! a table of state, piece, size and ID, wide where the terminal has room
-//! and narrow at 80 columns. Interactively it lists too; the picker is not
-//! built yet.
+//! The matches come from the library. Without a terminal, or with `--json`,
+//! this file lists them for a console: a table of state, piece, size and ID,
+//! wide where the terminal has room and narrow at 80 columns. With a
+//! terminal the picker opens over them, and its keys run the same functions
+//! as the commands they are named after.
 
 use crate::cli::cmd::status::{Color, WIDE_FROM, mid, pad, pad_left, paint, sanitize};
+use crate::cli::cmd::{fork, pin, unearth};
 use crate::cli::output::{Output, Style};
-use crate::cli::{Context, FindArgs};
+use crate::cli::picker::{AcceptKey, EnterStays, align_pieces, pick_with_keys};
+use crate::cli::{Context, FindArgs, ForkArgs, UnearthArgs, tty};
+use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::ops::find::{FindReport, FoundPiece, FoundState, find};
+use antiq::ops::pin::{Direction, Pinned, run as pin_piece};
 use anyhow::Context as _;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
@@ -32,6 +38,11 @@ pub fn run(ctx: &Context, args: &FindArgs, out: &mut Output) -> anyhow::Result<u
             .context("print the result")?;
         return Ok(0);
     }
+    // The picker is for a person at a terminal. Where `/dev/tty` does not
+    // open, the table below is the answer, as with `--json`.
+    if tty::open().is_ok() {
+        return interact(ctx, &collection, args, report, out);
+    }
     if args.print {
         // A shell reads these back, so each is the path as the filesystem
         // holds it, not the escaped form of the table.
@@ -48,6 +59,131 @@ pub fn run(ctx: &Context, args: &FindArgs, out: &mut Output) -> anyhow::Result<u
         out.note(&line).context("print the notes")?;
     }
     Ok(0)
+}
+
+// =========================================================
+// The picker
+// =========================================================
+
+/// What a picker key does with the selected piece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    /// Queue the piece's folder for stdout (Enter with `--print`).
+    Print,
+    /// Give the piece a new ID. Ends the picker.
+    Fork,
+    Pin,
+    Unpin,
+}
+
+/// Enter unearths the piece and ends the picker, or with `--print` queues
+/// its folder and keeps the picker open. `^F` forks and ends it, `^K` and
+/// `^X` pin and unpin and keep it open.
+const KEYS: [AcceptKey<Action>; 3] = [
+    AcceptKey {
+        ctrl: 'f',
+        hint: "fork",
+        action: Action::Fork,
+        closes: true,
+    },
+    AcceptKey {
+        ctrl: 'k',
+        hint: "pin",
+        action: Action::Pin,
+        closes: false,
+    },
+    AcceptKey {
+        ctrl: 'x',
+        hint: "unpin",
+        action: Action::Unpin,
+        closes: false,
+    },
+];
+
+fn interact(
+    ctx: &Context,
+    collection: &Collection,
+    args: &FindArgs,
+    report: FindReport,
+    out: &mut Output,
+) -> anyhow::Result<u8> {
+    let notes = notes(&report);
+    let enter_prints = EnterStays {
+        hint: "print",
+        action: Action::Print,
+    };
+    let enter_stays = args.print.then_some(&enter_prints);
+    let cwd = pin::reference_directory(ctx.directory.as_ref())?;
+
+    // Printed folders wait until the picker has left the alternate screen: a
+    // line written to a terminal while it is on would be drawn over and lost.
+    let mut printed: Vec<PathBuf> = Vec::new();
+    let picked = pick_with_keys(
+        report.matches,
+        align_pieces,
+        enter_stays,
+        &KEYS,
+        |found, action| match action {
+            Action::Print => {
+                printed.push(found.folder.clone());
+                format!("printed {}", sanitize(&found.folder.display().to_string()))
+            }
+            Action::Pin => pin_notice(collection, &cwd, found, Direction::Pin),
+            Action::Unpin => pin_notice(collection, &cwd, found, Direction::Unpin),
+            Action::Fork => unreachable!("fork ends the picker, it never stays"),
+        },
+    )
+    .context("run the picker")?;
+
+    for folder in &printed {
+        out.line_os(folder.as_os_str())
+            .context("print the result")?;
+    }
+    for line in &notes {
+        out.note(line).context("print the notes")?;
+    }
+
+    // Unearth and fork run once the terminal is back to normal, as the
+    // commands of the same name. Their questions, plans and exit codes are
+    // theirs. The ID names the piece: a folder called exactly like it would
+    // win over it in a reference.
+    let Some((found, action)) = picked else {
+        return Ok(0);
+    };
+    let piece: OsString = found.id.to_string().into();
+    // Enter and Ctrl-F are the keys that end the picker with a piece.
+    if action == Some(Action::Fork) {
+        let args = ForkArgs {
+            piece,
+            name: None,
+            dry_run: false,
+        };
+        return fork::run(ctx, &args, out);
+    }
+    let args = UnearthArgs {
+        piece,
+        to: None,
+        version: None,
+        dry_run: false,
+        if_reachable: false,
+    };
+    unearth::run(ctx, &args, out)
+}
+
+/// Pin or unpin `found` the way the commands do and say what happened, or
+/// what went wrong, for the stats line.
+fn pin_notice(
+    collection: &Collection,
+    cwd: &std::path::Path,
+    found: &FoundPiece,
+    direction: Direction,
+) -> String {
+    let piece: OsString = found.id.to_string().into();
+    match pin_piece(collection, &SystemClock, cwd, &piece, direction, false) {
+        Ok(Pinned::Done(report)) => pin::sentence(&report, direction),
+        Ok(Pinned::Planned { .. }) => unreachable!("a run that is not a dry run does not plan"),
+        Err(error) => format!("error: {}", sanitize(&error.to_string())),
+    }
 }
 
 /// What stderr says: that nothing matched, and the warnings.

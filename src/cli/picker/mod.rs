@@ -9,7 +9,7 @@
 //! theme (it uses reverse video instead of a hardcoded background) and the
 //! whole UI stays under our control. It draws on the controlling terminal,
 //! keeping stdout free for piped data. The public surface is the
-//! single generic [`pick`] function; everything else is private, so swapping
+//! single generic [`pick_with_keys`] function; everything else is private, so swapping
 //! the engine never touches call sites.
 //!
 //! All interaction logic lives in [`state::PickerState`] and is unit tested
@@ -73,6 +73,16 @@ pub struct AcceptKey<A> {
     pub closes: bool,
 }
 
+/// Makes Enter act like a stay [`AcceptKey`]: it hands the selected item and
+/// `action` to the `on_stay` callback and the picker stays open. `find --print`
+/// uses it to queue a path per Enter.
+pub struct EnterStays<A> {
+    /// A word for the stats line, e.g. `print`.
+    pub hint: &'static str,
+    /// What the caller receives when Enter acts on the item.
+    pub action: A,
+}
+
 /// The Ctrl keys the picker itself handles. An [`AcceptKey`] on one of them
 /// is ignored, so a caller cannot take away aborting or moving the selection.
 const BUILT_IN_CTRL_KEYS: [char; 6] = ['c', 'd', 'n', 'p', 'u', 'w'];
@@ -92,11 +102,16 @@ fn accept_key<A>(
     keys.iter().find(|k| k.ctrl == c)
 }
 
-/// The stats line's hint for the accept keys, e.g. `^Y path`, or empty when
-/// there are none.
-fn key_hints<A>(keys: &[AcceptKey<A>]) -> String {
-    keys.iter()
-        .map(|k| format!("^{} {}", k.ctrl.to_ascii_uppercase(), k.hint))
+/// The stats line's hint for Enter, if it stays open, and the accept keys,
+/// e.g. `⏎ print  ^Y path`, or empty when there are none.
+fn key_hints<A>(enter: Option<&EnterStays<A>>, keys: &[AcceptKey<A>]) -> String {
+    enter
+        .map(|e| format!("⏎ {}", e.hint))
+        .into_iter()
+        .chain(
+            keys.iter()
+                .map(|k| format!("^{} {}", k.ctrl.to_ascii_uppercase(), k.hint)),
+        )
         .collect::<Vec<_>>()
         .join("  ")
 }
@@ -107,23 +122,19 @@ fn key_hints<A>(keys: &[AcceptKey<A>]) -> String {
 /// given row width in display columns, which lets the renderer align columns
 /// across every candidate and size them to the terminal (see [`layout`]). It
 /// runs at startup and again whenever the terminal width changes.
-/// Returns `Ok(None)` when there are no items or the user aborts (Esc / Ctrl-C)
-/// without selecting.
-pub fn pick<T>(items: Vec<T>, render_all: impl Fn(&[T], usize) -> Vec<Row>) -> Result<Option<T>> {
-    let keys: [AcceptKey<()>; 0] = [];
-    let picked = pick_with_keys(items, render_all, &keys, |_, ()| String::new())?;
-    Ok(picked.map(|(item, _)| item))
-}
-
-/// [`pick`] with extra [`AcceptKey`]s besides Enter.
 ///
 /// Returns the chosen item together with the action of the accept key that
-/// chose it, or `None` for the action when Enter did. An accept key that does
-/// not close the picker calls `on_stay` with the selected item and its
-/// action; the returned text replaces the stats line until the next key.
+/// chose it, or `None` for the action when Enter did. Returns `Ok(None)` when
+/// there are no items or the user aborts (Esc / Ctrl-C) without selecting.
+///
+/// An accept key that does not close the picker calls `on_stay` with the
+/// selected item and its action; the returned text replaces the stats line
+/// until the next key. With `enter_stays`, Enter does the same instead of
+/// choosing the item.
 pub fn pick_with_keys<T, A: Copy>(
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
+    enter_stays: Option<&EnterStays<A>>,
     keys: &[AcceptKey<A>],
     mut on_stay: impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
@@ -170,7 +181,14 @@ pub fn pick_with_keys<T, A: Copy>(
     // delivers each frame as one write; `draw` flushes once per frame.
     let mut frame = io::BufWriter::with_capacity(FRAME_BUFFER_BYTES, tty);
 
-    run_loop(&mut frame, items, render_all, keys, &mut on_stay)
+    run_loop(
+        &mut frame,
+        items,
+        render_all,
+        enter_stays,
+        keys,
+        &mut on_stay,
+    )
 }
 
 /// The frame buffer size: comfortably a full redraw of a large terminal, so a
@@ -205,6 +223,7 @@ fn run_loop<T, A: Copy>(
     tty: &mut impl Write,
     items: Vec<T>,
     render_all: impl Fn(&[T], usize) -> Vec<Row>,
+    enter_stays: Option<&EnterStays<A>>,
     keys: &[AcceptKey<A>],
     on_stay: &mut impl FnMut(&T, A) -> String,
 ) -> Result<Option<(T, Option<A>)>> {
@@ -212,7 +231,7 @@ fn run_loop<T, A: Copy>(
     let mut built_row_width = row_width(cols);
     let picker_rows = render_all(&items, built_row_width);
     let mut state = PickerState::new(items, picker_rows, list_height(rows));
-    let hints = key_hints(keys);
+    let hints = key_hints(enter_stays, keys);
 
     // The first frame paints a fresh alternate screen and every later frame
     // erases per line, so a full clear is only needed again after a resize.
@@ -222,7 +241,7 @@ fn run_loop<T, A: Copy>(
         clear_all = false;
 
         match event::read().context("while reading a key event")? {
-            Event::Key(key) => match step(&mut state, keys, key, on_stay) {
+            Event::Key(key) => match step(&mut state, enter_stays, keys, key, on_stay) {
                 Step::Continue => {}
                 // With nothing matching there is nothing to return, so the
                 // picker ends without a selection, as on abort.
@@ -277,7 +296,7 @@ enum Step<A> {
 }
 
 /// Handle one key press of the loop: apply it to the state, run `on_stay` for
-/// an accept key that keeps the picker open, and keep the notice only until
+/// an accept key (or Enter, when `enter_stays` is set) that keeps the picker open, and keep the notice only until
 /// the next press.
 ///
 /// Releases and repeats leave the notice alone: a terminal that reports them
@@ -285,6 +304,7 @@ enum Step<A> {
 /// appeared. With nothing selected a stay key does nothing.
 fn step<T, A: Copy>(
     state: &mut PickerState<T>,
+    enter_stays: Option<&EnterStays<A>>,
     keys: &[AcceptKey<A>],
     key: KeyEvent,
     on_stay: &mut impl FnMut(&T, A) -> String,
@@ -292,7 +312,13 @@ fn step<T, A: Copy>(
     if key.kind == KeyEventKind::Press {
         state.clear_notice();
     }
-    match handle_key(state, keys, key) {
+    let flow = match enter_stays {
+        Some(enter) if key.kind == KeyEventKind::Press && key.code == KeyCode::Enter => {
+            Flow::Stay(enter.action)
+        }
+        _ => handle_key(state, keys, key),
+    };
+    match flow {
         Flow::Continue => Step::Continue,
         Flow::Accept(action) => Step::Accept(action),
         Flow::Abort => Step::Abort,
@@ -859,8 +885,8 @@ mod tests {
 
     #[test]
     fn key_hints_name_each_key_and_its_purpose() {
-        assert_eq!(key_hints(&KEYS), "^Y path  ^O other");
-        assert_eq!(key_hints::<Action>(&[]), "");
+        assert_eq!(key_hints(None, &KEYS), "^Y path  ^O other");
+        assert_eq!(key_hints::<Action>(None, &[]), "");
     }
 
     #[test]
@@ -1155,7 +1181,7 @@ mod tests {
     fn feed_with(state: &mut PickerState<String>, keys: &[AcceptKey<Action>], events: &[KeyEvent]) {
         let mut on_stay = |item: &String, action: Action| format!("{action:?} {item}");
         for &event in events {
-            assert_eq!(step(state, keys, event, &mut on_stay), Step::Continue);
+            assert_eq!(step(state, None, keys, event, &mut on_stay), Step::Continue);
         }
     }
 
@@ -1200,10 +1226,16 @@ mod tests {
         let mut s = picker(10);
         let mut on_stay = |_: &String, _: Action| -> String { unreachable!("nothing is selected") };
         for c in "zzzz".chars() {
-            step(&mut s, &STAY_KEYS, press(KeyCode::Char(c)), &mut on_stay);
+            step(
+                &mut s,
+                None,
+                &STAY_KEYS,
+                press(KeyCode::Char(c)),
+                &mut on_stay,
+            );
         }
         assert_eq!(
-            step(&mut s, &STAY_KEYS, ctrl('y'), &mut on_stay),
+            step(&mut s, None, &STAY_KEYS, ctrl('y'), &mut on_stay),
             Step::Continue
         );
         assert_eq!(s.notice(), None);
@@ -1214,16 +1246,64 @@ mod tests {
         let mut s = picker(10);
         let mut on_stay = |_: &String, _: Action| String::new();
         assert_eq!(
-            step(&mut s, &STAY_KEYS, press(KeyCode::Enter), &mut on_stay),
+            step(
+                &mut s,
+                None,
+                &STAY_KEYS,
+                press(KeyCode::Enter),
+                &mut on_stay
+            ),
             Step::Accept(None)
         );
         assert_eq!(
-            step(&mut s, &STAY_KEYS, ctrl('o'), &mut on_stay),
+            step(&mut s, None, &STAY_KEYS, ctrl('o'), &mut on_stay),
             Step::Accept(Some(Action::Second))
         );
         assert_eq!(
-            step(&mut s, &STAY_KEYS, press(KeyCode::Esc), &mut on_stay),
+            step(&mut s, None, &STAY_KEYS, press(KeyCode::Esc), &mut on_stay),
             Step::Abort
         );
+    }
+
+    const ENTER_PRINTS: EnterStays<Action> = EnterStays {
+        hint: "print",
+        action: Action::Second,
+    };
+
+    #[test]
+    fn enter_that_stays_calls_back_and_keeps_the_picker_open() {
+        let mut s = picker(10);
+        let mut on_stay = |item: &String, action: Action| format!("{action:?} {item}");
+        let enter = press(KeyCode::Enter);
+        let stepped = step(&mut s, Some(&ENTER_PRINTS), &STAY_KEYS, enter, &mut on_stay);
+        assert_eq!(stepped, Step::Continue);
+        assert_eq!(s.notice(), Some("Second alpha"));
+    }
+
+    #[test]
+    fn enter_that_stays_does_nothing_without_a_match() {
+        let mut s = picker(10);
+        let mut on_stay = |_: &String, _: Action| -> String { unreachable!("nothing is selected") };
+        for c in "zzzz".chars() {
+            step(
+                &mut s,
+                None,
+                &STAY_KEYS,
+                press(KeyCode::Char(c)),
+                &mut on_stay,
+            );
+        }
+        let enter = press(KeyCode::Enter);
+        let stepped = step(&mut s, Some(&ENTER_PRINTS), &STAY_KEYS, enter, &mut on_stay);
+        assert_eq!(stepped, Step::Continue);
+    }
+
+    #[test]
+    fn the_hint_of_an_enter_that_stays_comes_first() {
+        assert_eq!(
+            key_hints(Some(&ENTER_PRINTS), &KEYS),
+            "⏎ print  ^Y path  ^O other"
+        );
+        assert_eq!(key_hints(Some(&ENTER_PRINTS), &[]), "⏎ print");
     }
 }
