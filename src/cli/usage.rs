@@ -368,6 +368,29 @@ mod tests {
     }
 
     #[test]
+    fn a_tip_of_clap_other_than_the_value_tip_is_passed_on_in_its_words() {
+        let error = raw(
+            ErrorKind::UnknownArgument,
+            "unexpected argument '--init' found",
+            &[
+                (
+                    ContextKind::InvalidArg,
+                    ContextValue::String("--init".into()),
+                ),
+                (
+                    ContextKind::Suggested,
+                    ContextValue::StyledStrs(vec!["'push --init' exists".to_string().into()]),
+                ),
+            ],
+        );
+        let lines = block_for(&error, &[]).render(&Env::new(true, false, true, 100));
+        assert!(
+            lines.contains(&"▌   'push --init' exists.".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn the_paragraphs_of_a_fallback_keep_the_tip_and_the_usage_on_one_line_each() {
         let rendered = "error: bad value\n\n  tip: try\n  this\n\nUsage: antiq\n  list\n\nFor more information, try '--help'.";
         assert_eq!(
