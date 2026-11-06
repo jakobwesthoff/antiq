@@ -5,15 +5,11 @@
 //! Steps 5 to 8 of `push`: the marker and the mirror.
 
 use super::PushError;
-use super::live::{Forecast, Live};
 use super::precheck::{Runner, Scratch};
 use super::summary;
-use crate::progress::Observer;
-use crate::relpath::RelPath;
 use crate::target::marker::{self, Marker};
 use crate::target::rsync::{Options, Outcome, Rsync};
 use crate::target::url::TargetUrl;
-use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 
@@ -149,41 +145,29 @@ pub(super) struct Mirrored {
     pub second_pass: bool,
 }
 
-/// Runs the mirror as a dry run that lists the sizes and tells the
-/// observer which pieces will change. Nothing is returned when the dry
-/// run fails, changes nothing or lists nothing that can be read: the
-/// real run then goes on without progress, and says what is wrong itself.
-pub(super) fn forecast<'a>(
-    mirror: &Mirror,
-    folders: &[RelPath],
-    observer: &'a dyn Observer,
-) -> Option<RefCell<Live<'a>>> {
-    let call = mirror
-        .rsync
-        .mirror_counted(mirror.options, mirror.collection, mirror.url);
-    let outcome = call.run().ok()?;
-    if !matches!(outcome.code, Some(0 | 24)) {
-        return None;
-    }
-    let found = Forecast::from_sized(&summary::parse_sized(&outcome.stdout), folders);
-    if found.is_empty() {
-        return None;
-    }
-    Some(RefCell::new(Live::new(found, folders.to_vec(), observer)))
-}
-
 /// Runs the mirror (step 6), and after deletions the second pass (step 7).
+///
+/// With `observed` the first call is the observed mirror, whose output
+/// `run` has to reduce to the plain listing (see [`super::observed`]).
 pub(super) fn run_mirror(
     mirror: &Mirror,
     run: Runner,
     dry_run: bool,
+    observed: bool,
 ) -> Result<Mirrored, PushError> {
     let call = |dry_run: bool| {
         mirror
             .rsync
             .mirror(mirror.options, mirror.collection, mirror.url, dry_run)
     };
-    let first = run(&call(dry_run)).map_err(PushError::Rsync)?;
+    let first_call = if observed {
+        mirror
+            .rsync
+            .mirror_observed(mirror.options, mirror.collection, mirror.url)
+    } else {
+        call(dry_run)
+    };
+    let first = run(&first_call).map_err(PushError::Rsync)?;
     let mut vanished = Vec::new();
     let mut failure: Option<PushError> = None;
     let mut record = |outcome: &Outcome| match classify(outcome) {
@@ -507,6 +491,14 @@ mod tests {
         answers: Vec<Outcome>,
         dry_run: bool,
     ) -> (Result<Mirrored, PushError>, Vec<Vec<String>>) {
+        mirrored_as(answers, dry_run, false)
+    }
+
+    fn mirrored_as(
+        answers: Vec<Outcome>,
+        dry_run: bool,
+        observed: bool,
+    ) -> (Result<Mirrored, PushError>, Vec<Vec<String>>) {
         let fixture = fixture();
         let options = Options {
             fsync: true,
@@ -535,6 +527,7 @@ mod tests {
                 }
             },
             dry_run,
+            observed,
         );
         (result, calls.into_inner())
     }
@@ -547,6 +540,26 @@ mod tests {
 ";
     const CREATED: &str = ">f+++++++++ new.txt
 ";
+
+    #[test]
+    fn only_the_first_call_of_an_observed_mirror_is_observed() {
+        let (result, calls) = mirrored_as(
+            vec![
+                outcome_of(Some(0), DELETING, ""),
+                outcome_of(Some(0), "", ""),
+            ],
+            false,
+            true,
+        );
+
+        result.expect("success");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].contains(&"-ii".to_string()), "{:?}", calls[0]);
+        assert!(!calls[0].contains(&"--itemize-changes".to_string()));
+        assert!(dry(&calls[1]));
+        assert!(calls[1].contains(&"--itemize-changes".to_string()));
+        assert!(!calls[1].contains(&"-ii".to_string()));
+    }
 
     #[test]
     fn a_run_without_deletions_is_one_call() {
@@ -730,6 +743,7 @@ mod tests {
                     })
                 }
             },
+            false,
             false,
         );
         assert!(matches!(result, Err(PushError::Rsync(_))), "{result:?}");

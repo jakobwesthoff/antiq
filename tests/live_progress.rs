@@ -461,7 +461,11 @@ fn push_that_sends_nothing_prints_the_text_it_always_did() {
     let run = world.run_tty_sized(&["push"], 100, 24, &[("NO_COLOR", "1")]);
     run.expect_code(0);
     assert!(run.stdout.contains("Nothing changed."), "{:?}", run.stdout);
-    assert!(!run.stdout.contains("Pushing to "));
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines.iter().all(|line| !line.contains("storing")),
+        "the card is gone: {lines:#?}"
+    );
 }
 
 #[test]

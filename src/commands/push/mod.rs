@@ -19,14 +19,19 @@ use crate::target::marker::{self, Marker, MarkerError};
 use crate::target::rsync::{Options, Rsync, RsyncError, quiet_option};
 use crate::target::url::{TargetUrl, UrlError};
 use crate::versions::VersionsError;
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
+use live::Progress;
+use observed::plain_listing;
 pub use outcome::{PushAction, PushOutcome, PushReport};
 pub use store::VersionCommand;
 use summary::Changes;
 
 mod live;
 mod mirror;
+mod observed;
 mod outcome;
 mod precheck;
 mod store;
@@ -214,9 +219,8 @@ pub struct PushRequest {
     pub dry_run: bool,
 }
 
-/// [`push`], telling `observer` how the mirror goes. On a real run, the
-/// mirror is first run as a dry run that lists the sizes, so that the
-/// observer knows the pieces and the files ahead.
+/// [`push`], telling `observer` how the mirror goes. A real run lists every
+/// entry rsync looks at, so that the observer can follow the one run.
 pub fn push_observed(
     collection: &Collection,
     request: &PushRequest,
@@ -381,28 +385,24 @@ fn push_watched(
         collection: collection.root(),
         url: &call_url,
     };
-    // A dry run has no progress to show, and without an observer nobody
-    // needs the sizes.
-    let live = match observer {
-        Some(observer) if !request.dry_run => mirror::forecast(&mirror_job, &folders, observer),
-        _ => None,
-    };
-    // Only the first call is the mirror itself: the checks and the second
-    // pass that may follow it are told to nobody.
-    let first = std::cell::Cell::new(true);
+    // A dry run has no progress to show. The progress follows the first
+    // call only: the check and the second pass that may follow it are told
+    // to nobody.
+    let progress = observer
+        .filter(|_| !request.dry_run)
+        .map(|observer| RefCell::new(Progress::new(&shown, observer)));
+    let first = Cell::new(true);
     let mirrored = mirror::run_mirror(
         &mirror_job,
-        &|call| match &live {
-            Some(live) if first.replace(false) => {
-                let outcome = call.run_observed(&mut |line| live.borrow_mut().line(line))?;
-                if matches!(outcome.code, Some(0 | 24)) {
-                    live.borrow_mut().finish();
-                }
-                Ok(outcome)
-            }
+        &|call| match &progress {
+            Some(progress) if first.replace(false) => call.run_observed(&mut |segment| {
+                progress.borrow_mut().segment(segment);
+                plain_listing(segment).map(Cow::Owned)
+            }),
             _ => call.run(),
         },
         request.dry_run,
+        progress.is_some(),
     )?;
     report.vanished = mirrored.vanished;
     report.second_pass = mirrored.second_pass;

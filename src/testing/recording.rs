@@ -23,6 +23,10 @@ pub enum Seen {
         operation: Operation,
         counter: Counter,
     },
+    Measured {
+        name: String,
+        bytes: Counter,
+    },
     Finished {
         name: String,
         bytes: u64,
@@ -57,6 +61,7 @@ impl Seen {
                 counter.done(),
                 counter.total()
             ),
+            Seen::Measured { name, bytes } => format!("{name} sent {}", bytes.done()),
             Seen::Finished {
                 name,
                 bytes,
@@ -72,6 +77,7 @@ impl Seen {
             Seen::Planned(_) => None,
             Seen::Started { name, .. }
             | Seen::Operation { name, .. }
+            | Seen::Measured { name, .. }
             | Seen::Finished { name, .. }
             | Seen::Dropped { name }
             | Seen::Paused { name } => Some(name),
@@ -128,6 +134,10 @@ impl Observer for Recorder {
                 name: name.to_string(),
                 operation,
                 counter: counter.clone(),
+            },
+            Event::Measured { name, bytes } => Seen::Measured {
+                name: name.to_string(),
+                bytes: bytes.clone(),
             },
             Event::Finished {
                 name,

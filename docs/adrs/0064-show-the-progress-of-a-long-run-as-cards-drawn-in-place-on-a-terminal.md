@@ -33,15 +33,12 @@ line when its piece ends and no cards.
 A pipe, `--json` and a dry run keep their output unchanged. Warnings and
 notes still follow the result.
 
-`push` on a terminal that moves the cursor runs the mirror once as a dry
-run before the real run, to learn the files and bytes of each piece. The
-extra scan is accepted. A terminal whose `TERM` is unset or `dumb` gets no
-dry run, and `push` lists its pieces at the end.
+`push` on a terminal that moves the cursor follows its one run of the
+mirror. The run lists every entry rsync looks at, with its length, and
+reports progress. A terminal whose `TERM` is unset or `dumb` gets the
+plain listing, and `push` lists its pieces at the end.
 
 ## Consequences
-
-`push` on a terminal that moves the cursor scans the source twice and
-makes one more ssh connection to an ssh target.
 
 The size of the terminal is read at each redraw. A redraw after a change
 of size waits until the size has stayed the same for the length of one

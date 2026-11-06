@@ -1778,7 +1778,15 @@ target. `--init` and `--force` are each refused together with
 
    `--fsync` unless `[target] fsync = false`. An option in `rsync_args`
    overrides antiq's (`--no-perms` after `-a`); an `-e` there replaces
-   antiq's ssh command, BatchMode included. The excludes are anchored at
+   antiq's ssh command, BatchMode included. The exception is the listing
+   of a push that shows progress cards (see "Progress cards"): it replaces
+   `--itemize-changes` with `-ii --info=progress2 --out-format='%i %l %n%L'`,
+   placed after `<rsync_args>` so that no option of the user's changes the
+   listing. `-ii` lists every entry rsync looks at, an unchanged one too,
+   and `%l` puts the length of the entry in front of its name. The
+   summary of step 9 is made from that listing as from the
+   `--itemize-changes` output, without the unchanged entries, the lengths
+   and the progress. The excludes are anchored at
    the collection root, so the same names inside a live piece are still
    copied; the exclude of the marker also protects the target's marker
    from `--delete`. The macOS volume-root directories and `.DS_Store` at
@@ -1792,7 +1800,7 @@ target. `--init` and `--force` are each refused together with
    interrupted run removes nothing that was on the target before.
 7. **Second pass.** When the run's output has a line starting with
    `*deleting` and the run ended with exit 0, 23 or 24, `push` runs the
-   same command with `-n` and, if that prints any itemized line (of a
+   mirror with `-n` and `--itemize-changes` and, if that prints any itemized line (of a
    directory too), the mirror once more. A run that ended any other way
    deleted nothing and gets no second pass. The result is the worst of
    the runs, and the first failure's text is the one printed; the
@@ -2216,11 +2224,10 @@ end without size and time. A `push` prints `Pushing to <target>` and an empty
 line above its cards once it has pieces to send; a claim that sends no piece
 keeps the headline, the sentence and the table of what was sent.
 
-On a terminal that moves the cursor, the mirror of a `push` first runs once
-as a dry run, to learn the files and bytes of each piece. When that dry run
-lists nothing it can read, the pieces appear as finished lines only. A
-`TERM` that is unset or `dumb` makes no dry run: the finished lines of the
-pieces are printed at the end, from the report of the push.
+On a terminal that moves the cursor, the mirror of a `push` runs once, as
+the real run, and the progress follows its listing. A `TERM` that is unset
+or `dumb` gets the finished lines of the pieces at the end, from the report
+of the push.
 
 The region is redrawn in place at most every 100 ms, with the carriage
 return, cursor up and erase to the end of the screen. antiq sets no

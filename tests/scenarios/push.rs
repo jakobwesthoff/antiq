@@ -95,12 +95,6 @@ fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
         .path()
         .display()
         .to_string();
-    // The archive of the stored version is compressed from a tree with the
-    // times of this run, so its size changes with the clock.
-    let stored_size: u64 = fs::read_dir(world.collection().path(".antiq/pieces/old/client-site"))
-        .expect("the piece has a store folder")
-        .map(|entry| entry.expect("an entry").metadata().expect("metadata").len())
-        .sum();
     let run = world.run_tty_sized(&["push", "--init"], 80, 24, &[("NO_COLOR", "1")]);
     run.expect_code(0);
     let mut screen = crate::support::screen::Screen::new(80, 24);
@@ -134,12 +128,11 @@ fn a_terminal_gets_the_claim_of_the_target_after_the_lines_of_the_pieces() {
         [
             format!("Pushing to {shown}"),
             String::new(),
-            format!(
-                "  ✔ old/client-site                          {stored_size:>5} B             3 created  0:00"
-            ),
-            "  ✔ notes/daily                                  6 B             1 created  0:00"
+            "  ✔ notes/daily                                                  1 created"
                 .to_string(),
-            "  ✔ projects/scanner                            43 B             4 created  0:00"
+            "  ✔ old/client-site                                              3 created"
+                .to_string(),
+            "  ✔ projects/scanner                                             4 created"
                 .to_string(),
             String::new(),
         ]

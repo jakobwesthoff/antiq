@@ -295,6 +295,8 @@ impl Observer for Feed {
                 operation,
                 counter: counter.clone(),
             },
+            // No card shows the bytes of an item.
+            Event::Measured { .. } => return,
             Event::Finished {
                 name,
                 bytes,

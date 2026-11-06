@@ -4,6 +4,7 @@
 
 //! The rsync executable.
 
+use std::borrow::Cow;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -103,6 +104,10 @@ const SSH_COMMAND: &str =
 /// connection cannot hold the lock for hours.
 const TIMEOUT: &str = "--timeout=300";
 
+/// What the observed mirror asks for: every entry, with its length, and
+/// the progress of the whole run.
+const OBSERVED_OPTIONS: &[&str] = &["-ii", "--info=progress2", "--out-format=%i %l %n%L"];
+
 /// What the mirror leaves out, anchored at the collection root: antiq's
 /// own scratch and lock files, the target's marker (which also keeps
 /// `--delete` away from it), and the files macOS puts at the root of a
@@ -186,40 +191,52 @@ impl Rsync {
         target: &TargetUrl,
         dry_run: bool,
     ) -> Call {
-        self.mirror_listing(options, collection, target, dry_run, "--itemize-changes")
+        self.mirror_with(options, collection, target, dry_run, true)
     }
 
-    /// The mirror with the option that makes rsync list each change.
-    fn mirror_listing(
+    /// The real mirror for a progress display. In place of
+    /// `--itemize-changes` it lists every entry, also an unchanged one
+    /// (`-ii`), with its length (`%i %l %n%L`), and reports progress
+    /// (`--info=progress2`). These come after the user's `rsync_args`, so
+    /// that a format of the user's cannot take the length away from the
+    /// listing.
+    pub fn mirror_observed(
+        &self,
+        options: &Options,
+        collection: &Path,
+        target: &TargetUrl,
+    ) -> Call {
+        self.mirror_with(options, collection, target, false, false)
+    }
+
+    fn mirror_with(
         &self,
         options: &Options,
         collection: &Path,
         target: &TargetUrl,
         dry_run: bool,
-        listing: &str,
+        itemize: bool,
     ) -> Call {
         let mut args: Vec<OsString> = Vec::new();
         if dry_run {
             args.push("-n".into());
         }
-        args.extend(["-a", "-H", "-x", "--delete", "--delete-delay", listing].map(OsString::from));
+        args.extend(["-a", "-H", "-x", "--delete", "--delete-delay"].map(OsString::from));
+        if itemize {
+            args.push("--itemize-changes".into());
+        }
         args.extend(MIRROR_EXCLUDES.map(|name| OsString::from(format!("--exclude={name}"))));
+        let tail: &[&str] = if itemize { &[] } else { OBSERVED_OPTIONS };
         self.finish(
             args,
             options,
             true,
+            tail,
             [
                 with_trailing_slash(collection.as_os_str()),
                 target.dir_arg(),
             ],
         )
-    }
-
-    /// The dry run of the mirror, listing each change with its size
-    /// (`%i %l %n%L`) in place of `--itemize-changes`, so that a progress
-    /// display knows the bytes and the files ahead of the real run.
-    pub fn mirror_counted(&self, options: &Options, collection: &Path, target: &TargetUrl) -> Call {
-        self.mirror_listing(options, collection, target, true, "--out-format=%i %l %n%L")
     }
 
     /// The call that lists the target directory.
@@ -228,6 +245,7 @@ impl Rsync {
             vec!["--list-only".into()],
             options,
             false,
+            &[],
             [target.dir_arg()],
         )
     }
@@ -243,6 +261,7 @@ impl Rsync {
             vec!["--max-size=64K".into()],
             options,
             true,
+            &[],
             [marker, with_trailing_slash(into.as_os_str())],
         )
     }
@@ -255,6 +274,7 @@ impl Rsync {
             vec!["-r".into(), "--chmod=F644".into()],
             options,
             true,
+            &[],
             [with_trailing_slash(from.as_os_str()), target.dir_arg()],
         )
     }
@@ -262,12 +282,13 @@ impl Rsync {
     /// Appends what every call shares, in the order of the mirror: the
     /// timeout, `--fsync`, `--rsync-path` and the ssh command, then the
     /// user's `rsync_args` so that they can override antiq's options, then
-    /// the paths.
+    /// `tail`, which the user cannot override, then the paths.
     fn finish(
         &self,
         mut args: Vec<OsString>,
         options: &Options,
         fsync: bool,
+        tail: &[&str],
         paths: impl IntoIterator<Item = OsString>,
     ) -> Call {
         args.push(TIMEOUT.into());
@@ -280,6 +301,7 @@ impl Rsync {
         args.push("-e".into());
         args.push(SSH_COMMAND.into());
         args.extend(options.rsync_args.iter().map(OsString::from));
+        args.extend(tail.iter().map(OsString::from));
         args.extend(paths);
         Call {
             program: self.path.clone(),
@@ -355,6 +377,10 @@ pub fn quiet_option(args: &[String]) -> Option<&str> {
     None
 }
 
+/// What [`Call::run_observed`] hands the segments of the output to: it
+/// returns what the standard output of the outcome keeps of a segment.
+pub type Segments<'a> = dyn FnMut(&[u8]) -> Option<Cow<[u8]>> + 'a;
+
 /// One prepared rsync call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
@@ -388,16 +414,20 @@ impl Call {
     /// Runs the call and returns what it left, whatever the exit status:
     /// the caller reads the status and the texts of 23, 24, 30 and 255.
     pub fn run(&self) -> Result<Outcome, RsyncError> {
-        self.run_observed(&mut |_| {})
+        self.run_observed(&mut |segment| Some(segment.into()))
     }
 
-    /// [`run`](Call::run), handing each line of standard output to `on_line`
-    /// (with its newline) while rsync still runs. The outcome holds the
-    /// whole output as `run` returns it.
+    /// [`run`](Call::run), handing the standard output to `on_segment` in
+    /// segments while rsync still runs. A segment ends after a newline,
+    /// which it keeps, or before a carriage return, which starts the next
+    /// segment: the progress updates rsync writes begin with one, so each
+    /// reaches `on_segment` as soon as the update after it starts, also in
+    /// the middle of a large file. What `on_segment` returns is appended to
+    /// the standard output of the outcome, `None` leaves the segment out.
     ///
     /// Standard error is read on a thread of its own: a full pipe would
     /// otherwise stop rsync while this one waits for a line.
-    pub fn run_observed(&self, on_line: &mut dyn FnMut(&[u8])) -> Result<Outcome, RsyncError> {
+    pub fn run_observed(&self, on_segment: &mut Segments) -> Result<Outcome, RsyncError> {
         let spawn_error = |cause| RsyncError::Spawn {
             path: self.program.clone(),
             cause,
@@ -418,21 +448,51 @@ impl Call {
                 (bytes, read)
             });
             let mut bytes = Vec::new();
-            let mut line = Vec::new();
+            let mut segment: Vec<u8> = Vec::new();
             let mut failure = None;
+            let mut hand_over = |segment: &mut Vec<u8>, bytes: &mut Vec<u8>| {
+                if let Some(kept) = on_segment(segment) {
+                    bytes.extend_from_slice(&kept);
+                }
+                segment.clear();
+            };
             loop {
-                line.clear();
-                match stdout.read_until(b'\n', &mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        on_line(&line);
-                        bytes.extend_from_slice(&line);
-                    }
+                let buffer = match stdout.fill_buf() {
+                    Ok(buffer) => buffer,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => {
                         failure = Some(error);
                         break;
                     }
+                };
+                if buffer.is_empty() {
+                    break;
                 }
+                // Up to the next byte that ends or starts a segment.
+                let at = buffer.iter().position(|byte| matches!(byte, b'\n' | b'\r'));
+                match at {
+                    None => {
+                        segment.extend_from_slice(buffer);
+                        let length = buffer.len();
+                        stdout.consume(length);
+                    }
+                    Some(at) if buffer[at] == b'\n' => {
+                        segment.extend_from_slice(&buffer[..=at]);
+                        stdout.consume(at + 1);
+                        hand_over(&mut segment, &mut bytes);
+                    }
+                    Some(at) => {
+                        segment.extend_from_slice(&buffer[..at]);
+                        stdout.consume(at + 1);
+                        if !segment.is_empty() {
+                            hand_over(&mut segment, &mut bytes);
+                        }
+                        segment.push(b'\r');
+                    }
+                }
+            }
+            if !segment.is_empty() {
+                hand_over(&mut segment, &mut bytes);
             }
             let (err_bytes, err_read) = drain.join().expect("the stderr reader does not panic");
             (bytes, err_bytes, failure.or(err_read.err()))
@@ -1020,24 +1080,32 @@ mod tests {
     }
 
     #[test]
-    fn the_counted_mirror_is_the_dry_run_with_a_sized_listing() {
+    fn the_observed_mirror_lists_every_entry_with_its_length_after_the_users_options() {
         let (_fake, rsync) = probed_fake();
-        let collection = Path::new("/Users/jakob/projects");
-        let counted = rsync.mirror_counted(&options(), collection, &nas());
-        let dry = rsync.mirror(&options(), collection, &nas(), true);
+        let options = Options {
+            fsync: true,
+            rsync_path: None,
+            rsync_args: args(&["--out-format=%i %n%L", "--bwlimit=500"]),
+        };
+        let call = rsync.mirror_observed(&options, Path::new("/Users/jakob/projects"), &nas());
 
-        let expected: Vec<String> = argv(&dry)
+        let mut expected: Vec<&str> = mirror_head()
             .into_iter()
-            .map(|arg| {
-                if arg == "--itemize-changes" {
-                    "--out-format=%i %l %n%L".to_string()
-                } else {
-                    arg
-                }
-            })
+            .filter(|arg| *arg != "--itemize-changes")
             .collect();
-        assert_eq!(argv(&counted), expected);
-        assert_eq!(argv(&counted)[0], "-n");
+        expected.extend([
+            "--fsync",
+            "-e",
+            SSH,
+            "--out-format=%i %n%L",
+            "--bwlimit=500",
+            "-ii",
+            "--info=progress2",
+            "--out-format=%i %l %n%L",
+            "/Users/jakob/projects/",
+            "nas.local:/volume1/antiq/",
+        ]);
+        assert_eq!(argv(&call), expected);
     }
 
     #[test]
@@ -1365,7 +1433,10 @@ mod tests {
         let mut arrivals = Vec::new();
 
         let outcome = call
-            .run_observed(&mut |line| arrivals.push((line.to_vec(), started.elapsed())))
+            .run_observed(&mut |line| {
+                arrivals.push((line.to_vec(), started.elapsed()));
+                Some(line.into())
+            })
             .expect("the fake runs");
 
         assert_eq!(outcome.stdout, b"one\ntwo\nthree\n");
@@ -1392,7 +1463,9 @@ mod tests {
         fake.fill_stderr(2, 300_000);
         let call = rsync.list(&options(), &nas());
 
-        let observed = call.run_observed(&mut |_| {}).expect("the fake runs");
+        let observed = call
+            .run_observed(&mut |segment| Some(segment.into()))
+            .expect("the fake runs");
         let plain = call.run().expect("the fake runs");
 
         assert_eq!(observed, plain);
@@ -1407,9 +1480,87 @@ mod tests {
             args: Vec::new(),
         };
         assert!(matches!(
-            call.run_observed(&mut |_| {}),
+            call.run_observed(&mut |_| None),
             Err(RsyncError::Spawn { .. })
         ));
+    }
+
+    /// A call of `sh -c script`, for output that has to arrive in pieces.
+    fn script(script: &str) -> Call {
+        Call {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        }
+    }
+
+    fn segments_of(call: &Call) -> (Vec<Vec<u8>>, Outcome) {
+        let mut segments = Vec::new();
+        let outcome = call
+            .run_observed(&mut |segment| {
+                segments.push(segment.to_vec());
+                Some(segment.into())
+            })
+            .expect("the shell runs");
+        (segments, outcome)
+    }
+
+    #[test]
+    fn run_observed_starts_a_segment_at_each_carriage_return_and_ends_one_after_a_newline() {
+        let call = script(r"printf 'one\n\r  5%% a\r  9%% (to-chk=1/3)\ntwo\n\r end'");
+
+        let (segments, outcome) = segments_of(&call);
+
+        assert_eq!(
+            segments,
+            [
+                &b"one\n"[..],
+                b"\r  5% a",
+                b"\r  9% (to-chk=1/3)\n",
+                b"two\n",
+                b"\r end",
+            ]
+        );
+        assert_eq!(
+            outcome.stdout,
+            b"one\n\r  5% a\r  9% (to-chk=1/3)\ntwo\n\r end"
+        );
+    }
+
+    #[test]
+    fn run_observed_hands_over_a_progress_update_before_the_line_it_belongs_to_ends() {
+        let gate = tempfile::tempdir().expect("a temp dir").keep();
+        let open = gate.join("open");
+        // The shell holds the newline back until the test has seen the
+        // first update, and gives up after five seconds so that a reader
+        // that waits for the newline fails instead of hanging.
+        let call = script(&format!(
+            r#"printf '\r first\r second'; i=0; while [ ! -f '{gate}' ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done; printf '\n'"#,
+            gate = open.display()
+        ));
+        let mut seen_before_the_newline = false;
+
+        call.run_observed(&mut |segment| {
+            if segment == b"\r first" {
+                seen_before_the_newline = !open.exists();
+                std::fs::write(&open, "").expect("the gate opens");
+            }
+            Some(segment.into())
+        })
+        .expect("the shell runs");
+
+        std::fs::remove_dir_all(&gate).expect("the gate goes");
+        assert!(seen_before_the_newline);
+    }
+
+    #[test]
+    fn run_observed_stores_only_what_the_callback_returns() {
+        let call = script(r"printf 'keep\n\r drop\nkeep too\n'");
+
+        let outcome = call
+            .run_observed(&mut |segment| (!segment.starts_with(b"\r")).then(|| segment.into()))
+            .expect("the shell runs");
+
+        assert_eq!(outcome.stdout, b"keep\nkeep too\n");
     }
 
     // =========================================================

@@ -17,30 +17,58 @@ use support::scenario::target::Target;
 
 const RSYNC_3_2_4: &str = "rsync  version 3.2.4  protocol version 31\n";
 
-/// The events as lines of text, counters read when the line is taken.
+/// One event as a line of text, made when the lines are asked for so that
+/// a counter reads as the run left it.
+type Line = Box<dyn Fn() -> String + Send>;
+
 #[derive(Default)]
-struct Lines(Mutex<Vec<String>>);
+struct Lines(Mutex<Vec<Line>>);
 
 impl Observer for Lines {
     fn event(&self, event: Event<'_>) {
-        let line = match event {
+        let line: Line = match event {
             Event::Planned { items } => {
-                let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
-                format!("planned {}", names.join(" "))
+                let names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
+                Box::new(move || format!("planned {}", names.join(" ")))
             }
-            Event::Started { name, bytes, .. } => format!("started {name} {bytes}"),
+            Event::Started { name, bytes, .. } => {
+                let name = name.to_string();
+                Box::new(move || format!("started {name} {bytes}"))
+            }
             Event::Operation {
                 name,
                 operation,
                 counter,
-            } => format!("{name} {operation:?} total {}", counter.total()),
+            } => {
+                let (name, counter) = (name.to_string(), counter.clone());
+                Box::new(move || {
+                    format!(
+                        "{name} {operation:?} {}/{}",
+                        counter.done(),
+                        counter.total()
+                    )
+                })
+            }
+            Event::Measured { name, bytes } => {
+                let (name, bytes) = (name.to_string(), bytes.clone());
+                Box::new(move || format!("{name} sent {}", bytes.done()))
+            }
             Event::Finished {
                 name,
                 bytes,
                 outcome,
-            } => format!("finished {name} {bytes} {outcome:?}"),
-            Event::Dropped { name } => format!("dropped {name}"),
-            Event::Paused { name } => format!("paused {name}"),
+            } => {
+                let (name, outcome) = (name.to_string(), outcome.clone());
+                Box::new(move || format!("finished {name} {bytes} {outcome:?}"))
+            }
+            Event::Dropped { name } => {
+                let name = name.to_string();
+                Box::new(move || format!("dropped {name}"))
+            }
+            Event::Paused { name } => {
+                let name = name.to_string();
+                Box::new(move || format!("paused {name}"))
+            }
         };
         self.0.lock().expect("no panic holds the lock").push(line);
     }
@@ -48,14 +76,26 @@ impl Observer for Lines {
 
 impl Lines {
     fn lines(&self) -> Vec<String> {
-        self.0.lock().expect("no panic holds the lock").clone()
+        let lines = self.0.lock().expect("no panic holds the lock");
+        lines.iter().map(|line| line()).collect()
     }
 }
 
 struct World {
     collection: Collection,
     fake: FakeRsync,
-    _target: Target,
+    target: Target,
+}
+
+impl World {
+    /// The name the push gives its one item: the target as configured.
+    fn item(&self) -> String {
+        self.target
+            .path()
+            .to_str()
+            .expect("a UTF-8 path")
+            .to_string()
+    }
 }
 
 fn world() -> World {
@@ -82,11 +122,15 @@ fn world_of(pieces: &[&str]) -> World {
     World {
         collection,
         fake,
-        _target: target,
+        target,
     }
 }
 
-fn push_with(world: &World, dry_run: bool, observer: &Lines) -> PushOutcome {
+fn push_result(
+    world: &World,
+    dry_run: bool,
+    observer: &Lines,
+) -> Result<PushOutcome, antiq::commands::push::PushError> {
     let collection =
         antiq::collection::Collection::find(&world.collection.root()).expect("a collection");
     let request = PushRequest {
@@ -95,7 +139,11 @@ fn push_with(world: &World, dry_run: bool, observer: &Lines) -> PushOutcome {
         if_reachable: false,
         dry_run,
     };
-    push_observed(&collection, &request, &SystemClock, observer).expect("the push ends")
+    push_observed(&collection, &request, &SystemClock, observer)
+}
+
+fn push_with(world: &World, dry_run: bool, observer: &Lines) -> PushOutcome {
+    push_result(world, dry_run, observer).expect("the push ends")
 }
 
 fn transfers(fake: &FakeRsync) -> Vec<Vec<String>> {
@@ -106,49 +154,35 @@ fn transfers(fake: &FakeRsync) -> Vec<Vec<String>> {
 }
 
 #[test]
-fn a_real_push_lists_the_sizes_first_and_follows_the_real_run() {
+fn a_real_push_follows_its_one_run_and_makes_no_dry_run() {
     let world = world();
-    world
-        .fake
-        .answer(1, ">f+++++++++ 5 projects/a/a.txt\n", "", 0);
-    world
-        .fake
-        .answer(2, ">f+++++++++ projects/a/a.txt\n", "", 0);
-    let seen = Lines::default();
-
-    push_with(&world, false, &seen);
-
-    assert_eq!(
-        seen.lines(),
-        [
-            "planned projects",
-            "started projects 5",
-            "projects Storing total 1",
-            "finished projects 5 Changes { created: 1, updated: 0, deleted: 0 }",
-        ]
+    world.fake.answer(
+        1,
+        ".d          96 ./\n\
+         >f+++++++++ 5 projects/a/a.txt\n\
+         \r              5 100%    0.00kB/s    0:00:00 (xfr#1, to-chk=0/3)\n",
+        "",
+        0,
     );
-    let calls = transfers(&world.fake);
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(calls[0].contains(&"-n".to_string()));
-    assert!(calls[0].contains(&"--out-format=%i %l %n%L".to_string()));
-    assert!(!calls[1].contains(&"-n".to_string()));
-    assert!(calls[1].contains(&"--itemize-changes".to_string()));
-}
-
-#[test]
-fn a_listing_that_cannot_be_read_gives_no_events_and_the_push_goes_on() {
-    let world = world();
-    world
-        .fake
-        .answer(1, ">f+++++++++ many projects/a/a.txt\n", "", 0);
-    world
-        .fake
-        .answer(2, ">f+++++++++ projects/a/a.txt\n", "", 0);
     let seen = Lines::default();
 
     let outcome = push_with(&world, false, &seen);
 
-    assert_eq!(seen.lines(), Vec::<String>::new());
+    let item = world.item();
+    assert_eq!(
+        seen.lines(),
+        [
+            format!("started {item} 0"),
+            format!("{item} Storing 2/3"),
+            format!("{item} sent 5"),
+        ]
+    );
+    let calls = transfers(&world.fake);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(!calls[0].contains(&"-n".to_string()));
+    assert!(calls[0].contains(&"-ii".to_string()));
+    assert!(calls[0].contains(&"--out-format=%i %l %n%L".to_string()));
+    assert!(!calls[0].contains(&"--itemize-changes".to_string()));
     let PushOutcome::Report(report) = outcome else {
         panic!("a report");
     };
@@ -156,22 +190,35 @@ fn a_listing_that_cannot_be_read_gives_no_events_and_the_push_goes_on() {
 }
 
 #[test]
-fn a_failing_listing_gives_no_events_and_the_push_goes_on() {
+fn a_push_that_changes_nothing_still_shows_the_entries_and_reports_no_change() {
     let world = world();
-    world.fake.answer(1, "", "rsync: error\n", 23);
-    world
-        .fake
-        .answer(2, ">f+++++++++ projects/a/a.txt\n", "", 0);
+    world.fake.answer(
+        1,
+        ".d          96 ./\n.f          1 projects/a/a.txt\n\r  0 0% (xfr#0, to-chk=0/2)\n",
+        "",
+        0,
+    );
     let seen = Lines::default();
 
-    push_with(&world, false, &seen);
+    let outcome = push_with(&world, false, &seen);
 
-    assert_eq!(seen.lines(), Vec::<String>::new());
-    assert_eq!(transfers(&world.fake).len(), 2);
+    let item = world.item();
+    assert_eq!(
+        seen.lines(),
+        [
+            format!("started {item} 0"),
+            format!("{item} Storing 2/2"),
+            format!("{item} sent 0"),
+        ]
+    );
+    let PushOutcome::Report(report) = outcome else {
+        panic!("a report");
+    };
+    assert!(report.changes.is_empty());
 }
 
 #[test]
-fn a_dry_run_makes_one_call_and_tells_nothing() {
+fn a_dry_run_makes_one_plain_call_and_tells_nothing() {
     let world = world();
     world
         .fake
@@ -181,15 +228,20 @@ fn a_dry_run_makes_one_call_and_tells_nothing() {
     push_with(&world, true, &seen);
 
     assert_eq!(seen.lines(), Vec::<String>::new());
-    assert_eq!(transfers(&world.fake).len(), 1);
+    let calls = transfers(&world.fake);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].contains(&"--itemize-changes".to_string()));
 }
 
 #[test]
-fn deletions_are_followed_in_the_first_pass_only_and_the_checks_after_it_tell_nothing() {
+fn deletions_are_followed_in_the_first_run_only_and_the_checks_after_it_tell_nothing() {
     let world = world();
-    world
-        .fake
-        .answer(1, "*deleting   0 projects/a/old.txt\n", "", 0);
+    world.fake.answer(
+        1,
+        ".d          96 ./\n*deleting   0 projects/a/old.txt\n",
+        "",
+        0,
+    );
     world
         .fake
         .answer(2, "*deleting   projects/a/old.txt\n", "", 0);
@@ -198,59 +250,55 @@ fn deletions_are_followed_in_the_first_pass_only_and_the_checks_after_it_tell_no
 
     push_with(&world, false, &seen);
 
+    let item = world.item();
     assert_eq!(
         seen.lines(),
         [
-            "planned projects",
-            "started projects 0",
-            "projects Removing total 1",
-            "finished projects 0 Changes { created: 0, updated: 0, deleted: 1 }",
+            format!("started {item} 0"),
+            format!("{item} Storing 1/0"),
+            format!("{item} sent 0"),
+            format!("{item} Removing 1/0"),
         ]
     );
     assert_eq!(transfers(&world.fake).len(), 3);
 }
 
 #[test]
-fn a_real_pass_that_differs_from_the_listing_reports_what_it_did_and_keeps_the_cards_whole() {
-    let world = world_of(&["alpha", "beta"]);
-    // The listing expects one file and one deletion for alpha, one file for
-    // beta. The real pass sends a second file for alpha while it waits for
-    // its deletions, a second one for beta after it finished, and a second
-    // deletion for alpha after it finished. A card never reopens for those.
-    world.fake.answer(
-        1,
-        ">f+++++++++ 5 alpha/x\n*deleting   0 alpha/gone\n>f+++++++++ 7 beta/z\n",
-        "",
-        0,
-    );
-    world.fake.answer(
-        2,
-        ">f+++++++++ alpha/x\n\
-         >f+++++++++ beta/z\n\
-         >f+++++++++ alpha/y\n\
-         *deleting   alpha/gone\n\
-         >f+++++++++ beta/w\n\
-         *deleting   alpha/more\n",
-        "",
-        0,
-    );
-    world.fake.answer(3, "", "", 0);
+fn a_check_that_fails_after_the_first_run_is_the_error_of_the_push() {
+    let world = world();
+    world
+        .fake
+        .answer(1, "*deleting   0 projects/a/old.txt\n", "", 0);
+    world.fake.answer(2, "", "rsync: error\n", 30);
     let seen = Lines::default();
 
-    push_with(&world, false, &seen);
+    let result = push_result(&world, false, &seen);
 
-    assert_eq!(
-        seen.lines(),
-        [
-            "planned alpha beta",
-            "started alpha 5",
-            "alpha Storing total 1",
-            "paused alpha",
-            "started beta 7",
-            "beta Storing total 1",
-            "finished beta 7 Changes { created: 1, updated: 0, deleted: 0 }",
-            "alpha Removing total 1",
-            "finished alpha 5 Changes { created: 1, updated: 0, deleted: 1 }",
-        ]
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
+fn a_report_counts_the_changes_of_the_second_run_too() {
+    let world = world();
+    world.fake.answer(
+        1,
+        ".d          96 ./\n*deleting   0 projects/a/old.txt\n",
+        "",
+        0,
     );
+    world
+        .fake
+        .answer(2, ">f+++++++++ projects/a/b.txt\n", "", 0);
+    world
+        .fake
+        .answer(3, ">f+++++++++ projects/a/b.txt\n", "", 0);
+    let seen = Lines::default();
+
+    let PushOutcome::Report(report) = push_with(&world, false, &seen) else {
+        panic!("a report");
+    };
+
+    let counts = report.changes.pieces[0].counts;
+    assert_eq!((counts.created, counts.deleted), (1, 1));
+    assert!(report.second_pass);
 }

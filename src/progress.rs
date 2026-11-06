@@ -110,6 +110,10 @@ pub enum Event<'a> {
         operation: Operation,
         counter: &'a Counter,
     },
+    /// The bytes the item has sent so far grow in `bytes`, which an observer
+    /// reads whenever it likes. An item whose size is not known beforehand
+    /// sends this in place of the size of its `Started`.
+    Measured { name: &'a str, bytes: &'a Counter },
     Finished {
         name: &'a str,
         bytes: u64,
@@ -243,6 +247,7 @@ mod tests {
                     counter.done(),
                     counter.total()
                 ),
+                Event::Measured { name, bytes } => format!("{name} sent {}", bytes.done()),
                 Event::Finished { name, outcome, .. } => format!("finished {name} {outcome:?}"),
                 Event::Dropped { name } => format!("dropped {name}"),
                 Event::Paused { name } => format!("paused {name}"),
@@ -280,6 +285,12 @@ mod tests {
                 bytes: 9,
             }],
         });
+        let sent = Counter::new();
+        sent.add(512);
+        observer.event(Event::Measured {
+            name: "projects/scanner",
+            bytes: &sent,
+        });
         observer.event(Event::Paused {
             name: "projects/scanner",
         });
@@ -296,6 +307,7 @@ mod tests {
                 "projects/scanner Packing 0/3",
                 "projects/scanner Verifying 2/3",
                 "planned 1",
+                "projects/scanner sent 512",
                 "paused projects/scanner",
                 "finished projects/scanner Files(3)",
                 "dropped tools/ray",
