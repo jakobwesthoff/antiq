@@ -1035,12 +1035,16 @@ checks it would make. (ADR 0061)
   warning and keeps it), `rebuild` and copying the missing file back from
   the target. A version with two files in one slot is refused naming
   the files and `forget`, as `fork` refuses it too.
-- A version whose top holds a non-file with a marker's name is refused.
+- A version whose top holds a `.antiq-restored` that is not a regular file,
+  or a `.antiq-pin` that is neither a regular file nor a symlink, is
+  refused; a hard link counts as a regular file. This holds for `fork` too.
 - The destination is the piece's stored path. It is refused, and nothing
   changes, when it is not one the patterns select, is excluded or lies
   below an excluded folder, lies in `.antiq/`, inside another piece or
   below a file or symlink, or when anything is at it, a dangling symlink
-  included. Nothing is followed through a symlink. A folder above the
+  included. The collection root is no destination, and a path is in
+  `.antiq/` when its first component is `.antiq` in any case of its ASCII
+  letters. Nothing is followed through a symlink. A folder above the
   path that the volume finds under another spelling than the path's
   (another case, or another Unicode normalisation) refuses too. Folders
   above the destination that do not exist are created; a failure before the
@@ -1108,8 +1112,9 @@ Before extracting, `unearth` checks every member name against the volume it extr
 names it cannot hold, name lengths, and names that collide under its case
 and Unicode rules, which come from a probe of the volume of `.antiq/tmp/`. It
 refuses the piece with a list of the offending names and the reason. A
-name is too long when it exceeds 255 bytes on Linux or 255 UTF-16 code
-units, counted on the name as stored, on macOS; a volume that stores names
+name is too long when it exceeds the maximum the volume reports (`fstatvfs`,
+255 on APFS and ext4), counted in UTF-16 code units, on the name as stored,
+on macOS and in bytes elsewhere; a volume that stores names
 decomposed (HFS+) counts them in that form. macOS also refuses a name that
 is not valid UTF-8. A symlink whose target is longer than 1023 bytes on
 macOS or 4095 bytes on Linux is refused for the same reason. The probe
