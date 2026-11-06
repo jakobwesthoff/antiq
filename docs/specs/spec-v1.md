@@ -2086,7 +2086,8 @@ terminal are plain text, whatever `CLICOLOR_FORCE` says.
 On a pipe the error is plain lines. An error line gives the title,
 prefixed `error:`; it is followed by a `  why:` and a `  fix:` line where
 the error has those sections, one `    candidate: <path>` line per
-candidate of an ambiguous reference and one
+candidate of an ambiguous reference (for an ambiguous version, one per
+matching stamp) and one
 `  while attempting to <action>` line per context, the innermost first. The
 reasons why one piece is refused are joined with `, ` by `archive` and with
 `; ` by `status`. A cause whose text the cause above it already

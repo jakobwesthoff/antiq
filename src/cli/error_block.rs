@@ -14,6 +14,7 @@ use antiq::lock::LockError;
 use antiq::reference::ReferenceError;
 use antiq::run::RunError;
 use antiq::target::marker;
+use antiq::versions::naming::VersionLookupError;
 
 /// The error block for `description`: the title, the sections an
 /// explanation adds, the candidates of an ambiguous reference, and the
@@ -41,6 +42,16 @@ pub fn block_for(description: &Description) -> Block {
         .unwrap_or_default();
     for candidate in candidates {
         block = block.candidate(&candidate.path);
+    }
+    // The stamps an ambiguous version input matches are candidates too,
+    // although the library error that carries them is no reference error.
+    if let Some(VersionLookupError::Ambiguous { stamps, .. }) = description
+        .library_error
+        .and_then(find::<VersionLookupError>)
+    {
+        for stamp in stamps {
+            block = block.candidate(stamp);
+        }
     }
     for step in &description.contexts {
         block = block.doing(step);

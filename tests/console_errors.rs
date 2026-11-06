@@ -143,6 +143,20 @@ fn two_versions_one_day(builder: &mut CollectionBuilder) {
 }
 
 #[test]
+fn an_ambiguous_version_lists_one_candidate_line_per_stamp_on_a_pipe() {
+    let world = world(Mode::Text, two_versions_one_day);
+    let run = world.run(&["unearth", "projects/scanner", "--version", "2026-11-04"]);
+    run.expect_code(1);
+    assert_eq!(
+        run.stderr,
+        "error: `2026-11-04` matches several versions of projects/scanner: 2026-11-04T100000, 2026-11-04T090211\n    \
+         candidate: 2026-11-04T100000\n    \
+         candidate: 2026-11-04T090211\n  \
+         while attempting to unearth the version\n"
+    );
+}
+
+#[test]
 fn the_json_of_an_unknown_piece_is_pinned_byte_for_byte() {
     let world = world(Mode::Json, stored_pieces);
     let run = world.run(&["unearth", "scnaer"]);
