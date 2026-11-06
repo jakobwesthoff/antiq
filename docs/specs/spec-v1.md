@@ -775,7 +775,11 @@ It refuses, also under `-n`, creating nothing and exiting 1, where
 `.antiq/` already exists, inside another collection (naming its root),
 where `.antiq` is a file or a symlink, and where a folder that would be a
 piece holds a `.antiq/` directory of its own, naming each such folder.
-`-n` prints the config it would write.
+`-n` prints the config it would write: the config alone on stdout, so a
+shell can redirect it, and `Would create a collection at <path>` on stderr.
+The collection ID in that config is minted for the print; a real run mints
+its own. A pattern that contains `**` gets a note on stderr, in `warnings`
+under `--json`.
 
 After creating the collection, `init` prints how many folders the next
 `archive` would archive.
@@ -1559,6 +1563,11 @@ it as stamps, newest first; it is empty for a piece whose name matches.
 `stamp` and `reason`, and is empty when there are none. Under `--json` a
 skipped version and the lock note appear only in the object, while the note
 that nothing matched is on stderr as in text output.
+
+`init` adds `created`, `id` (absent in a dry run), `path` (the canonical
+collection root), `patterns` and `warnings`, and in a dry run `config`, the
+text of the config that would be written, before `actions`. The action is
+`{"action": "create_collection", "path": ...}`.
 
 `status` has these keys, all of them present with an empty list when there
 is nothing to list: `folders`, `versions` and `archive_bytes` (the last two

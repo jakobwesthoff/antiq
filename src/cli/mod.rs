@@ -91,10 +91,7 @@ pub struct InitArgs {
     /// Glob pattern that selects pieces; repeat for several
     #[arg(long = "pattern", value_name = "GLOB")]
     pub patterns: Vec<String>,
-    /// Create the collection without asking
-    #[arg(long)]
-    pub yes: bool,
-    /// Print the plan and change nothing
+    /// Print the config that would be written and change nothing
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
@@ -660,13 +657,13 @@ mod tests {
     }
 
     #[test]
-    fn init_takes_patterns_and_yes() {
-        let cli = parse(&["init", "--pattern", "a*", "--pattern", "b*", "--yes", "-n"]);
+    fn init_takes_patterns_and_dry_run() {
+        let cli = parse(&["init", "--pattern", "a*", "--pattern", "b*", "-n"]);
         let Command::Init(args) = cli.command else {
             panic!("the command is init");
         };
         assert_eq!(args.patterns, ["a*", "b*"]);
-        assert!(args.yes && args.dry_run);
+        assert!(args.dry_run);
     }
 
     #[test]

@@ -11,7 +11,6 @@ use crate::filesystem::atomic::{flush_dir, write_atomic};
 use crate::filesystem::tree::TreeRoot;
 use crate::filesystem::{FilesystemError, io_error};
 use crate::id::{IdSource, ObjectId};
-use crate::interact::{Choice, Interaction, Question};
 use crate::relpath::{Name, RelPath};
 use crate::report::{CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
@@ -66,13 +65,7 @@ pub enum InitAction {
 #[derive(Debug, Clone)]
 pub struct InitPlan {
     root: PathBuf,
-    machine: String,
     patterns: Vec<String>,
-    exclude: Vec<RelPath>,
-    /// The `archive/` folder `archive.sh` left, whether or not the exclude
-    /// list takes it.
-    proposal: Option<RelPath>,
-    pieces: Vec<RelPath>,
     warnings: Vec<Warning>,
 }
 
@@ -85,21 +78,17 @@ pub struct InitReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
     pub path: String,
-    pub machine: String,
     pub patterns: Vec<String>,
-    pub exclude: Vec<RelPath>,
-    pub pieces: Vec<RelPath>,
+    /// The `config.toml` a dry run would write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
     pub actions: Vec<InitAction>,
     pub warnings: Vec<Warning>,
-    /// Whether the user answered a question. The console says different
-    /// things after an answer than after none.
-    #[serde(skip)]
-    pub answered: bool,
 }
 
 impl CommandReport for InitReport {
     fn partial(&self) -> bool {
-        !self.created && !self.dry_run
+        false
     }
 
     fn warnings(&self) -> &[Warning] {
@@ -113,8 +102,6 @@ pub struct InitRequest<'a> {
     pub directory: &'a Path,
     /// Empty selects with the default pattern.
     pub patterns: &'a [String],
-    pub machine: &'a str,
-    pub yes: bool,
     pub dry_run: bool,
 }
 
@@ -130,14 +117,8 @@ fn path(text: &str) -> RelPath {
 }
 
 /// Works out what `init` would do in `directory`, and refuses where it
-/// cannot do it. Nothing is written. With `accept_proposal` unset the
-/// `archive/` folder of `archive.sh` stays a piece.
-pub fn plan(
-    directory: &Path,
-    patterns: &[String],
-    machine: &str,
-    accept_proposal: bool,
-) -> Result<InitPlan, InitError> {
+/// cannot do it. Nothing is written.
+pub fn plan(directory: &Path, patterns: &[String]) -> Result<InitPlan, InitError> {
     let root = fs::canonicalize(directory).map_err(io_error("resolve", directory))?;
 
     // `find_root` can only fail here with "not a collection": the path was
@@ -155,7 +136,7 @@ pub fn plan(
     let tree = TreeRoot::open(&root).map_err(io_error("open", &root))?;
 
     // `find_root` ignores a `.antiq` that is not a directory, so this is
-    // the only place that refuses it before the user is asked anything.
+    // the only place that refuses it.
     if tree.lstat(&path(".antiq")).is_ok() {
         return Err(InitError::AntiqIsNotADirectory {
             path: root.join(".antiq"),
@@ -167,16 +148,7 @@ pub fn plan(
     } else {
         patterns.to_vec()
     };
-    let archive = path("archive");
-    let proposal = (Rules::new(&patterns, &[])?.matches(&archive) && has_archive_sh_layout(&tree))
-        .then_some(archive);
-    let exclude: Vec<RelPath> = proposal
-        .iter()
-        .filter(|_| accept_proposal)
-        .cloned()
-        .collect();
-
-    let rules = Rules::new(&patterns, &exclude)?.bind(&tree)?;
+    let rules = Rules::new(&patterns, &[])?.bind(&tree)?;
     let pieces = select(&tree, &rules)?.pieces().to_vec();
     refuse_nested_collections(&tree, &root, &pieces)?;
 
@@ -192,34 +164,9 @@ pub fn plan(
         .collect();
     Ok(InitPlan {
         root,
-        machine: machine.to_string(),
         patterns,
-        exclude,
-        proposal,
-        pieces,
         warnings,
     })
-}
-
-/// Whether `archive/` holds what `archive.sh` leaves: archives as
-/// `*.tar.xz` files and their listings as `*.lst` files in `index/`.
-fn has_archive_sh_layout(tree: &TreeRoot) -> bool {
-    let holds_file_ending = |directory: &RelPath, suffix: &[u8]| {
-        let is_directory = tree
-            .lstat(directory)
-            .is_ok_and(|entry| entry.kind == EntryKind::Directory);
-        is_directory
-            && tree.read_dir(directory).is_ok_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry.name.as_bytes().ends_with(suffix)
-                        && tree
-                            .lstat(&entry.path)
-                            .is_ok_and(|found| found.kind == EntryKind::File)
-                })
-            })
-    };
-    holds_file_ending(&path("archive"), b".tar.xz")
-        && holds_file_ending(&path("archive/index"), b".lst")
 }
 
 /// A piece is archived whole, so a piece that is a collection itself
@@ -245,6 +192,17 @@ fn refuse_nested_collections(
     }
 }
 
+/// Mints the collection's ID and renders the `config.toml` that carries it.
+fn render_config(
+    plan: &InitPlan,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+) -> Result<(ObjectId, String), InitError> {
+    let id = ids.mint(clock.now());
+    let config = ConfigDoc::new(id, Some(&plan.patterns), &[]).render()?;
+    Ok((id, config))
+}
+
 /// Creates the collection the plan describes. The `.antiq/` directory is
 /// built next to its final place and renamed into it, so it exists
 /// complete or not at all.
@@ -253,8 +211,7 @@ pub fn apply(
     clock: &dyn Clock,
     ids: &dyn IdSource,
 ) -> Result<InitReport, InitError> {
-    let id = ids.mint(clock.now());
-    let config = ConfigDoc::new(id, Some(&plan.patterns), &plan.exclude).render()?;
+    let (id, config) = render_config(plan, clock, ids)?;
 
     let staged = create_staging_directory(&plan.root)?;
     let published = fill_and_publish(&plan.root, &staged, &config);
@@ -264,7 +221,18 @@ pub fn apply(
         let _ = fs::remove_dir_all(&staged);
     }
     published?;
-    Ok(plan.report(Some(id), false))
+    Ok(plan.report(Some(id), None, false))
+}
+
+/// Says what `apply` would write, and writes nothing. The ID in the config
+/// is minted for the print; a real run mints its own.
+pub fn preview(
+    plan: &InitPlan,
+    clock: &dyn Clock,
+    ids: &dyn IdSource,
+) -> Result<InitReport, InitError> {
+    let (_, config) = render_config(plan, clock, ids)?;
+    Ok(plan.report(None, Some(config), true))
 }
 
 /// Makes `.antiq-init-<pid>-<n>` in `root` with the first `n` that is
@@ -304,95 +272,33 @@ fn fill_and_publish(root: &Path, staged: &Path, config: &str) -> Result<(), Init
     Ok(())
 }
 
-/// Makes the directory a collection, or says what it would do.
-///
-/// A dry run creates nothing and asks nothing. With `yes` the plan is
-/// carried out as it stands, the proposed exclude included. Otherwise the
-/// user is asked; no answer, as without a terminal, creates nothing.
+/// Makes the directory a collection, or with a dry run says what it would
+/// do. It never asks.
 pub fn init(
     request: &InitRequest<'_>,
-    interaction: &mut dyn Interaction,
     clock: &dyn Clock,
     ids: &dyn IdSource,
 ) -> Result<InitReport, InitError> {
-    let plan = plan(request.directory, request.patterns, request.machine, true)?;
+    let plan = plan(request.directory, request.patterns)?;
     if request.dry_run {
-        return Ok(plan.report(None, true));
+        preview(&plan, clock, ids)
+    } else {
+        apply(&plan, clock, ids)
     }
-    if request.yes {
-        return apply(&plan, clock, ids);
-    }
-
-    let answer = interaction.choose(&plan.question());
-    let mut report = match answer.as_ref().map(|choice| choice.id.as_str()) {
-        Some("create") => apply(&plan, clock, ids)?,
-        Some("create_keep") => {
-            let keeping = self::plan(request.directory, request.patterns, request.machine, false)?;
-            apply(&keeping, clock, ids)?
-        }
-        _ => plan.report(None, false),
-    };
-    report.answered = answer.is_some();
-    Ok(report)
 }
 
 impl InitPlan {
-    fn report(&self, id: Option<ObjectId>, dry_run: bool) -> InitReport {
+    fn report(&self, id: Option<ObjectId>, config: Option<String>, dry_run: bool) -> InitReport {
         let path = self.root.display().to_string();
         InitReport {
             dry_run,
             created: id.is_some(),
             id,
-            machine: self.machine.clone(),
             patterns: self.patterns.clone(),
-            exclude: self.exclude.clone(),
-            pieces: self.pieces.clone(),
+            config,
             actions: vec![InitAction::CreateCollection { path: path.clone() }],
             path,
             warnings: self.warnings.clone(),
-            answered: false,
-        }
-    }
-
-    /// What the user is asked. The details carry everything that is
-    /// decided, so the terminal alone shows it even when the output of the
-    /// command is redirected.
-    fn question(&self) -> Question {
-        let mut details = vec![
-            format!("patterns: {}", self.patterns.join(", ")),
-            format!("machine: {}", self.machine),
-        ];
-        if let Some(proposal) = &self.proposal {
-            details.push(format!("exclude: {proposal} (proposed: archive.sh layout)"));
-        }
-        details.extend(
-            self.warnings
-                .iter()
-                .map(|warning| format!("note: {}", warning.message)),
-        );
-        details.push(format!("pieces ({}):", self.pieces.len()));
-        details.extend(self.pieces.iter().map(|piece| format!("  {piece}")));
-
-        let mut choices = Vec::new();
-        match &self.proposal {
-            Some(proposal) => {
-                choices.push(Choice::new(
-                    "create",
-                    format!("Create the collection, excluding {proposal}"),
-                ));
-                choices.push(Choice::new(
-                    "create_keep",
-                    format!("Create the collection, keeping {proposal} as a piece"),
-                ));
-            }
-            None => choices.push(Choice::new("create", "Create the collection")),
-        }
-        choices.push(Choice::new("decline", "Do not create it"));
-        Question {
-            title: format!("Create a collection in {}?", self.root.display()),
-            details,
-            default: choices.len() - 1,
-            choices,
         }
     }
 }
@@ -403,11 +309,8 @@ mod tests {
     use crate::clock::FixedClock;
     use crate::config::Config;
     use crate::id::SeqIds;
-    use crate::interact::{Choice, NonInteractive, ScriptedInteraction};
     use crate::testing::tree::{TempCollection, Tree};
     use std::fs;
-
-    const MACHINE: &str = "laptop";
 
     fn clock() -> FixedClock {
         FixedClock::new("2026-11-04T10:00:00Z".parse().expect("a valid time"))
@@ -421,21 +324,8 @@ mod tests {
         list.iter().map(ToString::to_string).collect()
     }
 
-    fn names(pieces: &[RelPath]) -> Vec<String> {
-        pieces.iter().map(ToString::to_string).collect()
-    }
-
     fn plan_of(tree: &Tree, list: &[&str]) -> InitPlan {
-        plan(tree.root(), &patterns(list), MACHINE, true).expect("the directory can be planned")
-    }
-
-    /// A tree with the layout `archive.sh` leaves, next to a piece `p`.
-    fn archive_sh_tree() -> Tree {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("archive/one.tar.xz", "x");
-        tree.file("archive/index/one.tar.xz.lst", "x");
-        tree
+        plan(tree.root(), &patterns(list)).expect("the directory can be planned")
     }
 
     fn apply_plan(plan: &InitPlan) -> InitReport {
@@ -447,23 +337,11 @@ mod tests {
     // =========================================================
 
     #[test]
-    fn a_plan_lists_the_pieces_the_patterns_select() {
-        let mut tree = Tree::new();
-        tree.dir("a");
-        tree.dir("b");
-        tree.file("f", "x");
-        tree.dir(".hidden");
-        let plan = plan_of(&tree, &[]);
-        assert_eq!(names(&plan.pieces), ["a", "b"]);
-    }
-
-    #[test]
     fn given_patterns_replace_the_default() {
         let mut tree = Tree::new();
         tree.dir("a1");
         tree.dir("b1");
         let plan = plan_of(&tree, &["a*"]);
-        assert_eq!(names(&plan.pieces), ["a1"]);
         assert_eq!(plan.patterns, ["a*"]);
     }
 
@@ -476,8 +354,8 @@ mod tests {
     #[test]
     fn an_invalid_pattern_is_refused() {
         let tree = Tree::new();
-        let error = plan(tree.root(), &patterns(&["a//b"]), MACHINE, true)
-            .expect_err("an empty component is invalid");
+        let error =
+            plan(tree.root(), &patterns(&["a//b"])).expect_err("an empty component is invalid");
         assert!(matches!(
             error,
             InitError::Select(SelectError::InvalidPattern { .. })
@@ -502,105 +380,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.dir("a");
         let plan = plan_of(&tree, &["a*"]);
-        assert_eq!(names(&plan.pieces), ["a"]);
         assert!(plan.warnings.is_empty());
-    }
-
-    // =========================================================
-    // The archive.sh layout
-    // =========================================================
-
-    #[test]
-    fn archive_sh_layout_is_proposed_for_exclusion() {
-        let tree = archive_sh_tree();
-        let plan = plan_of(&tree, &[]);
-        assert_eq!(
-            plan.proposal,
-            Some(RelPath::parse("archive").expect("a valid path"))
-        );
-        assert_eq!(names(&plan.exclude), ["archive"]);
-        assert_eq!(names(&plan.pieces), ["p"]);
-    }
-
-    #[test]
-    fn a_declined_proposal_keeps_archive_as_a_piece() {
-        let tree = archive_sh_tree();
-        let plan = plan(tree.root(), &[], MACHINE, false).expect("plannable");
-        assert!(plan.proposal.is_some());
-        assert!(plan.exclude.is_empty());
-        assert_eq!(names(&plan.pieces), ["archive", "p"]);
-    }
-
-    fn assert_no_proposal(tree: &Tree) {
-        let plan = plan_of(tree, &[]);
-        assert_eq!(plan.proposal, None);
-        assert!(plan.exclude.is_empty());
-        assert_eq!(names(&plan.pieces), ["archive", "p"]);
-    }
-
-    #[test]
-    fn no_proposal_without_the_listings() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("archive/one.tar.xz", "x");
-        assert_no_proposal(&tree);
-    }
-
-    #[test]
-    fn no_proposal_without_the_archives() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("archive/index/one.tar.xz.lst", "x");
-        assert_no_proposal(&tree);
-    }
-
-    #[test]
-    fn no_proposal_when_archive_is_a_symlink() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("elsewhere/one.tar.xz", "x");
-        tree.file("elsewhere/index/one.tar.xz.lst", "x");
-        tree.symlink("archive", "elsewhere");
-        let plan = plan_of(&tree, &[]);
-        assert_eq!(plan.proposal, None);
-        assert_eq!(names(&plan.pieces), ["elsewhere", "p"]);
-    }
-
-    #[test]
-    fn no_proposal_when_no_pattern_selects_archive() {
-        let tree = archive_sh_tree();
-        let plan = plan_of(&tree, &["p*"]);
-        assert_eq!(plan.proposal, None);
-        assert!(plan.exclude.is_empty());
-        assert_eq!(names(&plan.pieces), ["p"]);
-    }
-
-    #[test]
-    fn no_proposal_when_the_listing_directory_is_a_file() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("archive/one.tar.xz", "x");
-        tree.file("archive/index", "x");
-        assert_no_proposal(&tree);
-    }
-
-    #[test]
-    fn no_proposal_when_a_tar_xz_is_a_directory() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.dir("archive/one.tar.xz");
-        tree.file("archive/index/one.tar.xz.lst", "x");
-        assert_no_proposal(&tree);
-    }
-
-    #[test]
-    fn no_proposal_when_a_lst_is_a_symlink() {
-        let mut tree = Tree::new();
-        tree.dir("p");
-        tree.file("archive/one.tar.xz", "x");
-        tree.dir("archive/index");
-        tree.symlink("archive/index/one.tar.xz.lst", "../one.tar.xz");
-        assert_no_proposal(&tree);
     }
 
     // =========================================================
@@ -610,8 +390,7 @@ mod tests {
     #[test]
     fn a_directory_with_antiq_is_refused_naming_itself() {
         let collection = TempCollection::minimal();
-        let error =
-            plan(collection.root(), &[], MACHINE, true).expect_err("the directory is a collection");
+        let error = plan(collection.root(), &[]).expect_err("the directory is a collection");
         assert_eq!(
             error.to_string(),
             format!(
@@ -625,7 +404,7 @@ mod tests {
     fn a_directory_below_a_collection_is_refused_naming_the_root() {
         let mut collection = TempCollection::minimal();
         let below = collection.tree().dir("projects/web");
-        let error = plan(&below, &[], MACHINE, true).expect_err("inside a collection");
+        let error = plan(&below, &[]).expect_err("inside a collection");
         assert_eq!(
             error.to_string(),
             format!(
@@ -639,8 +418,7 @@ mod tests {
     #[test]
     fn a_missing_directory_is_an_error() {
         let tree = Tree::new();
-        let error = plan(&tree.path("missing"), &[], MACHINE, true)
-            .expect_err("the directory does not exist");
+        let error = plan(&tree.path("missing"), &[]).expect_err("the directory does not exist");
         assert!(matches!(error, InitError::Filesystem(_)), "{error}");
     }
 
@@ -648,7 +426,7 @@ mod tests {
     fn a_file_outside_a_collection_is_an_open_error() {
         let mut tree = Tree::new();
         let file = tree.file("f", "x");
-        let error = plan(&file, &[], MACHINE, true).expect_err("a file is no directory");
+        let error = plan(&file, &[]).expect_err("a file is no directory");
         assert!(matches!(error, InitError::Filesystem(_)), "{error}");
     }
 
@@ -656,7 +434,7 @@ mod tests {
     fn a_file_inside_a_collection_is_refused_naming_the_root() {
         let mut collection = TempCollection::minimal();
         let file = collection.tree().file("f", "x");
-        let error = plan(&file, &[], MACHINE, true).expect_err("inside a collection");
+        let error = plan(&file, &[]).expect_err("inside a collection");
         assert!(
             matches!(error, InitError::InsideACollection { .. }),
             "{error}"
@@ -667,7 +445,7 @@ mod tests {
     fn plan_refuses_a_file_named_antiq() {
         let mut tree = Tree::new();
         tree.file(".antiq", "x");
-        let error = plan(tree.root(), &[], MACHINE, true).expect_err("the name is taken");
+        let error = plan(tree.root(), &[]).expect_err("the name is taken");
         assert!(
             matches!(error, InitError::AntiqIsNotADirectory { .. }),
             "{error}"
@@ -679,7 +457,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.dir("elsewhere");
         tree.symlink(".antiq", "elsewhere");
-        let error = plan(tree.root(), &[], MACHINE, true).expect_err("the name is taken");
+        let error = plan(tree.root(), &[]).expect_err("the name is taken");
         assert!(
             matches!(error, InitError::AntiqIsNotADirectory { .. }),
             "{error}"
@@ -692,7 +470,7 @@ mod tests {
         tree.dir("one/.antiq");
         tree.dir("two/.antiq");
         tree.dir("plain");
-        let error = plan(tree.root(), &[], MACHINE, true).expect_err("nested collections");
+        let error = plan(tree.root(), &[]).expect_err("nested collections");
         let root = canonical(tree.root());
         assert_eq!(
             error.to_string(),
@@ -709,8 +487,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.dir("one/.antiq");
         tree.dir("plain");
-        let plan = plan_of(&tree, &["plain"]);
-        assert_eq!(names(&plan.pieces), ["plain"]);
+        plan_of(&tree, &["plain"]);
     }
 
     // =========================================================
@@ -757,20 +534,13 @@ mod tests {
 
     #[test]
     fn apply_writes_the_settings_into_the_config() {
-        let tree = archive_sh_tree();
+        let mut tree = Tree::new();
+        tree.dir("p");
         let report = apply_plan(&plan_of(&tree, &["p*", "archive"]));
         let config = Config::read(&tree.path(".antiq/config.toml")).expect("a readable config");
         assert_eq!(Some(config.collection.id), report.id);
         assert_eq!(config.collection.patterns, ["p*", "archive"]);
-        assert_eq!(
-            config
-                .collection
-                .exclude
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            ["archive"]
-        );
+        assert!(config.collection.exclude.is_empty());
     }
 
     #[test]
@@ -844,7 +614,7 @@ mod tests {
             fs::create_dir(directory.join("probe")).is_err(),
             "the test needs a user that mode 500 locks out"
         );
-        let plan = plan(&directory, &[], MACHINE, true).expect("planning only reads");
+        let plan = plan(&directory, &[]).expect("planning only reads");
         let error = apply(&plan, &clock(), &SeqIds::new(1)).expect_err("nothing can be created");
         assert!(matches!(error, InitError::Filesystem(_)), "{error}");
         assert_eq!(
@@ -912,108 +682,40 @@ mod tests {
     // Deciding
     // =========================================================
 
-    fn request<'a>(
-        tree: &'a Tree,
-        patterns: &'a [String],
-        yes: bool,
-        dry_run: bool,
-    ) -> InitRequest<'a> {
+    fn request<'a>(tree: &'a Tree, patterns: &'a [String], dry_run: bool) -> InitRequest<'a> {
         InitRequest {
             directory: tree.root(),
             patterns,
-            machine: MACHINE,
-            yes,
             dry_run,
         }
     }
 
-    fn run(request: &InitRequest<'_>, interaction: &mut dyn Interaction) -> InitReport {
-        init(request, interaction, &clock(), &SeqIds::new(1)).expect("init succeeds")
+    fn run(request: &InitRequest<'_>) -> InitReport {
+        init(request, &clock(), &SeqIds::new(1)).expect("init succeeds")
     }
 
     #[test]
-    fn yes_creates_with_the_proposal() {
-        let tree = archive_sh_tree();
-        let report = run(&request(&tree, &[], true, false), &mut NonInteractive);
+    fn init_creates_the_collection() {
+        let tree = Tree::new();
+        let report = run(&request(&tree, &[], false));
         assert!(report.created);
-        assert!(!report.answered);
-        assert_eq!(names(&report.exclude), ["archive"]);
-        assert!(tree.path(".antiq/config.toml").is_file());
-    }
-
-    #[test]
-    fn a_scripted_create_creates_with_the_proposal() {
-        let tree = archive_sh_tree();
-        let mut interaction = ScriptedInteraction::new();
-        interaction.expect(
-            &format!(
-                "Create a collection in {}?",
-                canonical(tree.root()).display()
-            ),
-            "create",
-        );
-        let report = run(&request(&tree, &[], false, false), &mut interaction);
-        assert!(report.created);
-        assert!(report.answered);
-        assert_eq!(names(&report.exclude), ["archive"]);
-        assert_eq!(names(&report.pieces), ["p"]);
-    }
-
-    #[test]
-    fn a_scripted_create_keep_creates_without_the_exclude() {
-        let tree = archive_sh_tree();
-        let mut interaction = ScriptedInteraction::new();
-        interaction.expect(
-            &format!(
-                "Create a collection in {}?",
-                canonical(tree.root()).display()
-            ),
-            "create_keep",
-        );
-        let report = run(&request(&tree, &[], false, false), &mut interaction);
-        assert!(report.created);
-        assert!(report.exclude.is_empty());
-        assert_eq!(names(&report.pieces), ["archive", "p"]);
+        assert!(report.config.is_none());
         let config = Config::read(&tree.path(".antiq/config.toml")).expect("readable");
-        assert!(config.collection.exclude.is_empty());
+        assert_eq!(Some(config.collection.id), report.id);
     }
 
     #[test]
-    fn a_scripted_decline_creates_nothing() {
-        let tree = archive_sh_tree();
-        let mut interaction = ScriptedInteraction::new();
-        interaction.expect(
-            &format!(
-                "Create a collection in {}?",
-                canonical(tree.root()).display()
-            ),
-            "decline",
-        );
-        let report = run(&request(&tree, &[], false, false), &mut interaction);
-        assert!(!report.created);
-        assert!(report.answered);
-        assert!(!tree.path(".antiq").exists());
-    }
-
-    #[test]
-    fn no_answer_creates_nothing() {
-        let tree = archive_sh_tree();
-        let report = run(&request(&tree, &[], false, false), &mut NonInteractive);
-        assert!(!report.created);
-        assert!(!report.answered);
-        assert_eq!(names(&report.exclude), ["archive"]);
-        assert!(!tree.path(".antiq").exists());
-    }
-
-    #[test]
-    fn a_dry_run_creates_nothing_and_asks_nothing() {
-        let tree = archive_sh_tree();
-        // An empty script panics on any question.
-        let mut interaction = ScriptedInteraction::new();
-        let report = run(&request(&tree, &[], true, true), &mut interaction);
+    fn a_dry_run_creates_nothing_and_reports_the_config() {
+        let tree = Tree::new();
+        let patterns = patterns(&["a*"]);
+        let report = run(&request(&tree, &patterns, true));
         assert!(!report.created);
         assert!(report.dry_run);
+        assert!(report.id.is_none());
         assert!(!tree.path(".antiq").exists());
+        let text = report.config.expect("a dry run carries the config");
+        let config = Config::parse(&text, None).expect("the text is a config");
+        assert_eq!(config.collection.patterns, ["a*"]);
     }
 
     #[test]
@@ -1023,11 +725,8 @@ mod tests {
             &InitRequest {
                 directory: collection.root(),
                 patterns: &[],
-                machine: MACHINE,
-                yes: false,
                 dry_run: true,
             },
-            &mut NonInteractive,
             &clock(),
             &SeqIds::new(1),
         )
@@ -1036,74 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn a_declined_run_is_partial_and_a_dry_run_is_not() {
+    fn no_run_is_partial() {
         let tree = Tree::new();
-        let declined = run(&request(&tree, &[], false, false), &mut NonInteractive);
-        assert!(declined.partial());
-        let dry = run(&request(&tree, &[], false, true), &mut NonInteractive);
-        assert!(!dry.partial());
-        let created = run(&request(&tree, &[], true, false), &mut NonInteractive);
-        assert!(!created.partial());
-    }
-
-    /// Remembers what it was asked and gives no answer.
-    #[derive(Default)]
-    struct Recording {
-        questions: Vec<Question>,
-    }
-
-    impl Interaction for Recording {
-        fn choose(&mut self, question: &Question) -> Option<Choice> {
-            self.questions.push(question.clone());
-            None
-        }
-    }
-
-    #[test]
-    fn the_question_shows_what_is_decided() {
-        let mut tree = archive_sh_tree();
-        tree.dir("q");
-        let mut interaction = Recording::default();
-        run(
-            &request(&tree, &patterns(&["**"]), false, false),
-            &mut interaction,
-        );
-        let question = interaction.questions.pop().expect("one question");
-        assert_eq!(
-            question.title,
-            format!(
-                "Create a collection in {}?",
-                canonical(tree.root()).display()
-            )
-        );
-        let ids: Vec<&str> = question.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["create", "create_keep", "decline"]);
-        assert_eq!(question.default_choice().id, "decline");
-        let details = question.details.join("\n");
-        for expected in [
-            "patterns: **",
-            "machine: laptop",
-            "exclude: archive (proposed: archive.sh layout)",
-            "pieces (2):",
-            "p\n",
-            "contains `**`",
-        ] {
-            assert!(
-                details.contains(expected),
-                "{expected:?} missing in:\n{details}"
-            );
-        }
-    }
-
-    #[test]
-    fn without_a_proposal_the_question_offers_two_choices() {
-        let tree = Tree::new();
-        let mut interaction = Recording::default();
-        run(&request(&tree, &[], false, false), &mut interaction);
-        let question = interaction.questions.pop().expect("one question");
-        let ids: Vec<&str> = question.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["create", "decline"]);
-        assert_eq!(question.default_choice().id, "decline");
+        assert!(!run(&request(&tree, &[], true)).partial());
+        assert!(!run(&request(&tree, &[], false)).partial());
     }
 
     // =========================================================
@@ -1119,8 +754,8 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&report).expect("serialises"),
             format!(
-                "{{\"created\":true,\"id\":\"{id}\",\"path\":\"{root}\",\"machine\":\"laptop\",\
-                 \"patterns\":[\"a*\"],\"exclude\":[],\"pieces\":[],\
+                "{{\"created\":true,\"id\":\"{id}\",\"path\":\"{root}\",\
+                 \"patterns\":[\"a*\"],\
                  \"actions\":[{{\"action\":\"create_collection\",\"path\":\"{root}\"}}],\
                  \"warnings\":[]}}"
             )
@@ -1130,28 +765,27 @@ mod tests {
     #[test]
     fn a_dry_run_report_says_so_and_has_no_id() {
         let tree = Tree::new();
-        let report = run(&request(&tree, &[], false, true), &mut NonInteractive);
+        let report = run(&request(&tree, &[], true));
         let json = serde_json::to_value(&report).expect("serialises");
         assert_eq!(json["dry_run"], true);
         assert_eq!(json["created"], false);
         assert!(json.get("id").is_none());
+        assert!(json["config"].is_string());
     }
 
     #[test]
     fn a_report_without_the_flag_has_no_dry_run_key() {
         let tree = Tree::new();
-        let report = run(&request(&tree, &[], false, false), &mut NonInteractive);
+        let report = run(&request(&tree, &[], false));
         let json = serde_json::to_value(&report).expect("serialises");
         assert!(json.get("dry_run").is_none());
+        assert!(json.get("config").is_none());
     }
 
     #[test]
     fn the_report_keeps_the_notes() {
         let tree = Tree::new();
-        let report = run(
-            &request(&tree, &patterns(&["**"]), true, false),
-            &mut NonInteractive,
-        );
+        let report = run(&request(&tree, &patterns(&["**"]), false));
         assert_eq!(CommandReport::warnings(&report).len(), 1);
     }
 }

@@ -71,6 +71,21 @@ fn status_takes_no_dry_run() {
     );
 }
 
+#[test]
+fn init_takes_no_yes() {
+    // A dry run in a temporary directory, so that a build that still
+    // accepts the flag creates nothing.
+    let dir = tempfile::tempdir().expect("the temp dir is writable");
+    let run = Antiq::new()
+        .args(["--json", "-C"])
+        .arg(dir.path())
+        .args(["init", "--yes", "-n"])
+        .run();
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert_eq!(run.error_message(), "unexpected argument '--yes' found");
+}
+
 /// For a command line: its arguments parse, outside a collection the run
 /// fails with the kind `not_a_collection`, and inside one with the kind
 /// `not_implemented`.
