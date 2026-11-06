@@ -59,6 +59,10 @@ enum ListingOrigin {
 /// into the store once the tree is verified.
 pub(crate) struct Arrived {
     pub(crate) archive: PathBuf,
+    /// The bytes the extraction of the archive needs below `staging/`. A
+    /// fetched archive sits in `tmp/` already, so its own size is not in
+    /// here. A live package has no listing; its size is a lower bound.
+    pub(crate) room: u64,
     /// The members the listing names and where it came from. A live
     /// package has none; the strict verification compares the tree with
     /// the package itself.
@@ -95,6 +99,7 @@ impl Arrived {
     ) -> Result<Arrived, UnearthError> {
         Ok(Arrived {
             archive,
+            room: plan.needed,
             listing: Some((held_listing(collection, plan)?, ListingOrigin::Store)),
             fetched: Vec::new(),
             _parts: Parts::default(),
@@ -262,7 +267,8 @@ pub(crate) fn fetch(
         (entries, ListingOrigin::Remote)
     };
 
-    let needed = plan.payload.size + extracted_size(&entries);
+    let extracted = extracted_size(&entries);
+    let needed = plan.payload.size + extracted;
     let available = free_space(&staging_dir)?;
     if available < needed {
         return Ok(Fetch::NoSpace { needed, available });
@@ -281,6 +287,7 @@ pub(crate) fn fetch(
     fetched.push((file.clone(), part));
     Ok(Fetch::Arrived(Arrived {
         archive,
+        room: extracted,
         listing: Some((entries, origin)),
         fetched,
         _parts: parts,
@@ -296,7 +303,9 @@ pub(crate) fn fetch_live(
     free_space: &dyn Fn(&Path) -> Result<u64, FsxError>,
 ) -> Result<Fetch, UnearthError> {
     let staging_dir = collection.staging_dir();
-    let needed = plan.payload.size;
+    // The package and its extraction are on the volume together, so the
+    // plan counts both.
+    let needed = plan.needed;
     remote.begin_phase()?;
     let available = free_space(&staging_dir)?;
     if available < needed {
@@ -317,6 +326,7 @@ pub(crate) fn fetch_live(
     check_stream(&part)?;
     Ok(Fetch::Arrived(Arrived {
         archive: part,
+        room: plan.payload.size,
         listing: None,
         fetched: Vec::new(),
         _parts: parts,
@@ -739,6 +749,21 @@ pub(in crate::ops::unearth) mod tests {
         }
     }
 
+    /// The room a volume of `base` bytes has left while `tmp/` holds files:
+    /// what a fetch has already put there is gone from it.
+    pub(in crate::ops::unearth) fn after_tmp(
+        tmp: std::path::PathBuf,
+        base: u64,
+    ) -> impl Fn(&std::path::Path) -> Result<u64, FsxError> {
+        move |_| {
+            let held: u64 = fs::read_dir(&tmp)
+                .expect("lists")
+                .map(|entry| entry.expect("an entry").metadata().expect("stats").len())
+                .sum();
+            Ok(base - held)
+        }
+    }
+
     impl Scenario {
         /// `keep_listing` leaves the listing in the local store.
         fn new(keep_listing: bool) -> Scenario {
@@ -1042,6 +1067,58 @@ pub(in crate::ops::unearth) mod tests {
 
         assert!(matches!(error, UnearthError::Listing(_)), "{error}");
         assert!(scenario.nothing_is_left());
+    }
+
+    #[test]
+    fn a_volume_with_room_for_archive_and_extraction_unearths_a_held_listing_piece() {
+        let scenario = Scenario::new(true);
+        let plan = scenario.fx.planned(&scenario.fx.request(ID));
+        let room = after_tmp(scenario.fx.collection.tmp_dir(), plan.needed);
+        let env = Scenario::environment(&room, &crate::fsx::moves::move_dir, &TargetRules::probe);
+
+        let report = scenario
+            .unearth_through(&scenario.remote, &env)
+            .expect("unearths");
+
+        assert!(report.unearthed, "{report:?}");
+    }
+
+    #[test]
+    fn a_volume_one_byte_short_of_archive_and_extraction_skips_before_the_archive_moves() {
+        let scenario = Scenario::new(true);
+        let plan = scenario.fx.planned(&scenario.fx.request(ID));
+        let room = after_tmp(scenario.fx.collection.tmp_dir(), plan.needed - 1);
+        let env = Scenario::environment(&room, &crate::fsx::moves::move_dir, &TargetRules::probe);
+
+        let report = scenario
+            .unearth_through(&scenario.remote, &env)
+            .expect("skips");
+
+        assert!(!report.unearthed);
+        assert_eq!(scenario.remote.count(Op::GetPayload), 0);
+        assert!(scenario.tmp_is_empty());
+        assert!(!scenario.held(&scenario.payload));
+    }
+
+    #[test]
+    fn a_fetched_listing_counts_in_the_room_without_a_panic_or_a_skip() {
+        let scenario = Scenario::new(false);
+        let tmp = scenario.fx.collection.tmp_dir();
+        let listing_size = fs::metadata(scenario.on_remote(&scenario.listing))
+            .expect("the listing")
+            .len();
+        let archive_size = fs::metadata(scenario.on_remote(&scenario.payload))
+            .expect("the archive")
+            .len();
+        let listed: u64 = FILES.iter().map(|(_, content)| content.len() as u64).sum();
+        let room = after_tmp(tmp, listing_size + archive_size + listed);
+        let env = Scenario::environment(&room, &crate::fsx::moves::move_dir, &TargetRules::probe);
+
+        let report = scenario
+            .unearth_through(&scenario.remote, &env)
+            .expect("unearths");
+
+        assert!(report.unearthed, "{report:?}");
     }
 
     #[test]

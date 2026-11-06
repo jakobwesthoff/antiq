@@ -149,7 +149,7 @@ mod tests {
     use crate::id::SeqIds;
     use crate::meta::{CreatedSource, FileName, HistoryAction, Lifecycle, PayloadKind};
     use crate::ops::fork::forked_new;
-    use crate::ops::unearth::remote::tests::Full;
+    use crate::ops::unearth::remote::tests::{Full, after_tmp};
     use crate::ops::unearth::tests::{FILES, Fixture, ID, NOW, OTHER_ID, id, path, time};
     use crate::ops::unearth::{Skipped, UnearthRequest, UnearthSource};
     use crate::pack::live::LiveError;
@@ -752,7 +752,7 @@ mod tests {
     fn a_volume_without_room_for_the_package_skips_before_it_moves() {
         let live = Live::own();
         let plan = live.plan(&live.fx.request(ID));
-        let room = |_: &Path| Ok(plan.payload.size - 1);
+        let room = |_: &Path| Ok(2 * plan.payload.size - 1);
         let rename: super::super::local::Rename<'_> = &crate::fsx::moves::move_dir;
 
         let report = live
@@ -767,12 +767,51 @@ mod tests {
         assert_eq!(
             report.skipped,
             Some(Skipped::NoSpace {
-                needed: plan.payload.size,
-                available: plan.payload.size - 1
+                needed: 2 * plan.payload.size,
+                available: 2 * plan.payload.size - 1
             })
         );
         assert_eq!(live.remote.count(Op::GetPayload), 0);
+        assert!(live.tmp_is_empty());
         assert_eq!(live.fx.entry(ID).state, EntryState::Gone);
+    }
+
+    #[test]
+    fn a_volume_with_room_for_the_package_twice_unearths_it() {
+        let live = Live::own();
+        let plan = live.plan(&live.fx.request(ID));
+        let room = after_tmp(live.fx.collection.tmp_dir(), 2 * plan.payload.size);
+        let rename: super::super::local::Rename<'_> = &crate::fsx::moves::move_dir;
+
+        let report = live
+            .unearth_through(
+                &live.fx.request(ID),
+                Some(&live.remote),
+                &Live::environment(&room, &rename),
+            )
+            .expect("unearths");
+
+        assert!(report.unearthed, "{report:?}");
+    }
+
+    #[test]
+    fn a_volume_that_fits_the_package_once_skips_before_it_moves() {
+        let live = Live::own();
+        let plan = live.plan(&live.fx.request(ID));
+        let room = after_tmp(live.fx.collection.tmp_dir(), plan.payload.size);
+        let rename: super::super::local::Rename<'_> = &crate::fsx::moves::move_dir;
+
+        let report = live
+            .unearth_through(
+                &live.fx.request(ID),
+                Some(&live.remote),
+                &Live::environment(&room, &rename),
+            )
+            .expect("skips");
+
+        assert!(!report.unearthed);
+        assert_eq!(live.remote.count(Op::GetPayload), 0);
+        assert!(live.tmp_is_empty());
     }
 
     #[test]

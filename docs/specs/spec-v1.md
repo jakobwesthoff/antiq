@@ -1641,8 +1641,10 @@ fails the run with a note to run `unearth` again.
 An ID without an archive (a gone piece, or another collection's live
 piece unearthed as a fork) is unearthed from its current live package:
 its stream checksum is checked and the staged tree is verified against
-the package's members. A fork of another collection's piece creates a
-new ID owned here. `unearth` warns when the package of a piece of this
+the package's members. A live package has no listing, so the volume
+needs room for twice the package's size before it is fetched: the package
+itself and, as a lower bound, its extraction. A fork of another
+collection's piece creates a new ID owned here. `unearth` warns when the package of a piece of this
 collection was marked stale, and for each path the live exclude list left
 out of the package. The result has no archive payload until
 it is archived. A live piece without a live package, as with

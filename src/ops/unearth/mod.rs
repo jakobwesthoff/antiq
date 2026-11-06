@@ -606,7 +606,8 @@ fn unsupported(payload: &Payload, reason: &str) -> UnearthError {
 /// The space an unearth needs below the staging directory. An archive
 /// that is fetched also needs room for itself, and its listing may be
 /// missing here, in which case only the archive is counted. A live package
-/// has no listing, so its size is a lower bound for the extracted tree.
+/// has no listing, so its size is a lower bound for the extracted tree, and
+/// it is fetched too, so the package is counted twice.
 fn space_needed(
     store: &Store<'_>,
     id: ObjectId,
@@ -614,7 +615,7 @@ fn space_needed(
     source: UnearthSource,
 ) -> Result<u64, UnearthError> {
     if matches!(source, UnearthSource::LivePackage | UnearthSource::Fork) {
-        return Ok(payload.size);
+        return Ok(2 * payload.size);
     }
     let listing_name = payload
         .listing
@@ -1401,7 +1402,7 @@ pub(crate) mod tests {
 
         assert_eq!(plan.source(), UnearthSource::LivePackage);
         assert_eq!(plan.target(), &path("projects/a"));
-        assert_eq!(plan.needed, 77);
+        assert_eq!(plan.needed, 154);
     }
 
     #[test]

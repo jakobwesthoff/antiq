@@ -169,8 +169,8 @@ pub(super) fn carry_out(
 ) -> Result<UnearthReport, UnearthError> {
     let staging_dir = collection.staging_dir();
     let available = (env.free_space)(&staging_dir)?;
-    if available < plan.needed {
-        return Ok(skipped(collection, plan, plan.needed, available, warnings));
+    if available < arrived.room {
+        return Ok(skipped(collection, plan, arrived.room, available, warnings));
     }
 
     // The tree is extracted below `staging/`, in a folder named after the
@@ -214,7 +214,7 @@ pub(super) fn carry_out(
         }
         Placed::NoSpace => {
             let available = (env.free_space)(&staging_dir).unwrap_or(0);
-            Ok(skipped(collection, plan, plan.needed, available, warnings))
+            Ok(skipped(collection, plan, arrived.room, available, warnings))
         }
     }
 }
