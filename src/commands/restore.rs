@@ -7,20 +7,256 @@
 #![allow(dead_code, reason = "the restore core that uses these follows")]
 
 use crate::archive::extract::ExtractionFlush;
-use crate::error::HasKind;
+use crate::collection::Collection;
+use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable};
-use crate::relpath::RelPath;
+use crate::filesystem::tree::TreeRoot;
+use crate::listing::{self, Listing, ListingEntry, ListingError, ListingType};
+use crate::markers::RESTORED_FILE;
+use crate::pin::PIN_FILE;
+use crate::reference::{self, CandidateSet, ReferenceError};
+use crate::relpath::{Name, RelPath};
+use crate::versions::VersionsError;
+use crate::versions::damage::{self, Check, Condition, Places};
+use crate::versions::naming::{self, Candidate, Lookup};
+use crate::versions::stamp::Stamp;
+use crate::versions::store::{self, StoreVersion};
+use jiff::tz::TimeZone;
 use rustix::io::Errno;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Why a restore failed. Nothing in it can fail yet.
+/// Why a restore failed.
 #[derive(Debug, thiserror::Error)]
-pub enum RestoreError {}
+pub enum RestoreError {
+    #[error("{0}")]
+    Usage(String),
+    #[error("cannot find the piece: {0}")]
+    Reference(#[from] ReferenceError),
+    #[error("cannot read the store: {0}")]
+    Versions(#[from] VersionsError),
+    #[error("cannot read the listing: {0}")]
+    Listing(#[from] ListingError),
+    #[error("cannot read {path}: {source}")]
+    Read { path: String, source: io::Error },
+    #[error("`{input}` matches no version of {piece}; there are {}", stamps.join(", "))]
+    NoSuchVersion {
+        piece: String,
+        input: String,
+        stamps: Vec<String>,
+    },
+    #[error("`{input}` matches several versions of {piece}: {}", stamps.join(", "))]
+    AmbiguousVersion {
+        piece: String,
+        input: String,
+        stamps: Vec<String>,
+    },
+    #[error("version {stamp} of {piece} has no archive; `forget` removes what is left of it")]
+    Incomplete { piece: String, stamp: String },
+    #[error(
+        "version {stamp} of {piece} is damaged: {}. `fork` extracts it with a warning and keeps it, `rebuild` rebuilds its listing and checksum file from the archive, or the missing file can be copied back from the target",
+        reasons.join("; ")
+    )]
+    Damaged {
+        piece: String,
+        stamp: String,
+        reasons: Vec<String>,
+    },
+    #[error("version {stamp} of {piece} has a listing of a newer format than this antiq reads")]
+    FormatTooNew { piece: String, stamp: String },
+    #[error("version {stamp} of {piece} holds `{name}` at its top, and it is not a file")]
+    MarkerNotAFile {
+        piece: String,
+        stamp: String,
+        name: String,
+    },
+}
 
-impl HasKind for RestoreError {}
+impl HasKind for RestoreError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            RestoreError::Usage(_) => ErrorKind::Usage,
+            RestoreError::Reference(error) => error.kind(),
+            RestoreError::Listing(error) => error.kind(),
+            RestoreError::FormatTooNew { .. } => ErrorKind::FormatTooNew,
+            _ => ErrorKind::Other,
+        }
+    }
+}
+
+// =========================================================
+// Choosing the piece and the version
+// =========================================================
+
+/// The version to bring back, with everything the checks on it read.
+#[derive(Debug)]
+pub(crate) struct Chosen {
+    pub piece: RelPath,
+    pub stamp: Stamp,
+    pub version: StoreVersion,
+    pub listing: Listing,
+}
+
+/// Finds the piece `given` names in the store and the version of it to
+/// bring back, and refuses a version that cannot be: one without an
+/// archive, a damaged one, one of a newer format, and one whose top holds
+/// a marker's name as anything but a file.
+pub(crate) fn choose_version(
+    collection: &Collection,
+    places: &Places,
+    cwd: &Path,
+    given: &OsStr,
+    version: Option<&str>,
+    zone: &TimeZone,
+) -> Result<Chosen, RestoreError> {
+    if given.is_empty() {
+        return Err(RestoreError::Usage("the piece is empty".to_string()));
+    }
+    if version == Some("") {
+        return Err(RestoreError::Usage("the version is empty".to_string()));
+    }
+
+    let scan = store::scan(places.pieces_dir)?;
+    let piece = reference::resolve_piece(
+        collection,
+        cwd,
+        given,
+        &CandidateSet::store(collection, &scan),
+    )?;
+    let mut versions = scan
+        .pieces
+        .iter()
+        .find(|stored| stored.path == piece)
+        .map(|stored| stored.versions.clone())
+        .expect("the resolved piece is one of the scan");
+    versions.sort_by_key(|candidate| std::cmp::Reverse(candidate.stamp));
+
+    let version = match version {
+        None => versions
+            .iter()
+            .find(|candidate| !candidate.is_incomplete())
+            .expect("a piece of the store has a version with an archive"),
+        Some(input) => {
+            let candidates: Vec<Candidate> = versions
+                .iter()
+                .map(|candidate| Candidate {
+                    stamp: candidate.stamp,
+                    incomplete: candidate.is_incomplete(),
+                })
+                .collect();
+            let stamps = |stamps: &[Stamp]| stamps.iter().map(Stamp::to_string).collect();
+            match naming::find_version(input, &candidates, zone) {
+                Lookup::Found(stamp) => versions
+                    .iter()
+                    .find(|candidate| candidate.stamp == stamp)
+                    .expect("a found stamp is one of the candidates"),
+                Lookup::NoMatch => {
+                    return Err(RestoreError::NoSuchVersion {
+                        piece: piece.to_string(),
+                        input: input.to_string(),
+                        stamps: stamps(&candidates.iter().map(|c| c.stamp).collect::<Vec<_>>()),
+                    });
+                }
+                Lookup::Several(found) => {
+                    return Err(RestoreError::AmbiguousVersion {
+                        piece: piece.to_string(),
+                        input: input.to_string(),
+                        stamps: stamps(&found),
+                    });
+                }
+            }
+        }
+    };
+    let (piece_text, stamp_text) = (piece.to_string(), version.stamp.to_string());
+    if version.is_incomplete() {
+        return Err(RestoreError::Incomplete {
+            piece: piece_text,
+            stamp: stamp_text,
+        });
+    }
+
+    let inspection = damage::inspect(places, &piece, version, Check::Full)?;
+    match inspection.condition {
+        Condition::Sound => {}
+        Condition::Incomplete | Condition::BeingStored => {
+            return Err(RestoreError::Incomplete {
+                piece: piece_text,
+                stamp: stamp_text,
+            });
+        }
+        Condition::NewerFormat => {
+            return Err(RestoreError::FormatTooNew {
+                piece: piece_text,
+                stamp: stamp_text,
+            });
+        }
+        Condition::Damaged(damages) => {
+            return Err(RestoreError::Damaged {
+                piece: piece_text,
+                stamp: stamp_text,
+                reasons: damages.iter().map(ToString::to_string).collect(),
+            });
+        }
+    }
+
+    let store_root = TreeRoot::open(places.pieces_dir).map_err(|source| RestoreError::Read {
+        path: places.pieces_dir.display().to_string(),
+        source,
+    })?;
+    let listing_name = version
+        .listings
+        .first()
+        .expect("a sound version has a listing");
+    let listing_path = piece.join(
+        &Name::from_bytes(listing_name.as_encoded_bytes().to_vec())
+            .expect("a scanned file name is a valid name"),
+    );
+    let file = store_root
+        .open_read(&listing_path)
+        .map_err(|source| RestoreError::Read {
+            path: listing_path.to_string(),
+            source,
+        })?;
+    let listing = listing::read_full(file)?;
+    if let Some(name) = marker_not_a_file(&listing.entries) {
+        return Err(RestoreError::MarkerNotAFile {
+            piece: piece_text,
+            stamp: stamp_text,
+            name,
+        });
+    }
+
+    Ok(Chosen {
+        piece,
+        stamp: version.stamp,
+        version: version.clone(),
+        listing,
+    })
+}
+
+/// The first entry at the top of the piece that has a marker's name and is
+/// not what that marker is: `.antiq-restored` must be a file, and
+/// `.antiq-pin` a file or a symlink. A hard link is extracted as a file.
+pub(crate) fn marker_not_a_file(entries: &[ListingEntry]) -> Option<String> {
+    entries.iter().find_map(|entry| {
+        let mut components = entry.path.components();
+        let (Some(name), None) = (components.next(), components.next()) else {
+            return None;
+        };
+        let is_file = matches!(entry.kind, ListingType::File | ListingType::Hardlink);
+        let fits = if name == RESTORED_FILE.as_bytes() {
+            is_file
+        } else if name == PIN_FILE.as_bytes() {
+            is_file || entry.kind == ListingType::Symlink
+        } else {
+            return None;
+        };
+        (!fits).then(|| String::from_utf8_lossy(name).into_owned())
+    })
+}
 
 // =========================================================
 // Flushing the extracted tree
@@ -78,7 +314,7 @@ pub(crate) fn parse_kernel(release: &str) -> Option<(u32, u32)> {
 /// filesystem from kernel 5.8 on only; before that it can return success
 /// for data that failed to reach the disk, so older kernels flush per
 /// item. `EINVAL` and `ENOSYS` mean the call is unknown.
-pub(crate) fn choose(
+pub(crate) fn choose_method(
     os: System,
     kernel: Option<(u32, u32)>,
     probe: &io::Result<()>,
@@ -181,7 +417,7 @@ impl TreeFlush {
         // Opened before the extraction starts, so that on Linux the
         // descriptor's error state is older than every write it must report.
         let tried = (platform.barrier)(&probe);
-        let method = choose(platform.os, platform.kernel, &tried)?;
+        let method = choose_method(platform.os, platform.kernel, &tried)?;
         Ok(TreeFlush {
             method,
             os: platform.os,
@@ -283,7 +519,7 @@ mod tests {
     #[test]
     fn macos_takes_the_barrier_when_the_full_flush_works() {
         assert_eq!(
-            choose(System::MacOs, None, &Ok(())).unwrap(),
+            choose_method(System::MacOs, None, &Ok(())).unwrap(),
             Method::Barrier
         );
     }
@@ -292,7 +528,7 @@ mod tests {
     fn macos_flushes_per_item_when_the_full_flush_is_not_supported() {
         let refused = errno(Errno::NOTSUP);
         assert_eq!(
-            choose(System::MacOs, None, &refused).unwrap(),
+            choose_method(System::MacOs, None, &refused).unwrap(),
             Method::PerItem
         );
     }
@@ -300,11 +536,11 @@ mod tests {
     #[test]
     fn linux_takes_the_barrier_from_kernel_5_8_on() {
         assert_eq!(
-            choose(System::Linux, Some((5, 8)), &Ok(())).unwrap(),
+            choose_method(System::Linux, Some((5, 8)), &Ok(())).unwrap(),
             Method::Barrier
         );
         assert_eq!(
-            choose(System::Linux, Some((6, 1)), &Ok(())).unwrap(),
+            choose_method(System::Linux, Some((6, 1)), &Ok(())).unwrap(),
             Method::Barrier
         );
     }
@@ -312,15 +548,15 @@ mod tests {
     #[test]
     fn linux_flushes_per_item_below_kernel_5_8_or_without_a_kernel() {
         assert_eq!(
-            choose(System::Linux, Some((5, 7)), &Ok(())).unwrap(),
+            choose_method(System::Linux, Some((5, 7)), &Ok(())).unwrap(),
             Method::PerItem
         );
         assert_eq!(
-            choose(System::Linux, Some((4, 19)), &Ok(())).unwrap(),
+            choose_method(System::Linux, Some((4, 19)), &Ok(())).unwrap(),
             Method::PerItem
         );
         assert_eq!(
-            choose(System::Linux, None, &Ok(())).unwrap(),
+            choose_method(System::Linux, None, &Ok(())).unwrap(),
             Method::PerItem
         );
     }
@@ -329,7 +565,7 @@ mod tests {
     fn linux_flushes_per_item_when_syncfs_is_refused() {
         for refusal in [Errno::INVAL, Errno::NOSYS] {
             assert_eq!(
-                choose(System::Linux, Some((5, 15)), &errno(refusal)).unwrap(),
+                choose_method(System::Linux, Some((5, 15)), &errno(refusal)).unwrap(),
                 Method::PerItem,
                 "{refusal:?}"
             );
@@ -339,16 +575,16 @@ mod tests {
     #[test]
     fn other_systems_flush_per_item() {
         assert_eq!(
-            choose(System::Other, Some((9, 9)), &Ok(())).unwrap(),
+            choose_method(System::Other, Some((9, 9)), &Ok(())).unwrap(),
             Method::PerItem
         );
     }
 
     #[test]
     fn a_probe_error_that_is_no_refusal_is_returned() {
-        let error = choose(System::MacOs, None, &errno(Errno::IO)).unwrap_err();
+        let error = choose_method(System::MacOs, None, &errno(Errno::IO)).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(Errno::IO.raw_os_error()));
-        let error = choose(System::Linux, Some((5, 15)), &errno(Errno::NOTSUP)).unwrap_err();
+        let error = choose_method(System::Linux, Some((5, 15)), &errno(Errno::NOTSUP)).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(Errno::NOTSUP.raw_os_error()));
     }
 
@@ -505,5 +741,337 @@ mod tests {
         let flush = TreeFlush::begin(dir.path()).unwrap();
         assert_eq!(flush.method(), Method::Barrier);
         flush.finish().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::testing::tree::{TempCollection, Tree};
+    use crate::testing::versions::{Store, StoredVersion};
+    use crate::versions::names::VersionFile;
+
+    const OLD: &str = "2026-11-03T081500";
+    const NEW: &str = "2026-11-04T090211";
+
+    fn source() -> Tree {
+        let mut tree = Tree::new();
+        tree.file("projects/scanner/main.rs", "fn main() {}");
+        tree.file("projects/scanner/src/lib.rs", "pub fn f() {}");
+        tree.file("tools/scan-old/run.sh", "echo");
+        tree
+    }
+
+    struct World {
+        collection: TempCollection,
+        store: Store,
+    }
+
+    impl World {
+        fn new() -> World {
+            World {
+                collection: TempCollection::minimal(),
+                store: Store::new(),
+            }
+        }
+
+        fn add(&mut self, piece: &str, stamp: &str) -> StoredVersion {
+            self.store.add_version(&source(), piece, stamp)
+        }
+
+        fn choose(&self, given: &str, version: Option<&str>) -> Result<Chosen, RestoreError> {
+            self.choose_in(given, version, &TimeZone::UTC)
+        }
+
+        fn choose_in(
+            &self,
+            given: &str,
+            version: Option<&str>,
+            zone: &TimeZone,
+        ) -> Result<Chosen, RestoreError> {
+            let collection =
+                Collection::find(self.collection.root()).expect("the collection is found");
+            choose_version(
+                &collection,
+                &self.store.places(),
+                self.collection.root(),
+                OsStr::new(given),
+                version,
+                zone,
+            )
+        }
+    }
+
+    fn scanner() -> World {
+        let mut world = World::new();
+        world.add("projects/scanner", OLD);
+        world.add("projects/scanner", NEW);
+        world
+    }
+
+    fn chosen_stamp(result: Result<Chosen, RestoreError>) -> String {
+        result.expect("a version is chosen").stamp.to_string()
+    }
+
+    fn message(result: Result<Chosen, RestoreError>) -> String {
+        result.expect_err("the choice is refused").to_string()
+    }
+
+    #[test]
+    fn a_path_names_the_piece_and_the_newest_version_is_taken() {
+        let chosen = scanner().choose("projects/scanner", None).expect("chosen");
+        assert_eq!(chosen.piece.to_string(), "projects/scanner");
+        assert_eq!(chosen.stamp.to_string(), NEW);
+        assert_eq!(chosen.listing.entries.len(), 3);
+    }
+
+    #[test]
+    fn a_search_word_names_the_piece() {
+        assert_eq!(chosen_stamp(scanner().choose("scanner", None)), NEW);
+    }
+
+    #[test]
+    fn an_ambiguous_word_keeps_its_candidates() {
+        let mut world = scanner();
+        world.add("tools/scan-old", NEW);
+        let error = world.choose("scan", None).expect_err("two pieces match");
+        assert_eq!(error.kind(), ErrorKind::AmbiguousReference);
+        let details = Error::from(error).details();
+        let candidates = details["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_piece_has_its_own_kind() {
+        let error = scanner()
+            .choose("nothing-like-it", None)
+            .expect_err("unknown");
+        assert_eq!(error.kind(), ErrorKind::UnknownReference);
+    }
+
+    #[test]
+    fn an_empty_piece_and_an_empty_version_are_usage_errors() {
+        let world = scanner();
+        let error = world.choose("", None).expect_err("empty piece");
+        assert_eq!(error.kind(), ErrorKind::Usage);
+        let error = world
+            .choose("projects/scanner", Some(""))
+            .expect_err("empty version");
+        assert_eq!(error.kind(), ErrorKind::Usage);
+    }
+
+    #[test]
+    fn a_version_is_named_by_its_stamp() {
+        let world = scanner();
+        assert_eq!(chosen_stamp(world.choose("scanner", Some(OLD))), OLD);
+    }
+
+    #[test]
+    fn a_version_is_named_by_a_prefix_of_its_utc_stamp() {
+        let world = scanner();
+        assert_eq!(
+            chosen_stamp(world.choose("scanner", Some("2026-11-03T08"))),
+            OLD
+        );
+    }
+
+    #[test]
+    fn a_version_is_named_by_its_local_date_and_time() {
+        let world = scanner();
+        let berlin = TimeZone::get("Europe/Berlin").expect("the zone exists");
+        // 09:02:11 UTC is 10:02:11 in Berlin in November.
+        let by_date = world.choose_in("scanner", Some("2026-11-04"), &berlin);
+        assert_eq!(chosen_stamp(by_date), NEW);
+        let by_time = world.choose_in("scanner", Some("2026-11-04 10:02"), &berlin);
+        assert_eq!(chosen_stamp(by_time), NEW);
+    }
+
+    #[test]
+    fn several_matches_list_every_stamp() {
+        let text = message(scanner().choose("scanner", Some("2026-11")));
+        assert!(text.contains(OLD) && text.contains(NEW), "{text}");
+    }
+
+    #[test]
+    fn no_match_lists_the_versions_there_are() {
+        let error = scanner()
+            .choose("scanner", Some("1999"))
+            .expect_err("no match");
+        assert!(
+            matches!(error, RestoreError::NoSuchVersion { .. }),
+            "{error:?}"
+        );
+        let text = error.to_string();
+        assert!(text.contains(OLD) && text.contains(NEW), "{text}");
+    }
+
+    #[test]
+    fn an_incomplete_version_named_by_stamp_is_refused_naming_forget() {
+        let mut world = World::new();
+        world.add("projects/scanner", OLD);
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Archive);
+        let error = world.choose("scanner", Some(NEW)).expect_err("no archive");
+        assert!(
+            matches!(error, RestoreError::Incomplete { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("forget"), "{error}");
+    }
+
+    #[test]
+    fn a_piece_with_only_an_incomplete_version_is_not_a_piece_of_the_store() {
+        let mut world = World::new();
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Archive);
+        let error = world.choose("scanner", None).expect_err("no archive");
+        assert_eq!(error.kind(), ErrorKind::UnknownReference);
+    }
+
+    #[test]
+    fn the_newest_version_with_an_archive_is_taken_over_a_newer_incomplete_one() {
+        let mut world = World::new();
+        world.add("projects/scanner", OLD);
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Archive);
+        assert_eq!(chosen_stamp(world.choose("scanner", None)), OLD);
+    }
+
+    #[test]
+    fn a_damaged_newest_version_is_refused_and_the_older_one_is_not_taken() {
+        let mut world = World::new();
+        world.add("projects/scanner", OLD);
+        world
+            .add("projects/scanner", NEW)
+            .remove(VersionFile::Listing);
+        let error = world.choose("scanner", None).expect_err("damaged");
+        assert!(matches!(error, RestoreError::Damaged { .. }), "{error:?}");
+    }
+
+    fn assert_damaged(damage: impl FnOnce(&StoredVersion), expected: &str) {
+        let mut world = World::new();
+        let version = world.add("projects/scanner", NEW);
+        damage(&version);
+        let error = world.choose("scanner", None).expect_err("damaged");
+        let RestoreError::Damaged { reasons, .. } = &error else {
+            panic!("expected damage, got {error:?}");
+        };
+        assert!(
+            reasons.iter().any(|reason| reason.contains(expected)),
+            "{reasons:?} lacks {expected:?}"
+        );
+        let text = error.to_string();
+        for remedy in ["`fork`", "`rebuild`", "copied back"] {
+            assert!(text.contains(remedy), "{text} lacks {remedy}");
+        }
+    }
+
+    #[test]
+    fn a_missing_listing_is_damage() {
+        assert_damaged(|v| v.remove(VersionFile::Listing), "listing is missing");
+    }
+
+    #[test]
+    fn a_missing_checksum_file_is_damage() {
+        assert_damaged(
+            |v| v.remove(VersionFile::Checksum),
+            "checksum file is missing",
+        );
+    }
+
+    #[test]
+    fn a_truncated_archive_is_damage() {
+        assert_damaged(
+            |v| v.truncate(VersionFile::Archive, 10),
+            "archive has 10 bytes",
+        );
+    }
+
+    #[test]
+    fn a_cut_listing_is_damage() {
+        assert_damaged(|v| v.cut_listing(), "listing is damaged");
+    }
+
+    #[test]
+    fn a_doubled_slot_names_every_file() {
+        let mut twin = None;
+        assert_damaged(
+            |v| twin = Some(v.add_twin(VersionFile::Archive, "other")),
+            "2 files for the archive",
+        );
+        assert!(twin.is_some());
+    }
+
+    #[test]
+    fn a_listing_of_a_newer_format_has_its_own_kind() {
+        let mut world = World::new();
+        let version = world.add("projects/scanner", NEW);
+        version.edit_listing(|text| text.replacen("# antiq listing 1", "# antiq listing 2", 1));
+        let error = world.choose("scanner", None).expect_err("newer format");
+        assert_eq!(error.kind(), ErrorKind::FormatTooNew);
+        assert!(
+            matches!(error, RestoreError::FormatTooNew { .. }),
+            "{error:?}"
+        );
+    }
+
+    fn entry(path: &str, kind: ListingType) -> ListingEntry {
+        ListingEntry {
+            path: RelPath::parse(path).expect("a valid path"),
+            kind,
+            size: 0,
+            mtime: 0,
+            mode: 0o644,
+            link: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn a_marker_name_at_the_top_must_be_what_the_marker_is() {
+        let refused = |path: &str, kind| marker_not_a_file(&[entry(path, kind)]);
+        assert_eq!(
+            refused(".antiq-restored", ListingType::Dir).as_deref(),
+            Some(".antiq-restored")
+        );
+        assert_eq!(
+            refused(".antiq-restored", ListingType::Symlink).as_deref(),
+            Some(".antiq-restored")
+        );
+        assert_eq!(
+            refused(".antiq-pin", ListingType::Dir).as_deref(),
+            Some(".antiq-pin")
+        );
+        assert_eq!(refused(".antiq-restored", ListingType::File), None);
+        assert_eq!(refused(".antiq-pin", ListingType::File), None);
+        assert_eq!(refused(".antiq-pin", ListingType::Symlink), None);
+        assert_eq!(refused(".antiq-pin", ListingType::Hardlink), None);
+        assert_eq!(refused("sub/.antiq-pin", ListingType::Dir), None);
+        assert_eq!(refused("other", ListingType::Dir), None);
+    }
+
+    #[test]
+    fn a_version_whose_top_holds_a_marker_name_as_a_directory_is_refused() {
+        let mut world = World::new();
+        let version = world.add("projects/scanner", NEW);
+        // A directory entry for the marker's name, with the counts of the
+        // head left as they are: directories count for neither.
+        version.edit_listing(|text| {
+            let line = text
+                .lines()
+                .find(|line| line.ends_with("  src/"))
+                .expect("the listing has a directory line")
+                .to_string();
+            text.replacen(&line, &line.replace("src/", ".antiq-pin/"), 1)
+        });
+        let error = world.choose("scanner", None).expect_err("a marker name");
+        assert!(
+            matches!(error, RestoreError::MarkerNotAFile { .. }),
+            "{error:?}"
+        );
     }
 }
