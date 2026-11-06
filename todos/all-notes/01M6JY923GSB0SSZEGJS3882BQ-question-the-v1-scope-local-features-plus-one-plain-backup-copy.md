@@ -146,10 +146,28 @@ open, so the discussion survives without the conversation.
   live folders are only counted. No `--all`.
 - "soon" means due within 3 days.
 
-## Pending presentations to the user
+## Decided in round 8 (asqr 01M6K3PRWHFAZ9SE96KXKQQ435, 2026-11-04)
 
-- After round 7 (asqr 01M6K2MRX043QTZTSTCP22HKR9: listing variant,
-  status layout, the soon threshold), present the grep study in asqr
+- grep engine: `regex::bytes` over each whole decoded listing. The user
+  asked how complex the multithreaded code is and how much memory a
+  search takes; answered in round 9.
+- Listings stay `.sha256.zst`.
+- The store root is `.antiq/pieces/`.
+- grep output: the user wants to see several output variants before
+  choosing.
+- `forget` removes one specific version only. Removing all versions of
+  a piece at once is at most an explicit exception (perhaps with
+  `--force`).
+- `import` stays, but changes: it should import a folder that lies
+  outside the collection (not an archive file), so that it becomes an
+  archived piece with the timestamps it has out there. The intended
+  migration of old tar archives is to unpack each with its old
+  timestamps somewhere temporary and run `import` on the folder. The
+  user asked for ideas and another round.
+
+## Presented
+
+- The grep study was presented in round 8
   (`docs/research/listing-grep.md`, main e2002a9):
   - the method: generated data, the read path, what is measured and
     what is extrapolated;
