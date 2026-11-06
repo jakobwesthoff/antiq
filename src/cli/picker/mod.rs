@@ -1630,7 +1630,14 @@ mod tests {
     /// A picker over `alpha`, `beta` and `gamma` whose rows end their size
     /// column at 30.
     fn with_files(height: usize) -> PickerState<'static, String> {
-        let mut state = picker(height).with_contents(Box::new(OneFile));
+        with_contents_ending_sizes_at_30(height, Box::new(OneFile))
+    }
+
+    fn with_contents_ending_sizes_at_30(
+        height: usize,
+        contents: Box<dyn Contents<String>>,
+    ) -> PickerState<'static, String> {
+        let mut state = picker(height).with_contents(contents);
         let rows = ["alpha", "beta", "gamma"]
             .iter()
             .map(|name| Row {
@@ -1977,7 +1984,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_cannot_be_written_is_an_error_wherever_it_breaks() {
-        let mut s = picker(10).with_contents(Box::new(Many));
+        let mut s = with_contents_ending_sizes_at_30(10, Box::new(Many));
         feed(&mut s, &[ctrl('o')]);
         let length = drawn(&s, 80).len();
         for limit in 0..length {
