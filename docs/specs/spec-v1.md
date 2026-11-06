@@ -1941,7 +1941,8 @@ a removal that depends on the age of a file is listed as such.
 piece must also hold no archive here (neither in the entry nor as a file
 named by an archive payload of any committed version in its object
 directory), have no recorded change that is not committed, no open
-decision and no folder in place. A folder counts as absent only when
+decision and no folder in place. An entry that is being removed or unearthed is never dropped. A folder
+counts as absent only when
 looking at its path says that nothing is there; a path that cannot be
 looked at, such as one below a directory nobody may enter, keeps the
 piece and is named in a warning. It is checked once for the plan and

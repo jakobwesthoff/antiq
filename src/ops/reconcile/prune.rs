@@ -23,7 +23,7 @@ use crate::reference::Candidate;
 use crate::report::Warning;
 use crate::store::{Source, Store, StoreError};
 use crate::tombstone::Tombstones;
-use crate::tracking::{self, PieceState, TrackingEntry};
+use crate::tracking::{self, EntryState, PieceState, TrackingEntry};
 use crate::tree::EntryKind;
 use std::collections::BTreeSet;
 use std::fs;
@@ -94,6 +94,11 @@ fn droppable(
     part: &Part,
     notes: &mut Vec<Warning>,
 ) -> Result<bool, Error> {
+    // The start-of-run repairs finish a removal or an unearthing from the
+    // entry, so a piece in either state stays.
+    if matches!(entry.state, EntryState::Removing | EntryState::Unearthing) {
+        return Ok(false);
+    }
     let pulled = part.would_pull.get(&entry.id).cloned().unwrap_or_default();
     let Ok(Some(current)) = store.current_with(entry.id, &pulled) else {
         return Ok(false);
@@ -234,7 +239,7 @@ mod tests {
     use crate::remote::testing::{metadata_bytes, object};
     use crate::testing::tree::COLLECTION_ID;
     use crate::testing::tree::TempCollection;
-    use crate::tracking::{EntryState, VersionTakenOut};
+    use crate::tracking::VersionTakenOut;
 
     struct World {
         _temp: TempCollection,
@@ -280,6 +285,29 @@ mod tests {
     fn a_gone_piece_is_planned() {
         let world = world();
         assert_eq!(planned(&world).len(), 1);
+    }
+
+    fn with_state(world: &World, state: EntryState) {
+        let mut entry = tracking::read(&world.collection, object(1))
+            .expect("reads")
+            .expect("an entry");
+        entry.state = state;
+        let clock = FixedClock::new("2026-11-04T12:00:00Z".parse().expect("a time"));
+        tracking::write(&world.collection, &world.lock, &clock, &mut entry).expect("written");
+    }
+
+    #[test]
+    fn a_piece_that_is_being_removed_is_not_planned() {
+        let world = world();
+        with_state(&world, EntryState::Removing);
+        assert!(planned(&world).is_empty());
+    }
+
+    #[test]
+    fn a_piece_that_is_being_unearthed_is_not_planned() {
+        let world = world();
+        with_state(&world, EntryState::Unearthing);
+        assert!(planned(&world).is_empty());
     }
 
     #[test]
