@@ -2489,15 +2489,18 @@ mod tests {
         add(&mut world, "piece", 40);
         let recorder = Recorder::new();
 
-        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
+        // The read-back reads the archive twice and the 9 bytes of content
+        // once.
+        let read = 2 * report.archived[0].archive_bytes + 9;
         assert_eq!(
             recorder.lines(),
             [
                 "started piece 9",
                 "piece Packing 2/2",
-                "piece Verifying 2/2",
+                &format!("piece Verifying {read}/{read}"),
                 "piece Storing 0/0",
                 "piece Removing 4/4",
                 "finished piece 9 Files(2)",
@@ -2524,20 +2527,25 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_linked_file_is_counted_once_in_the_verify_and_per_name_in_the_packing() {
+    fn a_hard_link_adds_no_bytes_to_the_verify_and_one_file_to_the_packing() {
         let mut world = world("");
         add(&mut world, "piece", 40);
         world.tree().hard_link("piece/a.txt", "piece/link.txt");
         let recorder = Recorder::new();
 
-        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
         // a.txt, link.txt and sub/b.txt are packed; the link is a member
-        // that the verify does not read again.
+        // that the verify does not read again, so the 9 bytes of content
+        // are read once.
+        let read = 2 * report.archived[0].archive_bytes + 9;
         assert_eq!(
             recorder.lines_of("piece")[1..3],
-            ["piece Packing 3/3", "piece Verifying 2/2"]
+            [
+                "piece Packing 3/3".to_string(),
+                format!("piece Verifying {read}/{read}")
+            ]
         );
     }
 

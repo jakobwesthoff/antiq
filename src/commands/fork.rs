@@ -756,7 +756,7 @@ mod tests {
             [
                 "started projects/scanner 25 2026-11-04T090211",
                 "projects/scanner Extracting 2/2",
-                "projects/scanner Verifying 2/2",
+                "projects/scanner Verifying 25/25",
                 "finished projects/scanner 25 Files(2)",
             ]
         );

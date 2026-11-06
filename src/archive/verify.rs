@@ -5,12 +5,12 @@
 //! Verifying a package against a folder or a listing.
 
 use super::hashing::HashingReader;
-use super::read::read_package;
+use super::read::{read_package, read_package_counted};
 use super::tar_write::{DirectoryStack, listing_line};
 use super::{PackError, Verified, WalkRules};
 use crate::filesystem::tree::{TreeError, TreeRoot};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
-use crate::progress::Counter;
+use crate::progress::{Counter, Metered};
 use crate::relpath::RelPath;
 use crate::select::Rules;
 use crate::tree::{EntryKind, Problem, TreeEntry};
@@ -187,9 +187,9 @@ pub(crate) fn verify_strict(
     verify_strict_observed(package, root, rules, hooks, None, &mut |_, _| {})
 }
 
-/// [`verify_strict`], counting the files it reads into `counter`. The
-/// counter gets its total once the package is read: the regular files the
-/// package holds under their own name.
+/// [`verify_strict`], adding the bytes it reads to `counter`: the archive
+/// once, then the files of the folder. The caller sets the total, since it
+/// knows the size of the archive and the listing before the read starts.
 pub(crate) fn verify_strict_counted(
     package: &Path,
     root: &TreeRoot,
@@ -210,23 +210,11 @@ fn verify_strict_observed(
 ) -> Result<Verified, PackError> {
     // The stream is read to its end first, so a damaged package never
     // reaches the folder.
-    let package = read_package(package)?;
-    // A hard link is not read again, so only the first name of a file counts.
-    if let Some(counter) = counter {
-        let files = package
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == ListingType::File)
-            .count();
-        counter.set_total(files as u64);
-    }
-    let mut counted = |stage: Stage, path: &RelPath| {
-        if let (Some(counter), Stage::AfterRead) = (counter, stage) {
-            counter.add(1);
-        }
-        observe(stage, path);
+    let package = match counter {
+        Some(counter) => read_package_counted(package, counter)?,
+        None => read_package(package)?,
     };
-    let (folder, moved) = read_folder_granted(root, rules, hooks, &mut counted)?;
+    let (folder, moved) = read_folder_granted(root, rules, hooks, counter, observe)?;
     let mut differences = differences_from(&package.entries, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     // The container is the first member and has the top directory's mode
@@ -263,13 +251,14 @@ fn read_folder_granted(
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
+    meter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<(Folder, Vec<RelPath>), PackError> {
     let mut granted = Granted::new(root);
     if rules.staged {
         granted.grant();
     }
-    let mut folder = read_folder(root, rules, hooks, observe, &granted.modes())?;
+    let mut folder = read_folder(root, rules, hooks, meter, observe, &granted.modes())?;
     let restored = granted.restore()?;
     // Restoring a mode changes the directory's ctime, so the record takes
     // the ctime from the directory as it is left. Anything else that
@@ -393,6 +382,16 @@ pub fn compare_with_listing(
     compare_with_listing_observed(listing, root, rules, &mut |_, _| {})
 }
 
+/// The bytes the files of `listing` hold when they are read: those of the
+/// regular files under their own name, as a hard link is not read again.
+pub(crate) fn content_bytes(listing: &[ListingEntry]) -> u64 {
+    listing
+        .iter()
+        .filter(|entry| entry.kind == ListingType::File)
+        .map(|entry| entry.size)
+        .sum()
+}
+
 /// The points in reading a file at which a test can change the folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -403,26 +402,18 @@ enum Stage {
     AfterRead,
 }
 
-/// [`compare_with_listing`], counting the files it reads into `counter`.
-/// The counter gets its total at once: the regular files the listing holds
-/// under their own name, as a hard link is not read again.
+/// [`compare_with_listing`], adding the bytes of the files it reads to
+/// `counter`. The counter gets its total at once: the bytes of the regular
+/// files the listing holds under their own name, as a hard link is not read
+/// again.
 pub(crate) fn compare_with_listing_counted(
     listing: &[ListingEntry],
     root: &TreeRoot,
     rules: &WalkRules,
     counter: &Counter,
 ) -> Result<Compared, PackError> {
-    let files = listing
-        .iter()
-        .filter(|entry| entry.kind == ListingType::File)
-        .count();
-    counter.set_total(files as u64);
-    let mut counted = |stage: Stage, _: &RelPath| {
-        if stage == Stage::AfterRead {
-            counter.add(1);
-        }
-    };
-    compare_with_listing_observed(listing, root, rules, &mut counted)
+    counter.set_total(content_bytes(listing));
+    compare_with_listing_with(listing, root, rules, Some(counter), &mut |_, _| {})
 }
 
 fn compare_with_listing_observed(
@@ -431,7 +422,17 @@ fn compare_with_listing_observed(
     rules: &WalkRules,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Compared, PackError> {
-    let (folder, moved) = read_folder_granted(root, rules, &RealFs, observe)?;
+    compare_with_listing_with(listing, root, rules, None, observe)
+}
+
+fn compare_with_listing_with(
+    listing: &[ListingEntry],
+    root: &TreeRoot,
+    rules: &WalkRules,
+    meter: Option<&Counter>,
+    observe: &mut dyn FnMut(Stage, &RelPath),
+) -> Result<Compared, PackError> {
+    let (folder, moved) = read_folder_granted(root, rules, &RealFs, meter, observe)?;
     let mut differences = differences_from(listing, &folder, rules.staged);
     differences.extend(moved.into_iter().map(Difference::ChangedWhileRead));
     differences.sort_by(|a, b| a.path().cmp(b.path()));
@@ -478,6 +479,7 @@ fn read_folder(
     root: &TreeRoot,
     rules: &WalkRules,
     hooks: &dyn Hooks,
+    meter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
     modes: &HashMap<RelPath, u32>,
 ) -> Result<Folder, PackError> {
@@ -544,7 +546,7 @@ fn read_folder(
                         continue;
                     }
                 }
-                let read = read_file(&mut directories, entry, observe)?;
+                let read = read_file(&mut directories, entry, meter, observe)?;
                 if entry.nlink > 1 {
                     let hash = match &read {
                         Read::Hashed(sha256) => Some(sha256.clone()),
@@ -592,6 +594,7 @@ enum Read {
 fn read_file(
     directories: &mut DirectoryStack<'_>,
     entry: &TreeEntry,
+    meter: Option<&Counter>,
     observe: &mut dyn FnMut(Stage, &RelPath),
 ) -> Result<Read, PackError> {
     let read = |source| PackError::Read {
@@ -607,7 +610,7 @@ fn read_file(
     if !is_recorded(&file.metadata().map_err(read)?, entry) {
         return Ok(Read::Changed);
     }
-    let mut reader = HashingReader::new(&mut file);
+    let mut reader = HashingReader::new(Metered::new(&mut file, meter));
     io::copy(&mut reader, &mut io::sink()).map_err(read)?;
     let (length, sha256) = (reader.bytes_read(), reader.sha256());
     observe(Stage::AfterRead, &entry.path);
@@ -1047,7 +1050,45 @@ mod tests {
 
         assert!(compared.differences().is_empty());
         // main.rs and notes.txt; copy.txt is a link member of notes.txt.
-        assert_eq!((counter.done(), counter.total()), (2, 2));
+        let size = |name: &str| {
+            std::fs::metadata(tree.path(name))
+                .expect("the file exists")
+                .len()
+        };
+        let bytes = size("proj/src/main.rs") + size("proj/notes.txt");
+        assert!(bytes > 0, "the fixture has content");
+        assert_eq!((counter.done(), counter.total()), (bytes, bytes));
+    }
+
+    #[test]
+    fn a_listing_of_files_without_content_has_a_total_of_zero() {
+        let mut tree = Tree::new();
+        tree.file("proj/empty.txt", "");
+        let listing = packed(&tree);
+        let counter = Counter::new();
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        compare_with_listing_counted(&listing, &root, &WalkRules::default(), &counter)
+            .expect("the comparison runs");
+        assert_eq!((counter.done(), counter.total()), (0, 0));
+    }
+
+    #[test]
+    fn the_strict_verify_adds_the_archive_once_and_the_files_once() {
+        let mut tree = mixed();
+        tree.hard_link("proj/notes.txt", "proj/src/copy.txt");
+        let package = pack_piece(&tree, "proj");
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let archive = dir.path().join("proj.tar.zst");
+        std::fs::write(&archive, &package.bytes).expect("the archive is written");
+        let root = TreeRoot::open(&tree.path("proj")).expect("the folder opens");
+        let counter = Counter::new();
+
+        verify_strict_counted(&archive, &root, &WalkRules::default(), &RealFs, &counter)
+            .expect("the folder equals the archive");
+
+        let contents = content_bytes(&package.packed.listing);
+        assert!(contents > 0, "the fixture has content");
+        assert_eq!(counter.done(), package.bytes.len() as u64 + contents);
     }
 
     #[test]

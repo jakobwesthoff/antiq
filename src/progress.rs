@@ -47,6 +47,13 @@ impl Counter {
         self.shared.done.fetch_add(amount, Ordering::Relaxed);
     }
 
+    /// Raises the units done to `value`, unless more are done already. For
+    /// a step that reads the total so far from somewhere else, such as the
+    /// compressor, whose polls must never move the bar back.
+    pub fn raise_to(&self, value: u64) {
+        self.shared.done.fetch_max(value, Ordering::Relaxed);
+    }
+
     /// Sets how many units the operation has in all, once the step knows.
     pub fn set_total(&self, total: u64) {
         self.shared.total.store(total, Ordering::Relaxed);
@@ -59,6 +66,31 @@ impl Counter {
     /// The units in all, or 0 while the step does not know yet.
     pub fn total(&self) -> u64 {
         self.shared.total.load(Ordering::Relaxed)
+    }
+}
+
+/// A reader that counts the bytes passing through it into a [`Counter`]
+/// as they are read, so that a bar follows a long read instead of
+/// jumping when it ends.
+pub struct Metered<'a, R> {
+    inner: R,
+    counter: Option<&'a Counter>,
+}
+
+impl<'a, R> Metered<'a, R> {
+    /// Without a counter the reader just reads.
+    pub fn new(inner: R, counter: Option<&'a Counter>) -> Metered<'a, R> {
+        Metered { inner, counter }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Metered<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if let Some(counter) = self.counter {
+            counter.add(count as u64);
+        }
+        Ok(count)
     }
 }
 
@@ -215,6 +247,38 @@ mod tests {
         assert_eq!(counter.total(), 0);
         counter.set_total(518);
         assert_eq!(counter.total(), 518);
+    }
+
+    #[test]
+    fn raising_a_counter_keeps_the_larger_value() {
+        let counter = Counter::new();
+        counter.raise_to(5);
+        counter.raise_to(3);
+        assert_eq!(counter.done(), 5);
+        counter.raise_to(9);
+        assert_eq!(counter.done(), 9);
+    }
+
+    #[test]
+    fn a_metered_reader_adds_the_bytes_of_each_read_as_they_pass() {
+        use std::io::Read;
+        let counter = Counter::new();
+        let mut reader = Metered::new(&b"0123456789"[..], Some(&counter));
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).expect("ten bytes are there");
+        assert_eq!(counter.done(), 4);
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).expect("the rest reads");
+        assert_eq!(counter.done(), 10);
+    }
+
+    #[test]
+    fn a_metered_reader_without_a_counter_just_reads() {
+        use std::io::Read;
+        let mut reader = Metered::new(&b"abc"[..], None);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("reads");
+        assert_eq!(text, "abc");
     }
 
     #[test]

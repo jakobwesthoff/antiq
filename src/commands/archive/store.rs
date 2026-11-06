@@ -7,13 +7,13 @@
 
 use super::ArchiveError;
 use super::seams::Seams;
-use crate::archive::check::{ChecksumFile, file_sha256};
+use crate::archive::check::{ChecksumFile, file_sha256_counted};
 use crate::archive::names::{MemberKind, MemberName, portability_warnings};
 use crate::archive::pool::{
     ARCHIVE_FIXED_BYTES, ARCHIVE_JOB_BYTES, ARCHIVE_WORKER_BYTES, Lease, Pool, workers_for_piece,
 };
 use crate::archive::tar_write::sparse_warning;
-use crate::archive::verify::verify_strict_counted;
+use crate::archive::verify::{content_bytes, verify_strict_counted};
 use crate::archive::zstd::ZstdSettings;
 use crate::archive::{PackError, PackNote, PackSettings, Packager, TarZstd, Verified, WalkRules};
 use crate::clock::Clock;
@@ -380,8 +380,14 @@ fn stage_and_store(
     };
     let archive_path = staging_path.join(&names.archive);
     let verifying = context.tracker.operation(Operation::Verifying);
+    // The bar covers the whole read-back from its first frame: the archive
+    // is read twice, once for its hash and once for its members, and then
+    // the files of the folder are read once. `packed.listing` is what the
+    // read-back is compared with a few lines below.
+    verifying.set_total(2 * packed.size + content_bytes(&packed.listing));
     context.seams.before_read_back(&staging_path);
-    let read_back = file_sha256(&archive_path).map_err(|source| Abort::of(verify_error(source)))?;
+    let read_back = file_sha256_counted(&archive_path, &verifying)
+        .map_err(|source| Abort::of(verify_error(source)))?;
     if read_back != packed.sha256 {
         return Err(Abort::of(verify_error(PackError::ArchiveDiffers {
             file: names.archive.clone(),
@@ -578,12 +584,14 @@ mod tests {
     use crate::filesystem::tree::TreeRoot;
     use crate::listing::read_full;
     use crate::select::Rules;
+    use crate::testing::recording::{Recorder, Seen};
     use crate::testing::shared_pool;
     use crate::testing::tree::TempCollection;
     use crate::walk::{Call, Hooks, walk_piece};
     use std::fs;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     const WHEN: &str = "2026-11-04T09:02:11Z";
     const LONG_AGO: i64 = 1_700_000_000;
@@ -703,6 +711,16 @@ mod tests {
         ledger: &SpaceLedger,
         pool: &Pool,
     ) -> Result<Stored, StoreFailure> {
+        store_tracked(world, probe, ledger, pool, Tracker::silent())
+    }
+
+    fn store_tracked(
+        world: &World,
+        probe: &dyn Seams,
+        ledger: &SpaceLedger,
+        pool: &Pool,
+        tracker: Tracker<'_>,
+    ) -> Result<Stored, StoreFailure> {
         let collection = Collection::find(world.temp.root()).expect("a collection");
         let rules = PieceRules::new(&["node_modules/".to_string()], &[]).expect("valid rules");
         let root = TreeRoot::open(world.temp.root()).expect("the root opens");
@@ -718,7 +736,7 @@ mod tests {
             seams: probe,
             run_dirs: &world.run_dirs,
             zstd: &zstd,
-            tracker: Tracker::silent(),
+            tracker,
         };
         let request = StoreRequest {
             folder: Folder::Live(&piece),
@@ -729,6 +747,54 @@ mod tests {
             time: None,
         };
         store_version(&context, &request)
+    }
+
+    /// The counter of the newest event the recorder has seen, which these
+    /// tests make an operation.
+    #[rustfmt::skip]
+    fn newest_counter(recorder: &Recorder) -> (u64, u64) {
+        let Some(Seen::Operation { counter, .. }) = recorder.seen().pop() else { panic!("the newest event is an operation") };
+        (counter.done(), counter.total())
+    }
+
+    #[test]
+    fn the_read_back_has_its_total_before_the_first_byte_and_counts_the_archive_first() {
+        let world = world();
+        let recorder = Arc::new(Recorder::new());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let probe = Probe {
+            before_read_back: Some(Box::new({
+                let (recorder, seen) = (Arc::clone(&recorder), Arc::clone(&seen));
+                move |_| {
+                    seen.lock()
+                        .expect("no panic")
+                        .push(newest_counter(&recorder))
+                }
+            })),
+            before_verify: Some(Box::new({
+                let (recorder, seen) = (Arc::clone(&recorder), Arc::clone(&seen));
+                move |_| {
+                    seen.lock()
+                        .expect("no panic")
+                        .push(newest_counter(&recorder))
+                }
+            })),
+            ..Probe::default()
+        };
+
+        let tracker = Tracker::new(&*recorder, "piece");
+        let stored = store_tracked(&world, &probe, &world.ledger, shared_pool(), tracker)
+            .unwrap_or_else(|failure| panic!("the store succeeds, but {}", describe(&failure)));
+
+        // 9 bytes of content are read once, the archive twice.
+        let total = 2 * stored.archive_bytes + 9;
+        let seen = seen.lock().expect("no panic").clone();
+        assert_eq!(
+            seen,
+            [(0, total), (stored.archive_bytes, total)],
+            "the total is known before the hash starts, and the hash pass reads the archive"
+        );
+        assert_eq!(newest_counter(&recorder).0, newest_counter(&recorder).1);
     }
 
     fn stored(world: &World, probe: &dyn Seams) -> Stored {
