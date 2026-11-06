@@ -5,6 +5,7 @@
 //! How antiq talks to a person at a terminal.
 
 pub mod block;
+pub mod dryrun;
 pub mod env;
 pub mod render;
 pub mod rich;

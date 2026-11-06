@@ -14,7 +14,8 @@ well as in wide ones.
 
 ## Decision
 
-antiq writes console output only.
+antiq writes console output only. Messages in it are blocks on a
+terminal and plain lines on a pipe (ADR 0063).
 
 `status` lists only the pieces that have a state (`due`, `soon`,
 `pinned`, `refused`), since a list of every piece each time says little.

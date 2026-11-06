@@ -41,7 +41,7 @@ pub fn render_blocks(blocks: &[Block], env: &Env) -> Vec<String> {
     lines
 }
 
-fn paint(env: &Env, style: Style, text: &str) -> String {
+pub(super) fn paint(env: &Env, style: Style, text: &str) -> String {
     if env.color && !text.is_empty() {
         format!("{style}{text}{style:#}")
     } else {
@@ -90,7 +90,7 @@ fn wrap(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
 }
 
 /// The painted lines of `text` wrapped to `width` columns.
-fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
+pub(super) fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
     wrap(&text.words(), width)
         .iter()
         .map(|line| {
@@ -103,7 +103,7 @@ fn flow(env: &Env, text: &Rich, base: Style, width: usize) -> Vec<String> {
 }
 
 /// How wide the text of a line may be after `indent` columns.
-fn available(env: &Env, indent: usize) -> usize {
+pub(super) fn available(env: &Env, indent: usize) -> usize {
     if env.width < MIN_WRAP_WIDTH {
         usize::MAX
     } else {

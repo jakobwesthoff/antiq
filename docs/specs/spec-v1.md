@@ -655,7 +655,8 @@ reported as changed while read. (ADR 0033)
 ## Operations
 
 Every command prints readable text on a terminal and has `--json`. Data
-goes to stdout, messages to stderr.
+goes to stdout, messages to stderr (see "Console output" for the
+messages that belong to a result).
 
 **Dry runs.** Every command that changes something has `-n`/`--dry-run`:
 `init`, `archive`, `unearth`, `fork`, `forget`, `rebuild`, `import`,
@@ -1917,12 +1918,50 @@ store and the store folders that hold sidecars only for `forget`.
 
 ### Console output
 
+A stream is rich when it is a terminal. Stdout and stderr are decided
+separately, so one can be rich while the other is a pipe. Environment
+variables that force colour do not make a pipe rich. (ADR 0063)
+
 The output adapts to the terminal's width: on a terminal of 100 columns or
 more tables use their wide layout, with full paths; on a narrower one they
 use their narrow layout, in which a path that does not fit is shortened in
 the middle, keeping its start and its end. Without a terminal the width is
-80. Colour is used only on a terminal, and not when the environment
-variable `NO_COLOR` is set to a non-empty value. (ADR 0056)
+80. Prose in blocks is wrapped at the terminal's width but at most 100
+columns, and not wrapped below 40. (ADR 0056)
+
+Colour is written only on a rich stream, in the 16 named ANSI colours, so
+the terminal's theme decides the shades. It is off when `NO_COLOR` is set
+to a non-empty value, when `CLICOLOR` is `0`, and when `TERM` is unset or
+`dumb`; a terminal in that case keeps the symbols and the words of the
+badges. Symbols are Unicode when the first non-empty one of `LC_ALL`,
+`LC_CTYPE` and `LANG` names UTF-8, and ASCII stand-ins otherwise.
+
+A message to a person is a block of one of four kinds. Each has a badge
+with a symbol and a word:
+
+| Kind | Badge | Colour | Form |
+|------|-------|--------|------|
+| error | `✖ ERROR` | red | badge on its own line, then a bar with the bold title and the sections "Why it happened", "How to fix it" and "What antiq was doing", the last always at the bottom; a section without content is left out |
+| warning | `⚠ WARNING` | yellow | badge and bold title on one line, then a bar with the text and a `→` line that says how to fix it |
+| info | `ℹ INFO` | cyan | the form of a warning; one line when there is only a title |
+| hint | `→ HINT` | cyan | badge and text on one line, wrapped text hangs under the text, no bar |
+
+Every warning is its own block. Blocks are separated by an empty line, and
+no bar runs past the last line of text.
+
+A dry run writes each action line behind a magenta tag `○ would <verb>`,
+and ends with an empty line and "Dry run: nothing was <verb>. Run again
+without `-n` to <what it would do>."
+
+Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
+the dry-run footer. A stream that is not a terminal gets plain lines: on
+stderr `error:` and `warning:` lines, on stdout the `Would <verb> ...`
+lines of a dry run. Info and hint blocks are not written to it.
+
+An info or hint follows the stream of what it belongs to. One that belongs
+to a command's result and the dry-run footer go to stdout and are dropped
+when stdout is not rich. One that belongs to a failure or a warning goes to
+stderr and is dropped when stderr is not rich.
 
 Data goes to stdout, messages to stderr. An error line gives the error and
 its causes joined with `: `, prefixed `error:`; it is followed by one

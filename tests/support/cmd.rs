@@ -105,6 +105,21 @@ impl Antiq {
         let mut command = detached(program);
         command.env("HOME", home.path());
         command.env("PATH", path_without_real_ssh(home.path()));
+        // The developer's colour and locale settings must not decide what
+        // a test sees. A test that wants one sets it itself.
+        for name in [
+            "NO_COLOR",
+            "CLICOLOR",
+            "CLICOLOR_FORCE",
+            "CI",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LANG",
+        ] {
+            command.env_remove(name);
+        }
+        command.env("TERM", "xterm-256color");
+        command.env("LC_ALL", "en_US.UTF-8");
         Antiq {
             command,
             stdout_set: false,

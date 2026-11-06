@@ -9,7 +9,11 @@
 //! it is what `antiq status | head` ends with, so a stream whose reader is
 //! gone silently drops what is written to it from then on.
 
+use crate::cli::console::block::Block;
+use crate::cli::console::dryrun;
 use crate::cli::console::env::Env;
+use crate::cli::console::render::render_blocks;
+use crate::cli::console::rich::Rich;
 use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -270,6 +274,58 @@ impl Output {
         self.stderr.write_line(text)
     }
 
+    /// Writes an info block that belongs to a command's result to stdout.
+    /// Only a terminal gets it, after an empty line; a pipe gets nothing.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
+    pub fn info_result(&mut self, info: &Block) -> io::Result<()> {
+        self.result_block(info)
+    }
+
+    /// Writes a hint that belongs to a command's result to stdout, under
+    /// the same rule as `info_result`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
+    pub fn hint_result(&mut self, hint: &Block) -> io::Result<()> {
+        self.result_block(hint)
+    }
+
+    fn result_block(&mut self, block: &Block) -> io::Result<()> {
+        if !self.stdout_env.rich {
+            return Ok(());
+        }
+        self.stdout.write_line("")?;
+        for line in render_blocks(std::slice::from_ref(block), &self.stdout_env) {
+            self.stdout.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Writes blocks of any kind to stderr: the rich form on a terminal,
+    /// the `error:` and `warning:` lines on a pipe. Info and hint blocks
+    /// exist only on a terminal.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
+    pub fn blocks(&mut self, blocks: &[Block]) -> io::Result<()> {
+        for line in render_blocks(blocks, &self.stderr_env) {
+            self.stderr.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Writes one action of a dry run to stdout.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
+    pub fn dry_line(&mut self, verb: &str, rest: &Rich) -> io::Result<()> {
+        let line = dryrun::line(&self.stdout_env, verb, rest);
+        self.stdout.write_line(&line)
+    }
+
+    /// Writes the closing lines of a dry run to stdout, none to a pipe.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no command renders blocks yet"))]
+    pub fn dry_footer(&mut self, nothing_was: &str, rerun: &str) -> io::Result<()> {
+        for line in dryrun::footer(&self.stdout_env, nothing_was, rerun) {
+            self.stdout.write_line(&line)?;
+        }
+        Ok(())
+    }
+
     /// Writes what went wrong, the pieces an ambiguous reference could mean
     /// and what the run was doing, to stderr.
     pub fn plain_error(
@@ -298,7 +354,7 @@ impl Output {
 
 #[cfg(test)]
 pub mod testing {
-    use super::Output;
+    use super::{Env, Output};
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
 
@@ -332,6 +388,11 @@ pub mod testing {
                 Box::new(Buffer(self.stderr.clone())),
                 colored,
             )
+        }
+
+        /// Output whose streams have the given environments.
+        pub fn output_with(&self, stdout: Env, stderr: Env) -> Output {
+            self.output(false).with_envs(stdout, stderr)
         }
 
         pub fn stdout(&self) -> String {
@@ -403,6 +464,96 @@ mod tests {
             capture.stdout(),
             "{\"format\":1,\"command\":\"status\",\"pieces\":[],\"remote\":\"none\"}\n"
         );
+    }
+
+    fn terminal() -> Env {
+        Env::new(true, false, true, 80)
+    }
+
+    #[test]
+    fn an_info_result_follows_an_empty_line_on_a_terminal_stdout() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.info_result(&Block::info(Rich::parse("Nothing was deleted.")))
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "\n ℹ INFO  Nothing was deleted.\n");
+        assert_eq!(capture.stderr(), "");
+    }
+
+    #[test]
+    fn an_info_result_and_a_hint_result_are_dropped_on_a_stdout_pipe() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.info_result(&Block::info(Rich::parse("Nothing was deleted.")))
+            .expect("memory accepts writes");
+        out.hint_result(&Block::hint(Rich::parse("Run `antiq status`.")))
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "");
+        assert_eq!(capture.stderr(), "", "the stderr terminal does not matter");
+    }
+
+    #[test]
+    fn a_hint_result_is_one_inline_line_on_a_terminal_stdout() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.hint_result(&Block::hint(Rich::parse("Run `antiq status`.")))
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "\n → HINT  Run antiq status.\n");
+    }
+
+    #[test]
+    fn blocks_on_a_stderr_terminal_are_rich_and_separated_by_an_empty_line() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.blocks(&[
+            Block::warning(Rich::parse("Clock skew")),
+            Block::info(Rich::parse("Nothing was pushed.")),
+        ])
+        .expect("memory accepts writes");
+        assert_eq!(
+            capture.stderr(),
+            " ⚠ WARNING  Clock skew\n\n ℹ INFO  Nothing was pushed.\n"
+        );
+        assert_eq!(capture.stdout(), "");
+    }
+
+    #[test]
+    fn blocks_on_a_stderr_pipe_keep_only_the_plain_lines_of_errors_and_warnings() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.blocks(&[
+            Block::warning(Rich::parse("Clock skew")),
+            Block::info(Rich::parse("Nothing was pushed.")),
+        ])
+        .expect("memory accepts writes");
+        assert_eq!(capture.stderr(), "warning: Clock skew\n");
+        assert_eq!(capture.stdout(), "");
+    }
+
+    #[test]
+    fn a_dry_run_on_a_terminal_gets_the_tag_and_the_footer() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.dry_line("archive", &Rich::new().path("projects/scanner"))
+            .expect("memory accepts writes");
+        out.dry_footer("archived", "archive these pieces")
+            .expect("memory accepts writes");
+        assert_eq!(
+            capture.stdout(),
+            "○ would archive  projects/scanner\n\n\
+             Dry run: nothing was archived. Run again without -n to archive these pieces.\n"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_on_a_stdout_pipe_keeps_the_would_line_and_has_no_footer() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), terminal());
+        out.dry_line("archive", &Rich::new().path("projects/scanner"))
+            .expect("memory accepts writes");
+        out.dry_footer("archived", "archive these pieces")
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "Would archive projects/scanner\n");
     }
 
     #[test]
