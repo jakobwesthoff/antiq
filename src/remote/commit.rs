@@ -53,6 +53,10 @@ pub struct Request<'a> {
     /// The payloads and listings of this object that the metadata names and
     /// the remote may not have yet.
     pub uploads: &'a [Upload<'a>],
+    /// The caller has put `uploads` on the remote and flushed it, so the
+    /// first step puts nothing and flushes nothing. A file that is gone
+    /// when the metadata is checked is still put again from `uploads`.
+    pub put_already: bool,
 }
 
 /// How a commit ended, when the remote itself did not fail.
@@ -386,11 +390,13 @@ fn run(remote: &dyn Remote, settings: &Settings, request: &Request) -> Result<Ou
 
     // The payloads are durable under their final names before a claim for
     // metadata that names them exists.
-    for upload in request.uploads {
-        remote.put_payload(upload)?;
-    }
-    if !request.uploads.is_empty() {
-        remote.flush()?;
+    if !request.put_already {
+        for upload in request.uploads {
+            remote.put_payload(upload)?;
+        }
+        if !request.uploads.is_empty() {
+            remote.flush()?;
+        }
     }
 
     // State may have changed during the upload.
@@ -814,8 +820,31 @@ mod tests {
                     based_on,
                     metadata,
                     uploads,
+                    put_already: false,
                 },
             )
+        }
+
+        /// A commit of a caller that put the uploads itself.
+        fn commit_put_already(&self, metadata: &[u8]) -> Outcome {
+            let uploads = self.uploads();
+            for upload in &uploads {
+                self.remote.put_payload(upload).expect("the caller puts");
+            }
+            self.remote.flush().expect("the caller flushes");
+            commit(
+                &self.remote,
+                &self.settings(),
+                &self.lock,
+                &Request {
+                    id: id(),
+                    based_on: 0,
+                    metadata,
+                    uploads: &uploads,
+                    put_already: true,
+                },
+            )
+            .expect("the commit runs")
         }
 
         fn committed(&self, based_on: u32, metadata: &[u8]) -> Outcome {
@@ -935,6 +964,47 @@ mod tests {
             2,
             "no flush for uploads that are not there"
         );
+    }
+
+    #[test]
+    fn a_commit_of_files_the_caller_put_makes_no_put_and_no_first_flush() {
+        let world = World::new();
+        let before = 3;
+        let outcome = world.commit_put_already(&metadata("a", true));
+        assert_eq!(outcome, committed(1));
+        // The caller's two puts and its flush come first.
+        assert_eq!(
+            calls_after(&world, before),
+            [
+                Call::new(Op::ListDir, ""),
+                Call::new(Op::ListDir, ""),
+                Call::new(Op::CreateExclusive, CLAIM),
+                Call::new(Op::WriteTemp, OWN_TEMP),
+                Call::new(Op::Flush, ""),
+                Call::new(Op::ListDir, ""),
+                Call::new(Op::RenameIntoPlace, "meta.1"),
+                Call::new(Op::Flush, ""),
+                Call::new(Op::ListDir, ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_that_vanished_after_the_caller_put_it_is_put_again() {
+        let world = World::new();
+        // The caller's puts and flush are three calls; the commit's own
+        // listings follow.
+        world.remote.before(Op::ListDir, 4, |inner| {
+            inner.delete(id(), PAYLOAD).expect("deleted");
+        });
+        let outcome = world.commit_put_already(&metadata("a", true));
+        assert_eq!(outcome, committed(1));
+        assert_eq!(
+            world.remote.count(Op::PutPayload),
+            3,
+            "two by the caller, one again"
+        );
+        assert!(world.names().contains(&PAYLOAD.to_string()));
     }
 
     #[test]
