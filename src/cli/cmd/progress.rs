@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push`, `unearth` and `fork` share when they show cards on a
+//! What `archive`, `push`, `unearth`, `fork` and `rebuild` share when they show cards on a
 //! terminal: when to show them, how they are set up, and the summary line
 //! and the pieces that never sent an event.
 

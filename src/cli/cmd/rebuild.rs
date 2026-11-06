@@ -4,20 +4,39 @@
 
 //! The `rebuild` command: repairs a damaged version.
 
+use super::progress;
+use super::unearth::description_with;
 use crate::cli::console::block::Block;
+use crate::cli::console::cards::{Count, Summary, Tone, sizes};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
+use crate::cli::table::{decimal_size, sanitize};
 use crate::cli::{Context, RebuildArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::rebuild::{
     Action, Basis, RebuildEntry, RebuildPlan, RebuildReport, RebuildRequest, plan, rebuild,
+    rebuild_observed,
 };
+use antiq::progress::Operation;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
+
+/// What the cards of a rebuild count: the content bytes of the files in the
+/// archive, which the size on the card counts too. Where the size is not
+/// known the count shows the bytes checked so far and no total.
+const COUNTS: &[(Operation, Count)] = &[(
+    Operation::Verifying,
+    Count {
+        text: |done, total| match total {
+            Some(_) => sizes(done, total),
+            None => decimal_size(done),
+        },
+        percent: true,
+    },
+)];
 
 pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
@@ -57,20 +76,51 @@ pub fn run(ctx: &Context, args: &RebuildArgs, out: &mut Output) -> anyhow::Resul
         return Ok(0);
     }
 
-    let report = rebuild(&request, &SystemClock, &zone)
+    let style = out.stdout_style();
+    // On a terminal the version shows as a card while it is checked, and its
+    // line replaces the line of the pipe.
+    let (result, shown) = progress::watch(
+        ctx,
+        out,
+        false,
+        description_with(COUNTS, style, &zone),
+        |observer| rebuild_observed(&request, &SystemClock, &zone, observer),
+        || rebuild(&request, &SystemClock, &zone),
+        |_| Vec::new(),
+    )?;
+    let report = result
         .map_err(antiq::Error::from)
         .context("rebuild the version")?;
     if ctx.json {
         out.json(Some("rebuild"), &report)
             .context("print the result")?;
     } else {
-        let lines = render(&report, out.stdout_style().terminal, &zone);
-        for line in &lines.stdout {
-            out.line(line).context("print the result")?;
+        let lines = render(&report, style.terminal, &zone);
+        if let Some(shown) = &shown {
+            shown.print_summary(out, &summary(&report, shown.took()))?;
+        } else {
+            for line in &lines.stdout {
+                out.line(line).context("print the result")?;
+            }
         }
         out.notices(&lines.stderr).context("print the notes")?;
     }
     Ok(0)
+}
+
+/// The last line of a rebuild that showed cards. It names the roles of the
+/// files because their names are long, and the line of a pipe has them.
+fn summary(report: &RebuildReport, took: std::time::Duration) -> Summary {
+    let text = match report.basis {
+        Basis::ChecksumFile => "Rebuilt the listing",
+        Basis::Listing => "Rebuilt the checksum file",
+        Basis::ReadableOnly => "Rebuilt the listing and the checksum file",
+    };
+    Summary {
+        tone: Tone::Ok,
+        parts: vec![(text.to_string(), Tone::Ok)],
+        took,
+    }
 }
 
 /// What a run prints.
@@ -201,6 +251,7 @@ mod tests {
     use super::*;
     use antiq::relpath::RelPath;
     use antiq::versions::stamp::Stamp;
+    use std::time::Duration;
 
     fn entry(basis: Basis, against: Option<&str>, write: &[&str]) -> RebuildEntry {
         let stamp = Stamp::parse("2026-11-04T090211").expect("a stamp");
@@ -241,5 +292,59 @@ mod tests {
         ));
         assert_eq!(rows[0], "  read     a.tar.zst to its end");
         assert_eq!(rows.len(), 3);
+    }
+
+    fn report(basis: Basis, written: &[&str]) -> RebuildReport {
+        let stamp = Stamp::parse("2026-11-04T090211").expect("a stamp");
+        RebuildReport {
+            piece: RelPath::parse("projects/scanner").expect("a piece"),
+            stamp,
+            version: stamp.time(),
+            basis,
+            written: written.iter().map(|file| file.to_string()).collect(),
+            repairs: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_closing_line_names_the_files_that_were_written_by_their_role() {
+        let line = |report: &RebuildReport| {
+            let summary = summary(report, Duration::from_secs(67));
+            (summary.tone, summary.parts[0].0.clone())
+        };
+        assert_eq!(
+            line(&report(Basis::ChecksumFile, &["a.sha256.zst"])),
+            (Tone::Ok, "Rebuilt the listing".to_string())
+        );
+        assert_eq!(
+            line(&report(Basis::Listing, &["a.tar.zst.sha256"])),
+            (Tone::Ok, "Rebuilt the checksum file".to_string())
+        );
+        assert_eq!(
+            line(&report(
+                Basis::ReadableOnly,
+                &["a.sha256.zst", "a.tar.zst.sha256"]
+            )),
+            (
+                Tone::Ok,
+                "Rebuilt the listing and the checksum file".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn the_card_counts_content_bytes_against_the_size_of_the_listing() {
+        let [first, second] = progress::card_of(COUNTS, Operation::Verifying, 1, 4);
+        assert!(first.ends_with("  verifying"), "{first:?}");
+        assert!(second.ends_with("25%  1 B/4 B"), "{second:?}");
+    }
+
+    #[test]
+    fn without_a_total_the_card_counts_the_bytes_checked_under_the_moving_bar() {
+        let [_, second] = progress::card_of(COUNTS, Operation::Verifying, 412_000_000, 0);
+        assert!(second.ends_with("412 MB"), "{second:?}");
+        assert!(!second.contains('%'), "{second:?}");
+        assert!(!second.contains('/'), "{second:?}");
     }
 }

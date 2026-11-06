@@ -322,16 +322,15 @@ fn with_both_missing_the_archive_is_read_and_both_files_are_written() {
 }
 
 #[test]
-fn a_terminal_names_the_version_by_its_local_time() {
+fn a_terminal_names_the_version_on_its_card_by_its_local_time() {
     let world = world(Mode::Text, one_version);
     remove(&files(&world, STAMP).listing);
     let run = world.run_tty(&["rebuild", PIECE, STAMP]);
     run.expect_code(0);
-    // 09:02:11 UTC is 22:02:11 in Auckland.
+    // 09:02:11 UTC is 22:02:11 in Auckland. On a terminal the finished line
+    // of the card names the version.
     assert!(
-        run.plain().starts_with(&format!(
-            "Rebuilt version 2026-11-04 22:02:11 of {PIECE}: wrote "
-        )),
+        run.plain().contains("version 2026-11-04 22:02:11"),
         "{:?}",
         run.stdout
     );

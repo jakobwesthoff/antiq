@@ -122,6 +122,8 @@ pub enum Outcome {
     NoRoom { needed: Option<u64>, available: u64 },
     /// The item is partly done and the repairs of the next run finish it.
     Unfinished(String),
+    /// Rebuild: the files it wrote for a damaged version.
+    Rebuilt { listing: bool, checksum: bool },
 }
 
 #[derive(Debug, Clone, Copy)]

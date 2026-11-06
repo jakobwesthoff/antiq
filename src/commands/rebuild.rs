@@ -7,18 +7,15 @@
 //! against whatever survives.
 
 use crate::archive::PackError;
-use crate::archive::check::{
-    ArchiveCheck, ChecksumFile, check_archive, check_members_against_listing, file_digest,
-    file_sha256,
-};
-use crate::archive::read;
+use crate::archive::check::{ChecksumFile, check_entries_against_listing, read_archive_once};
 use crate::clock::{Clock, whole_seconds};
 use crate::code_span::CodeSpan;
 use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::tree::TreeRoot;
-use crate::listing::{self, Header, ListingEntry, ListingError};
+use crate::listing::{self, Header, Listing, ListingEntry, ListingError};
 use crate::plan::LockHeld;
+use crate::progress::{Counter, Observer, Operation, Outcome, Silent, Tracker};
 use crate::reference::{self, ReferenceError};
 use crate::relpath::{Name, RelPath};
 use crate::repair::Repair;
@@ -248,14 +245,55 @@ pub fn rebuild(
     clock: &dyn Clock,
     zone: &TimeZone,
 ) -> Result<RebuildReport, RebuildError> {
+    rebuild_observed(request, clock, zone, &Silent)
+}
+
+/// [`rebuild`], telling `observer` what the run does.
+pub fn rebuild_observed(
+    request: &RebuildRequest<'_>,
+    clock: &dyn Clock,
+    zone: &TimeZone,
+    observer: &dyn Observer,
+) -> Result<RebuildReport, RebuildError> {
     check_arguments(request)?;
     let guard = RunGuard::begin(request.collection, clock)?;
     let chosen = choose(request, zone)?;
     let basis = judge(request.collection, &chosen)?;
     let entry = entry_of(&chosen, basis);
 
+    // The listing is the only source of the size of the piece. Without it the
+    // card counts the content it has checked and shows no total.
+    let surviving = match basis {
+        Basis::Listing => Some(read_surviving_listing(request.collection, &chosen)?),
+        Basis::ChecksumFile | Basis::ReadableOnly => None,
+    };
+    let size = surviving.as_ref().map(|listing| listing.bytes);
+
+    let name = chosen.folder.to_string();
+    let tracker = Tracker::new(observer, &name);
+    let siblings: Vec<String> = chosen.siblings.iter().map(Stamp::to_string).collect();
+    tracker.started(size, Some(&chosen.version.stamp.to_string()), &siblings);
+    let verifying = tracker.operation(Operation::Verifying);
+    if let Some(size) = size {
+        verifying.set_total(size);
+    }
+
     let rebuilt = whole_seconds(clock.now());
-    write_missing(request.collection, &chosen, basis, rebuilt)?;
+    write_missing(
+        request.collection,
+        &chosen,
+        basis,
+        rebuilt,
+        surviving.as_ref(),
+        &verifying,
+    )?;
+    tracker.finished(
+        size.unwrap_or(0),
+        &Outcome::Rebuilt {
+            listing: basis.written().contains(&VersionFile::Listing),
+            checksum: basis.written().contains(&VersionFile::Checksum),
+        },
+    );
 
     let mut warnings = report::setting_notes(request.collection);
     warnings.extend(guard.warnings().iter().cloned());
@@ -334,6 +372,9 @@ fn check_arguments(request: &RebuildRequest<'_>) -> Result<(), RebuildError> {
 struct Chosen {
     folder: RelPath,
     version: StoreVersion,
+    /// The stamps of the complete versions of the piece, in order, so that a
+    /// card can tell apart two versions that read alike.
+    siblings: Vec<Stamp>,
 }
 
 fn choose(request: &RebuildRequest<'_>, zone: &TimeZone) -> Result<Chosen, RebuildError> {
@@ -361,7 +402,18 @@ fn choose(request: &RebuildRequest<'_>, zone: &TimeZone) -> Result<Chosen, Rebui
         .find(|version| version.stamp == stamp)
         .expect("the lookup names a version of the folder")
         .clone();
-    Ok(Chosen { folder, version })
+    let mut siblings: Vec<Stamp> = found
+        .versions
+        .iter()
+        .filter(|version| !version.is_incomplete())
+        .map(|version| version.stamp)
+        .collect();
+    siblings.sort();
+    Ok(Chosen {
+        folder,
+        version,
+        siblings,
+    })
 }
 
 // =========================================================
@@ -379,7 +431,9 @@ fn judge(collection: &Collection, chosen: &Chosen) -> Result<Basis, RebuildError
         pieces_dir: &pieces_dir,
         tmp_pack_dir: &tmp_pack,
     };
-    let Chosen { folder, version } = chosen;
+    let Chosen {
+        folder, version, ..
+    } = chosen;
     let piece = folder.to_string();
     let stamp = version.stamp.to_string();
     let refuse = |reason: String| RebuildError::Refused {
@@ -512,16 +566,37 @@ fn sidecar_name(archive: &str, kind: VersionFile) -> String {
 // Writing what is missing
 // =========================================================
 
-/// Checks the archive as `basis` says, writes the missing files into the
-/// staging folder in `tmp/`, moves them into the store folder and removes
-/// the staging folder.
+/// The listing the version has, read in full.
+fn read_surviving_listing(
+    collection: &Collection,
+    chosen: &Chosen,
+) -> Result<Listing, RebuildError> {
+    let path = collection
+        .pieces_dir()
+        .join(OsStr::from_bytes(chosen.folder.as_bytes()))
+        .join(&chosen.version.files(VersionFile::Listing)[0]);
+    let file = File::open(&path).map_err(io_error("open", &path))?;
+    Ok(listing::read_full(file)?)
+}
+
+/// Reads the archive once, as `basis` says, writes the missing files into
+/// the staging folder in `tmp/`, moves them into the store folder and
+/// removes the staging folder. `verifying` counts the content bytes of the
+/// files in the archive.
+///
+/// One read serves the hash and the members, so what the written checksum
+/// file vouches for and what the listing lists come from the same bytes.
 fn write_missing(
     collection: &Collection,
     chosen: &Chosen,
     basis: Basis,
     rebuilt: Timestamp,
+    surviving: Option<&Listing>,
+    verifying: &Counter,
 ) -> Result<(), RebuildError> {
-    let Chosen { folder, version } = chosen;
+    let Chosen {
+        folder, version, ..
+    } = chosen;
     let piece = folder.to_string();
     let stamp = version.stamp.to_string();
     let from_pack = |error: PackError| match error {
@@ -561,38 +636,32 @@ fn write_missing(
             let path = sidecar(VersionFile::Checksum);
             let line = std::fs::read(&path).map_err(io_error("read", &path))?;
             let checksum = ChecksumFile::parse(&line).map_err(from_pack)?;
-            check_archive(&archive, ArchiveCheck::Checksum(&checksum)).map_err(from_pack)?;
-            let entries = read::list(&archive).map_err(from_pack)?;
-            let size = std::fs::metadata(&archive)
-                .map_err(io_error("look at", &archive))?
-                .len();
+            let read =
+                read_archive_once(&archive, Some(&checksum), Some(verifying)).map_err(from_pack)?;
             vec![(
                 sidecar_name(&archive_name, VersionFile::Listing),
-                listing_bytes(&header(size), &entries)?,
+                listing_bytes(&header(read.digest.bytes), &read.entries)?,
             )]
         }
         Basis::Listing => {
-            let path = sidecar(VersionFile::Listing);
-            let file = File::open(&path).map_err(io_error("open", &path))?;
-            let listing = listing::read_full(file)?;
-            check_members_against_listing(&archive, &listing.entries).map_err(from_pack)?;
-            let hash = file_sha256(&archive).map_err(from_pack)?;
+            let listing = surviving.expect("a rebuild from the listing has read it");
+            let read = read_archive_once(&archive, None, Some(verifying)).map_err(from_pack)?;
+            check_entries_against_listing(&read.entries, &listing.entries).map_err(from_pack)?;
             vec![(
                 sidecar_name(&archive_name, VersionFile::Checksum),
-                ChecksumFile::new(hash, archive_name.clone()).to_bytes(),
+                ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
             )]
         }
         Basis::ReadableOnly => {
-            let entries = read::list(&archive).map_err(from_pack)?;
-            let digest = file_digest(&archive).map_err(from_pack)?;
+            let read = read_archive_once(&archive, None, Some(verifying)).map_err(from_pack)?;
             vec![
                 (
                     sidecar_name(&archive_name, VersionFile::Listing),
-                    listing_bytes(&header(digest.bytes), &entries)?,
+                    listing_bytes(&header(read.digest.bytes), &read.entries)?,
                 ),
                 (
                     sidecar_name(&archive_name, VersionFile::Checksum),
-                    ChecksumFile::new(digest.sha256, archive_name.clone()).to_bytes(),
+                    ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
                 ),
             ]
         }
@@ -662,7 +731,191 @@ fn remove_staging(collection: &Collection, files: &[(String, Vec<u8>)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::FixedClock;
     use crate::lock::LockError;
+    use crate::testing::recording::Recorder;
+    use crate::testing::tree::{TempCollection, Tree};
+    use crate::testing::versions::{Store, StoredVersion};
+    use std::fs;
+
+    const STAMP: &str = "2026-11-04T090211";
+
+    /// A collection whose one piece has a stored version, built from two
+    /// files of 12 and 13 content bytes.
+    struct World {
+        temp: TempCollection,
+        clock: FixedClock,
+        version: StoredVersion,
+        _store: Store,
+    }
+
+    impl World {
+        fn new() -> World {
+            let mut temp = TempCollection::minimal();
+            temp.tree().file(
+                ".antiq/config.toml",
+                format!(
+                    "[collection]\nid = \"{}\"\npatterns = [\"projects/*\"]\n",
+                    crate::testing::tree::COLLECTION_ID
+                ),
+            );
+            let mut source = Tree::new();
+            source.file("projects/scanner/main.rs", "fn main() {}");
+            source.file("projects/scanner/src/lib.rs", "pub fn f() {}");
+            let mut store = Store::new();
+            let version = store.add_version(&source, "projects/scanner", STAMP);
+            let world = World {
+                version: StoredVersion {
+                    folder: temp.root().join(".antiq/pieces/projects/scanner"),
+                    ..version
+                },
+                temp,
+                clock: FixedClock::new("2026-11-05T10:00:00Z".parse().expect("a time")),
+                _store: store,
+            };
+            copy_all(
+                &world._store.pieces_dir(),
+                &world.temp.root().join(".antiq/pieces"),
+            );
+            world
+        }
+
+        fn rebuild(&self, recorder: &Recorder) -> Result<RebuildReport, RebuildError> {
+            let collection = Collection::find(self.temp.root()).expect("the collection");
+            let cwd = self.temp.root().to_path_buf();
+            rebuild_observed(
+                &RebuildRequest {
+                    collection: &collection,
+                    cwd: &cwd,
+                    piece: OsStr::new("projects/scanner"),
+                    version: STAMP,
+                },
+                &self.clock,
+                &TimeZone::UTC,
+                recorder,
+            )
+        }
+
+        fn archive_bytes(&self) -> u64 {
+            fs::metadata(self.version.path(VersionFile::Archive))
+                .expect("the archive exists")
+                .len()
+        }
+    }
+
+    fn copy_all(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("the folder is made");
+        for item in fs::read_dir(from).expect("the folder lists") {
+            let item = item.expect("an item");
+            let target = to.join(item.file_name());
+            if item.file_type().expect("a type").is_dir() {
+                copy_all(&item.path(), &target);
+            } else {
+                fs::copy(item.path(), &target).expect("the file is copied");
+            }
+        }
+    }
+
+    #[test]
+    fn a_rebuild_from_the_checksum_file_counts_the_content_it_checked_with_no_total() {
+        let world = World::new();
+        world.version.remove(VersionFile::Listing);
+        let recorder = Recorder::new();
+
+        world.rebuild(&recorder).expect("the rebuild runs");
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner - 2026-11-04T090211",
+                "projects/scanner Verifying 25/0",
+                "finished projects/scanner 0 Rebuilt { listing: true, checksum: false }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_from_the_listing_counts_the_content_against_the_size_of_the_listing() {
+        let world = World::new();
+        world.version.remove(VersionFile::Checksum);
+        let recorder = Recorder::new();
+
+        world.rebuild(&recorder).expect("the rebuild runs");
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner 25 2026-11-04T090211",
+                "projects/scanner Verifying 25/25",
+                "finished projects/scanner 25 Rebuilt { listing: false, checksum: true }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_of_an_archive_alone_has_no_size_and_writes_both_files() {
+        let world = World::new();
+        world.version.remove(VersionFile::Listing);
+        world.version.remove(VersionFile::Checksum);
+        let recorder = Recorder::new();
+
+        world.rebuild(&recorder).expect("the rebuild runs");
+
+        assert_eq!(
+            recorder.lines(),
+            [
+                "started projects/scanner - 2026-11-04T090211",
+                "projects/scanner Verifying 25/0",
+                "finished projects/scanner 0 Rebuilt { listing: true, checksum: true }",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_the_judge_refuses_reports_nothing() {
+        let sound = World::new();
+        let corrupt = World::new();
+        corrupt
+            .version
+            .overwrite(VersionFile::Checksum, b"not a checksum line");
+        for world in [sound, corrupt] {
+            let recorder = Recorder::new();
+            world.rebuild(&recorder).expect_err("the judge refuses");
+            assert_eq!(recorder.lines(), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn a_rebuild_refused_while_reading_ends_without_a_finish() {
+        let mismatch = World::new();
+        mismatch.version.remove(VersionFile::Listing);
+        let other = ChecksumFile::new(
+            "0".repeat(64),
+            mismatch.version.names.of(VersionFile::Archive).to_string(),
+        );
+        mismatch
+            .version
+            .overwrite(VersionFile::Checksum, &other.to_bytes());
+        let cut = World::new();
+        cut.version.remove(VersionFile::Listing);
+        cut.version.remove(VersionFile::Checksum);
+        cut.version
+            .truncate(VersionFile::Archive, cut.archive_bytes() / 2);
+        for world in [mismatch, cut] {
+            let recorder = Recorder::new();
+            world.rebuild(&recorder).expect_err("the reading refuses");
+            let lines = recorder.lines();
+            assert!(
+                lines[0].starts_with("started projects/scanner - "),
+                "{lines:?}"
+            );
+            assert!(
+                lines[1].starts_with("projects/scanner Verifying "),
+                "{lines:?}"
+            );
+            assert_eq!(lines.len(), 2, "{lines:?}");
+        }
+    }
 
     #[test]
     fn a_usage_error_is_a_usage_kind_and_a_held_lock_keeps_its_kind() {

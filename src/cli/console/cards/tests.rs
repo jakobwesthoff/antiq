@@ -1195,3 +1195,19 @@ fn a_size_measured_for_an_unknown_piece_opens_no_card() {
     cards.apply(msg, secs(0));
     assert_eq!(cards.region(secs(0), MOCKUP, 24), Vec::<String>::new());
 }
+
+#[test]
+fn a_rebuilt_piece_says_which_files_were_written() {
+    let mut cards = cards(UNEARTH);
+    for (name, listing, checksum) in [("a", true, false), ("b", false, true), ("c", true, true)] {
+        cards.apply(
+            finished(name, 25, Outcome::Rebuilt { listing, checksum }),
+            secs(0),
+        );
+    }
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("  listing rebuilt"), "{lines:?}");
+    assert!(lines[1].contains("  checksum rebuilt"), "{lines:?}");
+    assert!(lines[2].contains("  both files rebuilt"), "{lines:?}");
+    assert_eq!(lines.len(), 3, "a rebuilt piece has no reasons under it");
+}

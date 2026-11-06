@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `archive`, `push`, `unearth` and `fork` show on a terminal while they work
+//! What `archive`, `push`, `unearth`, `fork` and `rebuild` show on a terminal while they work
 //! and what stays after they end. The bytes of a run on a pseudo-terminal
 //! are replayed on a screen, so the tests read what a person would see.
 
@@ -773,4 +773,157 @@ fn a_run_that_cannot_take_the_lock_prints_no_cards_and_fails_as_before() {
         assert_eq!(run.stdout, "", "{args:?}: {:?}", run.stdout);
         assert!(run.stderr.contains("lock"), "{args:?}: {:?}", run.stderr);
     }
+}
+
+// =========================================================
+// rebuild
+// =========================================================
+
+/// Removes the files of the stored version whose names end in one of
+/// `suffixes`.
+fn remove_sidecars(world: &World, suffixes: &[&str]) {
+    let store = world.collection().path(".antiq/pieces/projects/scanner");
+    for entry in fs::read_dir(&store).expect("the store folder") {
+        let path = entry.expect("an entry").path();
+        let name = path.to_string_lossy().into_owned();
+        if suffixes.iter().any(|suffix| name.ends_with(suffix)) {
+            fs::remove_file(path).expect("removes the file");
+        }
+    }
+}
+
+const LISTING: &str = ".sha256.zst";
+const CHECKSUM: &str = ".tar.zst.sha256";
+
+#[test]
+fn rebuild_with_a_listing_leaves_the_line_of_the_version_with_its_size_and_a_summary() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[CHECKSUM]);
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(
+        lines[0].starts_with("  ✔ projects/scanner version 2026-11-04 "),
+        "{lines:#?}"
+    );
+    assert!(lines[0].contains(" 18 B "), "{lines:#?}");
+    assert!(lines[0].contains("checksum rebuilt"), "{lines:#?}");
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(
+        is_summary(&lines[2], "✔ Rebuilt the checksum file"),
+        "{:?}",
+        lines[2]
+    );
+    assert!(
+        run.stderr
+            .contains("every member of the archive matches the listing"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(!run.stdout.contains("Rebuilt version"));
+}
+
+#[test]
+fn rebuild_without_a_listing_leaves_a_line_with_no_size() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[LISTING]);
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(lines[0].contains("listing rebuilt"), "{lines:#?}");
+    assert!(!lines[0].contains(" B "), "{lines:#?}");
+    assert!(
+        is_summary(&lines[2], "✔ Rebuilt the listing"),
+        "{:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn rebuild_of_an_archive_alone_says_both_files_were_rebuilt() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[LISTING, CHECKSUM]);
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    assert!(lines[0].contains("both files rebuilt"), "{lines:#?}");
+    assert!(
+        is_summary(&lines[2], "✔ Rebuilt the listing and the checksum file"),
+        "{:?}",
+        lines[2]
+    );
+}
+
+#[test]
+fn a_json_rebuild_on_a_terminal_prints_the_json_and_no_cards() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[CHECKSUM]);
+    let run = world.run_tty_sized(
+        &["--json", "rebuild", "projects/scanner", NEW],
+        100,
+        24,
+        &[],
+    );
+    run.expect_code(0);
+    assert_only_json(&run.stdout, "rebuild");
+}
+
+#[test]
+fn a_rebuild_dry_run_on_a_terminal_shows_no_cards() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[CHECKSUM]);
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW, "-n"], 100, 24, &[]);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('╸') && !run.stdout.contains("waiting"));
+    assert!(!run.stdout.contains("\x1b[1A") && !run.stdout.contains("\x1b[J"));
+    assert!(run.stdout.contains("would rebuild"), "{:?}", run.stdout);
+}
+
+#[test]
+fn rebuild_on_a_dumb_terminal_prints_the_line_it_always_did() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[CHECKSUM]);
+    let run = world.run_tty_sized(
+        &["rebuild", "projects/scanner", NEW],
+        100,
+        24,
+        &[("TERM", "dumb")],
+    );
+    run.expect_code(0);
+    assert!(!run.stdout.contains('\x1b'));
+    assert_eq!(run.stdout.lines().count(), 3, "{:?}", run.stdout);
+}
+
+#[test]
+fn a_rebuild_the_judge_refuses_leaves_no_card_and_fails_as_before() {
+    let world = unearth_world();
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW], 100, 24, &[]);
+    run.expect_code(1);
+    let screen = replay(&run.stdout, 100, 24).lines().join("\n");
+    assert!(!screen.contains('✔') && !screen.contains('╸'), "{screen:?}");
+    assert!(run.stderr.contains("not damaged"), "{:?}", run.stderr);
+}
+
+#[test]
+fn a_rebuild_whose_archive_does_not_match_its_checksum_leaves_no_card_and_names_the_error() {
+    let world = unearth_world();
+    remove_sidecars(&world, &[LISTING]);
+    let store = world.collection().path(".antiq/pieces/projects/scanner");
+    for entry in fs::read_dir(&store).expect("the store folder") {
+        let path = entry.expect("an entry").path();
+        if path.to_string_lossy().ends_with(CHECKSUM) {
+            let name = path
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .trim_end_matches(".sha256")
+                .to_string();
+            fs::write(&path, format!("{}  {name}\n", "0".repeat(64))).expect("replaces the line");
+        }
+    }
+    let run = world.run_tty_sized(&["rebuild", "projects/scanner", NEW], 100, 24, &[]);
+    run.expect_code(1);
+    let screen = replay(&run.stdout, 100, 24).lines().join("\n");
+    assert!(!screen.contains('✔') && !screen.contains('╸'), "{screen:?}");
+    assert!(run.stderr.contains("SHA-256"), "{:?}", run.stderr);
 }

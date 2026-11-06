@@ -1275,6 +1275,8 @@ only on the user's request, never as a repair. (ADR 0062)
   target, no line for the top-level directory; `files`, `bytes` and
   `archive-bytes` come from the same read. The `imported` line of a
   version made by `import` is not restored.
+- The archive file is read once: the hash of the file and the members come
+  from the same read.
 - Listing missing, checksum file present: hash the archive file and
   compare it with the checksum file. On a mismatch refuse (exit 1, naming
   both hashes); otherwise write the listing, with a `rebuilt` line,
@@ -1302,9 +1304,10 @@ only on the user's request, never as a repair. (ADR 0062)
   empty piece or version is a usage error. It takes the lock and has `-n`,
   which says what it would check and write.
 
-On the console `rebuild` prints `Rebuilt version <version> of <piece>: wrote
-<file>, ...` on stdout, the version named by its local time on a terminal
-and by its stamp otherwise. The statement of the case (the archive is the
+On a pipe `rebuild` prints `Rebuilt version <version> of <piece>: wrote
+<file>, ...` on stdout, the version named by its stamp. On a terminal it
+shows a card named after the piece and its version and leaves one finished
+line and a summary (see "Progress cards"); the stdout line stays out. The statement of the case (the archive is the
 one checksummed when it was stored; every member of the archive matches the
 listing; the archive reads without error, which does not show that it is
 unchanged), the repairs that were done and the warnings go to stderr as
@@ -2175,7 +2178,7 @@ that stream without a panic, and the run ends with the exit code it would have h
 
 #### Progress cards
 
-A real run of `archive`, `push`, `unearth` or `fork` on a rich stdout shows its
+A real run of `archive`, `push`, `unearth`, `fork` or `rebuild` on a rich stdout shows its
 progress as cards (ADR 0064). A dry run, `--json` and a stdout that is not a
 terminal print the lines they print without cards. The warnings and notes
 of the run follow the result as always.
@@ -2184,11 +2187,11 @@ A piece that is working has a card of two lines. The first has a mark that
 turns, the piece in bold, its size and the operation: `packing`,
 `verifying`, `storing` and `removing` for `archive`, `storing` and
 `removing` for `push`, `extracting`, `verifying` and `removing` for
-`unearth`, `extracting` and `verifying` for `fork`. The second has a bar,
+`unearth`, `extracting` and `verifying` for `fork`, `verifying` for `rebuild`. The second has a bar,
 the percentage and a count: `N/M files`, `N/M entries` for the removing of
 `archive`, and sizes such as `412 MB/1.2 GB` for the operations whose count
 is the content bytes of the piece: the `packing` and `verifying` of
-`archive` and the `verifying` of `unearth` and `fork`. A `push` has a card
+`archive` and the `verifying` of `unearth`, `fork` and `rebuild`. A `push` has a card
 of its own kind, described below. A count shows numbers only in units that match the card (its
 size, files, entries). The bar of `packing` follows the content bytes of
 the files among the bytes of the tar stream that the compressor has
@@ -2198,7 +2201,13 @@ content bytes of the members as the archive hands them out and those of the
 files of the folder as they are read, against twice the size of the files;
 its count shows both numbers halved, in the units of the size. The bar of
 the `verifying` of an `unearth` or a `fork` follows the content bytes of
-the files compared with the listing, against the same size. An operation
+the files compared with the listing, against the same size. The `rebuild`
+reads the archive once, and the same read hashes the file and gives the
+members. Its `verifying` follows the content bytes of the members as the
+archive hands them out. The size of its card and the total of its bar are
+the content bytes of the listing where the version has one. Where it has
+none, the size is blank and the count shows the content bytes checked so
+far (`412 MB`) under the moving bar, with no total and no percentage. An operation
 whose total is not known yet, and the `verifying` of an `unearth` or a
 `fork` whose files hold no bytes, has a bar with a moving lit part and no percentage or
 count. The percentage is rounded and stays at 99 until the operation is
@@ -2207,12 +2216,13 @@ done.
 A piece that has finished leaves one line: a mark (`✔` green, `✖` red for a
 refused or unfinished piece, `⚠` yellow for a skipped one), the piece in
 bold, its size, its result and the time as `m:ss`. The result is `N files`
-for `archive`, `unearth` and `fork`, the non-zero ones of `N created`, `N updated`
+for `archive`, `unearth` and `fork`, `listing rebuilt`, `checksum rebuilt`
+or `both files rebuilt` for `rebuild`, the non-zero ones of `N created`, `N updated`
 and `N deleted` for the pieces of a `push` on a terminal that does not move
 the cursor, and `refused`, `skipped` or `unfinished`. The
-line of an `unearth` or a `fork` has `version <local time>` after the
-piece, in the form `unearth` uses on a terminal. A `fork` of a version
-without a listing has no size. A refused, skipped or unfinished piece
+line of an `unearth`, a `fork` or a `rebuild` has `version <local time>` after the
+piece, in the form `unearth` uses on a terminal. A `fork` or a `rebuild` of a
+version without a listing has no size. A refused, skipped or unfinished piece
 has its reasons under the line, indented by four columns and wrapped to the
 width, one paragraph for each reason. A named piece that carries a pin
 reads `pinned, so it stays as it is. antiq unpin <piece> releases it`, with
@@ -2255,6 +2265,10 @@ mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
   directory the command runs in, or `Skipped <piece>` with a `⚠`.
 - `fork`: `Forked to ./projects/recipe-api-copy`, the path of the copy from
   the directory the command runs in, or `Skipped <piece>` with a `⚠`.
+- `rebuild`: `Rebuilt the listing`, `Rebuilt the checksum file` or `Rebuilt
+  the listing and the checksum file`. A refusal and a failure while the
+  archive is read end without a finished line or a summary, and the error
+  follows on stderr.
 
 A run with no piece to tell about prints the line of the pipe form, such as
 `Archived 0, skipped 0, refused 0.`. A piece that never reported progress, as

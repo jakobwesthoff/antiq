@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-`archive`, `push`, `unearth` and `fork` printed nothing until they ended. The
+`archive`, `push`, `unearth`, `fork` and `rebuild` printed nothing until they ended. The
 lines scripts read must stay as they are (ADR 0020).
 
 ## Decision
@@ -34,7 +34,9 @@ takes time, and counts the content bytes of the piece's files, the unit of
 the size on the card: packing counts the content bytes among those the
 compressor has consumed, and the verifying of an archive the content bytes
 of the members as the archive hands them out plus those of the files of the
-folder as they are read, with the count under the bar halved. A count under the bar shows numbers only in
+folder as they are read, with the count under the bar halved. The verifying of a
+rebuild counts the content bytes of the members of its single read of the archive; without a
+listing the size is unknown and the count shows the bytes checked so far. A count under the bar shows numbers only in
 units that match the card (its size, files, entries). The compressor works
 behind the writer, so the bytes handed to it reach the total long before it
 has compressed them; the bytes it has consumed are what the bar follows.

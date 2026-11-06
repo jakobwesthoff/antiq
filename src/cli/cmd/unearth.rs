@@ -151,8 +151,17 @@ fn done_summary(
 /// The description of the cards of a command that brings a version back:
 /// `unearth` and `fork` count and name their versions the same way.
 pub(super) fn description(style: Style, zone: &TimeZone) -> Description {
+    description_with(COUNTS, style, zone)
+}
+
+/// [`description`] for a command that counts differently.
+pub(super) fn description_with(
+    counts: &'static [(Operation, Count)],
+    style: Style,
+    zone: &TimeZone,
+) -> Description {
     let zone = zone.clone();
-    let mut description = Description::new(COUNTS);
+    let mut description = Description::new(counts);
     description.label = Box::new(move |stamp, siblings| {
         let siblings: Vec<Stamp> = siblings.iter().filter_map(|s| s.parse().ok()).collect();
         label(stamp, &siblings, style, &zone)

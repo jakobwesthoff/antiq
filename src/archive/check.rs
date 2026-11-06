@@ -7,7 +7,7 @@
 //! and the members of the archive against the listing.
 
 use super::hashing::HashingReader;
-use super::verify::{Difference, compare};
+use super::verify::{Difference, Hashed, compare, read_hashed};
 use super::{PackError, read};
 use crate::listing::{ListingEntry, is_sha256_hex};
 use crate::progress::{Counter, Metered};
@@ -249,12 +249,64 @@ fn check_members_with(
     counter: Option<&Counter>,
 ) -> Result<(), PackError> {
     let members = read::list_with(archive, counter)?;
-    let differences: Vec<Difference> = compare(listing, &members, &[], true);
+    check_entries_against_listing(&members, listing)
+}
+
+/// Compares the `members` an archive was read to with `listing`, as
+/// [`check_members_against_listing`] does.
+pub fn check_entries_against_listing(
+    members: &[ListingEntry],
+    listing: &[ListingEntry],
+) -> Result<(), PackError> {
+    let differences: Vec<Difference> = compare(listing, members, &[], true);
     if differences.is_empty() {
         Ok(())
     } else {
         Err(PackError::ListingDiffers(differences))
     }
+}
+
+// =========================================================
+// Reading an archive once
+// =========================================================
+
+/// What one read of an archive found.
+#[derive(Debug)]
+pub struct ArchiveRead {
+    /// The members, with the hash of every file computed from the stream.
+    pub entries: Vec<ListingEntry>,
+    /// The size and hash of the archive file.
+    pub digest: FileDigest,
+}
+
+/// Reads the archive once, so that the members and the hash of the file come
+/// from the same bytes. `content` counts the bytes of the files in the
+/// archive as they are read.
+///
+/// With a `checksum`, a file that is not the one it names is reported as
+/// that, ahead of whatever the stream shows.
+pub fn read_archive_once(
+    archive: &Path,
+    checksum: Option<&ChecksumFile>,
+    content: Option<&Counter>,
+) -> Result<ArchiveRead, PackError> {
+    let file = File::open(archive).map_err(PackError::OpenPackage)?;
+    let Hashed { package, digest } = read_hashed(archive, file, content, &mut |_| Ok(()))?;
+    if let Some(checksum) = checksum
+        && digest.sha256 != checksum.sha256
+    {
+        return Err(differs(
+            archive,
+            format!(
+                "its SHA-256 is {}, the checksum file says {}",
+                digest.sha256, checksum.sha256
+            ),
+        ));
+    }
+    Ok(ArchiveRead {
+        entries: package?.entries,
+        digest,
+    })
 }
 
 #[cfg(test)]
@@ -707,6 +759,61 @@ mod tests {
         assert!(matches!(
             check_members_against_listing(&file, &packaged.packed.listing),
             Err(PackError::Damaged(_))
+        ));
+    }
+
+    // =========================================================
+    // Reading an archive once
+    // =========================================================
+
+    #[test]
+    fn one_read_gives_the_members_and_the_hash_of_the_file_and_counts_the_content() {
+        let packaged = pack_piece(&mixed(), "proj");
+        let (_dir, file) = file_with(&packaged.bytes);
+        let counter = Counter::new();
+
+        let read = read_archive_once(&file, None, Some(&counter)).expect("the archive reads");
+
+        assert_eq!(read.entries, packaged.packed.listing);
+        assert_eq!(read.digest, file_digest(&file).expect("hashes"));
+        // `fn main() {}` and `hello`: the hard link adds none.
+        assert_eq!(counter.done(), 17);
+    }
+
+    #[test]
+    fn a_file_that_is_not_the_one_the_checksum_names_is_reported_before_the_stream() {
+        let packaged = pack_piece(&mixed(), "proj");
+        let cut = &packaged.bytes[..packaged.bytes.len() / 2];
+        let (_dir, file) = file_with(cut);
+        let checksum = ChecksumFile::new(ABC.into(), "a.tar.zst".into());
+
+        let error = read_archive_once(&file, Some(&checksum), None).expect_err("it differs");
+
+        assert!(
+            matches!(error, PackError::ArchiveDiffers { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_damaged_stream_with_a_matching_checksum_is_damaged() {
+        let packaged = pack_piece(&mixed(), "proj");
+        let cut = &packaged.bytes[..packaged.bytes.len() / 2];
+        let (_dir, file) = file_with(cut);
+        let checksum = checksum_of(&file);
+
+        assert!(matches!(
+            read_archive_once(&file, Some(&checksum), None),
+            Err(PackError::Damaged(_))
+        ));
+    }
+
+    #[test]
+    fn an_archive_that_is_gone_cannot_be_opened() {
+        let (dir, _) = file_with(b"");
+        assert!(matches!(
+            read_archive_once(&dir.path().join("missing"), None, None),
+            Err(PackError::OpenPackage(_))
         ));
     }
 }

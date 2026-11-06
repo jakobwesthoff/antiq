@@ -1675,6 +1675,27 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_with_another_hash_is_reported_ahead_of_a_file_of_the_folder_that_fails_to_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, archive, package, tree) = archived();
+        let file = tree.path("proj/src/main.rs");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let unreadable = std::fs::File::open(&file).is_err();
+        let other = "0".repeat(64);
+        assert_ne!(other, package.packed.sha256);
+
+        let result = verify_against(&archive, &tree, &other);
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(unreadable, "the test needs a user that mode 000 locks out");
+        let error = result.expect_err("the archive is not the one that was written");
+        assert!(
+            matches!(&error, PackError::ArchiveDiffers { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn a_fifo_on_disk_is_not_added() {
         let mut tree = mixed();
         let listing = packed(&tree);

@@ -486,7 +486,7 @@ impl Cards {
 
     fn outcome_tone(outcome: &Outcome) -> Tone {
         match outcome {
-            Outcome::Files(_) | Outcome::Changes { .. } => Tone::Ok,
+            Outcome::Files(_) | Outcome::Changes { .. } | Outcome::Rebuilt { .. } => Tone::Ok,
             Outcome::Refused(_) | Outcome::Unfinished(_) => Tone::Bad,
             Outcome::Skipped(_) | Outcome::NoRoom { .. } => Tone::Warn,
         }
@@ -519,6 +519,12 @@ impl Cards {
             Outcome::Refused(_) => "refused".to_string(),
             Outcome::Skipped(_) | Outcome::NoRoom { .. } => "skipped".to_string(),
             Outcome::Unfinished(_) => "unfinished".to_string(),
+            Outcome::Rebuilt {
+                listing: true,
+                checksum: true,
+            } => "both files rebuilt".to_string(),
+            Outcome::Rebuilt { listing: true, .. } => "listing rebuilt".to_string(),
+            Outcome::Rebuilt { .. } => "checksum rebuilt".to_string(),
         }
     }
 
@@ -547,7 +553,7 @@ impl Cards {
                 },
                 None,
             )],
-            Outcome::Files(_) | Outcome::Changes { .. } => Vec::new(),
+            Outcome::Files(_) | Outcome::Changes { .. } | Outcome::Rebuilt { .. } => Vec::new(),
         }
     }
 
