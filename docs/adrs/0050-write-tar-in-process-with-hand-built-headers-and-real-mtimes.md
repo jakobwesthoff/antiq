@@ -27,9 +27,10 @@ that shape already (ADR 0055). Listings, the strict verify and
 reclaiming compare the paths below that directory, so a piece that is
 renamed, forked under a new name or unearthed elsewhere still compares.
 
-Unearthing extracts entry by entry with antiq's own checks before the
-crate's, stops at the first refused member, and sets directory modes and
-times in a final pass.
+Unearthing reads the members with the crate and writes each one itself,
+after antiq's own checks, through directory handles that never follow a
+symlink. It stops at the first refused member and sets directory modes
+and times in a final pass.
 
 ## Consequences
 

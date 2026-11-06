@@ -813,7 +813,16 @@ verify and reclaiming compare the paths below it, so neither that name
 nor the folder's current name counts: a piece renamed by `fork --name`,
 unearthed with `--to` or imported with `--path` compares like any
 other. Unearthing extracts the directory's contents into the target.
-(ADR 0050)
+Each file, symlink and directory is created by antiq itself through open
+directory handles, never through a symlink, and a name that is already
+taken fails the extraction. Directories keep owner access while their
+members are written; once all members exist, the stored modification
+time and then the stored mode of every directory are set, the deepest
+first, and the target's modification time last. A symlink gets its stored
+mode where the platform can change it (macOS) and keeps the platform's
+mode where it cannot (Linux). The compressed stream is read to its end,
+so a failing content checksum or data after the end of the tar stream
+fails the extraction. (ADR 0050)
 
 Archives are compressed with zstd at level 19 with long-distance
 matching and a 128 MiB window, at the default job size of 64 MiB.

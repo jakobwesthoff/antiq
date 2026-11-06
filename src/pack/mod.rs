@@ -160,9 +160,19 @@ impl Verified {
     }
 }
 
-/// What an extraction reports. Filled in by the extraction.
-#[derive(Debug)]
-pub struct Unpacked;
+/// What an extraction reports.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unpacked {
+    /// Permission bits the archive stores for its top-level directory.
+    /// The staging root keeps the mode its owner gave it; the caller sets
+    /// this one when it moves the tree into place.
+    pub top_mode: u32,
+    /// Modification time of that directory, in seconds since the epoch.
+    /// Extraction sets it on the staging root.
+    pub top_mtime: u64,
+    /// Members extracted below the top-level directory.
+    pub members: usize,
+}
 
 /// Packs, verifies, lists and unpacks one package format.
 pub trait Packager {
@@ -304,6 +314,20 @@ pub enum PackError {
     },
     #[error("the folder differs from the package: {}", verify::describe(.0))]
     Differs(Vec<verify::Difference>),
+    #[error("cannot read the package")]
+    Archive(#[source] std::io::Error),
+    #[error("the package holds a member that cannot be extracted: `{member}`: {refusal}")]
+    Refused {
+        /// The member's path as the archive spells it, in escaped form.
+        member: String,
+        refusal: extract::Refusal,
+    },
+    #[error("cannot extract `{path}`")]
+    Extract {
+        path: RelPath,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl crate::error::HasKind for PackError {}
@@ -311,28 +335,11 @@ impl crate::error::HasKind for PackError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsx::tree::TreeRoot;
-
-    fn empty_root() -> (tempfile::TempDir, TreeRoot) {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let root = TreeRoot::open(dir.path()).expect("the dir opens");
-        (dir, root)
-    }
 
     #[test]
     fn the_format_id_is_tar_zstd_1() {
         assert_eq!(TarZstd.format().as_str(), "tar+zstd/1");
         assert_eq!(TarZstd.format().to_string(), "tar+zstd/1");
-    }
-
-    #[test]
-    fn the_unfinished_operations_answer_not_implemented() {
-        let (dir, root) = empty_root();
-        let errors = [TarZstd
-            .unpack(dir.path(), &root, &TargetRules::linux())
-            .expect_err("not implemented")
-            .to_string()];
-        assert_eq!(errors, ["unpacking a package is not implemented"]);
     }
 
     #[test]
