@@ -3037,6 +3037,34 @@ Notes for the items that call the strict verify and the listing comparison
   Rows show no pin state. `reference_directory` is `pub(super)` for
   I40.
 
+### I30
+
+- 2026-11-04 (merged, plan review 15 and opus diff review 10, all
+  fixed): `sync` lives in `src/ops/sync/` (pull, upload, commit,
+  cleanup) and `src/cli/cmd/sync/`. The phases run in this order: pull
+  with one retry of a failure that does not end the run, listings and
+  the index, uploads bounded by `remote_jobs` (`run_bounded`) with one
+  flush whenever any put ran, then per object with `meta.pending` a
+  classification as settle, conflict or commit, then cleanup with the
+  pending temp names in `Settings::keep`. Listings and the index are
+  fetched again after any settle or commit.
+- A settle without the committed `meta.k` (another machine's cleanup
+  removed it) needs the number in `committed_versions` above the base
+  the change builds on; otherwise the change stays a conflict with "the
+  change is in the history of version M". `Overtaken` and `Contested`
+  push their number into `committed_versions`. `Store::discard_pending`
+  removes a settled `meta.pending` below the local highest version. A
+  commit error after the rename does not carry its number yet (todo
+  `01M6JG79SGKMY0VGPHWC1R8RNF`).
+- Call sites for the next items, each a stub with a TODO:
+  `conflict::record` (I31), `live::refresh` and `live::delete_committed`
+  (I32), `tiers::apply` (I33). `pending_upload` stays in `status` until
+  I33 sets `verified`. A change that touches only metadata is a conflict
+  until I31 rebases it, although spec "Several machines" already states
+  the rebase.
+- The not-implemented stand-ins in `src/cli/mod.rs` and `tests/cli.rs`
+  run `reconcile --prune`; I35 implements it and moves them.
+
 ### I34
 
 - 2026-11-04 (finished): `ops::unearth::remote::{prepare, refresh,
