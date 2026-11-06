@@ -410,3 +410,21 @@ fn control_characters_of_a_piece_are_escaped_in_a_pipe() {
     assert_eq!(run.stdout.lines().count(), 1, "{:?}", run.stdout);
     assert!(run.stdout.starts_with("odd%09name\t"), "{:?}", run.stdout);
 }
+
+#[test]
+fn the_error_label_is_coloured_on_a_terminal_and_not_with_no_color() {
+    let world = world(Mode::Text, three_versions);
+
+    let coloured = world.run_tty_stderr(&["pin", "no-such-piece"], &[]);
+    coloured.expect_code(1);
+    assert!(
+        coloured.stderr.starts_with("\x1b[1;31merror:\x1b[0m "),
+        "{:?}",
+        coloured.stderr
+    );
+
+    let plain = world.run_tty_stderr(&["pin", "no-such-piece"], &[("NO_COLOR", "1")]);
+    plain.expect_code(1);
+    assert!(plain.stderr.starts_with("error: "), "{:?}", plain.stderr);
+    assert!(!plain.stderr.contains('\x1b'), "{:?}", plain.stderr);
+}

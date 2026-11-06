@@ -146,6 +146,32 @@ impl World {
         outcome
     }
 
+    /// Runs the command with stderr on a pseudo-terminal, `envs` added to
+    /// its environment. What it wrote to stderr comes back as `stderr`
+    /// with the terminal's `\r\n` as `\n`; stdout is piped.
+    pub fn run_tty_stderr(&self, args: &[&str], envs: &[(&str, &str)]) -> Outcome {
+        let mut terminal = Terminal::open();
+        let mut antiq = Antiq::new()
+            .arg("-C")
+            .arg(self.collection.root())
+            .args(args)
+            .env("TZ", TIME_ZONE)
+            .stderr(terminal.slave());
+        for (key, value) in envs {
+            antiq = antiq.env(key, value);
+        }
+        let run = antiq
+            .run_within(TTY_DEADLINE)
+            .expect("the command finishes on a terminal");
+        Outcome {
+            code: run.code(),
+            stdout: run.stdout,
+            stderr: terminal.finish(),
+            mode: Mode::Text,
+            value: None,
+        }
+    }
+
     /// Runs `script` and fails when it changed the collection or the
     /// target in any way: for a dry run.
     pub fn assert_unchanged(&self, script: impl FnOnce()) {

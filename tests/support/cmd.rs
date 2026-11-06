@@ -88,6 +88,7 @@ fn path_without_real_ssh(home: &Path) -> std::ffi::OsString {
 pub struct Antiq {
     command: Command,
     stdout_set: bool,
+    stderr_set: bool,
     _home: TempDir,
 }
 
@@ -107,6 +108,7 @@ impl Antiq {
         Antiq {
             command,
             stdout_set: false,
+            stderr_set: false,
             _home: home,
         }
     }
@@ -156,11 +158,19 @@ impl Antiq {
         self
     }
 
+    pub fn stderr(mut self, stderr: impl Into<Stdio>) -> Antiq {
+        self.command.stderr(stderr);
+        self.stderr_set = true;
+        self
+    }
+
     pub fn run(mut self) -> Run {
         if !self.stdout_set {
             self.command.stdout(Stdio::piped());
         }
-        self.command.stderr(Stdio::piped());
+        if !self.stderr_set {
+            self.command.stderr(Stdio::piped());
+        }
         // The lock is held for the fork only, the child runs on without it.
         let child = {
             let _guard = fork_lock();
@@ -184,7 +194,9 @@ impl Antiq {
         if !self.stdout_set {
             self.command.stdout(Stdio::piped());
         }
-        self.command.stderr(Stdio::piped());
+        if !self.stderr_set {
+            self.command.stderr(Stdio::piped());
+        }
         let mut child = {
             let _guard = fork_lock();
             self.command.spawn().expect("the antiq binary starts")
