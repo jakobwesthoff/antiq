@@ -986,8 +986,11 @@ exactly 64 lower-case hexadecimal digits; no such tool makes the remote
 broken. Every file name given to the remote is one path component, as
 on the path remote.
 
-After writing a run's temp files and before their renames, antiq runs
-`sync` on the NAS, and once more after the renames.
+Writing a temp file, creating a claim and renaming a temp do not make
+anything durable by themselves. antiq flushes, which runs `sync` on the
+NAS, after writing a run's temp files and before their renames, and once
+more after the renames. A rename is a hard link to the final name that
+runs only when that name is free, and the temp is removed afterwards.
 
 ### Transfers
 

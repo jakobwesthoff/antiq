@@ -22,7 +22,7 @@ use crate::config::{MachineConfig, RemoteConfig};
 use crate::id::ObjectId;
 use crate::report::Warning;
 use jiff::Timestamp;
-use script::Script;
+use script::{EXISTS_STATUS, Script};
 use session::{Output, Session, SessionError, SessionSettings, Target};
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -126,6 +126,45 @@ _rc=$?
 printf '@sum %s 0\n\n' "$_h"
 "#;
 
+/// Makes the object's directory and points `$1` at the file `$3` in it, so
+/// that the exclusive-create text which follows works on `$1`.
+const CREATE_EXCLUSIVE_HEAD: &str = r#"mkdir -p "$1/objects/$2" || exit 1
+set -- "$1/objects/$2/$3"
+"#;
+
+/// Writes `$4` to the temp `$3` and checks that `$5` bytes arrived. The
+/// size check is what notices a shell that cut the value short.
+const WRITE_TEMP: &str = r#"mkdir -p "$1/objects/$2" || exit 1
+printf '%s' "$4" > "$1/objects/$2/$3" || exit 1
+_st=$(antiq_stat "$1/objects/$2/$3")
+_rc=$?
+[ "$_rc" -eq 0 ] || exit "$_rc"
+if [ "${_st%% *}" != "$5" ]; then
+    printf 'wrote %s bytes instead of %s\n' "${_st%% *}" "$5" >&2
+    exit 45
+fi
+"#;
+
+/// Moves the temp `$3` to the name `$4` without replacing anything. The
+/// name is looked at before `ln` runs and again when `ln` fails: a name
+/// that is there is 17, any other failure of `ln` is 48 with its message.
+const RENAME_INTO_PLACE: &str = r#"_t="$1/objects/$2/$3"
+_f="$1/objects/$2/$4"
+[ -e "$_t" ] || [ -h "$_t" ] || exit 44
+if [ -e "$_f" ] || [ -h "$_f" ]; then exit 17; fi
+if ! _e=$(ln "$_t" "$_f" 2>&1); then
+    if [ -e "$_f" ] || [ -h "$_f" ]; then exit 17; fi
+    printf '%s\n' "$_e" >&2
+    exit 48
+fi
+rm -f "$_t" || exit 1
+"#;
+
+/// Removes the file `$3` of the object, or of its `.antiq-partial`
+/// directory when `$4` is given.
+const DELETE: &str = r#"rm -f "$1/objects/$2${4:+/.antiq-partial}/$3" || exit 1
+"#;
+
 /// Shell functions every script of the remote starts with. They use
 /// only POSIX `sh` and tools every NAS has.
 ///
@@ -206,6 +245,22 @@ antiq_root_check() {
 }
 "#;
 
+/// Points where a test replaces a step of the production behaviour.
+#[derive(Debug, Clone)]
+pub(crate) struct SshSeams {
+    /// The script text that creates a file and fails when it exists, in
+    /// place of [`script::EXCLUSIVE_CREATE`].
+    pub exclusive_create: &'static str,
+}
+
+impl Default for SshSeams {
+    fn default() -> SshSeams {
+        SshSeams {
+            exclusive_create: script::EXCLUSIVE_CREATE,
+        }
+    }
+}
+
 /// The remote on a NAS reached over ssh.
 pub struct SshRemote {
     session: Session,
@@ -214,6 +269,7 @@ pub struct SshRemote {
     id: ObjectId,
     #[allow(dead_code)] // read by the transfers
     machine: MachineConfig,
+    seams: SshSeams,
 }
 
 /// What a script answered after the root check passed.
@@ -318,7 +374,14 @@ impl SshRemote {
             root,
             id,
             machine,
+            seams: SshSeams::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_seams(mut self, seams: SshSeams) -> SshRemote {
+        self.seams = seams;
+        self
     }
 
     /// A script that starts with the root check. `$1` is the root.
@@ -612,28 +675,72 @@ impl Remote for SshRemote {
     fn get_payload(&self, _id: ObjectId, _name: &str, _to: &Path) -> Result<Transfer, RemoteError> {
         Err(pending())
     }
-    fn create_exclusive(&self, _id: ObjectId, _name: &str) -> Result<Created, RemoteError> {
-        Err(pending())
+    fn create_exclusive(&self, id: ObjectId, name: &str) -> Result<Created, RemoteError> {
+        plain_name(name)?;
+        let body = format!("{CREATE_EXCLUSIVE_HEAD}{}", self.seams.exclusive_create);
+        let script = self.script(&body).arg(id.to_string()).arg(name);
+        let output = self.exec(&script)?;
+        if output.status == EXISTS_STATUS {
+            return Ok(Created::AlreadyExists);
+        }
+        self.answer(output, false, "create")?;
+        Ok(Created::Yes)
     }
-    fn write_temp(&self, _id: ObjectId, _temp: &str, _bytes: &[u8]) -> Result<(), RemoteError> {
-        Err(pending())
+    fn write_temp(&self, id: ObjectId, temp: &str, bytes: &[u8]) -> Result<(), RemoteError> {
+        plain_name(temp)?;
+        let script = self
+            .script(WRITE_TEMP)
+            .arg(id.to_string())
+            .arg(temp)
+            .arg(bytes)
+            .arg(bytes.len().to_string());
+        self.run(&script, false, "write")?;
+        Ok(())
     }
     fn rename_into_place(
         &self,
-        _id: ObjectId,
-        _temp: &str,
-        _name: &str,
+        id: ObjectId,
+        temp: &str,
+        name: &str,
     ) -> Result<Placement, RemoteError> {
-        Err(pending())
+        plain_name(temp)?;
+        plain_name(name)?;
+        let script = self
+            .script(RENAME_INTO_PLACE)
+            .arg(id.to_string())
+            .arg(temp)
+            .arg(name);
+        let output = self.exec(&script)?;
+        match output.status {
+            EXISTS_STATUS => return Ok(Placement::TargetExists),
+            FILE_MISSING => {
+                return Err(RemoteError::Io {
+                    action: "rename",
+                    path: format!("{}/objects/{id}/{temp}", self.root),
+                    source: std::io::ErrorKind::NotFound.into(),
+                });
+            }
+            _ => {}
+        }
+        self.answer(output, false, "rename")?;
+        Ok(Placement::Placed)
     }
     fn put_payload(&self, _upload: &Upload<'_>) -> Result<Transfer, RemoteError> {
         Err(pending())
     }
-    fn delete(&self, _id: ObjectId, _name: &str) -> Result<(), RemoteError> {
-        Err(pending())
+    fn delete(&self, id: ObjectId, name: &str) -> Result<(), RemoteError> {
+        plain_name(name)?;
+        let script = self.script(DELETE).arg(id.to_string()).arg(name);
+        self.run(&script, false, "delete").map(|_| ())
     }
-    fn delete_partial(&self, _id: ObjectId, _name: &str) -> Result<(), RemoteError> {
-        Err(pending())
+    fn delete_partial(&self, id: ObjectId, name: &str) -> Result<(), RemoteError> {
+        plain_name(name)?;
+        let script = self
+            .script(DELETE)
+            .arg(id.to_string())
+            .arg(name)
+            .arg("partial");
+        self.run(&script, false, "delete").map(|_| ())
     }
     fn checksum(&self, id: ObjectId, name: &str) -> Result<String, RemoteError> {
         let answer = self.run_on_file(CHECKSUM, id, name, "hash")?;
@@ -1761,5 +1868,297 @@ mod tests {
         assert!(checksum_of(&[frame("sum", &[])]).is_err());
         assert!(checksum_of(&[frame("sum", &[&ABC.to_uppercase()])]).is_err());
         assert_eq!(checksum_of(&[frame("sum", &[ABC])]).expect("hash"), ABC);
+    }
+
+    // ----- writing -----
+
+    fn far_file(far: &Far, name: &str) -> PathBuf {
+        far.object_dir(OBJECT).join(name)
+    }
+
+    #[test]
+    fn the_first_exclusive_create_makes_the_file_and_the_second_keeps_it() {
+        let far = Far::new();
+        let remote = far.remote();
+        assert_eq!(
+            remote
+                .create_exclusive(object(), "meta.2.claim")
+                .expect("first"),
+            Created::Yes
+        );
+        let claim = far_file(&far, "meta.2.claim");
+        assert_eq!(std::fs::read(&claim).expect("claim"), b"");
+        std::fs::write(&claim, "mine").expect("bytes");
+        assert_eq!(
+            remote
+                .create_exclusive(object(), "meta.2.claim")
+                .expect("second"),
+            Created::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&claim).expect("claim"), b"mine");
+    }
+
+    #[test]
+    fn an_exclusive_create_runs_the_text_of_the_seam() {
+        let far = Far::new();
+        let seams = SshSeams {
+            exclusive_create: "exit 17",
+        };
+        let remote = far.remote().with_seams(seams);
+        assert_eq!(
+            remote.create_exclusive(object(), "fresh").expect("answer"),
+            Created::AlreadyExists
+        );
+        assert!(!far_file(&far, "fresh").exists());
+    }
+
+    #[test]
+    fn a_failing_mkdir_on_the_far_side_is_an_io_error_of_kind_other() {
+        let far = Far::new();
+        far.wrap("mkdir", "echo 'mkdir: denied' >&2; exit 1");
+        let error = far
+            .remote()
+            .create_exclusive(object(), "claim")
+            .expect_err("mkdir fails");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert!(error.to_string().contains("mkdir: denied"), "{error}");
+        assert_eq!(error.kind(), crate::error::ErrorKind::Other);
+    }
+
+    #[test]
+    fn a_temp_file_holds_exactly_the_bytes_given() {
+        let far = Far::new();
+        let bytes: &[u8] = b"line\n'quoted' \"double\" $HOME `x` \\ \xff\n\n";
+        far.remote()
+            .write_temp(object(), ".meta.3.laptop.part", bytes)
+            .expect("written");
+        assert_eq!(
+            std::fs::read(far_file(&far, ".meta.3.laptop.part")).expect("temp"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_temp_file_of_another_size_than_the_bytes_is_an_error() {
+        let far = Far::new();
+        far.wrap(
+            "stat",
+            r#"case "$2" in '%s %Y' | '%z %m') echo "1 0"; exit 0 ;; esac
+exec /usr/bin/stat "$@""#,
+        );
+        let error = far
+            .remote()
+            .write_temp(object(), ".t.part", b"three")
+            .expect_err("size");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert!(
+            error.to_string().contains("wrote 1 bytes instead of 5"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rewriting_a_temp_file_shortens_it() {
+        let far = Far::new();
+        let remote = far.remote();
+        remote
+            .write_temp(object(), ".t.part", b"long content")
+            .expect("first");
+        remote
+            .write_temp(object(), ".t.part", b"short")
+            .expect("second");
+        assert_eq!(
+            std::fs::read(far_file(&far, ".t.part")).expect("temp"),
+            b"short"
+        );
+        remote.write_temp(object(), ".t.part", b"").expect("empty");
+        assert_eq!(std::fs::read(far_file(&far, ".t.part")).expect("temp"), b"");
+    }
+
+    #[test]
+    fn a_nul_byte_is_refused_before_any_script_runs() {
+        let far = Far::new();
+        let remote = far.remote();
+        let error = remote
+            .write_temp(object(), ".t.part", b"a\0b")
+            .expect_err("NUL");
+        assert!(matches!(error, RemoteError::Session(_)), "{error}");
+        assert_eq!(far.commands(), 0);
+    }
+
+    #[test]
+    fn a_temp_is_renamed_into_place_and_its_name_goes() {
+        let far = Far::new();
+        let temp = far_file(&far, ".meta.3.part");
+        std::fs::write(&temp, "v3").expect("temp");
+        let placed = far
+            .remote()
+            .rename_into_place(object(), ".meta.3.part", "meta.3")
+            .expect("renamed");
+        assert_eq!(placed, Placement::Placed);
+        assert_eq!(
+            std::fs::read(far_file(&far, "meta.3")).expect("final"),
+            b"v3"
+        );
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn a_taken_name_is_left_alone_whatever_holds_it() {
+        let far = Far::new();
+        let remote = far.remote();
+        let temp = far_file(&far, ".t.part");
+        std::fs::write(&temp, "new").expect("temp");
+        let final_name = far_file(&far, "taken");
+        for taker in ["file", "directory", "dangling"] {
+            match taker {
+                "file" => std::fs::write(&final_name, "old").expect("file"),
+                "directory" => std::fs::create_dir(&final_name).expect("directory"),
+                _ => std::os::unix::fs::symlink("nowhere", &final_name).expect("symlink"),
+            }
+            let placed = remote
+                .rename_into_place(object(), ".t.part", "taken")
+                .expect("answer");
+            assert_eq!(placed, Placement::TargetExists, "{taker}");
+            assert_eq!(std::fs::read(&temp).expect("temp kept"), b"new", "{taker}");
+            match taker {
+                "file" => assert_eq!(std::fs::read(&final_name).expect("final"), b"old"),
+                "directory" => assert!(final_name.is_dir()),
+                _ => assert_eq!(
+                    std::fs::read_link(&final_name).expect("link"),
+                    Path::new("nowhere")
+                ),
+            }
+            if final_name.is_dir() {
+                std::fs::remove_dir(&final_name).expect("clean");
+            } else {
+                std::fs::remove_file(&final_name).expect("clean");
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_the_far_side_refuses_is_an_io_error_and_never_a_taken_name() {
+        let far = Far::new();
+        let temp = far_file(&far, ".t.part");
+        std::fs::write(&temp, "new").expect("temp");
+        far.wrap("ln", "echo 'ln: Operation not permitted' >&2; exit 1");
+        let error = far
+            .remote()
+            .rename_into_place(object(), ".t.part", "meta.3")
+            .expect_err("ln fails");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert!(
+            error.to_string().contains("Operation not permitted"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&temp).expect("temp stays"), b"new");
+        assert!(!far_file(&far, "meta.3").exists());
+    }
+
+    #[test]
+    fn a_name_taken_while_the_link_is_made_is_a_taken_name() {
+        let far = Far::new();
+        let temp = far_file(&far, ".t.part");
+        std::fs::write(&temp, "new").expect("temp");
+        far.wrap(
+            "ln",
+            "echo rival > \"$2\"; echo 'ln: File exists' >&2; exit 1",
+        );
+        let placed = far
+            .remote()
+            .rename_into_place(object(), ".t.part", "meta.3")
+            .expect("answer");
+        assert_eq!(placed, Placement::TargetExists);
+        assert_eq!(
+            std::fs::read(far_file(&far, "meta.3")).expect("rival"),
+            b"rival\n"
+        );
+        assert_eq!(std::fs::read(&temp).expect("temp kept"), b"new");
+    }
+
+    #[test]
+    fn renaming_a_temp_that_is_not_there_creates_nothing() {
+        let far = Far::new();
+        far.object_dir(OBJECT);
+        let error = far
+            .remote()
+            .rename_into_place(object(), ".nothing.part", "meta.3")
+            .expect_err("missing");
+        assert!(
+            matches!(error, RemoteError::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound),
+            "{error}"
+        );
+        assert!(!far_file(&far, "meta.3").exists());
+    }
+
+    #[test]
+    fn deleting_removes_a_file_and_a_missing_file_counts_as_removed() {
+        let far = Far::new();
+        let remote = far.remote();
+        let file = far_file(&far, "payload.old");
+        std::fs::write(&file, "x").expect("file");
+        remote.delete(object(), "payload.old").expect("deleted");
+        assert!(!file.exists());
+        remote.delete(object(), "payload.old").expect("again");
+        remote
+            .delete("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("id"), "x")
+            .expect("object without directory");
+    }
+
+    #[test]
+    fn deleting_a_directory_is_an_io_error() {
+        let far = Far::new();
+        std::fs::create_dir(far_file(&far, "dir")).expect("dir");
+        let error = far.remote().delete(object(), "dir").expect_err("directory");
+        assert!(matches!(error, RemoteError::Io { .. }), "{error}");
+        assert!(far_file(&far, "dir").is_dir());
+    }
+
+    #[test]
+    fn a_partial_file_is_deleted_from_the_partial_directory_only() {
+        let far = Far::new();
+        let partial = far_file(&far, ".antiq-partial");
+        std::fs::create_dir(&partial).expect("dir");
+        std::fs::write(partial.join(".t.part"), "half").expect("partial");
+        std::fs::write(far_file(&far, ".t.part"), "other").expect("object file");
+        let remote = far.remote();
+        remote.delete_partial(object(), ".t.part").expect("deleted");
+        assert!(!partial.join(".t.part").exists());
+        assert!(far_file(&far, ".t.part").exists());
+        remote.delete_partial(object(), ".t.part").expect("again");
+    }
+
+    #[test]
+    fn writing_refuses_names_that_reach_outside_the_directory() {
+        let far = Far::new();
+        let remote = far.remote();
+        for name in ["", ".", "..", "a/b", "../x"] {
+            assert!(matches!(
+                remote.create_exclusive(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.write_temp(object(), name, b"x"),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.rename_into_place(object(), name, "x"),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.rename_into_place(object(), "x", name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.delete(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                remote.delete_partial(object(), name),
+                Err(RemoteError::InvalidName { .. })
+            ));
+        }
+        assert_eq!(far.commands(), 0);
     }
 }
