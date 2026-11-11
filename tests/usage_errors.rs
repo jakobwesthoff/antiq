@@ -41,6 +41,38 @@ fn a_forced_colour_gives_a_pipe_no_escape_sequence_in_a_usage_error() {
 }
 
 #[test]
+fn a_newline_in_an_unexpected_argument_cannot_forge_a_line_of_the_error() {
+    let run = Antiq::new().args(["status", "a\nerror: forged"]).run();
+    assert_eq!(run.code(), 2);
+    let errors = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("error: "))
+        .count();
+    assert_eq!(errors, 1, "{:?}", run.stderr);
+    assert!(run.stderr.contains("a%0Aerror: forged"), "{:?}", run.stderr);
+}
+
+#[test]
+fn a_bidi_control_and_a_carriage_return_in_an_unexpected_argument_are_escaped_in_the_json_message()
+{
+    let run = Antiq::new()
+        .args(["--json", "status", "a\u{202e}b\rc"])
+        .run();
+    assert_eq!(run.code(), 2);
+    let message = run.error_message();
+    assert!(message.contains("a%E2%80%AEb%0Dc"), "{message:?}");
+}
+
+#[test]
+fn an_unknown_command_with_a_control_character_is_escaped_in_the_message() {
+    let run = Antiq::new().args(["--json", "x\ny\n\nz"]).run();
+    assert_eq!(run.code(), 2);
+    let message = run.error_message();
+    assert!(message.contains("x%0Ay%0A%0Az"), "{message:?}");
+}
+
+#[test]
 fn a_forced_colour_gives_a_pipe_no_escape_sequence_in_help_or_version() {
     for flag in ["--help", "--version"] {
         let run = Antiq::new().env("CLICOLOR_FORCE", "1").arg(flag).run();

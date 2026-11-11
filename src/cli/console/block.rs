@@ -5,6 +5,7 @@
 //! The message blocks: error, warning, info, hint and the dry-run line.
 
 use super::rich::Rich;
+use antiq::shown::escape_controls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -96,7 +97,7 @@ impl Block {
     /// The one line a pipe gets for this block, whatever the kind. Scripts
     /// read it, so it keeps the wording they match on.
     pub fn pipe(mut self, line: &str) -> Block {
-        self.pipe = Some(line.to_string());
+        self.pipe = Some(escape_controls(line));
         self
     }
 
@@ -104,7 +105,7 @@ impl Block {
     /// it prints this text as written, backticks included, which is the
     /// message that `--json` carries.
     pub fn message(mut self, message: &str) -> Block {
-        self.message = Some(message.to_string());
+        self.message = Some(escape_controls(message));
         self
     }
 
@@ -129,7 +130,7 @@ impl Block {
     /// A paragraph of the "What <program> said" section of an error, which
     /// follows "How to fix it".
     pub fn program_said(mut self, program: &str, paragraph: impl Into<Para>) -> Block {
-        self.said_by = Some(program.to_string());
+        self.said_by = Some(escape_controls(program));
         self.said.push(paragraph.into());
         self
     }
@@ -144,7 +145,7 @@ impl Block {
     /// A step the run was in when an error stopped it, as the rest of the
     /// sentence "Attempting to ...". Steps are given innermost first.
     pub fn doing(mut self, phrase: &str) -> Block {
-        self.doing.push(phrase.to_string());
+        self.doing.push(escape_controls(phrase));
         self
     }
 
@@ -152,7 +153,7 @@ impl Block {
     /// `candidate:` lines. A terminal shows none: the caller prints a
     /// table of the matches under the block.
     pub fn candidate(mut self, path: &str) -> Block {
-        self.candidates.push(path.to_string());
+        self.candidates.push(escape_controls(path));
         self
     }
 }

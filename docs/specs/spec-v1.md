@@ -2304,7 +2304,10 @@ U+202E and U+2066 to U+2069, and U+2028 and U+2029. A `%` in a name is written
 `%25` and a byte that is not UTF-8 `%XX`, so the shown form of a name is
 unambiguous and stands for exactly one sequence of bytes. This holds for the
 result lines of every command, the `Would ...` lines of a dry run, the notes
-and warnings, and the findings of `status`. `--json` carries the structured
+and warnings, the findings of `status`, and errors in every part (the title,
+the text, "How to fix it", the steps the run was in, the candidates and the
+lines that rsync and other programs said), also the usage errors that echo
+an argument of the command line. `--json` carries the structured
 fields (`piece`, `path`, `candidates` and the like) unchanged, as JSON strings,
 and the `message` and `fix` of errors and warnings in the shown form. `grep` is the exception: on a terminal its paths
 use the comment-line escapes of a listing, and in a pipe its lines carry the

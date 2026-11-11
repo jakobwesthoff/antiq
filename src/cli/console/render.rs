@@ -11,6 +11,7 @@ use super::rich::{Rich, Role, Word};
 use super::symbols::Symbols;
 use super::theme;
 use anstyle::Style;
+use antiq::shown::escape_controls;
 use unicode_width::UnicodeWidthStr;
 
 /// Prose is never wrapped wider than this, however wide the terminal is.
@@ -324,9 +325,10 @@ impl Block {
                     lines.push(bar.line(&format!("  {line}")));
                 }
             }
-            Para::Pre(line) => {
-                lines.push(bar.line(&format!("  {}", paint(env, theme::BOLD, line))))
-            }
+            Para::Pre(line) => lines.push(bar.line(&format!(
+                "  {}",
+                paint(env, theme::BOLD, &escape_controls(line))
+            ))),
             Para::Blank => lines.push(bar.line("")),
         }
     }
@@ -390,7 +392,7 @@ impl Block {
 fn plain_paragraph(paragraph: &Para) -> Option<String> {
     match paragraph {
         Para::Text(text) => Some(text.to_plain()),
-        Para::Pre(line) => Some(line.clone()),
+        Para::Pre(line) => Some(escape_controls(line)),
         Para::Blank => None,
     }
 }

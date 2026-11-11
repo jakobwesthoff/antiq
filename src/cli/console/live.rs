@@ -13,6 +13,7 @@ use crate::cli::console::cards::{Cards, Config, Msg, Ready};
 use crate::cli::console::reflow::{Reflow, rows_to_climb};
 use crate::cli::output::{Output, SizeSource};
 use antiq::progress::{Event, Observer};
+use antiq::shown::first_raw_character;
 use std::io;
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -177,6 +178,16 @@ impl<'o> Driver<'o> {
         } else {
             Vec::new()
         };
+        // These lines go out as raw bytes together with the cursor sequences
+        // of the region, past the check of `Output::line`, so they are
+        // checked here.
+        for line in lines.iter().chain(&region) {
+            debug_assert!(
+                first_raw_character(line).is_none(),
+                "a raw {:?} reached the live output in {line:?}",
+                first_raw_character(line)
+            );
+        }
         if lines.is_empty()
             && region == self.shown
             && (self.shown.is_empty() || size == self.last_size)

@@ -566,3 +566,72 @@ fn the_title_of_a_block_starts_with_a_capital_in_the_rich_form_only() {
     );
     assert_eq!(Rich::new().capitalised(), Rich::new());
 }
+
+// =========================================================
+// Names with characters that a terminal acts on
+// =========================================================
+
+#[test]
+fn text_in_a_rich_value_shows_a_control_character_escaped() {
+    assert_eq!(Rich::new().text("a\nb").to_plain(), "a%0Ab");
+    assert_eq!(Rich::new().cmd("a\u{202e}b").to_plain(), "a%E2%80%AEb");
+    assert_eq!(Rich::parse("`x\x1b[31m`").to_plain(), "x%1B[31m");
+}
+
+#[test]
+fn the_styling_of_antiq_survives_while_the_escape_of_a_name_does_not() {
+    let block = Block::error(Rich::new().cmd("a\x1b[2Jb"));
+    let lines = block.render(&colored());
+    assert!(lines[1].contains("\x1b[1ma%1B[2Jb\x1b[0m"), "{lines:?}");
+}
+
+#[test]
+fn a_pipe_line_message_and_candidate_of_a_block_show_a_control_character_escaped() {
+    let block = Block::error(rich("title"))
+        .message("cannot read a\nerror: forged")
+        .candidate("p\nq");
+    assert_eq!(
+        block.render_plain(),
+        [
+            "error: cannot read a%0Aerror: forged",
+            "    candidate: p%0Aq"
+        ]
+    );
+    let piped = Block::warning(rich("w")).pipe("warning: x\ny");
+    assert_eq!(piped.render_plain(), ["warning: x%0Ay"]);
+}
+
+#[test]
+fn a_preformatted_line_a_step_and_the_words_of_a_program_show_a_control_character_escaped() {
+    let block = Block::error(rich("title"))
+        .program_said("rsync\n", Para::pre("said\nsomething"))
+        .doing("read a\nb");
+    assert_eq!(
+        block.render_plain(),
+        [
+            "error: title",
+            "  rsync%0A said: said%0Asomething",
+            "  while attempting to read a%0Ab"
+        ]
+    );
+    let lines = block.render(&bare(80));
+    assert!(lines.iter().all(|line| !line.contains('\n')), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("said%0Asomething")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Attempting to read a%0Ab."))
+    );
+}
+
+#[test]
+fn a_preformatted_paragraph_built_by_hand_is_escaped_when_it_is_drawn() {
+    let direct = Block::warning(rich("w")).text(Para::Pre("x\ny".to_string()));
+    assert!(
+        direct
+            .render(&bare(80))
+            .iter()
+            .any(|line| line.ends_with("x%0Ay"))
+    );
+    assert_eq!(direct.render_plain(), ["warning: w", "  x%0Ay"]);
+}

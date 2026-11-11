@@ -9,7 +9,7 @@ use crate::collection::Collection;
 use crate::filesystem::FilesystemError;
 use crate::filesystem::device::{self, FsKind};
 use crate::lock::{self, Holder};
-use crate::shown::escape_controls;
+use crate::shown::{escape_controls, escape_lines};
 use miette::Diagnostic;
 use serde::Serialize;
 use serde::ser::SerializeMap;
@@ -116,7 +116,7 @@ impl Serialize for Warning {
         }
         object.serialize_entry("message", &self.message)?;
         if let Some(help) = self.kind.as_ref().and_then(|kind| kind.help()) {
-            object.serialize_entry("fix", &escape_controls(&help.to_string()))?;
+            object.serialize_entry("fix", &escape_lines(&help.to_string()))?;
         }
         object.end()
     }
@@ -280,10 +280,10 @@ mod tests {
     fn the_fix_of_a_warning_in_json_is_escaped() {
         let warning = Warning::of(WarningKind::SkillOutdated {
             message: "old".into(),
-            fix: "copy to a\nb".into(),
+            fix: "copy to a\tb\n\nthen \x1b[2J".into(),
         });
         let json = serde_json::to_value(&warning).expect("a warning serialises");
-        assert_eq!(json["fix"], "copy to a%0Ab");
+        assert_eq!(json["fix"], "copy to a%09b\n\nthen %1B[2J");
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //! Text with a few styled spans, written once and rendered for any
 //! environment.
 
+use antiq::shown::escape_controls;
+
 /// What a span of text is, which decides how it looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -71,9 +73,12 @@ impl Rich {
         rich.text(rest)
     }
 
+    /// Adds a span. Its text can hold a name from the user's files, so a
+    /// character that a terminal acts on is escaped here, before any width
+    /// is counted and before the look of the span is added around it.
     fn push(mut self, role: Role, text: &str) -> Rich {
         if !text.is_empty() {
-            self.spans.push((role, text.to_string()));
+            self.spans.push((role, escape_controls(text)));
         }
         self
     }

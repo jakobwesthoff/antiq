@@ -51,6 +51,39 @@ pub fn escape_controls(text: &str) -> String {
     shown
 }
 
+/// `text` without its SGR sequences, `ESC [`, digits and semicolons, `m`:
+/// the styling antiq writes itself. Any other escape sequence stays, so a
+/// cursor movement or a screen erase is still found in it.
+pub fn strip_sgr(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        plain.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let digits = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit() || *byte == b';')
+            .count();
+        if after.as_bytes().get(digits) == Some(&b'm') {
+            rest = &after[digits + 1..];
+        } else {
+            plain.push_str("\x1b[");
+            rest = after;
+        }
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// The first character of `line` that no text line of antiq holds: one of
+/// the escaped class after the SGR sequences are taken out, other than the
+/// tab of a pipe table. Lines are written without their line end.
+pub fn first_raw_character(line: &str) -> Option<char> {
+    strip_sgr(line)
+        .chars()
+        .find(|character| is_escaped(*character) && *character != '\t')
+}
+
 /// What [`Shown`] can show: a raw name as the bytes the filesystem holds.
 pub trait Named {
     fn name_bytes(&self) -> &[u8];
@@ -184,6 +217,17 @@ pub fn serialize_lossy<P: AsRef<Path>, S: serde::Serializer>(
     serializer.serialize_str(&path.as_ref().to_string_lossy())
 }
 
+/// `text` of several lines with the escaped characters written out, its
+/// line breaks kept. For a help text, whose paragraphs a break separates:
+/// a name in it has to be escaped where the text is made, since a break in
+/// a name cannot be told from one between paragraphs here.
+pub fn escape_lines(text: &str) -> String {
+    text.split('\n')
+        .map(escape_controls)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The positions `matched` (counted in characters of `raw`) as positions in
 /// `escape_controls(raw)`. A character that is escaped takes several
 /// positions; one that was matched marks all of them.
@@ -207,11 +251,40 @@ pub fn positions(raw: &str, matched: &[usize]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shown, ansi_c, escape_controls, positions, shell_word};
+    use super::{
+        Shown, ansi_c, escape_controls, escape_lines, first_raw_character, positions, shell_word,
+        strip_sgr,
+    };
     use crate::relpath::RelPath;
     use std::ffi::OsStr;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::path::Path;
+
+    #[test]
+    fn sgr_sequences_are_stripped() {
+        assert_eq!(strip_sgr("\x1b[1;38;2;1;2;3mab\x1b[0m c"), "ab c");
+        assert_eq!(strip_sgr("\x1b[mx"), "x");
+    }
+
+    #[test]
+    fn a_sequence_that_is_no_sgr_stays() {
+        assert_eq!(strip_sgr("\x1b[2Jxm"), "\x1b[2Jxm");
+        assert_eq!(strip_sgr("\x1b[31"), "\x1b[31");
+        assert_eq!(strip_sgr("\x1b[1Am"), "\x1b[1Am");
+    }
+
+    #[test]
+    fn styled_text_and_tabs_hold_no_raw_character() {
+        assert_eq!(first_raw_character("\x1b[1mname\x1b[0m\tx"), None);
+    }
+
+    #[test]
+    fn a_raw_control_or_bidi_character_is_found() {
+        assert_eq!(first_raw_character("a\nb"), Some('\n'));
+        assert_eq!(first_raw_character("\x1b[2Jm"), Some('\x1b'));
+        assert_eq!(first_raw_character("x\u{202e}"), Some('\u{202e}'));
+        assert_eq!(first_raw_character("\x1b[1m\x1b[31"), Some('\x1b'));
+    }
 
     #[test]
     fn a_plain_word_stays_a_plain_word() {
@@ -337,6 +410,15 @@ mod tests {
         assert_eq!(escape_controls("a\x7fb"), "a%7Fb");
         // U+0085 is a control character that takes two bytes in UTF-8.
         assert_eq!(escape_controls("x\u{85}y"), "x%C2%85y");
+    }
+
+    #[test]
+    fn escape_lines_keeps_the_line_breaks_and_escapes_the_rest() {
+        assert_eq!(
+            escape_lines("a\n\n  b\x1b\tc\r\nd"),
+            "a\n\n  b%1B%09c%0D\nd"
+        );
+        assert_eq!(escape_lines(""), "");
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::cli::console::render::{Part, render_blocks, render_parts};
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::Notice;
 use antiq::error::ErrorKind;
-use antiq::shown::escape_controls;
+use antiq::shown::{escape_controls, first_raw_character};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::ffi::OsStr;
@@ -43,7 +43,21 @@ impl Sink {
         }
     }
 
+    /// Writes a line of text. A name from the user's files reaches it in the
+    /// shown form of `antiq::shown`, so a raw control character in `line` is
+    /// a value that skipped the rule; a debug build stops there.
     fn write_line(&mut self, line: &str) -> io::Result<()> {
+        debug_assert!(
+            first_raw_character(line).is_none(),
+            "a raw {:?} reached the output in {line:?}",
+            first_raw_character(line)
+        );
+        self.write_line_bytes(line.as_bytes())
+    }
+
+    /// Writes a line of JSON. The structured fields carry names as they are,
+    /// so JSON is no text line in the sense of `write_line`.
+    fn write_json_line(&mut self, line: &str) -> io::Result<()> {
         self.write_line_bytes(line.as_bytes())
     }
 
@@ -300,7 +314,7 @@ impl Output {
         };
         let line = serde_json::to_string(&envelope)
             .expect("an envelope of plain data and string keys always serialises");
-        self.stdout.write_line(&line)
+        self.stdout.write_json_line(&line)
     }
 
     /// Writes the error object of a failed run to stdout.
@@ -814,6 +828,31 @@ mod tests {
         assert_eq!(
             capture.stdout(),
             "○ would archive  notes/two  spaces /and trailing \n"
+        );
+    }
+
+    #[test]
+    fn styling_and_the_tab_of_a_pipe_table_pass_the_check_of_a_line() {
+        let capture = Capture::default();
+        let mut out = capture.output();
+        out.line("\x1b[1mpiece\x1b[0m\tstamp")
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "\x1b[1mpiece\x1b[0m\tstamp\n");
+    }
+
+    #[test]
+    fn json_with_a_name_of_the_escaped_class_is_no_text_line_and_passes() {
+        let capture = Capture::default();
+        let mut out = capture.output();
+        out.json(
+            Some("find"),
+            &serde_json::json!({"piece": "a\u{202e}b\u{85}"}),
+        )
+        .expect("memory accepts writes");
+        assert!(
+            capture.stdout().contains("a\u{202e}b\u{85}"),
+            "{:?}",
+            capture.stdout()
         );
     }
 

@@ -513,6 +513,20 @@ fn the_commands_of_a_refused_push_carry_the_directory_option_on_a_console_only()
 }
 
 #[test]
+fn the_json_fix_of_a_refused_push_keeps_the_line_breaks_between_its_paragraphs() {
+    let collection = stored(&[STAMP]);
+    collection.damage_remove_listing("projects/a", STAMP);
+
+    let fix = push(&collection, &[]).error_fix();
+
+    assert!(
+        fix.starts_with("Repair or remove these versions first:\n\n  projects/a "),
+        "{fix:?}"
+    );
+    assert!(!fix.contains("%0A"), "{fix:?}");
+}
+
+#[test]
 fn an_archive_of_the_wrong_size_is_forgotten_or_copied_back() {
     let collection = stored(&[STAMP]);
     collection.damage_truncate_archive("projects/a", STAMP);

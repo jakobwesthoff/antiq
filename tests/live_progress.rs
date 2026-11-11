@@ -119,6 +119,44 @@ fn archive_leaves_one_finished_line_per_piece_and_the_summary() {
 }
 
 #[test]
+fn archive_shows_a_hostile_piece_name_escaped_in_the_cards_and_the_finished_lines() {
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["projects/*"]);
+    for name in [
+        "projects/ev\x1b[2Jil",
+        "projects/two\nlines",
+        "projects/100%",
+    ] {
+        builder.piece(name, |piece| {
+            piece.age_days(40).file("src/main.rs", "fn main() {}\n");
+        });
+    }
+    let world = World::new(Setup::new(builder.finish()), Mode::Text);
+
+    let run = world.run_tty_sized(&["archive"], 100, 24, &[]);
+
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    for shown in [
+        "projects/ev%1B[2Jil",
+        "projects/two%0Alines",
+        "projects/100%25",
+    ] {
+        let found = lines
+            .iter()
+            .filter(|line| line.starts_with(&format!("  ✔ {shown} ")))
+            .count();
+        assert_eq!(found, 1, "{shown} in {lines:#?}");
+    }
+    assert!(
+        !run.stdout.contains("\x1b[2Jil") && !run.stdout.contains("two\nlines"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
 fn archive_with_more_pieces_than_rows_keeps_every_line_in_the_scrollback() {
     let world = archive_world(12);
     let run = world.run_tty_sized(&["archive"], 100, 8, &[]);

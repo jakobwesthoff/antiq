@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Error output shows a path or name with a control character, a bidi
+  control or U+2028 and U+2029 in the same escaped form as the result
+  lines, in the title, the text, "How to fix it", the candidates and the
+  lines that rsync and other programs said, and in the usage error for an
+  argument of the command line. A newline in a name could forge a line of
+  an error, such as an `error:` line in a pipe. The lines of a regex error
+  of `grep` are one line in a pipe, joined by `%0A`
 - `import -n` lists an ignored folder once when an ignored name sorts
   between the folder and its content, such as `cache.log` next to
   `cache/`. The content of the folder was listed as well

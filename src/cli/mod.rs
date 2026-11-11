@@ -22,7 +22,7 @@ use self::console::rich::Rich;
 use self::output::{ErrorReport, Output};
 use antiq::commands::forget::{self, Which};
 use antiq::error::ErrorKind;
-use antiq::shown::Shown;
+use antiq::shown::{Shown, escape_controls, escape_lines};
 use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{Map, Value};
@@ -274,7 +274,40 @@ pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
             let result = dispatch(&cli, out);
             finish(&cli, result, out)
         }
-        Err(error) => report_usage_error(&error, &args, out),
+        Err(error) => report_usage_error(&escaped_usage_error(error, &args), &args, out),
+    }
+}
+
+/// `error` for a command line whose arguments hold no character of the
+/// escaped class. clap puts an argument that it does not know into the
+/// message as it is, and the lines of the message are split and cut at
+/// blank lines afterwards, so an argument with a newline can forge a line
+/// before anything could escape it. The arguments are therefore escaped
+/// first and parsed again, which gives the same error over escaped text.
+fn escaped_usage_error(error: clap::Error, args: &[OsString]) -> clap::Error {
+    let escaped: Vec<OsString> = args
+        .iter()
+        .map(|arg| OsString::from(escape_controls(&arg.to_string_lossy())))
+        .collect();
+    if escaped == args {
+        return error;
+    }
+    safe_usage_error(error, Cli::try_parse_from(&escaped).err())
+}
+
+/// The error of the escaped command line when it is of the same kind as
+/// the original. Any other outcome, the escaped arguments parsing or
+/// failing differently, leaves the original kind and exit code with its
+/// message on one line, escaped.
+fn safe_usage_error(original: clap::Error, reparsed: Option<clap::Error>) -> clap::Error {
+    match reparsed {
+        Some(error) if error.kind() == original.kind() => error,
+        _ => {
+            let rendered = original.render().to_string();
+            let text = rendered.trim_end();
+            let text = text.strip_prefix("error: ").unwrap_or(text);
+            clap::Error::raw(original.kind(), escape_controls(text))
+        }
     }
 }
 
@@ -400,7 +433,7 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
             }),
         );
         if let Some(warning) = &note.warning {
-            details.insert("log_warning".into(), Value::from(warning.clone()));
+            details.insert("log_warning".into(), Value::from(escape_controls(warning)));
         }
     }
     // When the output itself fails there is nowhere left to report that.
@@ -408,6 +441,10 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
         let explained = description
             .library_error
             .and_then(|error| antiq::error::explanation(error));
+        // The library words names by the rule already. Text from other
+        // programs and libraries, such as an rsync reason or a regex error,
+        // reaches the message as it is, so the message is escaped once more.
+        let message = escape_controls(&description.root);
         out.json_error(
             Some(cli.command.name()),
             &ErrorReport {
@@ -415,10 +452,10 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
                 code: explained
                     .and_then(|link| link.code())
                     .map(|code| code.to_string()),
-                message: &description.root,
+                message: &message,
                 fix: explained
                     .and_then(|link| link.help())
-                    .map(|help| help.to_string()),
+                    .map(|help| escape_lines(&help.to_string())),
                 details: &details,
             },
         )
@@ -652,6 +689,43 @@ mod tests {
         let mut line = vec!["antiq"];
         line.extend_from_slice(args);
         Cli::try_parse_from(line).expect("the arguments are valid")
+    }
+
+    #[test]
+    fn a_usage_error_without_a_matching_second_error_is_one_escaped_line_of_the_same_kind() {
+        let original =
+            Cli::try_parse_from(["antiq", "a\nerror: forged"]).expect_err("an unknown command");
+        let kind = original.kind();
+        let code = original.exit_code();
+        let safe = safe_usage_error(original, None);
+        assert_eq!(safe.kind(), kind);
+        assert_eq!(safe.exit_code(), code);
+        let text = safe.render().to_string();
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("error: "))
+                .count(),
+            1
+        );
+        assert!(text.contains("a%0Aerror: forged"), "{text:?}");
+    }
+
+    #[test]
+    fn the_second_error_replaces_the_first_when_both_are_of_one_kind() {
+        let original = Cli::try_parse_from(["antiq", "a\nb"]).expect_err("an unknown command");
+        let second = Cli::try_parse_from(["antiq", "a%0Ab"]).expect_err("an unknown command");
+        let safe = safe_usage_error(original, Some(second));
+        assert!(safe.render().to_string().contains("'a%0Ab'"));
+    }
+
+    #[test]
+    fn a_second_error_of_another_kind_falls_back_to_the_escaped_first() {
+        let original = Cli::try_parse_from(["antiq", "a\nb"]).expect_err("an unknown command");
+        let other =
+            Cli::try_parse_from(["antiq", "status", "--bad"]).expect_err("an unknown argument");
+        let safe = safe_usage_error(original, Some(other));
+        assert_eq!(safe.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(safe.render().to_string().contains("a%0Ab"));
     }
 
     fn finish_captured(cli: &Cli, result: anyhow::Result<u8>) -> (u8, String, String) {
