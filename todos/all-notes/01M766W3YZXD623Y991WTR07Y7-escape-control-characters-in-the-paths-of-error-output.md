@@ -34,10 +34,7 @@ says.
 ## Suggested fix
 
 Escape inside `Rich` (`push`) and `Block` (`pipe`, `message`,
-`Para::Pre`, `said`, `doing`, `candidates`) with the function the
-dry-run lines use, so that every block escapes. Update the spec's
-"Console output" section.
-
-## Relations
-
-- Relates to: [Escape control characters in the paths of dry-run and result lines](01M766J1GKEWA4XD9Q4M30V06R-escape-control-characters-in-the-paths-of-dry-run-and-result-lines.md), same escaping for the lines of a successful run
+`Para::Pre`, `said`, `doing`, `candidates`) with `sanitize` from
+`src/cli/table.rs`, which the dry-run lines, result lines, notes and
+warnings already use, so that every block escapes. Extend the general
+rule in the spec's "Console output" section to error output.
