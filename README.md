@@ -222,7 +222,7 @@ antiq find
 antiq find scan
 ```
 
-![antiq find shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq find scan shows only scan-old and scanner](docs/pages/assets/shots/find.png)
+![antiq find shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq find scan shows only scan-old and scanner with the letters of scan in red](docs/pages/assets/shots/find.png)
 *`find` shows the whole archive, a search word narrows it*
 
 ### Searching inside the archives
@@ -286,7 +286,7 @@ antiq archive scanner
 antiq find scanner
 ```
 
-![antiq find scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
+![antiq find scanner shows two versions of scanner with the name in red](docs/pages/assets/shots/versions.png)
 *the two versions of `scanner`*
 
 > [!TIP]
@@ -320,7 +320,7 @@ antiq import ~/old-disk/pixel-clock
 antiq find pixel-clock
 ```
 
-![antiq import packs pixel-clock as a version from March 2025, and antiq find pixel-clock shows that version](docs/pages/assets/shots/import.png)
+![antiq import packs pixel-clock as a version from March 2025, and antiq find pixel-clock shows that version with the name in red](docs/pages/assets/shots/import.png)
 *`import` names the version by the newest file, here from March 2025*
 
 The piece takes the folder's name, or the path given with `--as`, such as

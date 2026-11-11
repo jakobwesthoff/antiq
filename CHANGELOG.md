@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not show. The `--json` envelope carries `"command": "find"` instead of
   `"command": "list"`, also for a run through `list`, so a script that
   checks for `list` has to change
-- `list` marks the letters of each piece path that the query matched in
+- `find` marks the letters of each piece path that the query matched in
   bold red on a terminal with colour. The output without colour, in a
   pipe and with `--json` is unchanged
 
