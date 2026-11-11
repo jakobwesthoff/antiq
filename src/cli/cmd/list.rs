@@ -62,7 +62,17 @@ const LEAST_PIECE_WIDTH: usize = 8;
 
 fn render(report: &ListReport, query: Option<&str>, style: Style, zone: &TimeZone) -> Lines {
     let stdout = if style.terminal {
-        table(&report.versions, style, zone, None)
+        // Without colour a marked letter looks like any other, so the
+        // matching is skipped.
+        let looks = match query {
+            Some(text) if style.color => piece_looks(&mut Query::parse(text), &report.versions),
+            _ => Vec::new(),
+        };
+        let marking = (!looks.is_empty()).then_some(Marking {
+            looks: &looks,
+            marker: None,
+        });
+        table(&report.versions, style, zone, marking.as_ref())
     } else {
         report.versions.iter().map(pipe_line).collect()
     };
@@ -164,8 +174,8 @@ pub(in crate::cli) fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<Strin
     labels
 }
 
-/// How a table draws a row that is not an ordinary row of a listing. The
-/// tables of an ambiguous reference use it to show which rows matched.
+/// How a table draws a row beyond its plain form: the letters a search
+/// matched, and for an ambiguous reference which rows are the matches.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::cli) struct RowLook {
     /// The row is one of the matches.
@@ -559,6 +569,102 @@ mod tests {
             lines[2],
             format!("tools/{matched}scan{off}-old     2026-11-05 13:02:11   179 B       2")
         );
+    }
+
+    fn coloured() -> Style {
+        Style {
+            color: true,
+            ..TERMINAL
+        }
+    }
+
+    fn matched() -> String {
+        format!("{}", crate::cli::console::theme::MATCH)
+    }
+
+    fn starts_with(line: &str, expected: &str) {
+        assert!(line.starts_with(expected), "{line:?}");
+    }
+
+    #[test]
+    fn the_letters_of_a_piece_that_the_query_matched_are_red_on_a_coloured_terminal() {
+        let lines = render(&example(), Some("scan"), coloured(), &plus_one());
+        let (matched, off) = (matched(), "\x1b[0m");
+        starts_with(
+            &lines.stdout[1],
+            &format!("projects/{matched}scan{off}ner   2026-11-04 10:02:11"),
+        );
+        starts_with(
+            &lines.stdout[2],
+            &format!("projects/{matched}scan{off}ner "),
+        );
+        starts_with(
+            &lines.stdout[3],
+            &format!("tools/{matched}scan{off}-old     2025"),
+        );
+    }
+
+    #[test]
+    fn every_word_of_the_query_is_marked() {
+        let lines = render(&example(), Some("proj scan"), coloured(), &plus_one());
+        let (matched, off) = (matched(), "\x1b[0m");
+        starts_with(
+            &lines.stdout[1],
+            &format!("{matched}proj{off}ects/{matched}scan{off}ner "),
+        );
+    }
+
+    #[test]
+    fn without_colour_a_query_leaves_the_table_and_the_pipe_form_as_they_are() {
+        for style in [TERMINAL, PIPE] {
+            let with = render(&example(), Some("scan"), style, &plus_one());
+            let without = render(&example(), None, style, &plus_one());
+            assert_eq!(with, without);
+        }
+    }
+
+    #[test]
+    fn a_query_of_negated_words_marks_nothing() {
+        let plain = render(&example(), None, coloured(), &plus_one());
+        for query in ["!old", "!", "  "] {
+            let lines = render(&example(), Some(query), coloured(), &plus_one());
+            assert_eq!(lines.stdout, plain.stdout, "{query:?}");
+        }
+        let lines = render(&example(), Some("scan !old"), coloured(), &plus_one());
+        let (matched, off) = (matched(), "\x1b[0m");
+        let marked = format!("projects/{matched}scan{off}ner ");
+        let shown = &lines.stdout[1];
+        assert!(shown.starts_with(&marked), "{shown:?}");
+    }
+
+    #[test]
+    fn a_piece_cut_short_shows_no_highlight_and_a_whole_one_does() {
+        let long = format!("projects/{}-old", "x".repeat(60));
+        let versions = vec![
+            sound(&long, "2026-11-04T090211", 5, 1),
+            sound("old", "2026-11-04T090211", 5, 1),
+        ];
+        let style = Style {
+            width: 70,
+            ..coloured()
+        };
+        let lines = render(&report(versions), Some("old"), style, &plus_one());
+        let (matched, off) = (matched(), "\x1b[0m");
+        assert!(lines.stdout[1].contains('…'), "{:?}", lines.stdout[1]);
+        assert!(!lines.stdout[1].contains(&matched), "{:?}", lines.stdout[1]);
+        let whole = format!("{matched}old{off} ");
+        assert!(lines.stdout[2].starts_with(&whole), "{:?}", lines.stdout[2]);
+    }
+
+    #[test]
+    fn the_matched_letters_of_an_escaped_piece_are_marked_where_they_are_shown() {
+        let mut tabbed = sound("a", "2026-11-04T090211", 5, 1);
+        tabbed.piece = RelPath::from_bytes(b"a\tb/scanner".to_vec()).expect("a valid path");
+        let lines = render(&report(vec![tabbed]), Some("scan"), coloured(), &plus_one());
+        let (matched, off) = (matched(), "\x1b[0m");
+        let escaped = format!("a%09b/{matched}scan{off}ner ");
+        let shown = &lines.stdout[1];
+        assert!(shown.starts_with(&escaped), "{shown:?}");
     }
 
     #[test]

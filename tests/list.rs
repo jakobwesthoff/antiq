@@ -91,6 +91,38 @@ fn a_terminal_gets_the_table_in_local_time() {
 }
 
 #[test]
+fn a_coloured_terminal_marks_the_letters_the_query_matched() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run_tty(&["list", "scan"]);
+    run.expect_code(0);
+    assert!(
+        run.stdout
+            .contains("projects/\x1b[1m\x1b[31mscan\x1b[0mner"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("tools/\x1b[1m\x1b[31mscan\x1b[0m-old"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_terminal_without_colour_shows_the_table_of_a_query_unmarked() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run_tty_env(&["list", "scan"], &[("NO_COLOR", "1")]);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('\x1b'), "{:?}", run.stdout);
+    assert!(
+        run.stdout
+            .contains("projects/scanner   2026-11-04 22:02:11"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
 fn json_carries_utc_sizes_counts_and_the_stamp() {
     let world = world(Mode::Json, three_versions);
     let run = world.run(&["list"]);

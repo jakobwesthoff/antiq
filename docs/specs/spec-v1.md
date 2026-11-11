@@ -1413,6 +1413,10 @@ projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
 tools/scan-old     2025-02-11 19:40:07    40 MB      812
 ```
 
+On a terminal with colour, the letters of each piece path that the query
+matched are bold red. A piece path shortened to fit the width shows none.
+Without colour the table is the same with or without a query.
+
 The header row is dim and has no rule under it. The header of a column of
 numbers sits at the right edge of the column, over its right-aligned values.
 Without a terminal there is

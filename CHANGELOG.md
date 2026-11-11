@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `list` marks the letters of each piece path that the query matched in
+  bold red on a terminal with colour. The output without colour, in a
+  pipe and with `--json` is unchanged
+
 ### Fixed
 
 - The tables of an ambiguous piece reference mark the letters the search
