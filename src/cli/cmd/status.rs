@@ -11,8 +11,8 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, pad_left, paint, painted, sanitize,
-    spaces, wrap,
+    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, pad_left, paint, painted, spaces,
+    wrap,
 };
 use crate::cli::unresolved::pasteable_line;
 use antiq::clock::{Clock, SystemClock, whole_seconds};
@@ -22,6 +22,7 @@ use antiq::commands::status::{DoomedCause, StatusFinding, StatusReport, VersionN
 use antiq::commands::survey::{FutureTime, Refusal, RefusalKind, SurveyedPiece, Verdict};
 use antiq::relpath::RelPath;
 use antiq::report::lock_note;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::local_labels;
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
@@ -204,7 +205,7 @@ fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
         Verdict::Refused(reasons) => {
             let joined = reasons
                 .iter()
-                .map(|reason| sanitize(&reason_text(reason)))
+                .map(|reason| escape_controls(&reason_text(reason)))
                 .collect::<Vec<_>>()
                 .join("; ");
             ("refused", Color::Red, joined)
@@ -231,7 +232,7 @@ fn reason_text(reason: &Refusal) -> String {
 fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
     let names: Vec<String> = rows
         .iter()
-        .map(|row| sanitize(&row.piece.piece.to_string()))
+        .map(|row| escape_controls(&row.piece.piece.to_string()))
         .collect();
     let longest = names.iter().map(|name| name.width()).max().unwrap_or(0);
     let wide = style.width >= WIDE_FROM;
@@ -318,7 +319,7 @@ fn idle_text(row: &SurveyedPiece, now: Timestamp) -> String {
 // =========================================================
 
 fn shown(path: &RelPath) -> String {
-    sanitize(&path.to_string())
+    escape_controls(&path.to_string())
 }
 
 /// One finding below the table: the lines a pipe gets and the block a
@@ -379,10 +380,10 @@ fn finding(
     if let Some(meaning) = meaning {
         // The message is a clause without a full stop; below the title it
         // stands as a sentence.
-        block = block.text(Rich::parse(&sanitize(&format!("{meaning}."))).capitalised());
+        block = block.text(Rich::parse(&escape_controls(&format!("{meaning}."))).capitalised());
         if let Some(help) = meaning.help() {
             // The pasteable command names the piece and the `-C` directory.
-            let help = sanitize(&pasteable(meaning, help.to_string(), directory));
+            let help = escape_controls(&pasteable(meaning, help.to_string(), directory));
             block = block.fix(Rich::parse(&help));
         }
     }
@@ -396,7 +397,7 @@ fn version_text(note: &VersionNote, label: &str) -> String {
     if note.reasons.is_empty() {
         base
     } else {
-        format!("{base} ({})", sanitize(&note.reasons.join("; ")))
+        format!("{base} ({})", escape_controls(&note.reasons.join("; ")))
     }
 }
 
@@ -453,7 +454,7 @@ fn findings(report: &StatusReport, zone: &TimeZone, directory: Option<&Path>) ->
             format!(
                 "{}, first entry {}{cause}",
                 shown(&leftover.path),
-                sanitize(&inside)
+                escape_controls(&inside)
             )
         })
         .collect();

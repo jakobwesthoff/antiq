@@ -8,13 +8,13 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, sanitize,
-    shown_positions, spaces, thousands,
+    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, spaces, thousands,
 };
 use crate::cli::{Context, FindArgs};
 use antiq::collection::Collection;
 use antiq::commands::list::{ListReport, Row, State, list};
 use antiq::query::Query;
+use antiq::shown::{escape_controls, positions};
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -92,7 +92,7 @@ fn notes(report: &ListReport, query: Option<&str>) -> Vec<Notice> {
         for fault in &row.damage {
             notes.push(Notice::Note(format!(
                 "{} {} is damaged: {fault}",
-                sanitize(&row.piece.to_string()),
+                escape_controls(&row.piece.to_string()),
                 row.stamp
             )));
         }
@@ -125,7 +125,7 @@ fn state_name(state: State) -> &'static str {
 fn pipe_line(row: &Row) -> String {
     let number = |number: Option<u64>| number.map_or("-".to_string(), |number| number.to_string());
     [
-        sanitize(&row.piece.to_string()),
+        escape_controls(&row.piece.to_string()),
         row.stamp.to_string(),
         number(row.archive_bytes),
         number(row.files),
@@ -193,7 +193,7 @@ pub(in crate::cli) fn shown_matches(query: &mut Query, path: &str) -> Vec<usize>
     if query.is_empty() {
         return Vec::new();
     }
-    shown_positions(path, &query.matched(path))
+    positions(path, &query.matched(path))
 }
 
 /// The looks of `rows` that mark the letters of each piece `query` matched.
@@ -233,7 +233,7 @@ pub(in crate::cli) fn table(
     let labels = version_labels(rows, zone);
     let pieces: Vec<String> = rows
         .iter()
-        .map(|row| sanitize(&row.piece.to_string()))
+        .map(|row| escape_controls(&row.piece.to_string()))
         .collect();
     let sizes: Vec<String> = rows
         .iter()

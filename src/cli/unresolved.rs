@@ -14,12 +14,13 @@ use super::console::rich::Rich;
 use super::console::symbols::Symbols;
 use super::console::theme;
 use super::output::Style;
-use super::table::{WIDE_FROM, mid, pad, pad_left, painted, sanitize, spaces};
+use super::table::{WIDE_FROM, mid, pad, pad_left, painted, spaces};
 use super::{Cli, Command, Description, error_block};
 use antiq::commands::list::{Row, list};
 use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
+use antiq::shown::escape_controls;
 use antiq::versions::naming::{VersionLookupError, system_zone};
 use jiff::tz::TimeZone;
 use miette::Diagnostic;
@@ -246,7 +247,7 @@ fn build(
                 let mut shown = vec![bold(
                     &format!(
                         "The versions of {}, the {} matches marked",
-                        sanitize(piece),
+                        escape_controls(piece),
                         stamps.len()
                     ),
                     style,
@@ -371,7 +372,10 @@ fn piece_table(
 fn count_table(pieces: &[(String, usize, Vec<usize>)], style: Style) -> Vec<String> {
     const GAP: &str = "   ";
     let header = "VERSIONS";
-    let names: Vec<String> = pieces.iter().map(|(path, _, _)| sanitize(path)).collect();
+    let names: Vec<String> = pieces
+        .iter()
+        .map(|(path, _, _)| escape_controls(path))
+        .collect();
     let longest = names
         .iter()
         .map(|name| name.width())

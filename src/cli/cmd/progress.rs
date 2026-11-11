@@ -10,11 +10,11 @@ use crate::cli::Context;
 use crate::cli::console::cards::{Cards, Config, Count, Ready, Summary, Tone};
 use crate::cli::console::live::{Label, Setup, observed};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::import::ImportReport;
 use antiq::commands::push::PushReport;
 use antiq::progress::{Observer, Operation, Outcome};
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 use std::path::Path;
 use std::time::Duration;
@@ -194,14 +194,17 @@ pub(super) fn archive_summary(report: &ArchiveReport, took: Duration) -> Option<
 /// came about, or that the folder was skipped.
 pub(super) fn import_summary(report: &ImportReport, took: Duration) -> Summary {
     let (text, tone) = if let Some(version) = &report.imported {
-        let piece = sanitize(&version.piece);
+        let piece = escape_controls(&version.piece);
         (
             format!("Imported {piece} as version {}", version.stamp),
             Tone::Ok,
         )
     } else {
         let skipped = (report.skipped.as_ref()).expect("an import ends with a version or a skip");
-        (format!("Skipped {}", sanitize(&skipped.piece)), Tone::Warn)
+        (
+            format!("Skipped {}", escape_controls(&skipped.piece)),
+            Tone::Warn,
+        )
     };
     Summary {
         tone,
@@ -296,9 +299,12 @@ pub(super) fn restore_summary(
     took: Duration,
 ) -> Summary {
     let (text, tone) = if restored.skipped {
-        (format!("Skipped {}", sanitize(restored.piece)), Tone::Warn)
+        (
+            format!("Skipped {}", escape_controls(restored.piece)),
+            Tone::Warn,
+        )
     } else {
-        let destination = sanitize(&destination(root, restored.path, cwd));
+        let destination = escape_controls(&destination(root, restored.path, cwd));
         let tone = if restored.unfinished {
             Tone::Bad
         } else {

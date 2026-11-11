@@ -8,7 +8,6 @@ use crate::cli::console::block::Block;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{Context, ForgetArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -16,6 +15,7 @@ use antiq::commands::forget::{
     Action, ForgetPlan, ForgetReport, ForgetRequest, VersionEntry, Which, forget, plan,
 };
 use antiq::report::CommandReport;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -160,7 +160,12 @@ fn render(report: &ForgetReport, terminal: bool, zone: &TimeZone) -> Lines {
     let stdout = entries
         .iter()
         .zip(names)
-        .map(|(entry, name)| format!("Deleted {name} of {}", sanitize(&entry.piece.to_string())))
+        .map(|(entry, name)| {
+            format!(
+                "Deleted {name} of {}",
+                escape_controls(&entry.piece.to_string())
+            )
+        })
         .collect();
 
     let mut stderr = Vec::new();
@@ -174,7 +179,7 @@ fn render(report: &ForgetReport, terminal: bool, zone: &TimeZone) -> Lines {
         stderr.push(Notice::Line(format!(
             "error: could not delete version {} of {}: {}",
             failure.stamp,
-            sanitize(&failure.piece.to_string()),
+            escape_controls(&failure.piece.to_string()),
             failure.reason
         )));
     }
@@ -206,7 +211,7 @@ fn files_under_action(name: &str, piece: &str, entry: &VersionEntry) -> Vec<Stri
     // "checksum" is the longest part, so the file names line up whichever
     // files a version has left.
     for file in &entry.files {
-        lines.push(format!("  {:<8}   {}", part(file), sanitize(file)));
+        lines.push(format!("  {:<8}   {}", part(file), escape_controls(file)));
     }
     lines
 }
@@ -243,12 +248,15 @@ fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
             Action::Repair(repair) => stdout.push(format!("Would {}", repair.describe())),
             Action::ForgetVersion(entry) => {
                 let name = names.next().expect("a name for each version");
-                let piece = sanitize(&entry.piece.to_string());
+                let piece = escape_controls(&entry.piece.to_string());
                 if terminal {
                     stdout.extend(files_under_action(&name, &piece, entry));
                 } else {
-                    let files: Vec<String> =
-                        entry.files.iter().map(|file| sanitize(file)).collect();
+                    let files: Vec<String> = entry
+                        .files
+                        .iter()
+                        .map(|file| escape_controls(file))
+                        .collect();
                     stdout.push(format!(
                         "Would delete {name} of {piece}: {}",
                         files.join(", ")

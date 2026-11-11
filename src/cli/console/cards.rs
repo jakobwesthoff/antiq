@@ -12,11 +12,12 @@
 use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::output::Style;
-use crate::cli::table::{decimal_size, mid, pad_left, sanitize, thousands, wrap};
+use crate::cli::table::{decimal_size, mid, pad_left, thousands, wrap};
 use crate::cli::unresolved::pasteable_line;
 use anstyle::Style as Look;
 use antiq::pin::PIN_FILE;
 use antiq::progress::{Counter, Operation, Outcome};
+use antiq::shown::escape_controls;
 use std::path::PathBuf;
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -292,10 +293,10 @@ impl Cards {
     /// shows with its label only from `MIN_LABELLED_NAME` columns on, so a
     /// shorter one is counted as that wide.
     fn full_width(name: &str, label: Option<&str>) -> usize {
-        let name = sanitize(name).width();
+        let name = escape_controls(name).width();
         match label {
             Some(label) => {
-                name.max(MIN_LABELLED_NAME) + 1 + "version ".len() + sanitize(label).width()
+                name.max(MIN_LABELLED_NAME) + 1 + "version ".len() + escape_controls(label).width()
             }
             None => name,
         }
@@ -493,8 +494,8 @@ impl Cards {
     /// `width` columns: the cell is returned painted with its display width.
     fn name_cell(&self, name: &str, label: Option<&str>, width: usize) -> (String, usize) {
         let ellipsis = self.symbols().ellipsis;
-        let name = sanitize(name);
-        let label = label.map(|label| format!("version {}", sanitize(label)));
+        let name = escape_controls(name);
+        let label = label.map(|label| format!("version {}", escape_controls(label)));
         if let Some(label) = label {
             let room = width.saturating_sub(1 + label.width());
             if room >= MIN_LABELLED_NAME {
@@ -585,7 +586,7 @@ impl Cards {
                 .map(|reason| self.reason_text(&ready.name, reason))
                 .collect(),
             Outcome::Skipped(message) | Outcome::Unfinished(message) => {
-                vec![(sanitize(message), None)]
+                vec![(escape_controls(message), None)]
             }
             Outcome::NoRoom { needed, available } => vec![(
                 match needed {
@@ -609,14 +610,14 @@ impl Cards {
     /// other reason is shown as the library words it.
     fn reason_text(&self, name: &str, reason: &str) -> (String, Option<String>) {
         if reason == format!("pinned: {name}/{PIN_FILE}") {
-            let command = sanitize(&pasteable_line(
+            let command = escape_controls(&pasteable_line(
                 self.config.directory.as_deref(),
                 &["unpin".to_string(), name.to_string()],
             ));
             let text = format!("pinned, so it stays as it is. {command} releases it");
             return (text, Some(command));
         }
-        (sanitize(reason), None)
+        (escape_controls(reason), None)
     }
 
     /// The one line of a finished piece and, under it, the reasons it did

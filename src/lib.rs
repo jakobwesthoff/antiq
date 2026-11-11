@@ -36,6 +36,7 @@ pub mod report;
 pub mod rules;
 pub mod run;
 pub mod select;
+pub mod shown;
 pub mod sysmem;
 pub mod target;
 pub mod tree;

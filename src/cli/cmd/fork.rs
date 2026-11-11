@@ -11,7 +11,7 @@ use crate::cli::console::cards::Summary;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
-use crate::cli::table::{decimal_size, sanitize};
+use crate::cli::table::decimal_size;
 use crate::cli::{Context, ForkArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -20,6 +20,7 @@ use antiq::commands::fork::{
 };
 use antiq::plan::Step;
 use antiq::report::CommandReport;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::system_zone;
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -141,7 +142,7 @@ struct Lines {
 }
 
 fn done_lines(report: &ForkReport, style: Style, zone: &TimeZone) -> Lines {
-    let piece = sanitize(&report.piece);
+    let piece = escape_controls(&report.piece);
     let mut lines = Lines::default();
     for repair in &report.repairs {
         lines
@@ -165,7 +166,7 @@ fn done_lines(report: &ForkReport, style: Style, zone: &TimeZone) -> Lines {
         lines.stdout.push(format!(
             "Forked {piece} (version {}) to {}",
             label(&report.stamp, &report.siblings, style, zone),
-            sanitize(&report.path)
+            escape_controls(&report.path)
         ));
     }
     lines
@@ -176,7 +177,7 @@ fn check_text(check: &str, action: &ForkAction, style: Style, zone: &TimeZone) -
     match check {
         "version" if action.damage.is_empty() => format!("the version {version} is sound"),
         "version" => format!("the version {version} is damaged and is extracted with a warning"),
-        "destination" => format!("the destination {} is free", sanitize(&action.path)),
+        "destination" => format!("the destination {} is free", escape_controls(&action.path)),
         "free_space" => format!(
             "there is room for {}",
             decimal_size(action.bytes.expect("the free space is checked with a size"))
@@ -203,7 +204,7 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
         match step {
             Step::Repair(repair) => lines.push(format!("Would {}", repair.describe())),
             Step::Command(action) => {
-                let piece = sanitize(&action.piece);
+                let piece = escape_controls(&action.piece);
                 let version = label(&action.stamp, &action.siblings, style, zone);
                 if let Some(skipped) = &action.skipped {
                     let needed = skipped
@@ -218,7 +219,7 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
                 }
                 lines.push(format!(
                     "Would fork {piece} (version {version}) to {}",
-                    sanitize(&action.path)
+                    escape_controls(&action.path)
                 ));
                 // A terminal gets the checks as a list under a heading,
                 // a pipe keeps one `  check ...` line for each.

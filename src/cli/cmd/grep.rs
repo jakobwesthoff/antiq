@@ -6,11 +6,12 @@
 
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
-use crate::cli::table::{Color, WIDE_FROM, mid, paint, sanitize, spaces};
+use crate::cli::table::{Color, WIDE_FROM, mid, paint, spaces};
 use crate::cli::{Context, GrepArgs};
 use antiq::collection::Collection;
 use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep_collection};
 use antiq::report::Warning;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
@@ -84,7 +85,7 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
             Notice::Warning(Warning::new(format!(
                 "cannot search version {} of {}: {}",
                 skipped.stamp,
-                sanitize(&skipped.piece.to_string()),
+                escape_controls(&skipped.piece.to_string()),
                 skipped.reason
             )))
         }));
@@ -93,7 +94,7 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
     if found.pieces.is_empty() {
         out.note(&format!(
             "no archived path matches {}",
-            sanitize(printed.pattern)
+            escape_controls(printed.pattern)
         ))
         .context("print the notes")?;
     }
@@ -363,7 +364,7 @@ fn display(bytes: &[u8]) -> Displayed {
                 '\n' => "\\n".to_string(),
                 '\t' => "\\t".to_string(),
                 '\r' => "\\r".to_string(),
-                other => sanitize(&other.to_string()),
+                other => escape_controls(&other.to_string()),
             };
             units.push((shown, offset..end));
             offset = end;

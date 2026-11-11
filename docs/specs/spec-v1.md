@@ -1436,9 +1436,9 @@ numbers sits at the right edge of the column, over its right-aligned values.
 Without a terminal there is
 no header and a row is one line of tab-separated
 fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
-and the numbers unformatted. A control character in a piece path is written
-as `%` and the two hexadecimal digits of each of its bytes, on a terminal and
-in a pipe.
+and the numbers unformatted. A control character in a piece path, as
+described in "Console output", is written as `%` and the two hexadecimal
+digits of each of its bytes, on a terminal and in a pipe.
 
 A version that is not sound is marked in a last column on a terminal, in
 the `state` field in a pipe and in the `state` key of `--json`:
@@ -2293,7 +2293,9 @@ run with no action.
 
 A control character in a path or name from the user's files is written as `%`
 and the two hexadecimal digits of each of its bytes, on a terminal and in a
-pipe, so that a name cannot end a line or forge another one. This holds for the
+pipe, so that a name cannot end a line or forge another one. The characters
+are the Unicode control characters (category Cc), the bidi controls U+202A to
+U+202E and U+2066 to U+2069, and U+2028 and U+2029. This holds for the
 result lines of every command, the `Would ...` lines of a dry run, the notes
 and warnings, and the findings of `status`. `--json` carries the text
 unchanged, as a JSON string. `grep` is the exception: on a terminal its paths

@@ -7,8 +7,8 @@
 
 use super::console::block::Block;
 use super::console::rich::Rich;
-use super::table::sanitize;
 use antiq::report::{Warning, WarningKind};
+use antiq::shown::escape_controls;
 use miette::{Diagnostic, Severity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +28,7 @@ impl Notice {
     pub fn block(&self) -> Option<Block> {
         match self {
             Notice::Note(text) => {
-                let text = sanitize(text);
+                let text = escape_controls(text);
                 Some(Block::info(Rich::new().text(&text)).pipe(&format!("note: {text}")))
             }
             Notice::Warning(warning) => Some(warning_block(warning)),
@@ -39,7 +39,7 @@ impl Notice {
     /// The text of a line, which a pipe and a terminal show alike.
     pub fn line(&self) -> Option<String> {
         match self {
-            Notice::Line(line) => Some(sanitize(line)),
+            Notice::Line(line) => Some(escape_controls(line)),
             _ => None,
         }
     }
@@ -53,7 +53,7 @@ impl Notice {
 /// A message names paths and values from the user's files, so a control
 /// character in it is escaped for every reader, as in the lines of a table.
 fn warning_block(warning: &Warning) -> Block {
-    let message = &sanitize(&warning.message);
+    let message = &escape_controls(&warning.message);
     let advice = warning
         .kind
         .as_ref()
@@ -72,13 +72,15 @@ fn warning_block(warning: &Warning) -> Block {
         // The lead is a prefix of the raw message, so each part is escaped on
         // its own and the split stays where it was.
         let title = match warning.lead() {
-            Some((lead, rest)) => Rich::new().cmd(&sanitize(lead)).text(&sanitize(rest)),
+            Some((lead, rest)) => Rich::new()
+                .cmd(&escape_controls(lead))
+                .text(&escape_controls(rest)),
             None => Rich::new().text(message),
         };
         Block::warning(title).pipe(&format!("warning: {message}"))
     };
     match warning.kind.as_ref().and_then(|kind| kind.help()) {
-        Some(help) => block.fix(Rich::parse(&sanitize(&help.to_string()))),
+        Some(help) => block.fix(Rich::parse(&escape_controls(&help.to_string()))),
         None => block,
     }
 }

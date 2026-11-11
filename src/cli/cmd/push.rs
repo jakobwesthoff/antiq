@@ -13,7 +13,7 @@ use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::{numeric_header, pad, sanitize, thousands};
+use crate::cli::table::{numeric_header, pad, thousands};
 use crate::cli::{Context, LogNote, PushArgs};
 use antiq::clock::{Clock, SystemClock};
 use antiq::collection::Collection;
@@ -21,6 +21,7 @@ use antiq::commands::push::{Mismatch, PushOutcome, PushReport, PushRequest, push
 use antiq::external::Logs;
 use antiq::progress::Operation;
 use antiq::report::Warning;
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -164,7 +165,7 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     report.reason.is_none() && !report.dry_run && !report.changes.pieces.is_empty()
                 });
                 let lines = if let Some(shown) = shown {
-                    let target = report.initialized.then(|| sanitize(&report.target));
+                    let target = report.initialized.then(|| escape_controls(&report.target));
                     let summary = progress::push_summary(&report, target.as_deref(), shown.took());
                     // The card is gone. A terminal without cursor movement
                     // has the lines of its pieces above already.
@@ -183,7 +184,11 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 } else {
                     // The plain lines name the target and the changed
                     // pieces, which come from the user's files.
-                    report.lines().iter().map(|line| sanitize(line)).collect()
+                    report
+                        .lines()
+                        .iter()
+                        .map(|line| escape_controls(line))
+                        .collect()
                 };
                 if report.dry_run && report.reason.is_none() {
                     out.dry_plan(&lines, "pushed", "push to the target")
@@ -217,7 +222,7 @@ fn change_rows(report: &PushReport) -> Vec<(String, [u64; 3])> {
         .map(|piece| {
             let c = &piece.counts;
             (
-                sanitize(&piece.piece.to_string()),
+                escape_controls(&piece.piece.to_string()),
                 [c.created, c.updated, c.deleted],
             )
         })
@@ -281,7 +286,7 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
     let total = |column: usize| rows.iter().map(|(_, row)| row[column]).sum::<u64>();
     let headline = format!(
         "Claimed the push target {}: {} created, {} updated, {} deleted",
-        sanitize(&report.target),
+        escape_controls(&report.target),
         total(0),
         total(1),
         total(2),

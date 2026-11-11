@@ -8,12 +8,12 @@ use super::archive::COUNTS;
 use super::progress::{self, Description};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{Context, ImportArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::import::{ImportReport, Outcome, Request, import, import_observed};
 use antiq::plan::PlanAction;
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 
 pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -102,15 +102,15 @@ fn report_lines(report: &ImportReport) -> Vec<String> {
     if let Some(version) = &report.imported {
         lines.push(format!(
             "imported {}: version {}",
-            sanitize(&version.piece),
+            escape_controls(&version.piece),
             version.stamp
         ));
     }
     if let Some(skipped) = &report.skipped {
         lines.push(format!(
             "skipped {}: {}",
-            sanitize(&skipped.piece),
-            sanitize(&skipped.message)
+            escape_controls(&skipped.piece),
+            escape_controls(&skipped.message)
         ));
     }
     lines

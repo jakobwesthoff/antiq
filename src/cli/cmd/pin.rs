@@ -8,7 +8,6 @@ use crate::cli::console::block::Block;
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{Context, PieceArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -16,6 +15,7 @@ use antiq::commands::pin::{
     Action, Direction, PinPlan, PinReport, PinRequest, pin as pin_piece, plan,
 };
 use antiq::report::CommandReport;
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 
 pub fn pin(ctx: &Context, args: &PieceArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -116,7 +116,7 @@ struct Lines {
 /// The info a terminal gets. `changed` is false when the piece is in the
 /// state asked for already.
 fn explanation(piece: &str, direction: Direction, changed: bool, dry: bool) -> Block {
-    let piece = sanitize(piece);
+    let piece = escape_controls(piece);
     let file = format!("{piece}/.antiq-pin");
     let status = Rich::new()
         .cmd("antiq status")
@@ -198,7 +198,7 @@ fn explanation(piece: &str, direction: Direction, changed: bool, dry: bool) -> B
 
 /// What a run, or a dry run in the state asked for, says about the piece.
 fn sentence(piece: &str, direction: Direction, changed: bool) -> String {
-    let piece = sanitize(piece);
+    let piece = escape_controls(piece);
     match (direction, changed) {
         (Direction::Pin, true) => format!("Pinned {piece}"),
         (Direction::Pin, false) => format!("{piece} is already pinned"),
@@ -252,8 +252,10 @@ fn render_plan(plan: &PinPlan, direction: Direction) -> Lines {
         .iter()
         .map(|action| match action {
             Action::Repair(repair) => format!("Would {}", repair.describe()),
-            Action::Pin { piece } => format!("Would pin {}", sanitize(&piece.to_string())),
-            Action::Unpin { piece } => format!("Would unpin {}", sanitize(&piece.to_string())),
+            Action::Pin { piece } => format!("Would pin {}", escape_controls(&piece.to_string())),
+            Action::Unpin { piece } => {
+                format!("Would unpin {}", escape_controls(&piece.to_string()))
+            }
         })
         .collect();
     if !changed {

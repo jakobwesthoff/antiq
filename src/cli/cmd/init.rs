@@ -8,12 +8,12 @@ use crate::cli::console::env::Env;
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
 use antiq::commands::init::{InitError, InitReport, InitRequest, init};
 use antiq::id::RandomIds;
 use antiq::select::SelectError;
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 
 pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -99,14 +99,14 @@ fn render(report: &InitReport, env: &Env) -> Lines {
     } else {
         stdout.push(format!(
             "Created the collection at {}",
-            sanitize(&report.path)
+            escape_controls(&report.path)
         ));
         if let Some(id) = report.id {
             stdout.push(format!("  id: {id}"));
         }
         stdout.push(format!(
             "  patterns: {}",
-            sanitize(&report.patterns.join(", "))
+            escape_controls(&report.patterns.join(", "))
         ));
         if let Some(due) = report.due {
             let folders = if due == 1 { "folder" } else { "folders" };

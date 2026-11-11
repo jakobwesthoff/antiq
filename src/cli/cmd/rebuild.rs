@@ -11,7 +11,6 @@ use crate::cli::console::cards::{Count, Summary, Tone, sizes_or_bytes};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{Context, RebuildArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -20,6 +19,7 @@ use antiq::commands::rebuild::{
     rebuild_observed,
 };
 use antiq::progress::Operation;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -148,10 +148,14 @@ fn statement(basis: Basis) -> &'static str {
 /// result on any output.
 fn render(report: &RebuildReport) -> Lines {
     let name = report.stamp.to_string();
-    let files: Vec<String> = report.written.iter().map(|file| sanitize(file)).collect();
+    let files: Vec<String> = report
+        .written
+        .iter()
+        .map(|file| escape_controls(file))
+        .collect();
     let stdout = vec![format!(
         "Rebuilt version {name} of {}: wrote {}",
-        sanitize(&report.piece.to_string()),
+        escape_controls(&report.piece.to_string()),
         files.join(", ")
     )];
 
@@ -175,7 +179,7 @@ fn explanation() -> Block {
 /// The rows of a version on a terminal: what is checked, against what, and
 /// which files are written, each under its role.
 fn rows(entry: &RebuildEntry) -> Vec<String> {
-    let row = |role: &str, file: &str| format!("  {role:<9}{}", sanitize(file));
+    let row = |role: &str, file: &str| format!("  {role:<9}{}", escape_controls(file));
     let mut rows = Vec::new();
     match (&entry.basis, &entry.against) {
         (Basis::ChecksumFile, Some(against)) => {
@@ -218,14 +222,22 @@ fn render_plan(plan: &RebuildPlan, terminal: bool, zone: &TimeZone) -> Lines {
                 let version = local_labels(&[entry.stamp], zone).remove(0);
                 stdout.push(format!(
                     "Would rebuild version {version} of {}",
-                    sanitize(&entry.piece.to_string())
+                    escape_controls(&entry.piece.to_string())
                 ));
                 stdout.extend(rows(entry));
             }
             Action::RebuildVersion(entry) => {
-                let archive = sanitize(&entry.archive);
-                let against = entry.against.as_deref().map(sanitize).unwrap_or_default();
-                let write: Vec<String> = entry.write.iter().map(|file| sanitize(file)).collect();
+                let archive = escape_controls(&entry.archive);
+                let against = entry
+                    .against
+                    .as_deref()
+                    .map(escape_controls)
+                    .unwrap_or_default();
+                let write: Vec<String> = entry
+                    .write
+                    .iter()
+                    .map(|file| escape_controls(file))
+                    .collect();
                 let write = write.join(", ");
                 stdout.push(match entry.basis {
                     Basis::ChecksumFile => {

@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The pieces of a console table: padding, cutting, wrapping and colour
-//! by display width, and the escaping of names that a terminal would act on.
+//! by display width.
 
 use crate::cli::console::theme;
 use crate::cli::output::Style;
@@ -101,40 +101,6 @@ pub(crate) fn decimal_size(bytes: u64) -> String {
         divisor *= 1000;
         unit += 1;
     }
-}
-
-/// Shows control characters of a name in the escaped form of the spec, so
-/// that a name cannot move the cursor or end a line.
-pub(crate) fn sanitize(text: &str) -> String {
-    let mut shown = String::new();
-    for character in text.chars() {
-        if character.is_control() {
-            let mut buffer = [0u8; 4];
-            for byte in character.encode_utf8(&mut buffer).bytes() {
-                shown.push_str(&format!("%{byte:02X}"));
-            }
-        } else {
-            shown.push(character);
-        }
-    }
-    shown
-}
-
-/// The positions `matched` (counted in characters of `raw`) as positions in
-/// `sanitize(raw)`. A character that `sanitize` escapes takes several
-/// positions; one that was matched marks all of them.
-pub(crate) fn shown_positions(raw: &str, matched: &[usize]) -> Vec<usize> {
-    let mut shown = Vec::new();
-    let mut start = 0;
-    for (position, character) in raw.chars().enumerate() {
-        // The width of one character's escape is whatever `sanitize` makes of it.
-        let end = start + sanitize(character.encode_utf8(&mut [0; 4])).chars().count();
-        if matched.contains(&position) {
-            shown.extend(start..end);
-        }
-        start = end;
-    }
-    shown
 }
 
 /// Cuts `text` to `width` columns by replacing its middle with
@@ -279,55 +245,6 @@ mod tests {
         assert_eq!(wrap("ab cdefghijkl", 5), ["ab", "cdefg", "hijkl"]);
         assert_eq!(wrap("", 5), [""]);
         assert_eq!(wrap("日本", 1), ["日", "本"]);
-    }
-
-    #[test]
-    fn sanitize_escapes_control_characters_by_their_bytes() {
-        assert_eq!(sanitize("plain name"), "plain name");
-        assert_eq!(sanitize("a\nb\tc"), "a%0Ab%09c");
-        assert_eq!(sanitize("\x1b[31m"), "%1B[31m");
-        // U+0085 is a control character that takes two bytes in UTF-8.
-        assert_eq!(sanitize("x\u{85}y"), "x%C2%85y");
-    }
-
-    #[test]
-    fn shown_positions_keep_the_positions_of_a_name_without_control_characters() {
-        assert_eq!(shown_positions("projects/scanner", &[9, 10]), [9, 10]);
-        assert!(shown_positions("a\tb", &[]).is_empty());
-    }
-
-    #[test]
-    fn shown_positions_move_past_the_escape_of_a_control_character() {
-        // `a%09b/scanner` holds `scan` from the seventh character on.
-        assert_eq!(shown_positions("a\tb/scanner", &[4, 5, 6, 7]), [6, 7, 8, 9]);
-        // `x%C2%85y`: each of the two bytes of U+0085 is a three-character escape.
-        assert_eq!(shown_positions("x\u{85}y", &[2]), [7]);
-    }
-
-    #[test]
-    fn a_matched_control_character_marks_its_whole_escape() {
-        assert_eq!(shown_positions("a\tb", &[1]), [1, 2, 3]);
-        assert_eq!(shown_positions("x\u{85}y", &[1]), [1, 2, 3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn shown_positions_cover_exactly_the_characters_sanitize_writes() {
-        for raw in [
-            "a\tb",
-            "x\u{85}y",
-            "e\u{301}",
-            "100%25",
-            "\u{65e5}\u{672c}",
-            "",
-        ] {
-            let every_raw_position: Vec<usize> = (0..raw.chars().count()).collect();
-            let every_shown_position: Vec<usize> = (0..sanitize(raw).chars().count()).collect();
-            assert_eq!(
-                shown_positions(raw, &every_raw_position),
-                every_shown_position,
-                "{raw:?}"
-            );
-        }
     }
 
     #[test]

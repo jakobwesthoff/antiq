@@ -9,7 +9,6 @@ use super::progress::{Description, Shown};
 use crate::cli::console::cards::{Count, items, sizes};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
-use crate::cli::table::sanitize;
 use crate::cli::{ArchiveArgs, Context};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -18,6 +17,7 @@ use antiq::commands::archive::{
 };
 use antiq::plan::{PlanAction, Step};
 use antiq::progress::Operation;
+use antiq::shown::escape_controls;
 use anyhow::Context as _;
 
 /// The packing and the verifying of a piece show the content bytes of its
@@ -172,22 +172,22 @@ fn print_report(ctx: &Context, report: &ArchiveReport, out: &mut Output) -> anyh
 /// are escaped.
 fn print_pipe_lines(report: &ArchiveReport, out: &mut Output) -> anyhow::Result<()> {
     for piece in &report.archived {
-        out.line(&format!("archived {}", sanitize(&piece.piece)))
+        out.line(&format!("archived {}", escape_controls(&piece.piece)))
             .context("print the result")?;
     }
     for piece in &report.skipped {
         out.line(&format!(
             "skipped {}: {}",
-            sanitize(&piece.piece),
-            sanitize(&piece.message)
+            escape_controls(&piece.piece),
+            escape_controls(&piece.message)
         ))
         .context("print the result")?;
     }
     for piece in &report.refused {
         out.line(&format!(
             "refused {}: {}",
-            sanitize(&piece.piece),
-            sanitize(&piece.reasons_text())
+            escape_controls(&piece.piece),
+            escape_controls(&piece.reasons_text())
         ))
         .context("print the result")?;
     }

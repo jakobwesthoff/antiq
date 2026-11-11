@@ -10,7 +10,7 @@ use crate::cli::console::cards::{Count, Summary, sizes, sizes_or_bytes};
 use crate::cli::console::rich::Rich;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
-use crate::cli::table::{decimal_size, sanitize};
+use crate::cli::table::decimal_size;
 use crate::cli::{Context, UnearthArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -20,6 +20,7 @@ use antiq::commands::unearth::{
 use antiq::plan::Step;
 use antiq::progress::Operation;
 use antiq::report::CommandReport;
+use antiq::shown::escape_controls;
 use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
@@ -207,7 +208,7 @@ struct Lines {
 }
 
 fn done_lines(report: &UnearthReport, style: Style, zone: &TimeZone) -> Lines {
-    let piece = sanitize(&report.piece);
+    let piece = escape_controls(&report.piece);
     let mut lines = Lines::default();
     for repair in &report.repairs {
         lines
@@ -236,7 +237,7 @@ fn check_text(check: &str, action: &UnearthAction, style: Style, zone: &TimeZone
             "the version {} is sound",
             label(&action.stamp, &action.siblings, style, zone)
         ),
-        "destination" => format!("the destination {} is free", sanitize(&action.path)),
+        "destination" => format!("the destination {} is free", escape_controls(&action.path)),
         "free_space" => format!("there is room for {}", decimal_size(action.bytes)),
         "member_names" => "the member names fit the volume (not run by -n)".to_string(),
         "extracted_tree" => "the extracted tree equals the listing (not run by -n)".to_string(),
@@ -264,7 +265,7 @@ fn dry_run_lines(plan: &DryRunPlan, style: Style, zone: &TimeZone) -> Vec<String
         match step {
             Step::Repair(repair) => lines.push(format!("Would {}", repair.describe())),
             Step::Command(action) => {
-                let piece = sanitize(&action.piece);
+                let piece = escape_controls(&action.piece);
                 let version = label(&action.stamp, &action.siblings, style, zone);
                 if let Some(skipped) = &action.skipped {
                     lines.push(format!(

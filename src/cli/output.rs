@@ -15,8 +15,8 @@ use crate::cli::console::env::Env;
 use crate::cli::console::render::{Part, render_blocks, render_parts};
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::Notice;
-use crate::cli::table::sanitize;
 use antiq::error::ErrorKind;
+use antiq::shown::escape_controls;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::ffi::OsStr;
@@ -445,7 +445,7 @@ impl Output {
     /// one is escaped here, before the line is split into verb and rest, so
     /// that a name cannot end a line or forge another action.
     pub fn dry_lines(&mut self, lines: &[String]) -> io::Result<usize> {
-        let lines: Vec<String> = lines.iter().map(|line| sanitize(line)).collect();
+        let lines: Vec<String> = lines.iter().map(|line| escape_controls(line)).collect();
         let width = lines
             .iter()
             .filter_map(|line| dryrun::split(line))
