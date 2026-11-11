@@ -351,8 +351,12 @@ fn a_dry_run_names_what_the_next_run_does_and_changes_nothing() {
                 .piece("experiments/rust-gpu", |piece| {
                     piece.age_days(33).file("src/main.rs", "fn main() {}\n");
                 })
+                .ignore(&["node_modules/"])
                 .piece("old/client-site", |piece| {
-                    piece.age_days(141).file("index.html", "<html>");
+                    piece
+                        .age_days(141)
+                        .file("index.html", "<html>")
+                        .file("node_modules/dep/index.js", "ignored");
                 })
                 .piece("notes/daily", |piece| {
                     piece.age_days(5).file("today.md", "fresh\n");
@@ -379,6 +383,7 @@ fn a_dry_run_names_what_the_next_run_does_and_changes_nothing() {
                         out,
                         "Would archive experiments/rust-gpu\n\
                          Would archive old/client-site\n\
+                         Would leave out node_modules/\n\
                          Refused media/camera-import: exclude entry: media/camera-import/card\n"
                     );
                 });
@@ -389,8 +394,12 @@ fn a_dry_run_names_what_the_next_run_does_and_changes_nothing() {
                     assert_eq!(
                         json["actions"],
                         serde_json::json!([
-                            {"kind": "archive", "piece": "experiments/rust-gpu"},
-                            {"kind": "archive", "piece": "old/client-site"},
+                            {"kind": "archive", "piece": "experiments/rust-gpu", "left_out": []},
+                            {
+                                "kind": "archive",
+                                "piece": "old/client-site",
+                                "left_out": ["node_modules/"],
+                            },
                         ])
                     );
                     let refused = json["refused"].as_array().expect("a list");

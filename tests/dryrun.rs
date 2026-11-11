@@ -51,6 +51,32 @@ fn an_archive_dry_run_on_a_terminal_tags_each_action_and_ends_with_a_footer() {
 }
 
 #[test]
+fn a_dry_run_on_a_terminal_shows_what_a_piece_leaves_out_under_it_and_widens_every_tag() {
+    let world = world(|builder| {
+        builder.ignore(&["node_modules/"]);
+        builder.piece("projects/alpha", |piece| {
+            piece
+                .age_days(40)
+                .file("data", "x")
+                .file("node_modules/dep/index.js", "x");
+        });
+        builder.piece("tools/scan-old", |piece| {
+            piece.age_days(40).file("data", "x");
+        });
+    });
+    let run = world.run_tty_env(&["archive", "-n"], PLAIN);
+    run.expect_code(0);
+    assert_eq!(
+        run.stdout,
+        "○ would archive    projects/alpha\n\
+         ○ would leave out  node_modules/\n\
+         ○ would archive    tools/scan-old\n\
+         \n\
+         \x20○ DRY RUN  Nothing was archived. Run again without -n to archive these pieces.\n"
+    );
+}
+
+#[test]
 fn a_dry_run_on_a_terminal_colours_the_tag_and_the_footer_badge_magenta() {
     let world = world(due_pieces);
     let run = world.run_tty_env(&["archive", "-n", "alpha"], &[]);

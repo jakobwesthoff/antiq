@@ -146,6 +146,25 @@ fn archive_follows_the_rule() {
 }
 
 #[test]
+fn a_dry_archive_action_has_the_keys_kind_piece_and_left_out_in_that_order() {
+    let json = dry(&world(due_piece), &["archive"]);
+
+    let action = json["actions"]
+        .as_array()
+        .expect("a list of actions")
+        .iter()
+        .find(|action| action["kind"] == "archive")
+        .expect("an archive action");
+    let keys: Vec<&str> = action
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["kind", "piece", "left_out"]);
+}
+
+#[test]
 fn forget_follows_the_rule() {
     assert_real_shape(&real(&world(two_versions), &["forget", PIECE, OLD_STAMP]));
     assert_dry_shape(&dry(&world(two_versions), &["forget", PIECE, OLD_STAMP]));

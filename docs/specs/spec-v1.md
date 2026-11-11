@@ -940,7 +940,10 @@ refused (reason `empty`, at the piece), and the walk refusals still apply.
 refused pieces never change the exit code, and only the pieces the walk
 refuses are listed, due or not: a pinned piece and a piece without a file
 that counts are not. `-n` lists the pieces it would archive and the ones it
-refuses, with the reason. It judges the folders as they lie in the
+refuses, with the reason. Under each piece it would archive, it names the
+entries the version does not contain and the removal of the folder deletes
+without a copy: the ignored entries and the `.antiq-restored` marker at the
+top. It judges the folders as they lie in the
 collection now, so a tree that repair 4 would give back to its live path is
 not judged.
 
@@ -996,9 +999,12 @@ not judged.
    cards and leave one finished line each, then a summary line (see
    "Progress cards"); these lines are for a pipe. The repairs of the start of the run
    go to stderr as `note:` lines and the warnings as `warning:` lines. A dry run prints the
-   repair lines and `Would archive <piece>` lines, then `Refused <piece>:
-   <reasons>` for each refused piece, and `Nothing to do.` when it prints
-   none. A skipped piece has the reason `differs` (the folder changed while
+   repair lines and `Would archive <piece>` lines, each followed by `Would
+   leave out <path>` for each entry the version leaves out, sorted (an
+   ignored file on its own line, an ignored folder once with a trailing `/`
+   and without its content, and `.antiq-restored` at the top), then
+   `Refused <piece>: <reasons>` for each refused piece, and `Nothing to do.`
+   when it prints none. A skipped piece has the reason `differs` (the folder changed while
    it was packed, and stayed where it is, or after the verify, and the
    message says whether it went back to its path or into `recovered/`),
    `no_room` or `error` (any other failure; the message names the step and
@@ -2575,7 +2581,8 @@ be told or the lock adds `code` (`antiq::config::unknown_key`,
 `antiq::lock::unreadable` or `antiq::lock::in_use`) before `message`, and
 `fix` after it when the warning has a fix (the unknown key has one). A dry run adds `refused` and `warnings` after
 `actions`, which hold the repairs, each as in `repairs`, and, per piece,
-`{"kind": "archive", "piece": ...}`.
+`{"kind": "archive", "piece": ..., "left_out": ...}` with `left_out` the list
+of paths the version leaves out, as for `import`.
 
 `push` has `result`, `target` (the `[target] url` as written) and
 `warnings`; `dry_run` comes first in a dry run only. `result` is `"pushed"` in a real run and in a dry run, `"unreachable"` for an unreachable target. In a real run `initialized` (the

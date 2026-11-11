@@ -175,6 +175,10 @@ antiq archive -n
 ![antiq archive -n lists the three would archive lines in magenta and ends with a DRY RUN badge saying that nothing was archived](docs/pages/assets/shots/dry-run.png)
 *the dry run lists what the next run would archive*
 
+Under each piece the dry run also names the entries the archive leaves
+out, such as an ignored `node_modules/`. Archiving deletes them with the
+folder, so they are gone without a copy.
+
 Now archive. `archive` packs each due piece into an archive, checks that
 the archive holds exactly what the folder held, and only then removes the
 folder. From then on the piece lives in the archive until you

@@ -166,6 +166,7 @@ pub(crate) fn plan(
         match setup.judge(&tree, now) {
             Judged::Go => actions.push(Step::Command(ArchiveAction::Archive {
                 piece: piece.to_string(),
+                left_out: tree.left_out(),
             })),
             Judged::Quiet => {}
             Judged::Refused(piece) => refused.push(piece),
@@ -1910,7 +1911,7 @@ mod tests {
 
         assert!(matches!(plan.actions[0], Step::Repair(_)));
         assert!(
-            matches!(&plan.actions[2], Step::Command(ArchiveAction::Archive { piece }) if piece == "due")
+            matches!(&plan.actions[2], Step::Command(ArchiveAction::Archive { piece, .. }) if piece == "due")
         );
         assert!(matches!(plan.actions[1], Step::Repair(_)));
         assert_eq!(plan.actions.len(), 3);
@@ -1930,6 +1931,92 @@ mod tests {
     fn a_dry_run_with_nothing_to_do_says_so() {
         let mut world = world("");
         add(&mut world, "recent", 1);
+
+        let plan = plan_of(&world, &Target::Due);
+
+        assert_eq!(plan.lines(), ["Nothing to do."]);
+    }
+
+    /// A due piece with the ignored entries `cache/deep/x` and `debug.log`.
+    fn world_with_ignored_entries() -> TempCollection {
+        let mut world = world("ignore = [\"cache/\", \"*.log\"]");
+        add(&mut world, "due", 40);
+        fs::create_dir_all(world.root().join("due/cache/deep")).expect("an ignored folder");
+        fs::write(world.root().join("due/cache/deep/x"), "x").expect("an ignored file");
+        fs::write(world.root().join("due/debug.log"), "x").expect("an ignored file");
+        world
+    }
+
+    #[test]
+    fn a_dry_run_carries_the_ignored_entries_in_the_action() {
+        let world = world_with_ignored_entries();
+
+        let json = serde_json::to_value(plan_of(&world, &Target::Due)).expect("serialises");
+
+        assert_eq!(
+            json["actions"],
+            serde_json::json!([{
+                "kind": "archive",
+                "piece": "due",
+                "left_out": ["cache/", "debug.log"],
+            }])
+        );
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_ignored_entries_under_the_piece_it_would_archive() {
+        let world = world_with_ignored_entries();
+
+        let plan = plan_of(&world, &Target::Due);
+
+        assert_eq!(
+            plan.lines(),
+            [
+                "Would archive due",
+                "Would leave out cache/",
+                "Would leave out debug.log"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_names_the_restored_marker_of_the_top_as_left_out() {
+        let mut world = world("");
+        add(&mut world, "due", 40);
+        fs::write(
+            world.root().join("due/.antiq-restored"),
+            "restored 2020-01-01T00:00:00Z\n",
+        )
+        .expect("the marker is written");
+
+        let json = serde_json::to_value(plan_of(&world, &Target::Due)).expect("serialises");
+
+        assert_eq!(
+            json["actions"][0]["left_out"],
+            serde_json::json!([".antiq-restored"])
+        );
+    }
+
+    #[test]
+    fn a_dry_run_names_every_ds_store_the_default_ignore_leaves_out() {
+        let mut world = world("");
+        add(&mut world, "due", 40);
+        fs::write(world.root().join("due/.DS_Store"), "x").expect("an ignored file");
+        fs::write(world.root().join("due/sub/.DS_Store"), "x").expect("an ignored file");
+
+        let json = serde_json::to_value(plan_of(&world, &Target::Due)).expect("serialises");
+
+        assert_eq!(
+            json["actions"][0]["left_out"],
+            serde_json::json!([".DS_Store", "sub/.DS_Store"])
+        );
+    }
+
+    #[test]
+    fn a_dry_run_says_nothing_of_the_ignored_entries_of_a_piece_that_is_not_due() {
+        let mut world = world("ignore = [\"cache/\"]");
+        add(&mut world, "recent", 1);
+        fs::create_dir_all(world.root().join("recent/cache")).expect("an ignored folder");
 
         let plan = plan_of(&world, &Target::Due);
 
@@ -1989,7 +2076,7 @@ mod tests {
         assert_eq!(json["dry_run"], true);
         assert_eq!(
             json["actions"],
-            serde_json::json!([{"kind": "archive", "piece": "due"}])
+            serde_json::json!([{"kind": "archive", "piece": "due", "left_out": []}])
         );
         assert_eq!(json["refused"], serde_json::json!([]));
         assert!(json["warnings"].is_array());

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `archive -n` names, under each piece it would archive, the entries the
+  version leaves out, as `import -n` does: a `Would leave out <path>` line
+  for each ignored entry (a folder once, with a trailing `/`) and for
+  `.antiq-restored`, and a `left_out` list in the action of `--json`.
+  These entries are deleted with the folder without a copy. A real run
+  prints what it printed before
+
 ### Fixed
 
 - `import -n` lists an ignored folder once when an ignored name sorts

@@ -244,29 +244,45 @@ fn a_dry_run_with_a_held_lock_names_the_holder_and_lists_nothing() {
     );
 }
 
-#[test]
-fn a_dry_run_lists_the_repairs_then_the_archives_and_changes_nothing() {
-    let collection = world();
+/// A leftover in `doomed/` that makes a repair the first line of the run.
+fn plant_doomed_leftover(collection: &Collection) {
     fs::create_dir_all(collection.path(".antiq/doomed/2026-11-03T000000/old")).expect("leftover");
     fs::write(
         collection.path(".antiq/doomed/2026-11-03T000000/old/f"),
         "x",
     )
     .expect("a file");
+}
+
+#[test]
+fn a_dry_run_lists_the_repairs_then_the_archives_with_what_they_leave_out_and_changes_nothing() {
+    let collection = world();
+    plant_doomed_leftover(&collection);
     let before = snapshot(&collection.root());
 
     let text = archive(&collection, &[], &["-n"]);
-    let json = archive(&collection, &["--json"], &["--dry-run"]);
 
     assert_eq!(text.code(), 0, "{}", text.stderr);
     let lines: Vec<&str> = text.stdout.lines().collect();
-    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines.len(), 4, "{lines:?}");
     assert!(
         lines[0].starts_with("Would delete .antiq/doomed/2026-11-03T000000/old"),
         "{lines:?}"
     );
     assert!(lines[1].starts_with("Would remove "), "{lines:?}");
     assert_eq!(lines[2], "Would archive old/site");
+    assert_eq!(lines[3], "Would leave out node_modules/");
+    assert_eq!(snapshot(&collection.root()), before);
+}
+
+#[test]
+fn a_dry_run_in_json_carries_what_each_archive_leaves_out_and_changes_nothing() {
+    let collection = world();
+    plant_doomed_leftover(&collection);
+    let before = snapshot(&collection.root());
+
+    let json = archive(&collection, &["--json"], &["--dry-run"]);
+
     let value = json.json();
     assert_eq!(value["dry_run"], true);
     let actions = value["actions"].as_array().expect("actions");
@@ -274,9 +290,43 @@ fn a_dry_run_lists_the_repairs_then_the_archives_and_changes_nothing() {
     assert_eq!(actions[0]["kind"], "repair");
     assert_eq!(
         actions[2],
-        serde_json::json!({"kind": "archive", "piece": "old/site"})
+        serde_json::json!({
+            "kind": "archive",
+            "piece": "old/site",
+            "left_out": ["node_modules/"],
+        })
     );
     assert_eq!(snapshot(&collection.root()), before);
+}
+
+#[test]
+fn a_dry_run_of_a_named_piece_lists_its_restored_marker_as_left_out() {
+    let collection = world();
+    fs::write(
+        collection.path("new/work/.antiq-restored"),
+        "restored 2020-01-01T00:00:00Z\n",
+    )
+    .expect("the marker is written");
+
+    let run = archive(&collection, &[], &["-n", "new/work"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        ["Would archive new/work", "Would leave out .antiq-restored"]
+    );
+}
+
+#[test]
+fn a_dry_run_of_a_piece_without_ignored_entries_has_an_empty_left_out() {
+    let collection = world();
+
+    let json = archive(&collection, &["--json"], &["-n", "new/work"]);
+
+    assert_eq!(
+        json.json()["actions"],
+        serde_json::json!([{"kind": "archive", "piece": "new/work", "left_out": []}])
+    );
 }
 
 #[test]

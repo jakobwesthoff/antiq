@@ -157,13 +157,18 @@ fn exit_code(partial: bool, named: bool, refused: &[RefusedPiece]) -> u8 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArchiveAction {
-    Archive { piece: String },
+    Archive {
+        piece: String,
+        /// What the version leaves out: ignored entries (a folder counts
+        /// once, with a trailing `/`) and the `.antiq-restored` marker.
+        left_out: Vec<String>,
+    },
 }
 
 impl PlanAction for ArchiveAction {
     fn describe(&self) -> String {
         match self {
-            ArchiveAction::Archive { piece } => format!("archive {piece}"),
+            ArchiveAction::Archive { piece, .. } => format!("archive {piece}"),
         }
     }
 }
@@ -196,14 +201,21 @@ impl ArchivePlan {
         }
     }
 
-    /// The lines the console prints: a `Would ...` line per action, a
+    /// The lines the console prints: a `Would ...` line per action, a line
+    /// per left-out path under each piece it would archive, a
     /// `Refused ...` line per refused piece, or `Nothing to do.` for none.
     pub fn lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
-            .actions
-            .iter()
-            .map(|action| format!("Would {}", action.describe()))
-            .collect();
+        let mut lines = Vec::new();
+        for action in &self.actions {
+            lines.push(format!("Would {}", action.describe()));
+            if let Step::Command(ArchiveAction::Archive { left_out, .. }) = action {
+                lines.extend(
+                    left_out
+                        .iter()
+                        .map(|path| format!("Would leave out {path}")),
+                );
+            }
+        }
         lines.extend(
             self.refused
                 .iter()
