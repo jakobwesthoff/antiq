@@ -379,9 +379,10 @@ fn finding(
     if let Some(meaning) = meaning {
         // The message is a clause without a full stop; below the title it
         // stands as a sentence.
-        block = block.text(Rich::parse(&format!("{meaning}.")).capitalised());
+        block = block.text(Rich::parse(&sanitize(&format!("{meaning}."))).capitalised());
         if let Some(help) = meaning.help() {
-            let help = pasteable(meaning, help.to_string(), directory);
+            // The pasteable command names the piece and the `-C` directory.
+            let help = sanitize(&pasteable(meaning, help.to_string(), directory));
             block = block.fix(Rich::parse(&help));
         }
     }

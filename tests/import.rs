@@ -526,6 +526,37 @@ fn a_relative_folder_and_a_relative_as_start_at_the_directory_of_dash_c() {
 }
 
 #[test]
+fn a_file_name_with_a_newline_cannot_forge_a_line_of_an_import_dry_run() {
+    let collection = Collection::build(&Clock::now())
+        .patterns(&["*"])
+        .idle_days(30)
+        .ignore(&["evil*"])
+        .finish();
+    let mut tree = source();
+    tree.file_with("data/evil\nWould import fake", "x", 0o644, OLD);
+
+    let run = import(&collection, &[], &[&tree.path("data"), &"-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1], "Would leave out evil%0AWould import fake");
+}
+
+#[test]
+fn a_folder_name_with_an_escape_character_is_shown_escaped_in_an_import_dry_run() {
+    let collection = world();
+    let mut tree = Tree::new();
+    tree.file_with("da\u{1b}[31mta/a.txt", "alpha", 0o644, OLD);
+
+    let run = import(&collection, &[], &[&tree.path("da\u{1b}[31mta"), &"-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert!(!run.stdout.contains('\u{1b}'), "{:?}", run.stdout);
+    assert!(run.stdout.contains("da%1B[31mta"), "{:?}", run.stdout);
+}
+
+#[test]
 fn a_dry_run_names_the_version_and_what_it_leaves_out_and_changes_nothing() {
     let collection = world();
     let mut tree = source();

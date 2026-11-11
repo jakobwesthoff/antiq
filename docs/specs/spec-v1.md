@@ -2291,6 +2291,12 @@ prints both. A `Would skip` line is tagged like an action but is
 none: a dry run whose lines are all skips has no footer, and so has a dry
 run with no action.
 
+A control character in a path or name from the user's files is written as `%`
+and the two hexadecimal digits of each of its bytes, on a terminal and in a
+pipe, so that a name cannot end a line or forge another one. This holds for the
+`Would ...` lines of a dry run, the notes and warnings, and the findings of
+`status`. `--json` carries the text unchanged, as a JSON string.
+
 Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
 the dry-run footer. A stream that is not a terminal gets plain lines: on
 stderr `error:` and `warning:` lines, on stdout the `Would <verb> ...`
@@ -2305,7 +2311,8 @@ The warnings of a run go to stderr after its result, one block each. The
 title of a warning is its message, with the first letter in upper case
 unless the message starts with a command or path; a warning that has a fix
 adds it as a `→` line. The unknown config key is the one with a fix. A pipe
-gets one `warning: <message>` line for each, the message as written.
+gets one `warning: <message>` line for each, the message as written, with a
+control character escaped as described above.
 A warning that starts with a piece path or another value from the user's files has
 that value in a code span, in the pipe line and in the JSON `message` too, so the
 console shows it as spelled and does not capitalise it.

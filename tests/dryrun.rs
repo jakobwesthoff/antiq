@@ -305,3 +305,50 @@ fn the_dry_runs_of_unearth_and_fork_in_a_pipe_keep_their_check_lines() {
         run.stdout
     );
 }
+
+#[test]
+fn the_fix_of_a_damaged_version_shows_an_escape_character_of_the_piece_escaped() {
+    let clock = Clock::now();
+    let mut builder = Collection::build(&clock);
+    builder.patterns(&["projects/*"]);
+    builder.version("projects/ev\x1b[31mil", NEW, &[("a.txt", "a")]);
+    let collection = builder.finish();
+    collection.damage_remove_listing("projects/ev\x1b[31mil", NEW);
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty_env(&["status"], PLAIN);
+
+    run.expect_code(0);
+    assert!(!run.stdout.contains('\x1b'), "{:?}", run.stdout);
+    assert!(run.stdout.contains("ev%1B[31mil"), "{:?}", run.stdout);
+}
+
+#[test]
+fn a_file_name_with_a_newline_cannot_forge_a_line_of_a_dry_run_on_a_terminal() {
+    let world = world(|builder| {
+        builder.ignore(&["evil*"]);
+        builder.piece("projects/alpha", |piece| {
+            piece
+                .age_days(40)
+                .file("data", "x")
+                .file("evil\x1b[31m\nWould archive fake", "x");
+        });
+    });
+    let run = world.run_tty_env(&["archive", "-n"], PLAIN);
+    run.expect_code(0);
+    assert!(!run.stdout.contains('\x1b'), "{:?}", run.stdout);
+    assert_eq!(
+        run.stdout
+            .lines()
+            .filter(|line| line.contains("would archive"))
+            .count(),
+        1,
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("evil%1B[31m%0AWould archive fake"),
+        "{:?}",
+        run.stdout
+    );
+}

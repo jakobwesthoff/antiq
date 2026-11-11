@@ -15,6 +15,7 @@ use crate::cli::console::env::Env;
 use crate::cli::console::render::{Part, render_blocks, render_parts};
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::Notice;
+use crate::cli::table::sanitize;
 use antiq::error::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -425,8 +426,8 @@ impl Output {
                 Some(block) => pending.push(block),
                 None => {
                     self.blocks(&std::mem::take(&mut pending))?;
-                    if let Notice::Line(line) = notice {
-                        self.stderr.write_line(line)?;
+                    if let Some(line) = notice.line() {
+                        self.stderr.write_line(&line)?;
                     }
                 }
             }
@@ -439,7 +440,12 @@ impl Output {
     /// terminal, with the rests lined up; any other line is written as it
     /// is. A `Would skip` line is tagged but is no action: running again
     /// would skip it too.
+    ///
+    /// The lines name paths from the user's files. A control character in
+    /// one is escaped here, before the line is split into verb and rest, so
+    /// that a name cannot end a line or forge another action.
     pub fn dry_lines(&mut self, lines: &[String]) -> io::Result<usize> {
+        let lines: Vec<String> = lines.iter().map(|line| sanitize(line)).collect();
         let width = lines
             .iter()
             .filter_map(|line| dryrun::split(line))
@@ -447,7 +453,7 @@ impl Output {
             .max()
             .unwrap_or(0);
         let mut actions = 0;
-        for line in lines {
+        for line in &lines {
             let Some((verb, rest)) = dryrun::split(line) else {
                 self.stdout.write_line(line)?;
                 continue;
@@ -809,6 +815,29 @@ mod tests {
             capture.stdout(),
             "○ would archive  notes/two  spaces /and trailing \n"
         );
+    }
+
+    #[test]
+    fn a_control_character_in_a_dry_run_line_is_escaped_on_a_pipe() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(Env::pipe(), Env::pipe());
+        let actions = out
+            .dry_lines(&["Would archive a\nWould archive b\u{1b}[0m".to_string()])
+            .expect("memory accepts writes");
+        assert_eq!(actions, 1);
+        assert_eq!(
+            capture.stdout(),
+            "Would archive a%0AWould archive b%1B[0m\n"
+        );
+    }
+
+    #[test]
+    fn a_control_character_in_a_dry_run_line_is_escaped_on_a_terminal() {
+        let capture = Capture::default();
+        let mut out = capture.output_with(terminal(), Env::pipe());
+        out.dry_lines(&["Would archive a\nWould archive b".to_string()])
+            .expect("memory accepts writes");
+        assert_eq!(capture.stdout(), "○ would archive  a%0AWould archive b\n");
     }
 
     #[test]

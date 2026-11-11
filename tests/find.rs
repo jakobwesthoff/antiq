@@ -451,6 +451,40 @@ fn a_listing_that_cannot_be_read_keeps_its_row_and_is_a_warning() {
 }
 
 #[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_a_warning() {
+    let world = world(Mode::Text, |builder| {
+        builder.version("no\nWould archive fake", SCANNER_NEW, &[("a.txt", "a")]);
+    });
+    let listing = world
+        .collection()
+        .version_files("no\nWould archive fake", SCANNER_NEW)
+        .listing;
+    fs::set_permissions(&listing, fs::Permissions::from_mode(0o000)).expect("the mode changes");
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+        }
+    }
+    let _restore = Restore(listing.clone());
+    assert!(
+        fs::File::open(&listing).is_err(),
+        "the test needs a non-root user"
+    );
+
+    let run = world.run(&["find"]);
+
+    run.expect_code(0);
+    assert_eq!(run.stderr.lines().count(), 1, "{:?}", run.stderr);
+    assert!(
+        run.stderr
+            .starts_with("warning: cannot open no%0AWould archive fake/"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+#[test]
 fn control_characters_of_a_piece_are_escaped_in_a_pipe() {
     let world = world(Mode::Text, |builder| {
         builder.version("odd\tname", SCANNER_NEW, &[("a.txt", "a")]);

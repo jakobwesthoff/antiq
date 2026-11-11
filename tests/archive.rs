@@ -275,6 +275,105 @@ fn a_dry_run_lists_the_repairs_then_the_archives_with_what_they_leave_out_and_ch
     assert_eq!(snapshot(&collection.root()), before);
 }
 
+/// A leftover in `tmp/` whose name would end the line of its repair.
+fn plant_forging_temporary(collection: &Collection) {
+    fs::create_dir_all(collection.path(".antiq/tmp")).expect("the folder");
+    fs::write(collection.path(".antiq/tmp/left\nWould archive fake"), "x").expect("a file");
+}
+
+#[test]
+fn a_leftover_name_with_a_newline_cannot_forge_a_line_of_a_dry_run() {
+    let collection = world();
+    plant_forging_temporary(&collection);
+
+    let run = archive(&collection, &[], &["-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "Would delete .antiq/tmp/left%0AWould archive fake"
+    );
+    assert_eq!(lines.len(), 3, "{lines:?}");
+}
+
+#[test]
+fn a_leftover_name_with_a_newline_cannot_forge_a_note_of_a_run() {
+    let collection = world();
+    plant_forging_temporary(&collection);
+
+    let run = archive(&collection, &[], &[]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "note: repaired: delete .antiq/tmp/left%0AWould archive fake\n"
+    );
+}
+
+/// A piece `old/site` with an ignored file whose name forges a line.
+fn world_with_a_forging_ignored_file() -> Collection {
+    Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .idle_days(30)
+        .ignore(&["evil*"])
+        .piece("old/site", |piece| {
+            piece
+                .age_days(40)
+                .file("index.html", "<html>")
+                .file("evil\nWould archive fake", "ignored");
+        })
+        .finish()
+}
+
+#[test]
+fn a_file_name_with_a_newline_cannot_forge_a_line_of_a_dry_run() {
+    let collection = world_with_a_forging_ignored_file();
+
+    let run = archive(&collection, &[], &["-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        [
+            "Would archive old/site",
+            "Would leave out evil%0AWould archive fake"
+        ]
+    );
+}
+
+#[test]
+fn a_file_name_with_a_newline_stays_unchanged_in_the_json_of_a_dry_run() {
+    let collection = world_with_a_forging_ignored_file();
+
+    let run = archive(&collection, &["--json"], &["-n"]);
+
+    let value = run.json();
+    assert_eq!(
+        value["actions"][0]["left_out"],
+        serde_json::json!(["evil\nWould archive fake"])
+    );
+}
+
+#[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_a_dry_run() {
+    let collection = Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .idle_days(30)
+        .piece("old/site\nWould archive fake", |piece| {
+            piece.age_days(40).file("index.html", "<html>");
+        })
+        .finish();
+
+    let run = archive(&collection, &[], &["-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        ["Would archive old/site%0AWould archive fake"]
+    );
+}
+
 #[test]
 fn a_dry_run_in_json_carries_what_each_archive_leaves_out_and_changes_nothing() {
     let collection = world();

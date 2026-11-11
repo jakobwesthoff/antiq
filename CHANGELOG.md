@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `import -n` lists an ignored folder once when an ignored name sorts
   between the folder and its content, such as `cache.log` next to
   `cache/`. The content of the folder was listed as well
+- A control character in a path, such as a newline or ESC in a file name,
+  is shown as `%` and the hex digits of its bytes in the `Would ...` lines
+  of a dry run, in notes and warnings, and in the fix lines of `status`, as
+  `find` already did. A newline in a name could forge a line of a dry run,
+  such as a `Would archive` line. `--json` is unchanged
 
 ## [1.3.0] - 2026-11-11
 
