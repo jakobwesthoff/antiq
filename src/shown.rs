@@ -95,6 +95,12 @@ impl Named for str {
     }
 }
 
+impl Named for [u8] {
+    fn name_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
 impl Named for String {
     fn name_bytes(&self) -> &[u8] {
         self.as_bytes()
@@ -386,6 +392,11 @@ mod tests {
         assert_eq!(Shown(&os_string).to_string(), "a%FF%25");
         let name = crate::relpath::Name::from_bytes(b"a\nb".to_vec()).expect("a valid name");
         assert_eq!(Shown(&name).to_string(), "a%0Ab");
+    }
+
+    #[test]
+    fn bytes_are_shown_like_the_name_they_are() {
+        assert_eq!(Shown(&b"a%\xff\n"[..]).to_string(), "a%25%FF%0A");
     }
 
     #[test]

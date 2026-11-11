@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name. The `message` and `fix` of errors and warnings in `--json` carry
   the same form. The structured fields (`piece`, `path`, `candidates`) are
   unchanged
+- `grep` shows the piece and the path by the same rule on a terminal and in
+  a pipe: a control character as `%XX` of its bytes, a `%` as `%25` and a
+  byte that is not UTF-8 as `%XX`. A pipe line used to carry the raw bytes
+  and a terminal the escapes of a listing (`\n`, `\t`, `\\`), so a newline
+  in an archived path split a hit into two lines. The pipe and terminal
+  forms now show a backslash as it is, and the match is still found in the
+  raw path
 - A pasteable command that names a path with a control character writes it
   in the `$'...'` quoting of a shell, as it did for a path that is not
   UTF-8, so the command names the exact path

@@ -19,10 +19,8 @@ use antiq::error::ErrorKind;
 use antiq::shown::{escape_controls, first_raw_character};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
@@ -334,12 +332,6 @@ impl Output {
     /// Writes a line of a command's result to stdout.
     pub fn line(&mut self, text: &str) -> io::Result<()> {
         self.stdout.write_line(text)
-    }
-
-    /// Writes a line of a command's result to stdout as the bytes it is.
-    /// For output that a shell reads back, such as a path.
-    pub fn line_os(&mut self, text: &OsStr) -> io::Result<()> {
-        self.stdout.write_line_bytes(text.as_bytes())
     }
 
     /// Writes a line of a message to the user to stderr.
@@ -964,41 +956,6 @@ mod tests {
             .expect("memory accepts writes");
         assert_eq!(capture.stdout(), "Created the collection\n");
         assert_eq!(capture.stderr(), "nothing else was done\n");
-    }
-
-    #[test]
-    fn a_line_of_bytes_is_written_as_it_is() {
-        let capture = Capture::default();
-        let mut out = capture.output();
-        out.line_os(OsStr::from_bytes(b"/work/100% done/a\xff"))
-            .expect("memory accepts writes");
-        assert_eq!(capture.stdout_bytes(), b"/work/100% done/a\xff\n");
-        assert_eq!(capture.stderr(), "");
-    }
-
-    #[test]
-    fn a_line_of_bytes_to_a_closed_pipe_is_dropped() {
-        let (pipe, flushes) = FailsOnFlush::new(io::ErrorKind::BrokenPipe);
-        let mut out = Output::new(Box::new(pipe), Box::new(Vec::new()));
-        out.line_os(OsStr::new("one"))
-            .expect("a closed pipe is no error");
-        out.line_os(OsStr::new("two"))
-            .expect("a closed pipe is no error");
-        assert_eq!(
-            *flushes.lock().expect("no test panics while counting"),
-            1,
-            "nothing is written after the pipe closed"
-        );
-    }
-
-    #[test]
-    fn another_write_failure_of_a_line_of_bytes_is_an_error() {
-        let (disk, _) = FailsOnFlush::new(io::ErrorKind::StorageFull);
-        let mut out = Output::new(Box::new(disk), Box::new(Vec::new()));
-        let error = out
-            .line_os(OsStr::new("one"))
-            .expect_err("a full disk is reported");
-        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     }
 
     #[test]

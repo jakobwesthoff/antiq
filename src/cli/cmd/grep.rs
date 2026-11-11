@@ -11,7 +11,7 @@ use crate::cli::{Context, GrepArgs};
 use antiq::collection::Collection;
 use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep_collection};
 use antiq::report::Warning;
-use antiq::shown::escape_controls;
+use antiq::shown::{Shown, escape_controls};
 use antiq::versions::naming::{local_labels, system_zone};
 use antiq::versions::stamp::Stamp;
 use anyhow::Context as _;
@@ -19,9 +19,7 @@ use jiff::tz::TimeZone;
 use regex::bytes::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::ops::Range;
-use std::os::unix::ffi::OsStrExt;
 use unicode_width::UnicodeWidthStr;
 
 pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -73,8 +71,7 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
             }
         } else {
             for line in pipe_lines(found) {
-                out.line_os(OsStr::from_bytes(&line))
-                    .context("print the hits")?;
+                out.line(&line).context("print the hits")?;
             }
         }
         // Warnings follow the hits: the hits are what was asked for. The
@@ -106,31 +103,25 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
 // =========================================================
 
 /// One line `piece<TAB>stamp<TAB>path` per hit and version, the piece and
-/// the path as the raw bytes they are, and `-` for the path of a piece
-/// whose name matches.
-fn pipe_lines(found: &GrepReport) -> Vec<Vec<u8>> {
+/// the path by the rule for names, so a tab or a newline in a name cannot
+/// add a field or a line, and `-` for the path of a piece whose name
+/// matches.
+fn pipe_lines(found: &GrepReport) -> Vec<String> {
     let mut lines = Vec::new();
     for hits in &found.pieces {
-        let line = |stamp: String, path: &[u8]| {
-            let mut line = hits.piece.as_bytes().to_vec();
-            line.push(b'\t');
-            line.extend_from_slice(stamp.as_bytes());
-            line.push(b'\t');
-            line.extend_from_slice(path);
-            line
-        };
+        let line = |stamp: String, path: String| format!("{}\t{stamp}\t{path}", Shown(&hits.piece));
         if hits.name_match {
             lines.extend(
                 hits.versions
                     .iter()
-                    .map(|version| line(version.stamp.to_string(), b"-")),
+                    .map(|version| line(version.stamp.to_string(), "-".to_string())),
             );
         }
         for file in &hits.files {
             lines.extend(
                 file.versions
                     .iter()
-                    .map(|stamp| line(stamp.to_string(), &file.path)),
+                    .map(|stamp| line(stamp.to_string(), Shown(&file.path[..]).to_string())),
             );
         }
     }
@@ -345,10 +336,10 @@ fn grouped(number: u64) -> String {
     text
 }
 
-/// A path as a terminal shows it: the escapes of a comment line of a
-/// listing, any other control character as `%XX` of its bytes, and a byte
-/// that is not UTF-8 as `%XX`. Each unit remembers the bytes of the path it
-/// stands for, so a match can be marked in it.
+/// A path as a terminal shows it, by the rule for names: a `%` as `%25`, a
+/// control character as `%XX` of its bytes, and a byte that is not UTF-8 as
+/// `%XX`. Each unit remembers the bytes of the path it stands for, so a
+/// match, which is found in the bytes, can be marked in it.
 struct Displayed {
     units: Vec<(String, Range<usize>)>,
 }
@@ -359,18 +350,14 @@ fn display(bytes: &[u8]) -> Displayed {
     for chunk in bytes.utf8_chunks() {
         for character in chunk.valid().chars() {
             let end = offset + character.len_utf8();
-            let shown = match character {
-                '\\' => "\\\\".to_string(),
-                '\n' => "\\n".to_string(),
-                '\t' => "\\t".to_string(),
-                '\r' => "\\r".to_string(),
-                other => escape_controls(&other.to_string()),
-            };
-            units.push((shown, offset..end));
+            units.push((
+                Shown(character.encode_utf8(&mut [0; 4]) as &str).to_string(),
+                offset..end,
+            ));
             offset = end;
         }
         for byte in chunk.invalid() {
-            units.push((format!("%{byte:02X}"), offset..offset + 1));
+            units.push((Shown(&[*byte][..]).to_string(), offset..offset + 1));
             offset += 1;
         }
     }
@@ -670,7 +657,7 @@ mod tests {
     // =========================================================
 
     #[test]
-    fn tab_backslash_newline_and_other_control_characters_are_shown_escaped() {
+    fn tab_newline_and_other_control_characters_are_shown_escaped_and_a_backslash_is_not() {
         let found = report(vec![hits(
             "notes",
             &[NEW],
@@ -679,7 +666,16 @@ mod tests {
 
         let lines = render(&found, "a", style(120, false));
 
-        assert_eq!(lines[1], "  a\\tb\\\\c\\nd\\re%1Bf   2026-11-04");
+        assert_eq!(lines[1], "  a%09b\\c%0Ad%0De%1Bf   2026-11-04");
+    }
+
+    #[test]
+    fn a_percent_sign_and_a_bidi_control_are_shown_by_the_rule_for_names() {
+        let found = report(vec![hits("notes", &[NEW], &[("100%\u{202e}x", &[NEW])])]);
+
+        let lines = render(&found, "x", style(120, false));
+
+        assert_eq!(lines[1], "  100%25%E2%80%AEx   2026-11-04");
     }
 
     #[test]
@@ -702,7 +698,7 @@ mod tests {
 
         let lines = render(&found, "XY", style(120, true));
 
-        assert_eq!(lines[1], format!("  a\\tb{RED}XY{END}   2026-11-04"),);
+        assert_eq!(lines[1], format!("  a%09b{RED}XY{END}   2026-11-04"),);
     }
 
     #[test]
@@ -722,7 +718,19 @@ mod tests {
 
         let lines = render(&found, r"\t", style(120, true));
 
-        assert_eq!(lines[1], format!("  a{RED}\\t{END}b   2026-11-04"));
+        assert_eq!(lines[1], format!("  a{RED}%09{END}b   2026-11-04"));
+    }
+
+    #[test]
+    fn a_match_after_a_percent_sign_and_a_newline_is_painted_on_exactly_its_letters() {
+        let found = report(vec![hits("notes", &[NEW], &[("a%b\nb", &[NEW])])]);
+
+        let lines = render(&found, "b", style(120, true));
+
+        assert_eq!(
+            lines[1],
+            format!("  a%25{RED}b{END}%0A{RED}b{END}   2026-11-04")
+        );
     }
 
     #[test]

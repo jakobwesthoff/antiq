@@ -1527,9 +1527,10 @@ that the longest right text leaves, but at least 20 columns, and a longer
 path is cut in the middle and not highlighted.
 
 The pattern is matched against the unescaped path bytes; text output shows
-the path with the comment-line escapes, any other control character as `%XX`
-of its bytes and a byte that is not UTF-8 as `%XX`, and the pipe form prints
-the raw path. A piece whose name matches gives one row, `piece name matches,
+the piece and the path by the rule of "Console output", on a terminal and in
+a pipe: a `%` as `%25`, a control character as `%XX` of its bytes and a byte
+that is not UTF-8 as `%XX`. A backslash is shown as it is. The match is
+highlighted on the characters it covers. A piece whose name matches gives one row, `piece name matches,
 2 versions, newest 2026-11-04, 48 211 files`, with the version count and the
 file count and no file list. The name matches when the
 leftmost match of the pattern in `<piece>/`, the piece path and a slash, ends
@@ -1538,7 +1539,9 @@ and `scanner.*` do not, and `scanner.*` lists the files below the piece. Only
 the heads of the listings of such a piece are read, and the file count is the
 one of its newest searched version. In a pipe every hit and
 version is one tab-separated line `piece  stamp  path`, with the full
-version stamp (`-` as the path for a name match), ordered by piece, then
+version stamp (`-` as the path for a name match). A tab or a newline in a
+name is shown escaped, so a line has three fields and a hit is one line.
+The lines are ordered by piece, then
 path, then version with the newest first. A skipped version is a `warning:`
 line on stderr. With no hit `grep` exits 0 and says `no archived path
 matches <pattern>` on stderr; a pattern that is not a valid regular
@@ -2309,9 +2312,8 @@ the text, "How to fix it", the steps the run was in, the candidates and the
 lines that rsync and other programs said), also the usage errors that echo
 an argument of the command line. `--json` carries the structured
 fields (`piece`, `path`, `candidates` and the like) unchanged, as JSON strings,
-and the `message` and `fix` of errors and warnings in the shown form. `grep` is the exception: on a terminal its paths
-use the comment-line escapes of a listing, and in a pipe its lines carry the
-raw bytes (see "grep").
+and the `message` and `fix` of errors and warnings in the shown form. This
+holds for `grep` too, on a terminal and in a pipe.
 
 Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
 the dry-run footer. A stream that is not a terminal gets plain lines: on

@@ -144,7 +144,7 @@ fn a_piece_name_match_is_a_line_per_version_with_a_dash() {
 }
 
 #[test]
-fn a_name_with_a_tab_and_a_backslash_is_matched_unescaped_and_printed_raw() {
+fn a_name_with_a_tab_and_a_backslash_is_matched_unescaped_and_its_tab_is_shown_escaped() {
     let mut store = Store::new();
     store.add_version(&source(&["notes/a\tb\\c", "notes/plain"]), "notes", NEW);
     let collection = collection_of(&store);
@@ -152,7 +152,57 @@ fn a_name_with_a_tab_and_a_backslash_is_matched_unescaped_and_printed_raw() {
     let run = grep(&collection, &[r"a\tb\\c"]);
 
     assert_eq!(run.code(), 0);
-    assert_eq!(run.stdout, "notes\t2026-11-04T100211\ta\tb\\c\n");
+    assert_eq!(run.stdout, "notes\t2026-11-04T100211\ta%09b\\c\n");
+}
+
+#[test]
+fn a_newline_in_an_archived_path_cannot_split_a_pipe_line() {
+    let mut store = Store::new();
+    store.add_version(&source(&["notes/a\nnotes\tfake\tline"]), "notes", NEW);
+    let collection = collection_of(&store);
+
+    let run = grep(&collection, &["fake"]);
+
+    assert_eq!(run.code(), 0);
+    assert_eq!(lines(&run.stdout).len(), 1, "{:?}", run.stdout);
+    assert_eq!(
+        run.stdout,
+        "notes\t2026-11-04T100211\ta%0Anotes%09fake%09line\n"
+    );
+    assert_eq!(run.stdout.matches('\t').count(), 2, "{:?}", run.stdout);
+}
+
+#[test]
+fn a_percent_sign_in_an_archived_path_is_shown_as_percent_25_in_a_pipe() {
+    let mut store = Store::new();
+    store.add_version(&source(&["notes/100% done"]), "notes", NEW);
+    let collection = collection_of(&store);
+
+    let run = grep(&collection, &["100"]);
+
+    assert_eq!(run.stdout, "notes\t2026-11-04T100211\t100%25 done\n");
+}
+
+#[test]
+fn a_bidi_control_in_an_archived_path_is_shown_escaped_in_a_pipe() {
+    let mut store = Store::new();
+    store.add_version(&source(&["notes/a\u{202e}gpj"]), "notes", NEW);
+    let collection = collection_of(&store);
+
+    let run = grep(&collection, &["gpj"]);
+
+    assert_eq!(run.stdout, "notes\t2026-11-04T100211\ta%E2%80%AEgpj\n");
+}
+
+#[test]
+fn a_piece_name_with_a_newline_is_shown_escaped_in_a_pipe() {
+    let mut store = Store::new();
+    store.add_version(&source(&["no\nes/a"]), "no\nes", NEW);
+    let collection = collection_of(&store);
+
+    let run = grep(&collection, &["a$"]);
+
+    assert_eq!(run.stdout, "no%0Aes\t2026-11-04T100211\ta\n");
 }
 
 // =========================================================
