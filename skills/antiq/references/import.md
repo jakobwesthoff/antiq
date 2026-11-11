@@ -5,8 +5,8 @@ Part of the antiq skill. Read SKILL.md first, which holds the rules for every ta
 `import` packs a folder from outside the collection as a version, checks
 the archive the way `archive` does, and leaves the folder where it is.
 It is the way to bring old projects from another disk, a downloads folder
-or an old archive file into the collection's archive. Run it only on the
-user's request.
+or an old archive file into the collection's archive. `import -n` is fine
+on your own; the import itself only on the user's request.
 
 ```sh
 antiq -C <collection root> import <absolute folder> --as <piece path> -n --json
