@@ -8,8 +8,10 @@
 //! following a link. Everything that reads a piece afterwards (idle check,
 //! packing, verification, change detection) works from this record.
 
+use crate::markers::RESTORED_FILE;
 use crate::relpath::{Name, RelPath};
 use rustix::fs::FileType;
+use std::collections::HashSet;
 
 /// What kind of file system object an entry is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,10 +164,52 @@ impl PieceTree {
     /// records the piece's history and is no part of its content.
     pub fn packed_entries(&self) -> impl Iterator<Item = &TreeEntry> {
         self.entries.iter().filter(|entry| {
-            let restored = entry.class == Class::Control
-                && entry.path.as_bytes() == crate::markers::RESTORED_FILE.as_bytes();
+            let restored =
+                entry.class == Class::Control && entry.path.as_bytes() == RESTORED_FILE.as_bytes();
             entry.class != Class::Ignored && !restored
         })
+    }
+
+    /// What the version of this piece does not contain, as a person reads
+    /// it: the ignored entries that are not inside an ignored folder (a
+    /// folder counts once, with a trailing `/`) and the `.antiq-restored`
+    /// marker of the top, sorted. The entries inside an ignored folder are
+    /// left out with it and not named; every other entry is packed or named
+    /// here.
+    pub fn left_out(&self) -> Vec<String> {
+        let mut left = Vec::new();
+        // Entries are ordered by path bytes, so a name such as `cache.log`
+        // can sit between `cache` and `cache/x`. Every ignored folder is
+        // therefore remembered, and an entry is inside one when its parent
+        // is such a folder: everything below an ignored folder is ignored
+        // with it.
+        let mut ignored_folders: HashSet<&[u8]> = HashSet::new();
+        for entry in &self.entries {
+            if entry.class == Class::Ignored {
+                let path = entry.path.as_bytes();
+                let inside = path
+                    .iter()
+                    .rposition(|byte| *byte == b'/')
+                    .is_some_and(|slash| ignored_folders.contains(&path[..slash]));
+                if !inside {
+                    let suffix = if entry.kind == EntryKind::Directory {
+                        "/"
+                    } else {
+                        ""
+                    };
+                    left.push(format!("{}{suffix}", entry.path));
+                }
+                if entry.kind == EntryKind::Directory {
+                    ignored_folders.insert(path);
+                }
+            } else if entry.class == Class::Control
+                && entry.path.as_bytes() == RESTORED_FILE.as_bytes()
+            {
+                left.push(RESTORED_FILE.to_string());
+            }
+        }
+        left.sort();
+        left
     }
 }
 
@@ -242,5 +286,103 @@ mod tests {
         assert_eq!(tree.top(), &top);
         assert_eq!(tree.problems(), problems.as_slice());
         assert!(tree.entries().is_empty());
+    }
+
+    fn classed(path: &str, kind: EntryKind, class: Class) -> TreeEntry {
+        TreeEntry {
+            class,
+            ..entry(path, kind)
+        }
+    }
+
+    fn tree_of(entries: Vec<TreeEntry>) -> PieceTree {
+        PieceTree::new(
+            RelPath::parse("projects/a").expect("valid path"),
+            entries,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn an_ignored_folder_is_left_out_once_without_its_content() {
+        let tree = tree_of(vec![
+            classed("cache", EntryKind::Directory, Class::Ignored),
+            classed("cache/deep", EntryKind::Directory, Class::Ignored),
+            classed("cache/deep/x", EntryKind::File, Class::Ignored),
+        ]);
+        assert_eq!(tree.left_out(), ["cache/"]);
+    }
+
+    #[test]
+    fn an_ignored_file_is_left_out_by_its_path() {
+        let tree = tree_of(vec![
+            entry("sub", EntryKind::Directory),
+            classed("sub/debug.log", EntryKind::File, Class::Ignored),
+        ]);
+        assert_eq!(tree.left_out(), ["sub/debug.log"]);
+    }
+
+    #[test]
+    fn a_name_that_sorts_between_a_folder_and_its_content_does_not_bring_the_content_back() {
+        let tree = tree_of(vec![
+            classed("cache", EntryKind::Directory, Class::Ignored),
+            classed("cache.log", EntryKind::File, Class::Ignored),
+            classed("cache/x", EntryKind::File, Class::Ignored),
+            classed("build", EntryKind::Directory, Class::Ignored),
+            classed("build-cache", EntryKind::Directory, Class::Ignored),
+            classed("build-cache/y", EntryKind::File, Class::Ignored),
+            classed("build/x", EntryKind::File, Class::Ignored),
+        ]);
+        assert_eq!(
+            tree.left_out(),
+            ["build-cache/", "build/", "cache.log", "cache/"]
+        );
+    }
+
+    #[test]
+    fn the_restored_marker_of_the_top_is_left_out() {
+        let tree = tree_of(vec![classed(
+            ".antiq-restored",
+            EntryKind::File,
+            Class::Control,
+        )]);
+        assert_eq!(tree.left_out(), [".antiq-restored"]);
+    }
+
+    #[test]
+    fn the_pin_of_the_top_is_packed_and_not_left_out() {
+        let tree = tree_of(vec![classed(".antiq-pin", EntryKind::File, Class::Control)]);
+        assert_eq!(tree.left_out(), Vec::<String>::new());
+        assert_eq!(tree.packed_entries().count(), 1);
+    }
+
+    #[test]
+    fn a_restored_marker_below_the_top_is_left_out_only_when_a_rule_ignores_it() {
+        let counted = tree_of(vec![
+            entry("sub", EntryKind::Directory),
+            classed("sub/.antiq-restored", EntryKind::File, Class::Counted),
+        ]);
+        let ignored = tree_of(vec![
+            entry("sub", EntryKind::Directory),
+            classed("sub/.antiq-restored", EntryKind::File, Class::Ignored),
+        ]);
+        assert_eq!(counted.left_out(), Vec::<String>::new());
+        assert_eq!(ignored.left_out(), ["sub/.antiq-restored"]);
+    }
+
+    #[test]
+    fn the_left_out_entries_come_sorted() {
+        let tree = tree_of(vec![
+            classed(".antiq-restored", EntryKind::File, Class::Control),
+            classed("z.log", EntryKind::File, Class::Ignored),
+            classed("a.log", EntryKind::File, Class::Ignored),
+        ]);
+        assert_eq!(tree.left_out(), [".antiq-restored", "a.log", "z.log"]);
+    }
+
+    #[test]
+    fn a_piece_without_ignored_entries_leaves_nothing_out() {
+        let tree = tree_of(vec![entry("a", EntryKind::File)]);
+        assert_eq!(tree.left_out(), Vec::<String>::new());
     }
 }

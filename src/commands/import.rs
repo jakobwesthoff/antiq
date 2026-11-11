@@ -20,7 +20,6 @@ use crate::commands::survey::Refusal;
 use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::space::{ReserveError, SpaceLedger};
 use crate::filesystem::tree::TreeRoot;
-use crate::markers::RESTORED_FILE;
 use crate::pin::{self, PIN_FILE, PinError};
 use crate::plan::{HeldDryRun, PlanAction, Step};
 use crate::progress::{Observer, Outcome as Progress, Silent, Tracker};
@@ -42,7 +41,6 @@ use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use serde::Serialize;
-use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -701,7 +699,7 @@ fn prepare(
         problems,
     );
     Ok(Prepared {
-        left_out: left_out(&walked),
+        left_out: walked.left_out(),
         source,
         root,
         packed,
@@ -741,42 +739,6 @@ fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportErro
             path: canonical.display().to_string(),
         }),
     }
-}
-
-/// The ignored entries that are not inside an ignored folder, and the
-/// restored marker, sorted.
-fn left_out(tree: &PieceTree) -> Vec<String> {
-    let mut left = Vec::new();
-    // Entries are ordered by path bytes, so a name such as `cache.log` can
-    // sit between `cache` and `cache/x`. Every ignored folder is therefore
-    // remembered, and an entry is inside one when its parent is such a
-    // folder: everything below an ignored folder is ignored with it.
-    let mut ignored_folders: HashSet<&[u8]> = HashSet::new();
-    for entry in tree.entries() {
-        if entry.class == Class::Ignored {
-            let path = entry.path.as_bytes();
-            let inside = path
-                .iter()
-                .rposition(|byte| *byte == b'/')
-                .is_some_and(|slash| ignored_folders.contains(&path[..slash]));
-            if !inside {
-                let suffix = if entry.kind == EntryKind::Directory {
-                    "/"
-                } else {
-                    ""
-                };
-                left.push(format!("{}{suffix}", entry.path));
-            }
-            if entry.kind == EntryKind::Directory {
-                ignored_folders.insert(path);
-            }
-        } else if entry.class == Class::Control && entry.path.as_bytes() == RESTORED_FILE.as_bytes()
-        {
-            left.push(RESTORED_FILE.to_string());
-        }
-    }
-    left.sort();
-    left
 }
 
 // =========================================================
