@@ -405,8 +405,10 @@ checked before the idle and empty tests. (ADR 0024)
 ## Damage
 
 antiq's own crashes never leave the states below behind for good (see
-"Repairs at the start of a run"). They come from outside: a file deleted
-by hand, an incomplete copy back from the target, a disk error. None of
+"Repairs at the start of a run"), except that a crash inside `forget` can
+leave an incomplete version, which running the same `forget` again
+removes (see "forget"). They come from outside: a file deleted by hand,
+an incomplete copy back from the target, a disk error. None of
 them is deleted or rewritten automatically. (ADR 0062)
 
 - **Incomplete version:** a listing or `.tar.zst.sha256` without its
@@ -1788,7 +1790,7 @@ together with `--init` and with `--force`. The steps run in this order.
    | path target answers ENOTCONN, EHOSTDOWN, EHOSTUNREACH, ENETUNREACH or ETIMEDOUT | unreachable |
    | path target directory does not exist | unreachable, also with `--init` |
    | ssh target directory does not exist | exit 1, unless `--init` |
-   | directory present, no `.antiq-target`, empty | unreachable with a warning naming `push --init`, unless `--init` |
+   | directory present, no `.antiq-target`, empty | unreachable, the reason naming `push --init`, unless `--init` |
    | directory present, no `.antiq-target`, not empty | exit 1; `--init` is refused |
    | `.antiq-target` of another collection, or not readable | exit 1 |
    | `.antiq-target` of this collection naming another host or another collection path | exit 1, naming both; `--force` pushes anyway and leaves the marker as it is; `--take-over` rewrites the marker and pushes |

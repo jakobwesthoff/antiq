@@ -469,7 +469,8 @@ checksum file. When one of them goes missing or is changed from outside
 antiq, the version is **damaged**. That happens when a file is deleted by
 hand, when a copy back from the [mirror](#mirroring) stops halfway, or after a disk
 error. antiq's own crashes do not cause it, because the next run cleans
-up after them.
+up after them. The one exception is a `forget` that crashed: it can leave
+an incomplete version, and running the same `forget` again removes it.
 
 You notice a damaged version in three places: `status` reports it, `find`
 marks it, and `push` refuses to run until it is repaired. Here the listing
@@ -486,8 +487,11 @@ What helps depends on what is missing, and the error names the command:
   left. The version is **incomplete**, and nothing can rebuild its files.
   Copy the archive back from the mirror if it is there, or let `forget`
   remove the version.
-- **A file is there but broken.** Copy it back from the mirror, or let
-  `forget` remove the version.
+- **The listing or the checksum file is there but broken.** `rebuild`
+  refuses to overwrite it. Delete that file and run `rebuild`, or copy it
+  back from the mirror.
+- **The archive is there but broken.** Copy it back from the mirror, or
+  let `forget` remove the version.
 
 Here `rebuild` repairs `scan-old`:
 
