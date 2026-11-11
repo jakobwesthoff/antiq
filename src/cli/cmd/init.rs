@@ -8,6 +8,7 @@ use crate::cli::console::env::Env;
 use crate::cli::console::symbols::Symbols;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
+use crate::cli::table::sanitize;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
 use antiq::commands::init::{InitError, InitReport, InitRequest, init};
@@ -96,11 +97,17 @@ fn render(report: &InitReport, env: &Env) -> Lines {
             )));
         }
     } else {
-        stdout.push(format!("Created the collection at {}", report.path));
+        stdout.push(format!(
+            "Created the collection at {}",
+            sanitize(&report.path)
+        ));
         if let Some(id) = report.id {
             stdout.push(format!("  id: {id}"));
         }
-        stdout.push(format!("  patterns: {}", report.patterns.join(", ")));
+        stdout.push(format!(
+            "  patterns: {}",
+            sanitize(&report.patterns.join(", "))
+        ));
         if let Some(due) = report.due {
             let folders = if due == 1 { "folder" } else { "folders" };
             stdout.push(format!("The next archive would archive {due} {folders}."));

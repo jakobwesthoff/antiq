@@ -181,7 +181,9 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                 } else if env.rich && report.initialized && report.plan.is_none() {
                     claimed(&report, &env)
                 } else {
-                    report.lines()
+                    // The plain lines name the target and the changed
+                    // pieces, which come from the user's files.
+                    report.lines().iter().map(|line| sanitize(line)).collect()
                 };
                 if report.dry_run && report.reason.is_none() {
                     out.dry_plan(&lines, "pushed", "push to the target")

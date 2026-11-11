@@ -132,6 +132,23 @@ fn a_folder_outside_becomes_a_version_of_its_name_and_the_source_stays() {
 }
 
 #[test]
+fn a_folder_name_with_a_newline_cannot_forge_a_line_of_the_result_of_an_import() {
+    let collection = world();
+    let mut tree = Tree::new();
+    tree.file_with("data\nimported fake/a.txt", "alpha", 0o644, OLD);
+
+    let run = import(&collection, &[], &[&tree.path("data\nimported fake")]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        [format!(
+            "imported data%0Aimported fake: version {OLD_STAMP}"
+        )]
+    );
+}
+
+#[test]
 fn the_text_output_is_one_line() {
     let collection = world();
     let tree = source();

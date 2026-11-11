@@ -569,6 +569,82 @@ impl Drop for Mode {
     }
 }
 
+/// A collection of one due piece whose name would end a line.
+fn forging_piece_world() -> Collection {
+    Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .idle_days(30)
+        .piece("old/site\nWould archive fake", |piece| {
+            piece.age_days(40).file("index.html", "<html>");
+        })
+        .finish()
+}
+
+#[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_the_result_of_a_run() {
+    let collection = forging_piece_world();
+
+    let run = archive(&collection, &[], &[]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        [
+            "archived old/site%0AWould archive fake",
+            "Archived 1, skipped 0, refused 0."
+        ]
+    );
+}
+
+#[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_a_skipped_piece() {
+    let collection = forging_piece_world();
+    let trash = collection.path(".antiq/trash");
+    let _restore = Mode(trash.clone(), 0o755);
+    fs::set_permissions(&trash, fs::Permissions::from_mode(0o555)).expect("trash is locked");
+    assert!(
+        fs::create_dir(trash.join("probe")).is_err(),
+        "the test needs a user that mode 555 locks out"
+    );
+
+    let run = archive(&collection, &[], &[]);
+
+    assert_eq!(run.code(), 3, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].starts_with("skipped old/site%0AWould archive fake: cannot move "),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_a_refused_piece() {
+    let collection = Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .piece("a/pinned\nWould archive fake", |piece| {
+            piece.age_days(40).file("f", "x").pinned();
+        })
+        .finish();
+
+    let dry = archive(&collection, &[], &["-n", "a/pinned\nWould archive fake"]);
+    let run = archive(&collection, &[], &["a/pinned\nWould archive fake"]);
+
+    assert_eq!(dry.code(), 1, "{}", dry.stderr);
+    assert_eq!(
+        dry.stdout.lines().collect::<Vec<_>>(),
+        ["Refused a/pinned%0AWould archive fake: pinned: a/pinned%0AWould archive fake/.antiq-pin"]
+    );
+    assert_eq!(run.code(), 1, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        [
+            "refused a/pinned%0AWould archive fake: pinned: a/pinned%0AWould archive fake/.antiq-pin",
+            "Archived 0, skipped 0, refused 1."
+        ]
+    );
+}
+
 #[test]
 fn a_piece_that_cannot_enter_trash_is_skipped_with_exit_3_and_the_next_run_archives_it() {
     let collection = world();

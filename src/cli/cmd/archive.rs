@@ -9,6 +9,7 @@ use super::progress::{Description, Shown};
 use crate::cli::console::cards::{Count, items, sizes};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
+use crate::cli::table::sanitize;
 use crate::cli::{ArchiveArgs, Context};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -166,21 +167,27 @@ fn print_report(ctx: &Context, report: &ArchiveReport, out: &mut Output) -> anyh
     print_pipe_lines(report, out)
 }
 
-/// One line for each piece, then the totals.
+/// One line for each piece, then the totals. The pieces, messages and
+/// reasons name paths from the user's files, so their control characters
+/// are escaped.
 fn print_pipe_lines(report: &ArchiveReport, out: &mut Output) -> anyhow::Result<()> {
     for piece in &report.archived {
-        out.line(&format!("archived {}", piece.piece))
+        out.line(&format!("archived {}", sanitize(&piece.piece)))
             .context("print the result")?;
     }
     for piece in &report.skipped {
-        out.line(&format!("skipped {}: {}", piece.piece, piece.message))
-            .context("print the result")?;
+        out.line(&format!(
+            "skipped {}: {}",
+            sanitize(&piece.piece),
+            sanitize(&piece.message)
+        ))
+        .context("print the result")?;
     }
     for piece in &report.refused {
         out.line(&format!(
             "refused {}: {}",
-            piece.piece,
-            piece.reasons_text()
+            sanitize(&piece.piece),
+            sanitize(&piece.reasons_text())
         ))
         .context("print the result")?;
     }

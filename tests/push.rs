@@ -2593,3 +2593,72 @@ fn every_marker_run_compares_checksums() {
         .expect("the marker was sent");
     assert!(send.contains(&"--checksum".to_string()), "{send:?}");
 }
+
+/// A target directory whose name would end the line that names it.
+fn forging_target() -> (support::tree::Tree, std::path::PathBuf) {
+    let mut tree = support::tree::Tree::new();
+    let target = tree.dir("evil\nPushed fake");
+    (tree, target)
+}
+
+#[test]
+fn a_target_name_with_a_newline_cannot_forge_a_line_of_the_result_of_a_push() {
+    let (_tree, target) = forging_target();
+    let (collection, fake) = targeted(&target);
+    fake.answer_all("", "", 0);
+
+    let run = push_text(&collection, &["--init"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].ends_with("evil%0APushed fake for this antiq collection."),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].ends_with("evil%0APushed fake. Nothing changed."),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_piece_name_with_a_newline_cannot_forge_a_line_of_the_changes_of_a_push() {
+    let target = Target::new();
+    let collection = Collection::build(&Clock::now())
+        .piece("evil\nChanged fake", |piece| {
+            piece.age_days(3).file("a.txt", "a");
+        })
+        .finish();
+    set_url(&collection, target.path().to_str().expect("a UTF-8 path"));
+    let fake = use_fake_rsync(&collection, RSYNC_3_2_4);
+    target.marker(&collection);
+    fake.answer_all(">f+++++++++ evil\\#012Changed fake/new.txt\n", "", 0);
+
+    let run = push_text(&collection, &[]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].ends_with("  evil%0AChanged fake: 1 created, 0 updated, 0 deleted"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_target_name_with_a_newline_cannot_forge_a_line_of_the_result_of_a_dry_run_of_a_push() {
+    let (_tree, target) = forging_target();
+    let (collection, fake) = targeted(&target);
+    fake.answer_all("", "", 0);
+
+    let run = push_text(&collection, &["--init", "-n"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[2].ends_with("evil%0APushed fake is up to date."),
+        "{lines:?}"
+    );
+}

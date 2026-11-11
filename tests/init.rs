@@ -327,6 +327,50 @@ fn a_dry_run_counts_nothing() {
 // =========================================================
 
 #[test]
+fn a_directory_name_with_a_newline_cannot_forge_a_line_of_the_result() {
+    let mut tree = Tree::new();
+    let forging = tree.dir("evil\nCreated fake");
+
+    let run = init_at(&forging, &[]);
+
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert!(
+        lines[0].ends_with("evil%0ACreated fake")
+            && lines[0].starts_with("Created the collection at "),
+        "{lines:?}"
+    );
+    assert_eq!(lines.len(), 4, "{lines:?}");
+}
+
+#[test]
+fn a_directory_name_with_a_newline_cannot_forge_a_line_of_a_dry_run() {
+    let mut tree = Tree::new();
+    let forging = tree.dir("evil\nWould create fake");
+
+    let run = init_at(&forging, &["-n"]);
+
+    assert_eq!(run.code(), 0, "stdout: {}", run.stdout);
+    assert_eq!(run.stderr.lines().count(), 1, "{:?}", run.stderr);
+    assert!(
+        run.stderr.ends_with("evil%0AWould create fake\n"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+#[test]
+fn an_escape_character_in_a_pattern_stays_out_of_the_config_a_dry_run_prints() {
+    let mut tree = Tree::new();
+    tree.dir("a");
+
+    let run = init_in(&tree, &["-n", "--pattern", "a\u{1b}*"]);
+
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    assert!(!run.stdout.contains('\u{1b}'), "{:?}", run.stdout);
+}
+
+#[test]
 fn a_dry_run_prints_the_config_it_would_write() {
     let mut tree = Tree::new();
     tree.dir("a");

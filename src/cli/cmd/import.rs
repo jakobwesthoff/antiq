@@ -8,6 +8,7 @@ use super::archive::COUNTS;
 use super::progress::{self, Description};
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
+use crate::cli::table::sanitize;
 use crate::cli::{Context, ImportArgs};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
@@ -87,18 +88,32 @@ fn print_report(ctx: &Context, report: &ImportReport, out: &mut Output) -> anyho
     if ctx.json {
         return out.json(Some("import"), report).context("print the result");
     }
-    if let Some(version) = &report.imported {
-        out.line(&format!(
-            "imported {}: version {}",
-            version.piece, version.stamp
-        ))
-        .context("print the result")?;
-    }
-    if let Some(skipped) = &report.skipped {
-        out.line(&format!("skipped {}: {}", skipped.piece, skipped.message))
-            .context("print the result")?;
+    for line in report_lines(report) {
+        out.line(&line).context("print the result")?;
     }
     print_notes(report, out)
+}
+
+/// The lines of a pipe: the version that came about and the skip, if any.
+/// The piece and the message name paths from the user's files, so their
+/// control characters are escaped.
+fn report_lines(report: &ImportReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(version) = &report.imported {
+        lines.push(format!(
+            "imported {}: version {}",
+            sanitize(&version.piece),
+            version.stamp
+        ));
+    }
+    if let Some(skipped) = &report.skipped {
+        lines.push(format!(
+            "skipped {}: {}",
+            sanitize(&skipped.piece),
+            sanitize(&skipped.message)
+        ));
+    }
+    lines
 }
 
 /// The repairs and the warnings of the run.
@@ -110,4 +125,29 @@ fn print_notes(report: &ImportReport, out: &mut Output) -> anyhow::Result<()> {
         .collect();
     notices.extend(notice::warnings(&report.warnings));
     out.notices(&notices).context("print the notes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use antiq::commands::archive::SkipReason;
+    use antiq::commands::import::SkippedImport;
+
+    #[test]
+    fn a_control_character_in_a_skipped_piece_is_escaped() {
+        let report = ImportReport {
+            imported: None,
+            skipped: Some(SkippedImport {
+                piece: "data\nskipped fake".into(),
+                reason: SkipReason::Error,
+                message: "cannot move data\nx".into(),
+            }),
+            repairs: Vec::new(),
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            report_lines(&report),
+            ["skipped data%0Askipped fake: cannot move data%0Ax"]
+        );
+    }
 }

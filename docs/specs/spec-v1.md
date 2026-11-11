@@ -2294,8 +2294,11 @@ run with no action.
 A control character in a path or name from the user's files is written as `%`
 and the two hexadecimal digits of each of its bytes, on a terminal and in a
 pipe, so that a name cannot end a line or forge another one. This holds for the
-`Would ...` lines of a dry run, the notes and warnings, and the findings of
-`status`. `--json` carries the text unchanged, as a JSON string.
+result lines of every command, the `Would ...` lines of a dry run, the notes
+and warnings, and the findings of `status`. `--json` carries the text
+unchanged, as a JSON string. `grep` is the exception: on a terminal its paths
+use the comment-line escapes of a listing, and in a pipe its lines carry the
+raw bytes (see "grep").
 
 Only a rich stream gets blocks, symbols, info, hints, the dry-run tag and
 the dry-run footer. A stream that is not a terminal gets plain lines: on
