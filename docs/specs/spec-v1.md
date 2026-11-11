@@ -2138,7 +2138,8 @@ terminal by the same info "Nothing was <done>.".
   Pieces whose path or last
   name is within two edits of the word, or within a third of its length
   when that is more, are the closest pieces; a swapped pair of letters
-  counts as one edit. Up to three of them, nearest first and by path among
+  counts as one edit, and word and path are compared composed (NFC), so a
+  difference only in Unicode composition is no edit. Up to three of them, nearest first and by path among
   equals, are shown under the caption "The closest pieces" in the table
   of the first case. Without a closest piece there is no table.
 - `unearth` or `forget` is given a search word that matches exactly one

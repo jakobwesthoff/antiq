@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A search word also matches a piece path that differs from it only in
   Unicode composition, such as a typed `é` against an `e` followed by a
   combining accent, and the letters it matched are marked on that path
+- The closest pieces offered for an unknown search word include a path
+  that differs from the word only in Unicode composition
 - The tables of an ambiguous piece reference mark the letters the search
   word matched on the right letters when the piece path holds a control
   character or a decomposed accent

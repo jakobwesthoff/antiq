@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 /// A piece a reference could mean, by its path in the escaped form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -396,14 +397,18 @@ const CLOSEST_LIMIT: usize = 3;
 /// is compared with the whole path and with its last name, because people
 /// type either. A few edits is two, or a third of the reference when that
 /// is more, so short words stay strict and long paths forgive more.
+///
+/// Reference and paths are compared lowercased and composed (NFC), so a
+/// letter and the same letter with a combining accent count as one character
+/// on both sides. The suggestion keeps the spelling the path is stored in.
 fn closest_pieces(reference: &str, paths: &[RelPath]) -> Vec<Candidate> {
-    let reference = reference.to_lowercase();
+    let reference = lowered_and_composed(reference);
     let allowed = (reference.chars().count() / 3).max(2);
     let mut near: Vec<(usize, String)> = paths
         .iter()
         .filter_map(|path| {
             let whole = path.to_string();
-            let lowered = whole.to_lowercase();
+            let lowered = lowered_and_composed(&whole);
             let last = lowered.rsplit('/').next().unwrap_or(&lowered);
             let distance = strsim::osa_distance(&reference, &lowered)
                 .min(strsim::osa_distance(&reference, last));
@@ -415,6 +420,10 @@ fn closest_pieces(reference: &str, paths: &[RelPath]) -> Vec<Candidate> {
         .take(CLOSEST_LIMIT)
         .map(|(_, path)| Candidate { path })
         .collect()
+}
+
+fn lowered_and_composed(text: &str) -> String {
+    text.to_lowercase().nfc().collect()
 }
 
 /// Resolves a piece of the store for a command that works on archives
@@ -1002,6 +1011,22 @@ mod tests {
         assert_eq!(closest_of(&set, "alpah"), ["projects/alpha"]);
         // Two letters swapped in the whole path, which no fuzzy match finds.
         assert_eq!(closest_of(&set, "projetcs/alpha"), ["projects/alpha"]);
+    }
+
+    #[test]
+    fn a_precomposed_word_names_the_decomposed_piece_spelled_nearly_like_it() {
+        let fx = Fixture::new();
+        // The piece is stored as `e` + U+0301 twice around a `t`; the word
+        // holds the precomposed letters with its last two letters swapped.
+        let set = set_of(&fx, &["e\u{301}te\u{301}"]);
+        assert_eq!(closest_of(&set, "\u{e9}\u{e9}t"), ["e\u{301}te\u{301}"]);
+    }
+
+    #[test]
+    fn a_decomposed_word_names_the_precomposed_piece_spelled_nearly_like_it() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["\u{e9}t\u{e9}"]);
+        assert_eq!(closest_of(&set, "e\u{301}e\u{301}t"), ["\u{e9}t\u{e9}"]);
     }
 
     #[test]
