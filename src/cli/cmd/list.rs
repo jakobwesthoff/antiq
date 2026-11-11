@@ -8,12 +8,13 @@ use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
 use crate::cli::table::{
-    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, sanitize, spaces,
-    thousands,
+    Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, sanitize,
+    shown_positions, spaces, thousands,
 };
 use crate::cli::{Context, ListArgs};
 use antiq::collection::Collection;
 use antiq::commands::list::{ListReport, Row, State, list};
+use antiq::query::Query;
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -169,10 +170,37 @@ pub(in crate::cli) fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<Strin
 pub(in crate::cli) struct RowLook {
     /// The row is one of the matches.
     pub chosen: bool,
-    /// Positions, in characters, of the piece name that the search matched.
+    /// Positions, in characters, of the piece name as the table shows it
+    /// (control characters escaped) that the search matched.
     pub piece_matched: Vec<usize>,
     /// How many leading characters of the version label the search matched.
     pub label_matched: usize,
+}
+
+/// The positions of `path` that `query` matched, counted in the characters
+/// of the escaped name a table shows. An empty query matches nothing.
+pub(in crate::cli) fn shown_matches(query: &mut Query, path: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    shown_positions(path, &query.matched(path))
+}
+
+/// The looks of `rows` that mark the letters of each piece `query` matched.
+pub(in crate::cli) fn piece_looks(query: &mut Query, rows: &[Row]) -> Vec<RowLook> {
+    let mut looks: Vec<RowLook> = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        // The rows of a piece are next to each other and share the letters.
+        let piece_matched = match index.checked_sub(1) {
+            Some(before) if rows[before].piece == row.piece => looks[before].piece_matched.clone(),
+            _ => shown_matches(query, &row.piece.to_string()),
+        };
+        looks.push(RowLook {
+            piece_matched,
+            ..RowLook::default()
+        });
+    }
+    looks
 }
 
 /// The looks of the rows of a table, one for each row.

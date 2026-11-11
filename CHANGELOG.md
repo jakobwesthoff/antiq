@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The tables of an ambiguous piece reference mark the letters the search
+  word matched on the right letters when the piece path holds a control
+  character or a decomposed accent
+
 ## [1.2.0] - 2026-11-06
 
 ### Added

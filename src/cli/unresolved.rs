@@ -6,7 +6,7 @@
 //! terminal: the error, the table of what it may have meant, and the info
 //! that nothing was done.
 
-use super::cmd::list::{Marking, RowLook, table, version_labels};
+use super::cmd::list::{Marking, RowLook, piece_looks, shown_matches, table, version_labels};
 use super::console::block::{Block, Para};
 use super::console::env::Env;
 use super::console::render::Part;
@@ -332,20 +332,10 @@ fn piece_table(
 ) -> Option<Vec<String>> {
     let rows = rows?;
     let mut query = Query::parse(word);
-    let mut matched_of = |path: &str| {
-        if word.is_empty() {
-            Vec::new()
-        } else {
-            query.matched(path)
-        }
-    };
-    let mut named: Vec<(String, Vec<usize>)> = pieces
+    let named: Vec<(String, Vec<usize>)> = pieces
         .iter()
-        .map(|piece| (piece.path.clone(), Vec::new()))
+        .map(|piece| (piece.path.clone(), shown_matches(&mut query, &piece.path)))
         .collect();
-    for (path, matched) in &mut named {
-        *matched = matched_of(path);
-    }
     let versions: Vec<Row> = rows
         .iter()
         .filter(|row| named.iter().any(|(path, _)| *path == row.piece.to_string()))
@@ -355,17 +345,7 @@ fn piece_table(
         .iter()
         .all(|(path, _)| versions.iter().any(|row| row.piece.to_string() == *path));
     if action.source == Source::Store && every_piece_has_versions {
-        let looks: Vec<RowLook> = versions
-            .iter()
-            .map(|row| RowLook {
-                piece_matched: named
-                    .iter()
-                    .find(|(path, _)| *path == row.piece.to_string())
-                    .map(|(_, matched)| matched.clone())
-                    .unwrap_or_default(),
-                ..RowLook::default()
-            })
-            .collect();
+        let looks = piece_looks(&mut query, &versions);
         let marking = Marking {
             looks: &looks,
             marker: None,
@@ -386,7 +366,8 @@ fn piece_table(
 }
 
 /// The pieces with the number of their versions, `0` for a piece that
-/// holds none.
+/// holds none, and the positions of the name as shown (control characters
+/// escaped) that the search matched.
 fn count_table(pieces: &[(String, usize, Vec<usize>)], style: Style) -> Vec<String> {
     const GAP: &str = "   ";
     let header = "VERSIONS";
@@ -969,6 +950,64 @@ mod tests {
                 "projects/scanner          1",
             ]
         );
+    }
+
+    /// A piece with a tab in its name: the table shows `a%09b/scanner`.
+    fn tabbed_piece() -> (Vec<Candidate>, Vec<Row>) {
+        let mut tabbed = row("a", "2026-11-04T090211");
+        tabbed.piece =
+            antiq::relpath::RelPath::from_bytes(b"a\tb/scanner".to_vec()).expect("a valid path");
+        let pieces = vec![Candidate {
+            path: tabbed.piece.to_string(),
+        }];
+        (pieces, vec![tabbed])
+    }
+
+    fn coloured_terminal() -> Style {
+        Style {
+            width: 80,
+            color: true,
+            terminal: true,
+            utf8: true,
+        }
+    }
+
+    #[test]
+    fn the_matched_letters_of_an_escaped_name_are_marked_in_the_list_table() {
+        let (pieces, rows) = tabbed_piece();
+        let action = action(&cli(&["forget", "p", "v"]).command).expect("forget is an action");
+        let lines = piece_table(
+            &pieces,
+            "scan",
+            action,
+            Some(&rows),
+            coloured_terminal(),
+            &TimeZone::UTC,
+        )
+        .expect("there is a listing");
+        let matched = format!("{}", crate::cli::console::theme::MATCH);
+        let off = "\x1b[0m";
+        let expected = format!("a%09b/{matched}scan{off}ner ");
+        assert!(lines[1].starts_with(&expected), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn the_matched_letters_of_an_escaped_name_are_marked_in_the_count_table() {
+        let (pieces, rows) = tabbed_piece();
+        let action = action(&cli(&["pin", "p"]).command).expect("pin is an action");
+        let lines = piece_table(
+            &pieces,
+            "scan",
+            action,
+            Some(&rows),
+            coloured_terminal(),
+            &TimeZone::UTC,
+        )
+        .expect("there is a listing");
+        let matched = format!("{}", crate::cli::console::theme::MATCH);
+        let off = "\x1b[0m";
+        let expected = format!("a%09b/{matched}scan{off}ner ");
+        assert!(lines[1].starts_with(&expected), "{:?}", lines[1]);
     }
 
     #[test]
