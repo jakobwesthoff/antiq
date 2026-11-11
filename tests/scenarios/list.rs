@@ -30,7 +30,7 @@ fn archive_size(world: &World, piece: &str, stamp: &str) -> u64 {
         .len()
 }
 
-/// The rows `list` has to show, newest version first within a piece. The
+/// The rows `find` has to show, newest version first within a piece. The
 /// archive of the damaged version is cut in half and its listing still
 /// records the size it had before, which is twice the size on disk or one
 /// byte more.
@@ -105,7 +105,7 @@ fn list_shows_versions_newest_first_in_the_form_each_reader_needs() {
             let fault_note = format!("note: tools/scan-old {SCAN_DAMAGED} is damaged: ");
 
             world.assert_unchanged(|| {
-                let list = world.run(&["list"]);
+                let list = world.run(&["find"]);
                 list.expect_code(0);
                 // A damaged version is a note on stderr in the text run and
                 // exit 0 all the same. The JSON run carries the fault in the
@@ -135,7 +135,7 @@ fn list_shows_versions_newest_first_in_the_form_each_reader_needs() {
                 });
 
                 list.json_only(|json| {
-                    assert_eq!(json["command"], "list");
+                    assert_eq!(json["command"], "find");
                     let versions = json["versions"].as_array().expect("a list");
                     assert_eq!(versions.len(), rows.len());
                     for (version, row) in versions.iter().zip(&rows) {
@@ -188,7 +188,7 @@ fn list_shows_versions_newest_first_in_the_form_each_reader_needs() {
                 // A person on a terminal gets the table, in local time
                 // (+13:00 in November and March, +12:00 in September).
                 if world.mode() == Mode::Text {
-                    let tty = world.run_tty(&["list"]);
+                    let tty = world.run_tty(&["find"]);
                     tty.expect_code(0);
                     let plain = tty.plain();
                     let lines: Vec<Vec<&str>> = plain
@@ -233,7 +233,7 @@ fn list_tells_apart_two_versions_in_the_repeated_hour() {
         },
         |world| {
             world.assert_unchanged(|| {
-                let list = world.run(&["list"]);
+                let list = world.run(&["find"]);
                 list.expect_code(0);
                 list.text_only(|out| {
                     let stamps: Vec<&str> = out
@@ -254,7 +254,7 @@ fn list_tells_apart_two_versions_in_the_repeated_hour() {
                 });
 
                 if world.mode() == Mode::Text {
-                    let tty = world.run_tty(&["list"]);
+                    let tty = world.run_tty(&["find"]);
                     tty.expect_code(0);
                     let plain = tty.plain();
                     let rows: Vec<Vec<&str>> = plain

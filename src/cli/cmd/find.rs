@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `list` command: lists the versions.
+//! The `find` command: finds and lists the versions of pieces.
 
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
@@ -11,7 +11,7 @@ use crate::cli::table::{
     Color, WIDE_FROM, decimal_size, mid, numeric_header, pad, paint, painted, sanitize,
     shown_positions, spaces, thousands,
 };
-use crate::cli::{Context, ListArgs};
+use crate::cli::{Context, FindArgs};
 use antiq::collection::Collection;
 use antiq::commands::list::{ListReport, Row, State, list};
 use antiq::query::Query;
@@ -19,7 +19,7 @@ use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
 
-pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u8> {
+pub fn run(ctx: &Context, args: &FindArgs, out: &mut Output) -> anyhow::Result<u8> {
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the antiq collection")?;
@@ -29,7 +29,7 @@ pub fn run(ctx: &Context, args: &ListArgs, out: &mut Output) -> anyhow::Result<u
         .context("list the versions")?;
 
     if ctx.json {
-        out.json(Some("list"), &report)
+        out.json(Some("find"), &report)
             .context("print the result")?;
         // The empty result is data in the JSON, and a note for the person
         // who reads the console.

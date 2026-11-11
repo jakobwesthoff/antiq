@@ -29,7 +29,7 @@ fn world() -> World {
 }
 
 /// Every table command, as the arguments to run.
-const TABLES: [&[&str]; 3] = [&["list"], &["status"], &["grep", "main"]];
+const TABLES: [&[&str]; 3] = [&["find"], &["status"], &["grep", "main"]];
 
 // =========================================================
 // Colour
@@ -68,7 +68,7 @@ fn a_terminal_without_utf8_gets_ascii_in_tables_and_summaries() {
 #[test]
 fn a_cut_piece_name_ends_in_three_dots_without_utf8() {
     let world = world();
-    let run = world.run_tty_env(&["list"], &[("LC_ALL", "C")]);
+    let run = world.run_tty_env(&["find"], &[("LC_ALL", "C")]);
     run.expect_code(0);
     assert!(run.stdout.contains("..."), "{:?}", run.stdout);
 }

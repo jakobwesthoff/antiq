@@ -6,6 +6,8 @@ Date: 2026-11-02
 
 Accepted
 
+Amended by [69. Make find the command and keep list as its alias](0069-make-find-the-command-and-keep-list-as-its-alias.md)
+
 ## Context
 
 `archive.sh` lists archives by name and restores one through an fzf

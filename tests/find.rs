@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! `antiq list` seen from outside the binary, on stores the scenario
+//! `antiq find` seen from outside the binary, on stores the scenario
 //! harness writes by hand. The harness runs every command under
 //! `TZ=Pacific/Auckland`, which is +13:00 in November 2026 and +12:00 in
 //! April 2026, so local time and UTC never read alike.
@@ -49,7 +49,7 @@ fn fields(line: &str) -> Vec<&str> {
 #[test]
 fn a_pipe_gets_tab_separated_lines_with_stamps_newest_first() {
     let world = world(Mode::Text, three_versions);
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0);
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(lines.len(), 3, "{:?}", run.stdout);
@@ -69,7 +69,7 @@ fn a_pipe_gets_tab_separated_lines_with_stamps_newest_first() {
 #[test]
 fn a_terminal_gets_the_table_in_local_time() {
     let world = world(Mode::Text, three_versions);
-    let run = world.run_tty(&["list"]);
+    let run = world.run_tty(&["find"]);
     run.expect_code(0);
     let plain = run.plain();
     let lines: Vec<&str> = plain.lines().collect();
@@ -93,7 +93,7 @@ fn a_terminal_gets_the_table_in_local_time() {
 #[test]
 fn a_coloured_terminal_marks_the_letters_the_query_matched() {
     let world = world(Mode::Text, three_versions);
-    let run = world.run_tty(&["list", "scan"]);
+    let run = world.run_tty(&["find", "scan"]);
     run.expect_code(0);
     assert!(
         run.stdout
@@ -111,7 +111,7 @@ fn a_coloured_terminal_marks_the_letters_the_query_matched() {
 #[test]
 fn a_terminal_without_colour_shows_the_table_of_a_query_unmarked() {
     let world = world(Mode::Text, three_versions);
-    let run = world.run_tty_env(&["list", "scan"], &[("NO_COLOR", "1")]);
+    let run = world.run_tty_env(&["find", "scan"], &[("NO_COLOR", "1")]);
     run.expect_code(0);
     assert!(!run.stdout.contains('\x1b'), "{:?}", run.stdout);
     assert!(
@@ -125,11 +125,11 @@ fn a_terminal_without_colour_shows_the_table_of_a_query_unmarked() {
 #[test]
 fn json_carries_utc_sizes_counts_and_the_stamp() {
     let world = world(Mode::Json, three_versions);
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0)
         .keys(&["format", "command", "versions", "warnings"]);
     run.json_only(|json| {
-        assert_eq!(json["command"], "list");
+        assert_eq!(json["command"], "find");
         let versions = json["versions"].as_array().expect("a list");
         assert_eq!(versions.len(), 3);
         let first = versions[0].as_object().expect("an object");
@@ -167,7 +167,7 @@ fn a_query_keeps_the_matching_pieces_in_every_form() {
             three_versions(builder);
             builder.version("notes", SCANNER_NEW, &[("a.txt", "a")]);
         });
-        let run = world.run(&["list", "scan"]);
+        let run = world.run(&["find", "scan"]);
         run.expect_code(0);
         run.text_only(|out| {
             assert_eq!(out.lines().count(), 3, "{out:?}");
@@ -189,6 +189,21 @@ fn a_query_keeps_the_matching_pieces_in_every_form() {
 }
 
 #[test]
+fn list_gives_the_output_of_find() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, three_versions);
+        let found = world.run(&["find", "scan"]);
+        let listed = world.run(&["list", "scan"]);
+        found.expect_code(0);
+        listed.expect_code(0);
+        assert_eq!(listed.stdout, found.stdout);
+        assert_eq!(listed.stderr, found.stderr);
+        found.json_only(|json| assert_eq!(json["command"], "find"));
+        listed.json_only(|json| assert_eq!(json["command"], "find"));
+    }
+}
+
+#[test]
 fn the_utc_offset_tells_apart_versions_that_render_alike() {
     // New Zealand's summer time ends at 03:00 on 2026-04-05, so 02:30 happens twice.
     let world = world(Mode::Text, |builder| {
@@ -196,7 +211,7 @@ fn the_utc_offset_tells_apart_versions_that_render_alike() {
             .version("notes", "2026-04-04T133000", &[("a.txt", "a")])
             .version("notes", "2026-04-04T143000", &[("a.txt", "a")]);
     });
-    let run = world.run_tty(&["list"]);
+    let run = world.run_tty(&["find"]);
     run.expect_code(0);
     assert!(
         run.stdout.contains("2026-04-05 02:30:00 +12:00"),
@@ -237,7 +252,7 @@ fn damaged_incomplete_and_newer_format_versions_are_marked() {
     )
     .expect("the listing is replaced");
 
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0);
     let states: Vec<(String, String)> = run
         .stdout
@@ -268,7 +283,7 @@ fn damaged_incomplete_and_newer_format_versions_are_marked() {
         run.stderr
     );
 
-    let tty = world.run_tty(&["list"]);
+    let tty = world.run_tty(&["find"]);
     // A terminal is coloured: red, yellow and magenta.
     assert!(
         tty.stdout.contains("   \x1b[31mdamaged\x1b[0m"),
@@ -299,7 +314,7 @@ fn a_doubled_slot_names_every_file_of_it() {
     let twin = archive.with_file_name(format!("other--{SCANNER_NEW}.tar.zst"));
     fs::copy(&archive, &twin).expect("the archive is copied");
 
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0);
     run.json_only(|json| {
         let row = &json["versions"][0];
@@ -315,7 +330,7 @@ fn a_doubled_slot_names_every_file_of_it() {
 fn an_empty_store_exits_0_with_a_note_in_every_form() {
     for mode in [Mode::Text, Mode::Json] {
         let world = world(mode, |_| {});
-        let run = world.run(&["list"]);
+        let run = world.run(&["find"]);
         run.expect_code(0);
         assert_eq!(run.stderr, "note: no versions in the collection\n");
         run.text_only(|out| assert_eq!(out, ""));
@@ -327,7 +342,7 @@ fn an_empty_store_exits_0_with_a_note_in_every_form() {
 fn a_query_without_a_match_exits_0_with_a_note_in_every_form() {
     for mode in [Mode::Text, Mode::Json] {
         let world = world(mode, three_versions);
-        let run = world.run(&["list", "zzz"]);
+        let run = world.run(&["find", "zzz"]);
         run.expect_code(0);
         assert_eq!(run.stderr, "note: no piece matches `zzz`\n");
         run.text_only(|out| assert_eq!(out, ""));
@@ -352,7 +367,7 @@ fn a_held_lock_is_a_note_and_the_listing_goes_on() {
     let _lock = hold_lock(&world.collection().root());
     let before = snapshot(&world.collection().root());
 
-    let run = world.run(&["list", "scan-old"]);
+    let run = world.run(&["find", "scan-old"]);
     run.expect_code(0);
     assert_eq!(run.stdout.lines().count(), 1, "{:?}", run.stdout);
     insta::assert_snapshot!(without_holder(&run.stderr), @"note: another antiq run holds the lock: its pid is <pid> on machine imperius, started <time>
@@ -367,7 +382,7 @@ fn a_held_lock_is_a_note_and_the_listing_goes_on() {
 fn a_held_lock_is_a_note_field_in_json_and_nothing_on_stderr() {
     let world = world(Mode::Json, three_versions);
     let _lock = hold_lock(&world.collection().root());
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0)
         .keys(&["format", "command", "versions", "warnings", "note"]);
     run.json_only(|json| {
@@ -406,7 +421,7 @@ fn a_listing_that_cannot_be_read_keeps_its_row_and_is_a_warning() {
             "the test needs a non-root user"
         );
 
-        let run = world.run(&["list"]);
+        let run = world.run(&["find"]);
         run.expect_code(0);
         run.text_only(|out| {
             let lines: Vec<&str> = out.lines().collect();
@@ -440,7 +455,7 @@ fn control_characters_of_a_piece_are_escaped_in_a_pipe() {
     let world = world(Mode::Text, |builder| {
         builder.version("odd\tname", SCANNER_NEW, &[("a.txt", "a")]);
     });
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
     run.expect_code(0);
     assert_eq!(run.stdout.lines().count(), 1, "{:?}", run.stdout);
     assert!(run.stdout.starts_with("odd%09name\t"), "{:?}", run.stdout);

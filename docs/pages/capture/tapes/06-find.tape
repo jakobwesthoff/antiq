@@ -13,11 +13,11 @@ Output out/discard.txt
 Set Height 472
 Source common.tape
 
-Type "antiq list"
+Type "antiq find"
 Enter
 Sleep 1s
-Type "antiq list scan"
+Type "antiq find scan"
 Enter
 Sleep 1s
-Screenshot ../assets/shots/list.png
+Screenshot ../assets/shots/find.png
 Sleep 1s

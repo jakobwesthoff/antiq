@@ -156,7 +156,7 @@ The folder under `.antiq/pieces/` holds the spelling of a piece's path. A
 live folder whose path the collection's volume treats as the same name
 (case, Unicode normalization, as probed per ADR 0054) is the same piece
 and is archived into that folder. `unearth` and `fork` extract to the
-stored spelling, `list` shows it, and `status` warns when a live spelling
+stored spelling, `find` shows it, and `status` warns when a live spelling
 differs from the stored one. A new store folder below an existing parent
 folder is created inside the parent's stored spelling.
 
@@ -411,7 +411,7 @@ them is deleted or rewritten automatically. (ADR 0062)
 
 - **Incomplete version:** a listing or `.tar.zst.sha256` without its
   `.tar.zst`. A store folder that holds sidecars only is not a piece of
-  the store, but its incomplete versions are found and reported. `list`
+  the store, but its incomplete versions are found and reported. `find`
   marks an incomplete version, `grep` skips it, `status` reports it, and
   `forget` removes it, also in such a folder, by piece path and stamp.
 - **Damaged version:** a `.tar.zst` whose listing or checksum file is
@@ -424,23 +424,23 @@ them is deleted or rewritten automatically. (ADR 0062)
   entries) or lacks a parsable `piece`, `archived` or `archive-bytes`
   line; or whose checksum file is not
   exactly one checksum line for the archive's name. `status` reports it;
-  `list` marks what it sees in the listing's head, the sidecars and the
+  `find` marks what it sees in the listing's head, the sidecars and the
   size of the archive; `rebuild` repairs a
   missing sidecar; `fork` can still extract it, with a warning and
   without the comparison against the listing; `unearth` refuses it.
 - **Doubled slot:** two or more files in one slot of a version, that is,
   with the same stamp and suffix and a different `<name>`. antiq cannot
   tell which of them belongs to the version, so the version is damaged and
-  no file of it is picked. `status` and `list` report it naming every such
+  no file of it is picked. `status` and `find` report it naming every such
   file; `unearth`, `fork` and `push` refuse it; `rebuild` refuses it,
   naming the files to remove by hand; `forget` removes every file of the
   version's slots, the `.tar.zst` files first.
 - **Newer format:** a listing whose first line names a higher listing
-  format than antiq knows is neither incomplete nor damaged. `list` and
+  format than antiq knows is neither incomplete nor damaged. `find` and
   `status` mark it "newer format", `grep` skips it with a warning,
   `unearth`, `fork` and `rebuild` refuse it with the error kind
   `format_too_new`, and `forget` takes it by its stamp. Damage beside it
-  (a missing or damaged checksum file) is decided first: `list` and
+  (a missing or damaged checksum file) is decided first: `find` and
   `status` show the version as damaged, and the three commands still
   refuse it as `format_too_new`. `push` neither
   refuses nor counts it.
@@ -479,7 +479,7 @@ tools read it as part of the file name.
 - **Header:** `piece` (the stored spelling), `archived` (the version time,
   the one in the file name), `archive` (the archive file's name),
   `archive-bytes` (its size, written when packing finishes), `files` and
-  `bytes` (count and total size of the regular files, so `list` and
+  `bytes` (count and total size of the regular files, so `find` and
   `status` read only the head of a listing). The writer derives `files`
   and `bytes` from the entries, and a full read refuses a listing whose
   counts differ from its entries. Each header line is `# `, the key padded
@@ -692,7 +692,7 @@ is none; a terminal shows the lines as described in "Console output". Under `--j
 writes its pid, machine name and start time into it. A command that finds
 the lock held fails at once with exit 1 and names the pid and start time,
 when the lock file has them: a run that has taken the lock but not yet
-written them is named by neither. `list`, `grep` and `status` take no
+written them is named by neither. `find`, `grep` and `status` take no
 lock and say when it is held, read from the pid in the lock file without
 trying the lock; the note is absent in the moment between a run taking
 the lock and writing the file. A collection on an SMB or NFS mount gets a
@@ -1390,9 +1390,14 @@ in place.
   `Would skip <piece>: <message>` instead of the import line and exits 3.
   Refusals are errors in a dry run too, with the same exit code.
 
-### list
+### find
 
-`list [query]` prints one row per version: pieces by path, the versions of
+`list` is another name of `find`: it takes the same arguments and gives
+the same output. The help lists `find` alone, and the help and the usage
+of `list` read as those of `find`. The envelope of `--json` carries `find`
+(see "JSON output"). `search` is not a name of the command. (ADR 0069)
+
+`find [query]` prints one row per version: pieces by path, the versions of
 a piece newest first. The query matches piece paths fuzzily, as a search
 word does, and keeps the pieces that match. Each row reads only the head of
 its listing. SIZE is the archive file's size (`archive-bytes`) in decimal
@@ -1406,7 +1411,7 @@ with the UTC offset added where two versions of a piece render alike (see
 "Naming a version"); FILES is grouped by thousands with a space.
 
 ```text
-$ antiq list scan
+$ antiq find scan
 PIECE              VERSION                 SIZE    FILES
 projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
 projects/scanner   2026-09-03 12:15:00   1.0 GB   47 980
@@ -1453,10 +1458,10 @@ On a narrow terminal (see "Console output") a piece path that does not fit is
 shortened in the middle to the width the other columns leave, but not below
 8 columns.
 
-With no version in the store `list` exits 0 and says `note: no versions in
+With no version in the store `find` exits 0 and says `note: no versions in
 the collection` on stderr; with versions but no piece matching the query it
 exits 0 and says ``note: no piece matches `<query>` ``, also under `--json`.
-Damaged versions do not change the exit code. `list` takes no lock and
+Damaged versions do not change the exit code. `find` takes no lock and
 writes nothing. A held lock is noted on stderr, `note: another run holds the
 lock (pid ..., machine ..., started ...)`, and under `--json` in the `note`
 field instead of on stderr. Notes on stderr come in the order: settings of
@@ -1502,7 +1507,7 @@ of more than two, the date of the version when the piece has a single
 searched version, and otherwise the dates of the versions that hold it,
 newest first. A date is a local date. Where two versions of a piece share a
 local date, searched or not, every version of that piece is named by its
-local time with seconds instead, with the UTC offset added as `list` does.
+local time with seconds instead, with the UTC offset added as `find` does.
 The last line counts the files with hits and the pieces they are in, and the
 pieces whose name matched.
 
@@ -1529,7 +1534,7 @@ path, then version with the newest first. A skipped version is a `warning:`
 line on stderr. With no hit `grep` exits 0 and says `no archived path
 matches <pattern>` on stderr; a pattern that is not a valid regular
 expression is a usage error, exit 2, also outside a collection. A held lock
-is noted as for `list`: a `note:` line on stderr, after the `warning:` lines
+is noted as for `find`: a `note:` line on stderr, after the `warning:` lines
 on the settings of the collection.
 
 ### status
@@ -2063,12 +2068,12 @@ error naming the key, exit 1.
 | `forget <piece> (<version> \| --all-versions --force) [-n]` | deletes a version, or all of them |
 | `rebuild <piece> <version> [-n]` | repairs a damaged version |
 | `import <folder> [--as <path>] [--time <time>] [-n]` | packs a folder as a version |
-| `list [<query>]` | lists the versions |
+| `find [<query>]` | finds and lists the versions of pieces; also called `list` |
 | `grep <pattern>` | searches the paths of all archived files |
 | `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
 | `push [--init] [--force] [--take-over] [--if-reachable] [-n]` | mirrors the collection to the target |
 
-(ADR 0023)
+(ADR 0023, ADR 0069)
 
 Every command takes `-C <path>` and `--json`. A flag a command does not
 take is a usage error. No command asks a question. (ADR 0020)
@@ -2090,7 +2095,7 @@ as the root; symlinks below the root are never followed.
 An input that names a candidate piece as a path is that piece. On a volume
 that treats other spellings of a name as the same (see "Spelling"), a path
 in another spelling names the candidate whose folder it leads to. Any other
-input is a search word, matched with the same fuzzy pattern `list` uses
+input is a search word, matched with the same fuzzy pattern `find` uses
 (smart case, smart normalization) against the candidates' paths in their
 escaped form. A command that deletes no stored version (`archive`, `pin`,
 `unpin`, `fork` and `rebuild`) acts on a search word that matches exactly one
@@ -2121,7 +2126,7 @@ terminal by the same info "Nothing was <done>.".
 - Several pieces match a word. The caption is "The N pieces that match
   `<word>`" and the "How to fix it" is "Name the piece by more of its
   path.". For `unearth`, `fork`, `rebuild` and `forget` the table is the
-  table of `antiq list` with all versions of the candidate pieces, in which
+  table of `antiq find` with all versions of the candidate pieces, in which
   the letters the word matched are bold red. For `archive`, `pin` and
   `unpin` it has the columns PIECE and VERSIONS, the number of stored
   versions, which is 0 for a live piece without any. `forget` uses that
@@ -2148,7 +2153,7 @@ terminal by the same info "Nothing was <done>.".
   matched letters bold red.
 - Several versions match a `--version` or version argument. The caption is
   "The versions of <piece>, the N matches marked". The table is the table
-  of `antiq list` with all versions of the piece. A `▸` stands in front of
+  of `antiq find` with all versions of the piece. A `▸` stands in front of
   each matching row, a row that does not match is dim in every column, and
   for an input without a `T` the part of the time that the input spelled
   is bold red. The "How to fix it" names the newest matching stamp and
@@ -2165,7 +2170,7 @@ The JSON error carries `code` and `fix` besides `kind` and `message`
 (`antiq::reference::ambiguous`, `antiq::reference::inexact` and
 `antiq::reference::unknown`, or `antiq::version::ambiguous`), and
 `error.candidates` lists the candidate pieces, relative to the collection
-root and in the escaped form of the list table. A script that runs
+root and in the escaped form of the `find` table. A script that runs
 `unearth` or `forget` with one of them passes `-C <root>` and uses it as
 given only when the path holds no `%` and is UTF-8; the `fix` of
 `inexact_reference` holds the exact spelling. The closest pieces and the
@@ -2209,7 +2214,7 @@ no bar runs past the last line of text.
 
 Tables have a dim header row and no rule under it. The header of a column
 of numbers is right-aligned over its values. This holds for the
-tables of `list`, `status`, `push` and the tables under an error.
+tables of `find`, `status`, `push` and the tables under an error.
 
 A dry run writes each action line behind a magenta tag `○ would <verb>`,
 with the text behind the longest verb of the run lined up, and ends with an
@@ -2478,8 +2483,10 @@ is written to the terminal to find any of this out.
 ### JSON output
 
 Every JSON output is one object `{"format": 1, "command": "<name>", ...}`
-on one line of stdout. `<name>` is the command's name. A command line that
-fails to parse before naming a command has `"command": null`. An error is
+on one line of stdout. `<name>` is the command's name, also when the
+command is called by another name (`list` for `find`) and also when the
+command line fails to parse. A command line that fails to parse before
+naming a command has `"command": null`. An error is
 `{"format": 1, "command": ..., "error": {...}}`, where the error object is
 `{kind, code?, message, fix?, ...details}`, in this order:
 
@@ -2594,12 +2601,12 @@ unreachable target, and the warnings follow as `warning: <message>` lines. The
 warnings hold the notes on the settings of the collection (an unknown key
 under `[target]` among them) besides those of the repairs.
 
-`list` adds `versions`, `warnings` (the notes on the settings of the
+`find` adds `versions`, `warnings` (the notes on the settings of the
 collection and the messages about files that could not be read, as
 warning objects) and, while a run holds the lock, `note`
 (a text). Each version is `piece`, `stamp` (the version stamp, which has the
 counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
-"list"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
+"find"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
 null where the head of the listing lacks them) and `damage` (a list of texts).
 
 `grep` adds `pattern`, `pieces`, `skipped` and `warnings` (the notes on the
@@ -2624,7 +2631,7 @@ actions first, then `{"kind": "pin", "piece": ...}` or `{"kind": "unpin",
 "piece": ...}` when `changed` is true.
 
 `forget` adds `forgotten`, `failed`, `repairs` and `warnings` (as for
-`list`, plus the repairs that failed). Each forgotten version is `piece`, `stamp` (the version stamp),
+`find`, plus the repairs that failed). Each forgotten version is `piece`, `stamp` (the version stamp),
 `version` (its time as RFC 3339 in UTC), `incomplete` and `files`, the bare
 names of its files in the order they were deleted. Each failed version is
 `piece`, `stamp` and `reason`. `forgotten` and `failed` list their versions

@@ -47,7 +47,7 @@ Hide
 Type "clear"
 Enter
 Show
-Type "antiq list scanner"
+Type "antiq find scanner"
 Enter
 Sleep 1s
 Screenshot ../assets/shots/versions.png

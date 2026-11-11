@@ -187,13 +187,42 @@ mod tests {
     #[test]
     fn an_extra_word_shows_clap_s_first_line_and_the_usage() {
         assert_eq!(
+            rich(&["antiq", "find", "a", "b"]),
+            [
+                "▌ ✖ ERROR",
+                "▌ Unexpected argument 'b' found",
+                "▌",
+                "▌ How to fix it",
+                "▌   Usage: antiq find [OPTIONS] [QUERY]",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_extra_word_after_the_alias_shows_the_usage_of_find() {
+        assert_eq!(
             rich(&["antiq", "list", "a", "b"]),
             [
                 "▌ ✖ ERROR",
                 "▌ Unexpected argument 'b' found",
                 "▌",
                 "▌ How to fix it",
-                "▌   Usage: antiq list [OPTIONS] [QUERY]",
+                "▌   Usage: antiq find [OPTIONS] [QUERY]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_misspelled_alias_gets_clap_s_suggestion() {
+        assert_eq!(
+            rich(&["antiq", "lsit"]),
+            [
+                "▌ ✖ ERROR",
+                "▌ Unrecognized subcommand 'lsit'",
+                "▌",
+                "▌ How to fix it",
+                "▌   Did you mean list?",
+                "▌   Usage: antiq [OPTIONS] <COMMAND>",
             ]
         );
     }

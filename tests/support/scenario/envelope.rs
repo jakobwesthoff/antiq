@@ -22,8 +22,12 @@ const KINDS: [&str; 11] = [
     "other",
 ];
 
+/// The other names of a command, as (alias, command): an alias runs its
+/// command, and the envelope carries the name of the command.
+const ALIASES: [(&str, &str); 1] = [("list", "find")];
+
 /// The command a command line names: the first argument that is neither
-/// `--json` nor `-C <path>`.
+/// `--json` nor `-C <path>`, under the name its envelope carries.
 pub fn command_of(args: &[String]) -> Option<String> {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -33,7 +37,13 @@ pub fn command_of(args: &[String]) -> Option<String> {
                 rest.next();
             }
             other if other.starts_with('-') => {}
-            other => return Some(other.to_string()),
+            other => {
+                let command = ALIASES
+                    .iter()
+                    .find(|(alias, _)| *alias == other)
+                    .map_or(other, |(_, command)| command);
+                return Some(command.to_string());
+            }
         }
     }
     None

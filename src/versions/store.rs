@@ -128,7 +128,7 @@ pub fn scan(pieces_dir: &Path) -> Result<StoreScan, VersionsError> {
 }
 
 /// The entries of `folder`, or `None` when the folder is not there any
-/// more. `status` and `list` scan without the lock while a run may be
+/// more. `status` and `find` scan without the lock while a run may be
 /// removing folders, so a folder that was listed as a directory and is gone
 /// by the time it is read is not an error.
 fn list_folder(root: &TreeRoot, folder: &RelPath) -> Result<Option<Vec<DirEntry>>, VersionsError> {
@@ -389,7 +389,7 @@ fn fresh_stamp_up_to(
 /// `tmp_pack_dir/<stamp>/<piece>`, whatever its `<name>`: then the version
 /// is being stored, and sidecars in the store folder without a `.tar.zst`
 /// are the move of a running `archive` or of repair 1, not an incomplete
-/// version. `status` and `list` run without the lock and meet this state
+/// version. `status` and `find` run without the lock and meet this state
 /// while an `archive` runs.
 pub fn is_being_stored(
     tmp_pack_dir: &Path,

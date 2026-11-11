@@ -6,6 +6,8 @@ Date: 2026-11-03
 
 Accepted
 
+Amended by [69. Make find the command and keep list as its alias](0069-make-find-the-command-and-keep-list-as-its-alias.md)
+
 ## Context
 
 The commands need names. They lean towards the theme of the name antiq

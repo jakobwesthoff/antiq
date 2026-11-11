@@ -36,7 +36,7 @@ fn a_warning_on_a_stderr_terminal_is_a_block_after_an_empty_line() {
     let world = world(stored);
     with_unknown_key(&world);
 
-    let run = world.run_tty_stderr(&["list"], &[("NO_COLOR", "1")]);
+    let run = world.run_tty_stderr(&["find"], &[("NO_COLOR", "1")]);
 
     run.expect_code(0);
     assert_eq!(
@@ -53,7 +53,7 @@ fn a_warning_on_a_stderr_pipe_is_a_warning_line() {
     let world = world(stored);
     with_unknown_key(&world);
 
-    let run = world.run(&["list"]);
+    let run = world.run(&["find"]);
 
     run.expect_code(0);
     assert_eq!(

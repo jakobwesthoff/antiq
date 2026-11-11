@@ -6,7 +6,7 @@
 //! terminal: the error, the table of what it may have meant, and the info
 //! that nothing was done.
 
-use super::cmd::list::{Marking, RowLook, piece_looks, shown_matches, table, version_labels};
+use super::cmd::find::{Marking, RowLook, piece_looks, shown_matches, table, version_labels};
 use super::console::block::{Block, Para};
 use super::console::env::Env;
 use super::console::render::Part;
@@ -1025,7 +1025,7 @@ mod tests {
             words(&["rebuild", "p", "v"]),
             ("rebuild", "rebuilt", Source::Store)
         );
-        assert!(action(&cli(&["list"]).command).is_none());
+        assert!(action(&cli(&["find"]).command).is_none());
     }
 
     #[test]
@@ -1034,7 +1034,7 @@ mod tests {
             command_line(&cli(&["forget", "scan", "2025", "-n"]), Some("a"), None),
             "antiq forget a 2025 -n"
         );
-        assert_eq!(command_line(&cli(&["list"]), None, None), "antiq");
+        assert_eq!(command_line(&cli(&["find"]), None, None), "antiq");
     }
 
     #[test]

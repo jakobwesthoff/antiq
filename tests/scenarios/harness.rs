@@ -443,6 +443,14 @@ fn the_command_is_the_first_argument_that_is_no_option() {
 }
 
 #[test]
+fn the_command_of_list_is_find() {
+    assert_eq!(
+        command_of(&args(&["--json", "list", "x"])).as_deref(),
+        Some("find")
+    );
+}
+
+#[test]
 fn a_success_object_is_accepted() {
     accepted(
         &["--json", "pin", "a"],

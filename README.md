@@ -212,17 +212,18 @@ either.
 ### What is in the archive
 
 The folders are gone from `experiments`, and their pieces live in the
-archive now. `list` shows every archived piece with its versions. Once the
-archive has grown, a search word narrows the list down: `list scan` shows
-only the pieces whose path fits `scan`.
+archive now. `find` shows every archived piece with its versions. Once the
+archive has grown, a search word narrows the list down: `find scan` shows
+only the pieces whose path fits `scan`. On a terminal with colour, the
+letters the search word matched are bold red.
 
 ```bash
-antiq list
-antiq list scan
+antiq find
+antiq find scan
 ```
 
-![antiq list shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq list scan shows only scan-old and scanner](docs/pages/assets/shots/list.png)
-*`list` shows the whole archive, a search word narrows it*
+![antiq find shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq find scan shows only scan-old and scanner](docs/pages/assets/shots/find.png)
+*`find` shows the whole archive, a search word narrows it*
 
 ### Searching inside the archives
 
@@ -282,17 +283,17 @@ side, each taking its own space:
 ```bash
 echo '// edited' >> scanner/src/main.rs
 antiq archive scanner
-antiq list scanner
+antiq find scanner
 ```
 
-![antiq list scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
+![antiq find scanner shows two versions of scanner](docs/pages/assets/shots/versions.png)
 *the two versions of `scanner`*
 
 > [!TIP]
 > `fork` does not need the whole path. A part that fits exactly one piece
 > is enough, such as `fork recipe` for `recipe-api`. When it fits several,
 > antiq lists them. The same goes for every command that deletes no
-> version: `archive`, `pin`, `unpin`, `rebuild` and `list`.
+> version: `archive`, `pin`, `unpin`, `rebuild` and `find`.
 
 ### Deleting versions
 
@@ -316,10 +317,10 @@ shows the progress card of `archive` while it works:
 
 ```bash
 antiq import ~/old-disk/pixel-clock
-antiq list pixel-clock
+antiq find pixel-clock
 ```
 
-![antiq import packs pixel-clock as a version from March 2025, and antiq list pixel-clock shows that version](docs/pages/assets/shots/import.png)
+![antiq import packs pixel-clock as a version from March 2025, and antiq find pixel-clock shows that version](docs/pages/assets/shots/import.png)
 *`import` names the version by the newest file, here from March 2025*
 
 The piece takes the folder's name, or the path given with `--as`, such as
@@ -466,7 +467,7 @@ hand, when a copy back from the [mirror](#mirroring) stops halfway, or after a d
 error. antiq's own crashes do not cause it, because the next run cleans
 up after them.
 
-You notice a damaged version in three places: `status` reports it, `list`
+You notice a damaged version in three places: `status` reports it, `find`
 marks it, and `push` refuses to run until it is repaired. Here the listing
 of `scan-old` is missing:
 
@@ -533,7 +534,7 @@ listing.
 
 On a terminal antiq draws progress cards and colours, as in the images
 above. When its output goes into a pipe or a file, it prints plain lines
-instead, such as one line per piece and a summary for `archive`. `list` and `grep`
+instead, such as one line per piece and a summary for `archive`. `find` and `grep`
 print one tab-separated line per version or match, ready for `cut` or
 `sort`.
 
@@ -570,7 +571,7 @@ Commands:
   forget   Delete a version, or all of them
   rebuild  Repair a damaged version
   import   Pack a folder as a version
-  list     List the versions
+  find     Find and list the versions of pieces
   grep     Search the paths of all archived files
   pin      Keep a piece from being archived
   unpin    Let a piece be archived again

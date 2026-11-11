@@ -66,8 +66,11 @@ pub enum Command {
     Rebuild(RebuildArgs),
     /// Pack a folder as a version
     Import(ImportArgs),
-    /// List the versions
-    List(ListArgs),
+    /// Find and list the versions of pieces
+    // `list` is an alias, not a visible alias, so the help names `find`
+    // alone.
+    #[command(alias = "list")]
+    Find(FindArgs),
     /// Search the paths of all archived files
     Grep(GrepArgs),
     /// Keep a piece from being archived
@@ -90,7 +93,7 @@ impl Command {
             Command::Forget(_) => "forget",
             Command::Rebuild(_) => "rebuild",
             Command::Import(_) => "import",
-            Command::List(_) => "list",
+            Command::Find(_) => "find",
             Command::Grep(_) => "grep",
             Command::Pin(_) => "pin",
             Command::Unpin(_) => "unpin",
@@ -193,7 +196,7 @@ pub struct ImportArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ListArgs {
+pub struct FindArgs {
     /// Fuzzy pattern that selects pieces
     pub query: Option<String>,
 }
@@ -292,7 +295,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Forget(args) => cmd::forget::run(&ctx, args, out),
         Command::Rebuild(args) => cmd::rebuild::run(&ctx, args, out),
         Command::Import(args) => cmd::import::run(&ctx, args, out),
-        Command::List(args) => cmd::list::run(&ctx, args, out),
+        Command::Find(args) => cmd::find::run(&ctx, args, out),
         Command::Grep(args) => cmd::grep::run(&ctx, args, out),
         Command::Pin(args) => cmd::pin::pin(&ctx, args, out),
         Command::Unpin(args) => cmd::pin::unpin(&ctx, args, out),
@@ -563,10 +566,13 @@ fn os_args(args: &[&str]) -> Vec<OsString> {
 
 /// The command a failed command line was meant for, as far as the
 /// arguments tell: the first positional argument, when it names a command.
+/// A command called by one of its aliases is named by its own name, as the
+/// envelope of a run carries the name of the command.
 fn guess_command(args: &[OsString]) -> Option<String> {
     let name = first_positional(args)?;
-    Cli::command().find_subcommand(&name)?;
-    Some(name)
+    let command = Cli::command();
+    let found = command.find_subcommand(&name)?;
+    Some(found.get_name().to_string())
 }
 
 /// The first argument that is neither a flag nor the value of `-C`. Only
@@ -864,6 +870,30 @@ mod tests {
     }
 
     #[test]
+    fn find_parses_as_find() {
+        let cli = parse(&["find", "scan"]);
+        assert!(
+            matches!(&cli.command, Command::Find(args) if args.query.as_deref() == Some("scan"))
+        );
+    }
+
+    #[test]
+    fn list_parses_as_find() {
+        let cli = parse(&["list", "scan"]);
+        assert!(
+            matches!(&cli.command, Command::Find(args) if args.query.as_deref() == Some("scan"))
+        );
+    }
+
+    #[test]
+    fn the_command_of_list_is_guessed_as_find() {
+        assert_eq!(
+            guess_command(&os(&["antiq", "--json", "list", "a"])).as_deref(),
+            Some("find")
+        );
+    }
+
+    #[test]
     fn dry_run_has_a_long_and_a_short_spelling() {
         for flag in ["-n", "--dry-run"] {
             let init = parse(&["init", flag]);
@@ -919,9 +949,9 @@ mod tests {
             if args.folder == std::path::Path::new("dir")
                 && args.as_path.as_deref() == Some(std::path::Path::new("proj"))
                 && args.time.as_deref() == Some("2020-01-01")));
-        let cli = parse(&["list", "scan"]);
+        let cli = parse(&["find", "scan"]);
         assert!(
-            matches!(&cli.command, Command::List(args) if args.query.as_deref() == Some("scan"))
+            matches!(&cli.command, Command::Find(args) if args.query.as_deref() == Some("scan"))
         );
         let cli = parse(&["grep", "main.rs"]);
         assert!(matches!(&cli.command, Command::Grep(args) if args.pattern == "main.rs"));

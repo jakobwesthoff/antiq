@@ -23,5 +23,5 @@ listing header, so a piece carries "group" and "year" as fields.
 
 ## Revisit when
 
-`list` or `grep` needs to filter or group archives by parts of their
+`find` or `grep` needs to filter or group archives by parts of their
 original path.

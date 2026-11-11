@@ -80,7 +80,7 @@ fn a_piece_by_path_comes_back_and_its_newest_version_goes() {
         assert!(world.collection().path("projects/scanner/README").exists());
         assert!(marker(&world).starts_with("restored "));
         assert!(!marker(&world).contains("version"), "{}", marker(&world));
-        let list = world.run(&["list"]);
+        let list = world.run(&["find"]);
         list.text_only(|out| {
             assert!(out.contains(OLD) && !out.contains(NEW), "{out:?}");
         });

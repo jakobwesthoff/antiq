@@ -14,13 +14,13 @@
 <script>
   // Inline code in the documentation that names a state of `status` takes
   // that state's colour from the console theme, so the text matches the
-  // captures. Inline code that is an antiq command (`grep`, `list scan`,
+  // captures. Inline code that is an antiq command (`grep`, `find scan`,
   // `antiq push --init`) takes the blue of the console's hints, which name
   // commands as well. GitHub shows the README without these colours.
   (function () {
     var states = { due: "state-due", soon: "state-soon", pinned: "state-pinned", refused: "state-refused" };
     var commands = ["init", "status", "archive", "unearth", "fork", "forget", "rebuild",
-                    "import", "list", "grep", "pin", "unpin", "push"];
+                    "import", "find", "grep", "pin", "unpin", "push"];
     document.querySelectorAll(".docs code").forEach(function (code) {
       if (code.closest("pre")) return;
       var text = code.textContent.trim();

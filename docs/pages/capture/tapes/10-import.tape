@@ -28,7 +28,7 @@ Type "antiq import ~/old-disk/pixel-clock"
 Enter
 Wait+Screen@60s /took [0-9]+:[0-9][0-9]/
 Sleep 500ms
-Type "antiq list pixel-clock"
+Type "antiq find pixel-clock"
 Enter
 Sleep 1s
 Screenshot ../assets/shots/import.png

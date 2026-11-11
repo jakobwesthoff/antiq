@@ -7,13 +7,14 @@
 
 mod support;
 
+use serde_json::Value;
 use std::fs;
 use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
 
 const COMMANDS: [&str; 13] = [
-    "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "list", "grep",
+    "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "find", "grep",
     "pin", "unpin", "push",
 ];
 
@@ -38,6 +39,98 @@ fn help_lists_the_thirteen_subcommands() {
     let mut expected = COMMANDS.to_vec();
     expected.sort_unstable();
     assert_eq!(listed, expected, "full help:\n{}", run.stdout);
+}
+
+const FIND_HELP_LINE: &str = "Find and list the versions of pieces";
+
+#[test]
+fn help_describes_find_as_finding_and_listing() {
+    let run = Antiq::new().arg("--help").run();
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let line = format!("  find     {FIND_HELP_LINE}");
+    assert!(
+        run.stdout.lines().any(|candidate| candidate == line),
+        "full help:\n{}",
+        run.stdout
+    );
+}
+
+/// The first line and the usage line of `antiq <name> --help`.
+fn command_help(name: &str) -> (String, String) {
+    let run = Antiq::new().args([name, "--help"]).run();
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let mut lines = run.stdout.lines();
+    let first = lines.next().expect("the help has a first line");
+    let usage = lines
+        .find(|line| line.starts_with("Usage:"))
+        .expect("the help has a usage line");
+    (first.to_string(), usage.to_string())
+}
+
+#[test]
+fn find_help_names_find() {
+    assert_eq!(
+        command_help("find"),
+        (
+            FIND_HELP_LINE.to_string(),
+            "Usage: antiq find [OPTIONS] [QUERY]".to_string()
+        )
+    );
+}
+
+#[test]
+fn list_help_is_the_help_of_find() {
+    assert_eq!(
+        command_help("list"),
+        (
+            FIND_HELP_LINE.to_string(),
+            "Usage: antiq find [OPTIONS] [QUERY]".to_string()
+        )
+    );
+}
+
+#[test]
+fn a_usage_error_of_find_names_find_in_the_envelope() {
+    let run = json_run(&["find", "a", "b"]);
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert_eq!(run.error_message(), "unexpected argument 'b' found");
+    assert_eq!(run.json()["command"], "find");
+}
+
+#[test]
+fn a_usage_error_of_list_names_find_in_the_envelope() {
+    let run = json_run(&["list", "a", "b"]);
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert_eq!(run.error_message(), "unexpected argument 'b' found");
+    assert_eq!(run.json()["command"], "find");
+}
+
+#[test]
+fn search_is_no_command() {
+    let run = json_run(&["search", "main.rs"]);
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert!(
+        run.error_message()
+            .starts_with("unrecognized subcommand 'search'"),
+        "message: {}",
+        run.error_message()
+    );
+    assert_eq!(run.json()["command"], Value::Null);
+}
+
+#[test]
+fn a_command_line_without_a_command_names_list_among_the_commands() {
+    let run = json_run(&[]);
+    assert_eq!(run.code(), 2, "stdout: {}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert!(
+        run.error_message().contains(", find, list, "),
+        "message: {}",
+        run.error_message()
+    );
 }
 
 #[test]
@@ -239,8 +332,8 @@ fn fork_needs_a_collection() {
 }
 
 #[test]
-fn list_needs_a_collection() {
-    for args in [&["list"][..], &["list", "query"]] {
+fn find_needs_a_collection() {
+    for args in [&["find"][..], &["find", "query"]] {
         let dir = tempfile::tempdir().expect("the temp dir is writable");
         let run = Antiq::new()
             .args(["--json", "-C"])
@@ -255,7 +348,7 @@ fn list_needs_a_collection() {
             run.stderr
         );
         assert_eq!(run.error_kind(), "not_a_collection", "{args:?}");
-        assert_eq!(run.json()["command"], "list");
+        assert_eq!(run.json()["command"], "find");
     }
 }
 
@@ -367,8 +460,8 @@ fn import_needs_a_folder() {
 }
 
 #[test]
-fn list_takes_one_query() {
-    assert_usage(&["list", "a", "b"], "unexpected argument 'b'");
+fn find_takes_one_query() {
+    assert_usage(&["find", "a", "b"], "unexpected argument 'b'");
 }
 
 #[test]
@@ -377,8 +470,8 @@ fn grep_needs_a_pattern() {
 }
 
 #[test]
-fn list_and_grep_and_status_take_no_dry_run() {
-    assert_usage(&["list", "-n"], "unexpected argument '-n'");
+fn find_and_grep_and_status_take_no_dry_run() {
+    assert_usage(&["find", "-n"], "unexpected argument '-n'");
     assert_usage(&["grep", "-n", "x"], "unexpected argument '-n'");
     assert_usage(&["status", "-n"], "unexpected argument '-n'");
 }

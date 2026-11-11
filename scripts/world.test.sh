@@ -122,7 +122,7 @@ test_history() {
     cd "$root/experiments" || exit 1
     "$ANTIQ_BIN" init --pattern '*' > /dev/null
     ANTIQ_DEMO_ROOT="$root" "$here/world.sh" history > /dev/null || fail "history: world.sh history failed"
-    listing=$("$ANTIQ_BIN" list --json)
+    listing=$("$ANTIQ_BIN" find --json)
     stamps=$(echo "$listing" | jq -r '[.. | strings | select(test("^2026-0[89]-[0-9]{2}T[0-9]{6}$"))] | sort | join(" ")')
     [ "$stamps" = "2026-08-02T093000 2026-09-12T181500" ] \
         || fail "history: the stamps of the versions are '$stamps'"

@@ -344,7 +344,7 @@ fn a_rebuilt_version_is_no_longer_damaged() {
         remove(&version.checksum);
         world.run(&["rebuild", PIECE, STAMP]).expect_code(0);
 
-        let run = world.run(&["list", PIECE]);
+        let run = world.run(&["find", PIECE]);
         run.expect_code(0);
         run.json_only(|json| {
             assert_eq!(json["versions"][0]["damage"], serde_json::json!([]));

@@ -76,7 +76,7 @@ fn a_copy_back_from_the_target_is_a_working_collection() {
             // commands answer alike, and none of them touches the
             // original or the target.
             world.assert_unchanged(|| {
-                for args in [vec!["list"], vec!["status"]] {
+                for args in [vec!["find"], vec!["status"]] {
                     let here = world.run(&args);
                     let there = world.run_as(&copy, &args);
                     here.expect_code(0);

@@ -57,7 +57,7 @@ const COMMANDS: &[Command] = &[
     command("pin", &["-n"], Some("tools/old-live"), &[], 0),
     command("unpin", &["-n"], Some("tools/pinned"), &[], 0),
     command("status", &[], None, &[], 0),
-    command("list", &[], None, &[], 0),
+    command("find", &[], None, &[], 0),
     command("grep", &[], None, &["main"], 0),
     // No target is configured, which is an error that needs the collection.
     command("push", &["-n"], None, &[], 1),

@@ -5,12 +5,12 @@
 //! One module per command.
 
 pub mod archive;
+pub mod find;
 pub mod forget;
 pub mod fork;
 pub mod grep;
 pub mod import;
 pub mod init;
-pub mod list;
 pub mod pin;
 mod progress;
 pub mod push;

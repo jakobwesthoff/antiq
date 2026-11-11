@@ -9,7 +9,7 @@ use crate::support::scenario::world::{Mode, Outcome, Setup, World, both_modes};
 use serde_json::json;
 use std::collections::BTreeSet;
 
-/// The piece of every row `list` printed, in the order printed, read from
+/// The piece of every row `find` printed, in the order printed, read from
 /// the pipe lines or from the JSON, so one expectation serves both modes.
 fn pieces_of(world: &World, outcome: &Outcome) -> Vec<String> {
     match world.mode() {
@@ -34,7 +34,7 @@ fn pieces_of(world: &World, outcome: &Outcome) -> Vec<String> {
 }
 
 fn expect_no_match(world: &World, query: &str) {
-    let outcome = world.run(&["list", query]);
+    let outcome = world.run(&["find", query]);
     outcome.expect_code(0);
     assert!(
         pieces_of(world, &outcome).is_empty(),
@@ -64,7 +64,7 @@ fn list_finds_pieces_by_search_word() {
             world.assert_unchanged(|| {
                 // A word that is part of two piece names finds both, the
                 // versions of each newest first.
-                let both = world.run(&["list", "scan"]);
+                let both = world.run(&["find", "scan"]);
                 both.expect_code(0);
                 assert_eq!(
                     pieces_of(world, &both),
@@ -72,7 +72,7 @@ fn list_finds_pieces_by_search_word() {
                 );
                 assert_eq!(both.stderr, "");
 
-                let one = world.run(&["list", "scanner"]);
+                let one = world.run(&["find", "scanner"]);
                 one.expect_code(0);
                 assert_eq!(
                     pieces_of(world, &one),
@@ -85,7 +85,7 @@ fn list_finds_pieces_by_search_word() {
                 // Smart case: a lower case word matches any case, a capital
                 // makes the match exact.
                 for query in ["ideas", "Ideas"] {
-                    let found = world.run(&["list", query]);
+                    let found = world.run(&["find", query]);
                     found.expect_code(0);
                     assert_eq!(pieces_of(world, &found), ["notes/Ideas"], "{query}");
                 }
@@ -129,7 +129,7 @@ fn a_path_names_its_piece_where_the_same_word_matches_several() {
             world.assert_unchanged(|| {
                 // As a word, `projects/scan` matches both pieces. Written
                 // as the path of a piece it names that piece.
-                let word = world.run(&["list", "projects/scan"]);
+                let word = world.run(&["find", "projects/scan"]);
                 assert_eq!(
                     pieces_of(world, &word),
                     ["projects/scan", "projects/scanner"]

@@ -59,9 +59,9 @@ fn utc_of(stamp: &str) -> String {
     format!("{date}T{}:{}:{}Z", &time[0..2], &time[2..4], &time[4..6])
 }
 
-/// The pieces `list` shows, to see what the store still holds.
+/// The pieces `find` shows, to see what the store still holds.
 fn listed_pieces(world: &World) -> Vec<String> {
-    let list = world.run(&["list"]);
+    let list = world.run(&["find"]);
     list.expect_code(0);
     let mut pieces = Vec::new();
     list.text_only(|out| {
