@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `import -n` lists an ignored folder once when an ignored name sorts
+  between the folder and its content, such as `cache.log` next to
+  `cache/`. The content of the folder was listed as well
+
 ## [1.3.0] - 2026-11-11
 
 ### Changed

@@ -42,6 +42,7 @@ use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -742,14 +743,22 @@ fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportErro
     }
 }
 
-/// The ignored entries that are not inside another ignored entry, and the
+/// The ignored entries that are not inside an ignored folder, and the
 /// restored marker, sorted.
 fn left_out(tree: &PieceTree) -> Vec<String> {
     let mut left = Vec::new();
-    let mut last: Option<&RelPath> = None;
+    // Entries are ordered by path bytes, so a name such as `cache.log` can
+    // sit between `cache` and `cache/x`. Every ignored folder is therefore
+    // remembered, and an entry is inside one when its parent is such a
+    // folder: everything below an ignored folder is ignored with it.
+    let mut ignored_folders: HashSet<&[u8]> = HashSet::new();
     for entry in tree.entries() {
         if entry.class == Class::Ignored {
-            let inside = last.is_some_and(|folder| lies_below(&entry.path, folder));
+            let path = entry.path.as_bytes();
+            let inside = path
+                .iter()
+                .rposition(|byte| *byte == b'/')
+                .is_some_and(|slash| ignored_folders.contains(&path[..slash]));
             if !inside {
                 let suffix = if entry.kind == EntryKind::Directory {
                     "/"
@@ -757,7 +766,9 @@ fn left_out(tree: &PieceTree) -> Vec<String> {
                     ""
                 };
                 left.push(format!("{}{suffix}", entry.path));
-                last = Some(&entry.path);
+            }
+            if entry.kind == EntryKind::Directory {
+                ignored_folders.insert(path);
             }
         } else if entry.class == Class::Control && entry.path.as_bytes() == RESTORED_FILE.as_bytes()
         {
@@ -1359,6 +1370,48 @@ mod tests {
             panic!("an import is planned: {:?}", plan.actions);
         };
         assert_eq!(left_out, &["cache/", "debug.log"]);
+    }
+
+    /// The path order puts `cache.log` between `cache` and `cache/x`, since
+    /// `.` sorts before `/`.
+    #[test]
+    fn an_ignored_file_sorting_between_a_folder_and_its_content_does_not_list_the_content() {
+        let world = world();
+        fs::create_dir_all(world.source.path().join("cache")).expect("folders");
+        fs::write(world.source.path().join("cache/x"), "x").expect("a file");
+        fs::write(world.source.path().join("cache.log"), "x").expect("a file");
+        fs::write(world.source.path().join(".antiqignore"), "cache/\n*.log\n").expect("rules");
+
+        let plan = plan_with(&world, &RealSeams).expect("the plan ends");
+
+        let import = plan.actions.last().expect("an import is planned");
+        let json = serde_json::to_value(import).expect("the action serialises");
+        assert_eq!(json["left_out"], serde_json::json!(["cache.log", "cache/"]));
+    }
+
+    /// `build-cache` sorts between `build` and `build/x`, since `-` sorts
+    /// before `/`.
+    #[test]
+    fn an_ignored_folder_sorting_between_a_folder_and_its_content_does_not_list_the_content() {
+        let world = world();
+        fs::create_dir_all(world.source.path().join("build")).expect("folders");
+        fs::create_dir_all(world.source.path().join("build-cache")).expect("folders");
+        fs::write(world.source.path().join("build/x"), "x").expect("a file");
+        fs::write(world.source.path().join("build-cache/y"), "y").expect("a file");
+        fs::write(
+            world.source.path().join(".antiqignore"),
+            "build/\nbuild-cache/\n",
+        )
+        .expect("rules");
+
+        let plan = plan_with(&world, &RealSeams).expect("the plan ends");
+
+        let import = plan.actions.last().expect("an import is planned");
+        let json = serde_json::to_value(import).expect("the action serialises");
+        assert_eq!(
+            json["left_out"],
+            serde_json::json!(["build-cache/", "build/"])
+        );
     }
     #[test]
     fn free_space_that_cannot_be_read_is_an_error_in_a_dry_run_and_a_skip_in_a_real_run() {
