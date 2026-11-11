@@ -668,7 +668,8 @@ Every command prints readable text on a terminal and has `--json`. Data
 goes to stdout, messages to stderr (see "Console output" for the
 messages that belong to a result).
 
-**Dry runs.** Every command that changes something has `-n`/`--dry-run`:
+**Dry runs.** Every command that changes a collection or its target has
+`-n`/`--dry-run`:
 `init`, `archive`, `unearth`, `fork`, `forget`, `rebuild`, `import`,
 `pin`, `unpin` and `push`. A dry run takes no lock and changes nothing.
 It computes the repairs read-only and lists them first, as actions of
@@ -1685,6 +1686,59 @@ refuses: a pin file that is a directory, and, for `pin` on a piece that
 has no pin, a top on another device (reason "mount point"). A rename that
 fails with `EXDEV` in the real run cannot be foreseen.
 
+### skill
+
+`skill` prints the agent skill that is compiled into the binary, so an
+agent reads the skill of the antiq that runs. (ADR 0070) It needs no
+collection and takes no `-n`. The skill is the core `skills/antiq/SKILL.md`
+and the parts `mirroring`, `import` and `damage`, each
+`skills/antiq/references/<part>.md`.
+
+- `skill` prints the core and `skill <part>` one part, as they are, on a
+  terminal too, and exits 0. A part this antiq does not know is a usage
+  error, exit 2, whose message names the parts.
+- `skill --install <dir>` writes the core to `<dir>/antiq/SKILL.md` and
+  every part to `<dir>/antiq/references/<part>.md`, creating the folders
+  it needs. `references/` is replaced whole; any other file in
+  `<dir>/antiq/` stays. A relative `<dir>` starts at the directory `-C`
+  names, else at the current directory. It prints `installed <path>` on
+  stdout for each file once it is written, with the absolute path. A
+  failure is the error kind `other`, exit 1, and names the path. `--install`
+  together with a part is a usage error.
+- The frontmatter of the core carries `antiq-version` with the crate
+  version.
+
+`skill` without `--install`, and the top-level `--version`, warn when an
+installed copy of the skill is older than this antiq. (ADR 0071) A copy
+is the directory `antiq` with a `SKILL.md` in a skills directory: `.agents/skills`, `.claude/skills`,
+`.gemini/skills`, `.github/skills`, `.cursor/skills` or `.codex/skills`
+in the directory the run starts in and in each directory above it up to
+the nearest one that holds a `.git` (only the start directory without
+one), and `~/.agents/skills`, `~/.claude/skills`, `~/.gemini/skills`,
+`~/.copilot/skills`, `~/.cursor/skills` or `~/.codex/skills`. A variable
+that holds an absolute path adds a directory below it, searched right
+after the one in the home directory: `CLAUDE_CONFIG_DIR` adds `skills`,
+`CODEX_HOME` adds `skills`, `COPILOT_HOME` adds `skills`, and
+`GEMINI_CLI_HOME` adds `.agents/skills` and `.gemini/skills`.
+
+- A copy is older when the `antiq-version` in its frontmatter, read from
+  its first 16 KiB, is a lower `MAJOR.MINOR.PATCH` version, or when it
+  has none. A copy of the same or a newer version, one that is not a
+  regular file or cannot be read, and one whose stamp is no such version
+  give no warning. A copy reached through several directories counts
+  once, by the real path of its `SKILL.md`.
+- One warning names every older copy, with the code
+  `antiq::skill::outdated`. Its message names each copy and the version
+  it is from, a copy in the start directory relative to it, one below the
+  home directory with `~/`, any other by its full path. Its fix says to
+  read the current skill with `antiq skill` and to ask the user whether
+  to update each copy with `antiq skill --install <skills directory>`.
+- In text the warning is a `warning:` line on stderr after the skill; a
+  terminal shows it as a block with its fix.
+- `--version` searches from the current directory, as it runs before the
+  command line is read, and prints the warning after the version, as a
+  line on stderr also under `--json`.
+
 ## Push
 
 `push [--init] [--force] [--take-over] [--if-reachable]` mirrors the
@@ -2078,8 +2132,9 @@ error naming the key, exit 1.
 | `grep <pattern>` | searches the paths of all archived files |
 | `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
 | `push [--init] [--force] [--take-over] [--if-reachable] [-n]` | mirrors the collection to the target |
+| `skill [<part>]`, `skill --install <dir>` | prints the agent skill, or installs it |
 
-(ADR 0023, ADR 0069)
+(ADR 0023, ADR 0069, ADR 0070)
 
 Every command takes `-C <path>` and `--json`. A flag a command does not
 take is a usage error. No command asks a question. (ADR 0020)
@@ -2562,7 +2617,7 @@ and its parent is a directory when the plan is made. The run decides.
 | `format_too_new` | 1 | `unearth`, `fork` or `rebuild` meets a listing of a newer format (see "Damage"), or `push` meets a marker with a higher `format` | |
 | `other` | 1 | any other failure | |
 
-`--help` and the top-level `--version` print text and exit 0, also under `--json`.
+`--help` and the top-level `--version` print text and exit 0, also under `--json`. `--version` may add the warning about an older copy of the agent skill on stderr (see "skill").
 
 `archive` adds `archived`, `skipped`, `refused`, `repairs` and `warnings`.
 An element of `archived` has `piece`, `stamp` (the version stamp), `version`
@@ -2675,6 +2730,11 @@ would archive; absent in a dry run and when the survey failed) and
 `warnings`. A dry run also has `config`, the text of the config that would be
 written, and `actions`, both before `warnings`; a real run has no `actions`.
 The action is `{"kind": "create_collection", "path": ...}`.
+
+`skill` has `part` (the name of the part, or null for the core), `skill`
+(the text) and `warnings`, a list that holds the warning object about
+older copies or is empty. `skill --install` has `installed`, the absolute
+paths of the files it wrote, in the order it wrote them.
 
 `status` has these keys, all of them present with an empty list when there
 is nothing to list: `folders`, `versions` and `archive_bytes` (the last two

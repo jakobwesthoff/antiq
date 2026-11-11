@@ -109,6 +109,14 @@ pub fn make_hermetic(command: &mut Command) {
         "KITTY_WINDOW_ID",
         "ALACRITTY_LOG",
         "TERM_PROGRAM",
+        // Where agents keep their skills in place of the home directory,
+        // which `antiq skill` searches for older copies of its skill
+        // (`src/cli/skill_age.rs`, `GLOBAL_DIRS`). The developer's own
+        // skills must not decide a test.
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "COPILOT_HOME",
+        "GEMINI_CLI_HOME",
     ] {
         command.env_remove(name);
     }

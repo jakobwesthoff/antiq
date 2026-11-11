@@ -15,5 +15,6 @@ pub mod pin;
 mod progress;
 pub mod push;
 pub mod rebuild;
+pub mod skill;
 pub mod status;
 pub mod unearth;

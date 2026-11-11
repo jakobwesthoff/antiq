@@ -11,6 +11,7 @@ mod emblem;
 mod error_block;
 pub mod notice;
 pub mod output;
+mod skill_age;
 pub mod table;
 mod unresolved;
 mod usage;
@@ -79,6 +80,8 @@ pub enum Command {
     Unpin(PieceArgs),
     /// Mirror the collection to the target
     Push(PushArgs),
+    /// Print the agent skill, or install it
+    Skill(SkillArgs),
 }
 
 impl Command {
@@ -98,6 +101,7 @@ impl Command {
             Command::Pin(_) => "pin",
             Command::Unpin(_) => "unpin",
             Command::Push(_) => "push",
+            Command::Skill(_) => "skill",
         }
     }
 }
@@ -235,6 +239,19 @@ pub struct PushArgs {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct SkillArgs {
+    /// Part of the skill to print in place of its core
+    #[arg(
+        value_parser = clap::builder::PossibleValuesParser::new(cmd::skill::part_names()),
+        conflicts_with = "install"
+    )]
+    pub part: Option<String>,
+    /// Write the skill into DIR/antiq, for a skills directory such as .claude/skills
+    #[arg(long, value_name = "DIR")]
+    pub install: Option<PathBuf>,
+}
+
 /// What every command gets to know about the invocation.
 #[derive(Debug)]
 pub struct Context {
@@ -300,6 +317,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         Command::Pin(args) => cmd::pin::pin(&ctx, args, out),
         Command::Unpin(args) => cmd::pin::unpin(&ctx, args, out),
         Command::Push(args) => cmd::push::run(&ctx, args, out),
+        Command::Skill(args) => cmd::skill::run(&ctx, args, out),
     }
 }
 
@@ -456,10 +474,12 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
     let code = u8::try_from(error.exit_code()).unwrap_or(ErrorKind::Usage.exit_code());
     let shows_help =
         error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand;
-    if error.kind() == clap::error::ErrorKind::DisplayVersion
-        && !asks_for_json(args)
-        && print_version_screen(out)
-    {
+    if error.kind() == clap::error::ErrorKind::DisplayVersion {
+        let drew_screen = !asks_for_json(args) && print_version_screen(out);
+        if !drew_screen {
+            print_clap(error, out);
+        }
+        warn_of_outdated_skill(out);
         return code;
     }
     if code == 0 || (shows_help && !asks_for_json(args)) {
@@ -487,6 +507,22 @@ fn report_usage_error(error: &clap::Error, args: &[OsString], out: &mut Output) 
         },
     );
     code
+}
+
+/// After the version, the warning about installed copies of the agent skill
+/// that are older than this antiq: an agent that checks which antiq runs
+/// learns there that its copy is stale. The command line was not parsed, so
+/// the search starts in the current directory, not in one `-C` names. The
+/// warning is a line on stderr also under `--json`, since the version is
+/// text there too.
+fn warn_of_outdated_skill(out: &mut Output) {
+    let Ok(start) = std::env::current_dir() else {
+        return;
+    };
+    if let Some(warning) = skill_age::outdated_copies(&start) {
+        // A closed stream leaves nowhere to print to.
+        let _ = out.notices(&notice::warnings(&[warning]));
+    }
 }
 
 /// Prints Archie's version screen when stdout is a terminal that can show

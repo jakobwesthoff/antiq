@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `antiq skill` prints an agent skill, a guide for AI coding agents to
+  antiq's commands, their JSON output and which of them delete
+  something. `antiq skill <part>` prints one of its parts (`mirroring`,
+  `import`, `damage`), and `antiq skill --install <dir>` writes the skill
+  to `<dir>/antiq/`, for a skills directory such as `.claude/skills`.
+  `antiq skill` and `antiq --version` warn when they find an installed
+  copy of the skill that is older than the antiq that runs
+
 ### Changed
 
 - `archive -n` names, under each piece it would archive, the entries the

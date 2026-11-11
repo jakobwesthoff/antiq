@@ -13,9 +13,9 @@ use std::io;
 use std::process::Stdio;
 use support::cmd::Antiq;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "find", "grep",
-    "pin", "unpin", "push",
+    "pin", "unpin", "push", "skill",
 ];
 
 /// Runs `antiq --json <args>`.
@@ -24,7 +24,7 @@ fn json_run(args: &[&str]) -> support::cmd::Run {
 }
 
 #[test]
-fn help_lists_the_thirteen_subcommands() {
+fn help_lists_the_fourteen_subcommands() {
     let run = Antiq::new().arg("--help").run();
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let mut listed: Vec<&str> = run

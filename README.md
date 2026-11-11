@@ -556,6 +556,26 @@ included. No command ever asks a question, so nothing waits for input.
 | 3 | partial: a step failed for some pieces, or an `unearth` or `fork` that did not finish |
 | 4 | target unreachable (`push` only) |
 
+## Using antiq with AI agents
+
+antiq ships an agent skill: a short guide for AI coding agents such as
+Claude Code or Codex that explains the commands, their JSON output and
+which commands delete something. An agent following it runs `status`,
+`find`, `grep` and dry runs on its own, and every other command only when
+you ask for it.
+
+The skill is compiled into antiq, so it always matches the installed
+version. An agent reads it with `antiq skill`. To install it where your
+agent loads skills from:
+
+```bash
+antiq skill --install ~/.claude/skills
+```
+
+This writes `~/.claude/skills/antiq/`. The copy stays as it is when antiq
+is updated; `antiq skill` and `antiq --version` warn about a copy that is
+older than the antiq that runs, and the same command updates it.
+
 ## Reference
 
 ### Commands
@@ -580,6 +600,7 @@ Commands:
   pin      Keep a piece from being archived
   unpin    Let a piece be archived again
   push     Mirror the collection to the target
+  skill    Print the agent skill, or install it
 
 Options:
   -C <PATH>      Run as if started in this directory
@@ -588,9 +609,9 @@ Options:
   -V, --version  Print version
 ```
 
-Every command takes `-C <path>` and `--json`. Commands that change
-something take `-n` / `--dry-run`, which prints the plan and changes
-nothing. `antiq --version` prints the version on one line, and on a
+Every command takes `-C <path>` and `--json`. Commands that change a
+collection or its target take `-n` / `--dry-run`, which prints the plan
+and changes nothing. `antiq --version` prints the version on one line, and on a
 terminal with 24-bit colour it draws Archie beside it.
 
 ### Configuration

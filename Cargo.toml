@@ -13,11 +13,13 @@ keywords = ["archive", "backup", "rsync", "zstd", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 # The published crate carries what the build needs: the sources, the build
 # script and the terminal renderings of the emblem that it embeds. The tests,
-# the docs, the images and the repository tooling stay in the repository.
+# the docs, the images and the repository tooling stay in the repository. The
+# agent skill under `skills/` is compiled into the binary, so it travels too.
 include = [
     "/src/",
     "/build.rs",
     "/assets/emblem/terminal/",
+    "/skills/",
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE",

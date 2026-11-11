@@ -59,6 +59,12 @@ pub enum WarningKind {
         machine: String,
         started: String,
     },
+    /// An installed copy of the agent skill is older than this antiq. The
+    /// binary searches the skills directories and words both texts, since
+    /// they name the copies it found.
+    #[diagnostic(code(antiq::skill::outdated), severity(Warning), help("{fix}"))]
+    #[error("{message}")]
+    SkillOutdated { message: String, fix: String },
 }
 
 impl Warning {
