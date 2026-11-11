@@ -2097,7 +2097,8 @@ that treats other spellings of a name as the same (see "Spelling"), a path
 in another spelling names the candidate whose folder it leads to. Any other
 input is a search word, matched with the same fuzzy pattern `find` uses
 (smart case, smart normalization) against the candidates' paths in their
-escaped form. A command that deletes no stored version (`archive`, `pin`,
+escaped form, also when word and path differ only in Unicode composition.
+A command that deletes no stored version (`archive`, `pin`,
 `unpin`, `fork` and `rebuild`) acts on a search word that matches exactly one
 candidate. `unearth` and `forget` remove a version and act only on the path
 of a candidate; a search word that matches exactly one candidate is the

@@ -2,11 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The fuzzy query that search-word piece references and `list` share.
+//! The fuzzy query that search-word piece references and `find` share.
 
 use crate::error::HasKind;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32String};
+use unicode_normalization::{UnicodeNormalization, is_nfc};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Why a query failed. Nothing in it can fail yet.
@@ -16,22 +17,64 @@ pub enum QueryError {}
 impl HasKind for QueryError {}
 
 /// A fuzzy query: the one place antiq scores text against what the user
-/// typed, so search-word piece references and `list` rank alike.
+/// typed, so search-word piece references and `find` rank alike.
 ///
 /// Matching is smart case (a capital makes the match case sensitive), smart
 /// normalisation (an accent in the query must match; a plain letter matches
 /// its accented forms) and several words that must all match the same text.
+///
+/// A text matches when the query matches it as stored, or when the query
+/// matches it with query and text both composed (NFC), so a word typed with
+/// a precomposed accent finds a path stored with a combining one. All words
+/// of a query match in the same form.
 pub struct Query {
-    pattern: Pattern,
+    /// The query as typed.
+    stored: Pattern,
+    /// The query composed per grapheme cluster.
+    composed: Pattern,
+    /// Whether composing changed the query. Without that, a text that is
+    /// already composed gives the second form nothing new to find.
+    composes_query: bool,
     matcher: Matcher,
     empty: bool,
+}
+
+/// `text` with every grapheme cluster composed (NFC). The clusters are
+/// composed one by one so that the text keeps the clusters nucleo counts
+/// in the stored form.
+fn composed_text(text: &str) -> String {
+    text.graphemes(true)
+        .flat_map(|cluster| cluster.nfc())
+        .collect()
+}
+
+/// The slots nucleo scores a composed `text` on: the first character of
+/// each cluster after composing it, the way nucleo itself reduces a
+/// cluster. Slot `k` is cluster `k` of `text`.
+fn composed_slots(text: &str) -> Utf32String {
+    if text.is_ascii() {
+        return Utf32String::from(text);
+    }
+    let slots = text
+        .graphemes(true)
+        .map(|cluster| {
+            cluster
+                .nfc()
+                .next()
+                .expect("a grapheme cluster has at least one character")
+        })
+        .collect();
+    Utf32String::Unicode(slots)
 }
 
 impl Query {
     pub fn parse(text: &str) -> Query {
         let text = text.trim();
+        let composed = composed_text(text);
         Query {
-            pattern: Pattern::parse(text, CaseMatching::Smart, Normalization::Smart),
+            stored: Pattern::parse(text, CaseMatching::Smart, Normalization::Smart),
+            composed: Pattern::parse(&composed, CaseMatching::Smart, Normalization::Smart),
+            composes_query: composed != text,
             matcher: Matcher::new(Config::DEFAULT),
             empty: text.is_empty(),
         }
@@ -42,27 +85,49 @@ impl Query {
         self.empty
     }
 
-    /// The score of `haystack`, or `None` when it does not match.
+    /// Whether the composed form can match `text` differently from the
+    /// stored one.
+    fn tries_composed(&self, text: &str) -> bool {
+        self.composes_query || !is_nfc(text)
+    }
+
+    /// The score of `haystack`, or `None` when it does not match: the
+    /// better of the stored and the composed form.
     pub fn score(&mut self, haystack: &str) -> Option<u32> {
         if self.empty {
             return Some(0);
         }
-        let haystack = Utf32String::from(haystack);
-        self.pattern.score(haystack.slice(..), &mut self.matcher)
+        let stored = Utf32String::from(haystack);
+        let stored = self.stored.score(stored.slice(..), &mut self.matcher);
+        if !self.tries_composed(haystack) {
+            return stored;
+        }
+        let composed = composed_slots(haystack);
+        let composed = self.composed.score(composed.slice(..), &mut self.matcher);
+        stored.max(composed)
     }
 
     /// The positions, counted in characters (`char`s), of the letters of
     /// `text` that the query matched; empty when it does not match, and
     /// also when every word of the query is negated. A letter with
-    /// combining marks is marked with them.
+    /// combining marks is marked with them. The stored form decides when
+    /// it matches; the composed form only when the stored one does not.
     pub fn matched(&mut self, text: &str) -> Vec<usize> {
-        let haystack = Utf32String::from(text);
         let mut positions = Vec::new();
-        if self
-            .pattern
-            .indices(haystack.slice(..), &mut self.matcher, &mut positions)
-            .is_none()
-        {
+        let stored = Utf32String::from(text);
+        let mut found = self
+            .stored
+            .indices(stored.slice(..), &mut self.matcher, &mut positions)
+            .is_some();
+        if !found && self.tries_composed(text) {
+            positions.clear();
+            let composed = composed_slots(text);
+            found = self
+                .composed
+                .indices(composed.slice(..), &mut self.matcher, &mut positions)
+                .is_some();
+        }
+        if !found {
             return Vec::new();
         }
         // Each word of the query reports its own positions, in no common order.
@@ -180,5 +245,74 @@ mod tests {
     fn a_plain_letter_matches_an_accented_one_and_not_the_other_way_round() {
         assert!(score("cafe", "caf\u{e9}").is_some());
         assert!(score("caf\u{e9}", "cafe").is_none());
+    }
+
+    #[test]
+    fn a_precomposed_word_matches_a_decomposed_path() {
+        assert!(score("caf\u{e9}", "cafe\u{301}").is_some());
+    }
+
+    #[test]
+    fn a_precomposed_word_scores_a_decomposed_path_like_its_precomposed_twin() {
+        let twin = score("caf\u{e9}", "caf\u{e9}");
+        assert!(twin.is_some());
+        assert_eq!(score("caf\u{e9}", "cafe\u{301}"), twin);
+    }
+
+    #[test]
+    fn a_precomposed_word_marks_a_decomposed_path() {
+        let mut query = Query::parse("caf\u{e9}");
+        assert_eq!(query.matched("cafe\u{301}/scanner"), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn several_words_mark_a_decomposed_path_in_one_form() {
+        let mut query = Query::parse("caf\u{e9} scan");
+        let marked = query.matched("cafe\u{301}/scanner");
+        assert_eq!(marked, [0, 1, 2, 3, 4, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn a_letter_that_composes_to_ascii_is_marked_at_its_place() {
+        // U+212A KELVIN SIGN composes to the ASCII `K`.
+        let mut query = Query::parse("Key");
+        assert_eq!(query.matched("\u{212a}ey"), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_decomposed_word_matches_a_precomposed_path() {
+        assert!(score("cafe\u{301}", "caf\u{e9}").is_some());
+    }
+
+    #[test]
+    fn a_decomposed_word_marks_a_precomposed_path() {
+        let mut query = Query::parse("cafe\u{301}");
+        assert_eq!(query.matched("caf\u{e9}/scanner"), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_plain_letter_matches_a_decomposed_letter_outside_the_fold_table() {
+        assert!(score("e", "e\u{302}\u{323}").is_some());
+        assert!(score("\u{3b1}", "\u{3b1}\u{301}").is_some());
+        assert!(score("\u{438}", "\u{438}\u{306}").is_some());
+    }
+
+    #[test]
+    fn a_decomposed_word_still_matches_another_accent_of_its_letter() {
+        assert!(score("cafe\u{301}", "caf\u{e8}").is_some());
+    }
+
+    #[test]
+    fn a_decomposed_word_does_not_match_a_path_without_the_accent() {
+        let mut query = Query::parse("cafe\u{301}");
+        assert!(query.score("cafe/scanner").is_none());
+        assert!(query.matched("cafe/scanner").is_empty());
+    }
+
+    #[test]
+    fn a_precomposed_word_marks_a_precomposed_path() {
+        let mut query = Query::parse("caf\u{e9}");
+        assert!(score("caf\u{e9}", "caf\u{e9}/scanner").is_some());
+        assert_eq!(query.matched("caf\u{e9}/scanner"), [0, 1, 2, 3]);
     }
 }
