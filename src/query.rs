@@ -7,6 +7,7 @@
 use crate::error::HasKind;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32String};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Why a query failed. Nothing in it can fail yet.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -50,10 +51,12 @@ impl Query {
         self.pattern.score(haystack.slice(..), &mut self.matcher)
     }
 
-    /// The positions, counted in characters, of the letters of `haystack`
-    /// that the query matched; empty when it does not match.
-    pub fn matched(&mut self, haystack: &str) -> Vec<usize> {
-        let haystack = Utf32String::from(haystack);
+    /// The positions, counted in characters (`char`s), of the letters of
+    /// `text` that the query matched; empty when it does not match, and
+    /// also when every word of the query is negated. A letter with
+    /// combining marks is marked with them.
+    pub fn matched(&mut self, text: &str) -> Vec<usize> {
+        let haystack = Utf32String::from(text);
         let mut positions = Vec::new();
         if self
             .pattern
@@ -65,9 +68,28 @@ impl Query {
         // Each word of the query reports its own positions, in no common order.
         positions.sort_unstable();
         positions.dedup();
+        let positions = positions.into_iter().map(|position| position as usize);
+
+        // A text with a non-ASCII character is held as one slot per
+        // grapheme cluster, so a position counts clusters there. A
+        // cluster of several characters (a letter and its combining
+        // accent, or `\r\n`) is marked as a whole.
+        if text.is_ascii() {
+            return positions.collect();
+        }
+        let mut cluster_start = Vec::new();
+        let mut cluster_len = Vec::new();
+        let mut characters = 0;
+        for cluster in text.graphemes(true) {
+            let length = cluster.chars().count();
+            cluster_start.push(characters);
+            cluster_len.push(length);
+            characters += length;
+        }
         positions
-            .into_iter()
-            .map(|position| position as usize)
+            .flat_map(|cluster| {
+                cluster_start[cluster]..cluster_start[cluster] + cluster_len[cluster]
+            })
             .collect()
     }
 }
@@ -85,6 +107,30 @@ mod tests {
         let mut query = Query::parse("scan");
         assert_eq!(query.matched("projects/scanner"), [9, 10, 11, 12]);
         assert!(query.matched("projects/other").is_empty());
+    }
+
+    #[test]
+    fn a_decomposed_accent_does_not_shift_the_matched_positions() {
+        let mut query = Query::parse("scan");
+        assert_eq!(query.matched("cafe\u{301}/scanner"), [6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn a_matched_decomposed_accent_is_marked_with_its_base() {
+        let mut query = Query::parse("cafe");
+        assert_eq!(query.matched("cafe\u{301}"), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_crlf_in_a_non_ascii_path_counts_as_two_characters() {
+        let mut query = Query::parse("scan");
+        assert_eq!(query.matched("\u{e9}\r\nscan"), [3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_crlf_in_an_ascii_path_is_unchanged() {
+        let mut query = Query::parse("scan");
+        assert_eq!(query.matched("a\r\nscan"), [3, 4, 5, 6]);
     }
 
     #[test]

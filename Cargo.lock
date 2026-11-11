@@ -91,6 +91,7 @@ dependencies = [
  "toml_edit",
  "ulid",
  "unicode-normalization",
+ "unicode-segmentation",
  "unicode-width 0.2.3",
  "whoami",
  "zstd",

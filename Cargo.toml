@@ -47,6 +47,7 @@ toml = "1.1.8"
 toml_edit = "0.25.17"
 ulid = "3.0.0"
 unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 whoami = "2.1.3"
 # `experimental` exposes `ZSTD_getFrameProgression`, which reports the bytes the
