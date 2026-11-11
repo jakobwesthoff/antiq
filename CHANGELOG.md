@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-11
+
 ### Changed
 
 - `list` is now `find`, and its help line reads "Find and list the
@@ -90,7 +92,8 @@ target.
   terminal with 24-bit colour, and the plain version in a pipe
 - macOS and Linux
 
-[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jakobwesthoff/antiq/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jakobwesthoff/antiq/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jakobwesthoff/antiq/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jakobwesthoff/antiq/releases/tag/v1.0.0
