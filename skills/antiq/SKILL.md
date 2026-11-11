@@ -19,8 +19,8 @@ Three files hold details for some tasks:
   `import`.
 - `references/damage.md`, or `antiq skill damage`: when `status`,
   `find` or an error reports a damaged or incomplete version, before
-  `rebuild` or `forget`, and before anything is copied back from the
-  target.
+  `rebuild`, or `forget` of such a version, and before anything is copied
+  back from the target.
 
 # antiq
 
@@ -43,8 +43,9 @@ compare it with the `antiq-version` at the top of this file:
 - antiq's version is higher: this copy of the skill is older than the
   antiq that runs. Read `antiq skill` and follow that instead.
 - antiq's version is lower, or `antiq skill` is an unknown command: the
-  antiq that runs is older than this skill. Tell the user, run only `status`, `find` and
-  `grep`, and nothing else until they update antiq or tell you to go on.
+  antiq that runs is older than this skill. Tell the user, run only
+  `status`, `find` and `grep`, and nothing else until they update antiq
+  or tell you to go on.
 
 `antiq --version` and `antiq skill` also warn when they find an installed
 copy of the skill that is older than the antiq that runs. Tell the user,
@@ -58,9 +59,10 @@ On your own, when the task concerns archived folders:
 
 - `status`, `find`, `grep` and `skill`: they only read and take no lock.
 - any command with `-n` (`--dry-run`): it prints the plan and changes
-  nothing in the collection or on the target. `push -n` still connects to
-  the target and writes a run log, so run it only when the task is about
-  the mirror. See `lock_held` below.
+  nothing in the collection or on the target (but see `lock_held` below).
+  `push -n` still connects to the target and writes a run log, which
+  counts among the 10 that antiq keeps, so run it only when the task is
+  about the mirror.
 
 Every other command only when the user asks for exactly that action, and
 after a dry run of the same command line. That includes `skill --install
@@ -80,6 +82,10 @@ and pass `<dir>` as an absolute path.
 | `rebuild <piece> <version>` | rewrites a missing listing or checksum file of a damaged version |
 | `push` | makes the target equal to the collection: **deletes on the target** what is gone locally |
 | `init [--pattern <glob>]...` | makes the current folder, or the one `-C` names, a collection; without `--pattern` every folder directly in it is a piece that `archive` deletes once idle |
+
+Do not archive a piece that holds your working directory or a file a
+running process writes: change out of it first, and write nothing into
+the folder after the dry run, since a write after the check is lost.
 
 When the user asks for something "back", `fork` keeps the version and
 `unearth` removes it. Say which one you run and why. After `forget` or
@@ -102,10 +108,14 @@ left out; do not read it as empty.
 
 - Run antiq in the folder the user named or in your working directory,
   or pass `-C <path>`; antiq finds the collection there or in a folder
-  above, the nearest one that holds `.antiq/`. If it is not found (every
-  command but `init` and `skill` fails with `not_a_collection`), ask the
-  user.
-- Pass `--json` whenever you read the output, and decide from the JSON:
+  above, the nearest one that holds `.antiq/`. That folder is the
+  collection root. No output names it, so find it yourself by looking
+  upward for `.antiq/`, and name it to the user before any changing
+  command: `archive` without a piece acts on the whole collection,
+  wherever in it you run. If there is none (every command but `init` and
+  `skill` fails with `not_a_collection`), ask the user.
+- Pass `--json` whenever you read the output (`skill` and `--version`
+  aside), and decide from the JSON:
   text output prints names from the user's folders, which can hold line
   breaks. With `--json`, stdout holds exactly one JSON object, errors
   included: `{"format": 1, "command": "<name>", ...}`.
@@ -152,10 +162,13 @@ the start of the run repaired) and `warnings`. `archive` lists
 `error`, and a `message` that says where the folder is) and `refused`.
 `import` has `imported` or `skipped`. `unearth` and `fork` have
 `unearthed` or `forked`, which is false with a `skipped` of `{"reason":
-"no_space", "needed", "available"}` when there was no room. `push` has
-`result` (`pushed` or `unreachable`), `pieces` (per piece `piece`,
-`created`, `updated`, `deleted`), `other` and, when unreachable,
-`reason`.
+"no_space", "needed", "available"}` when there was no room. Exit 3 with
+`unearthed` true means the folder is back and the version is still
+there, and `warnings` says why: tell the user, do not unearth again; the
+next locked run's repair `delete_restored_version` removes the version.
+`push` has `result` (`pushed` or `unreachable`), `pieces` (per piece
+`piece`, `created`, `updated`, `deleted`), `other` and, when
+unreachable, `reason`.
 
 ### Errors
 
@@ -209,7 +222,10 @@ findings. `status` exits 0 whatever it finds.
 each with `piece`, `stamp`, `version` (UTC time), `state` (`ok`,
 `damaged`, `incomplete`, `newer-format` or `unreadable`), `archive_bytes`,
 `bytes` and `files`. The word matches piece paths fuzzily. `list` is the
-same command.
+same command. `newer-format` is a version written by a newer antiq (error
+kind `format_too_new` when you try to use it): it is no damage; tell the
+user to update antiq and never offer `forget` for it. `unreadable` is a
+file antiq could not read; `warnings` names it.
 
 `antiq grep <regex> --json` searches the paths of the files inside all
 archives without unpacking anything. Each path is matched as
@@ -224,24 +240,30 @@ itself. It is the file in `.antiq/pieces/<piece path>/` whose name ends
 in `--<stamp>.tar.zst`, with the full `stamp` from `find --json`. Its
 members start with one top folder, named after the folder that was
 packed (for an imported version, the source folder). `zstd -dc <archive>
-| tar -t | head -n 1` names it; then `zstd -dc <archive> | tar -xO
-<top>/<path>` prints one file. Reading there is fine, writing is not. Use `fork` only when the user wants the folder back as a
-working copy.
+| tar -tf - | head -n 1` names it; then `zstd -dc <archive> | tar -xOf -
+<top>/<path>` prints one file. Reading there is fine, writing is not.
+Use `fork` only when the user wants the folder back as a working copy.
 
 ## Naming pieces and versions
 
 A piece is named by its path or by a search word. A relative path is read
 against the `-C` directory, or against the current directory without
-`-C`; pass the folder of `import` as an absolute path. `archive`, `fork`,
-`pin`, `unpin` and `rebuild` act on a search word that matches exactly
-one piece. `unearth` and `forget` act only on the exact path and refuse a
-search word.
+`-C`; pass the folder of `import` as an absolute path. Pass a piece as
+the path a plan, `status` or `find` printed, with `-C <collection root>`.
+Any other input is a fuzzy search word: `archive`, `fork`, `pin`, `unpin`
+and `rebuild` act on it when it matches exactly one piece, `unearth` and
+`forget` refuse it. In the dry run, compare `piece` (and `path` for
+`fork`) with the folder the user meant before you run the command for
+real; if it is not clearly the same, ask.
 
 Piece paths in JSON output (`piece`, `path`, `candidates`) are relative
 to the collection root, so run with `-C <collection root>` when you pass
 one back. The paths in status's `recovered`, `trash` and `doomed` are
-relative to `.antiq/`. A path that contains `%` is escaped in the output;
-use the spelling from the error's `fix` instead.
+relative to `.antiq/`. A path that contains `%` or a byte that is not
+UTF-8 is escaped in the output and is then no path antiq reads back: for
+`unearth` and `forget`, use the spelling from the `fix` of
+`inexact_reference`, which may be shell quoting such as `$'...'`;
+otherwise ask the user.
 
 A version is named by its stamp, or by a prefix of the stamp that
 contains the `T`, such as `2026-11-04T09`. An input without `T`, such as
@@ -260,12 +282,14 @@ matches several versions, or none, is an error of kind `other` (code
   `antiq grep '<a file name you expect>' --json`.
 - **"I need X again."** Ask whether the archived version may go
   (`unearth`) or should stay (`fork`) unless the user said so. Then
-  `antiq unearth <path> -n --json`, check the plan, run it without `-n`.
+  `antiq unearth <path> -n --json`, check the plan and tell the user
+  which version it takes (the newest, unless `--version` names one), then
+  run it without `-n`.
   `unearth` and `fork` refuse a destination that already exists. `fork
   --name <path>` writes the copy to another path below the collection
   root that the patterns select; a path outside the collection is
-  refused. For a copy outside the collection, fork it in and move it, or
-  ask the user.
+  refused. For files outside the collection, read them from the archive
+  (above), or ask the user.
 - **"Clean up what is idle."** `antiq status --json`, then `antiq archive
   -n --json`, and show the user the pieces in the plan. Once they agree,
   run `antiq archive --json` right after the dry run. If the user
@@ -273,19 +297,22 @@ matches several versions, or none, is an error of kind `other` (code
   then without `-n` for each. If time has passed since the plan, run
   `antiq archive -n --json` again and show it again; do not fall back to
   `archive <piece>`, which archives a piece that is no longer due.
-- **"Why was X not archived?"** `antiq status --json`. A piece missing
-  from `pieces` has no state: it is not due yet, no pattern selects it,
-  or it has no file that counts. A `refused` piece names each reason with
-  `kind`, `path` and `text`. `mount_point`, `nested_collection`,
-  `unreadable_entry` and `locked` are problems of the file system to
-  report to the user. `rule_file` adds the `line` of an `.antiqignore` or
-  `.antiq-timeless` file to fix, with the user's consent. A `pinned`
+- **"Why was X not archived?"** `antiq status --json`. `due` means the
+  next `archive` takes it; antiq archives only when `archive` runs. A
+  piece missing from `pieces` has no state: it is not due yet (also when
+  a file of it is listed in `future_times`, or it was unearthed or forked
+  less than `idle_days` ago), no pattern selects it, or it has no file
+  that counts. A `refused` piece names each reason with `kind`, `path`
+  and `text`. `mount_point`, `nested_collection`, `unreadable_entry` and
+  `locked` are problems of the file system to report to the user.
+  `rule_file` adds the `line` of an `.antiqignore` or `.antiq-timeless`
+  file to fix, with the user's consent. `exclude_entry` is an `exclude`
+  path of the config inside the piece; `not_a_file` and
+  `unreadable_marker` name a marker file to show the user. A `pinned`
   piece is archived only after `unpin`.
-- **"Keep X from being archived."** `antiq pin <piece> -n --json`, check
-  the `piece` it names, then run it without `-n`.
-- **Importing a folder from elsewhere, mirroring, a damaged version.**
-  Read `references/import.md`, `references/mirroring.md` or
-  `references/damage.md` first (`antiq skill import`, `mirroring`,
-  `damage`).
+- **"Keep X from being archived."** `antiq pin <piece> -n --json`, then
+  run it without `-n`.
+- **Importing, mirroring, a damaged version.** Read the part named at the
+  top first.
 
 End of the antiq skill.

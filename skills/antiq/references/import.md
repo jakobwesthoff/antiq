@@ -30,9 +30,10 @@ antiq -C <collection root> import <absolute folder> --as <piece path> --json
   leave out; show them to the user.
 - A folder with an `.antiq-pin` at its top, or without a file that
   counts, is refused.
-- Old archive files: unpack each into a temporary folder with the files'
-  original times, as `tar` and `unzip` keep them, and import the folder
-  that comes out.
+- Old archive files: unpack each into a temporary folder outside the
+  collection, with the files' original times as `tar` and `unzip` keep
+  them, and import the folder that comes out. The source and the unpacked
+  folder stay after the import; delete them only if the user asks.
 
 The result has `imported` with `piece`, `stamp` and the sizes, or
 `skipped` with `reason` and `message` (exit 3), for example when there is

@@ -4,9 +4,10 @@ Part of the antiq skill. Read SKILL.md first, which holds the rules for every ta
 
 Each version is three files in `.antiq/pieces/<piece path>/`: the archive
 (`.tar.zst`), its listing (`.sha256.zst`) and its checksum file
-(`.tar.zst.sha256`). A version is **damaged** when one of them is missing
-or changed from outside antiq, and **incomplete** when its archive is
-missing.
+(`.tar.zst.sha256`). A version is **incomplete** when its archive is
+missing, and **damaged** when the archive is there but the listing or the
+checksum file is missing or broken, or the archive has another size than
+its listing records.
 
 Damage comes from outside antiq: a file deleted by hand, an incomplete
 copy back from the target, a disk error. The one exception: a `forget`
@@ -16,8 +17,8 @@ interrupted before you offer to copy anything back.
 
 ## Where it shows
 
-- `status --json`: `damaged_versions` (each with `piece`, `version` and
-  `reasons`) and `incomplete_versions`.
+- `status --json`: `damaged_versions` (each with `piece`, `version`, which
+  here is the stamp, and `reasons`) and `incomplete_versions`.
 - `find --json`: the version's `state` is `damaged` or `incomplete`, and
   `damage` lists the faults.
 - `push` refuses to run while a damaged or incomplete version exists, and
@@ -57,12 +58,15 @@ it back; the unearthed folder already holds it.
 ## Restoring from the target
 
 The target is a plain copy of the collection, live folders included, as
-of the last `push`. Copy back only the files that are lost, from
-`<target>/.antiq/pieces/<piece path>/` to the same place in the
-collection, with `rsync -aH`; `-H` keeps hard links. Copy the whole
-target only into an empty folder: over an existing collection it replaces
-newer live files with the target's older ones. Show the user the command
-first, and do this only on their request.
+of the last `push`. Copy back only the files that are lost, each named
+on its own: `rsync -aH <target>/.antiq/pieces/<piece path>/<file>
+<collection root>/.antiq/pieces/<piece path>/`, never the whole folder,
+which would also bring back versions unearthed or forgotten since; `-H`
+keeps hard links. First check that `antiq status --json` has no `note`
+about a held lock. Copy the whole target only into an empty folder: over
+an existing collection it replaces newer live files with the target's
+older ones. Show the user the command first, and do this only on their
+request.
 
 Before the next `push`, run `antiq status --json` and `antiq push -n
 --json`. The `deleted` counts of the `mirror` action are what that push

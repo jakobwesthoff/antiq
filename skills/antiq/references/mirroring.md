@@ -23,7 +23,8 @@ Only on the user's request, and each step with their consent:
    this collection, and then pushes the whole collection in the same run.
    It refuses a folder that is not empty, and over ssh it creates the last
    missing level of the path.
-4. Later runs are `antiq push -n --json` and `antiq push --json`. A
+4. Later runs are `antiq push -n --json` and `antiq push --json`. Before
+   a push, show the user any `deleted` count above zero in the dry run. A
    scheduled run adds `--if-reachable`, which exits 0 instead of 4 when
    the target is offline.
 
@@ -52,6 +53,7 @@ these settings.
 | a folder that is not empty and has no marker | exit 1, `--init` refused | tell the user; never empty the folder |
 | the marker belongs to another collection | exit 1, also with `--force` and `--take-over` | tell the user |
 | the marker names this collection on another machine or at another path | exit 1, naming both | see below |
+| anything else, such as a tree left in `.antiq/trash/`, two piece paths that differ only in case, or a refused ssh key | exit 1, the message says what | tell the user |
 
 After a renamed machine or a moved collection, the marker names the old
 machine or path. `push --take-over` rewrites the marker to this machine
@@ -60,15 +62,17 @@ pushes once and leaves the marker as it is. Both make the target equal to
 this copy of the collection and delete on the target what this copy
 lacks. Before either, the user must be sure that this is the current copy
 and that the target holds nothing newer: run `antiq push --take-over -n
---json` (or `--force -n`) and show them the `deleted` counts of the
-`mirror` action first. Both only with the user's consent; after a
-take-over, a scheduled `push` from the old machine or path is refused.
+--json` (or `--force -n`) and show them the `updated` and `deleted`
+counts per piece of the `mirror` action first. Both only with the user's
+consent; after a take-over, a scheduled `push` from the old machine or
+path is refused.
 
 A failed `push` names its run log, a zstd file that `zstd -dc <path> |
 less` reads. On macOS the logs are in `~/Library/Logs/antiq`. Read it
 when the error does not say enough.
 
-`push` stays on the collection's volume and does not read the target
+`push` stays on the collection's volume, so a mount inside a live folder
+arrives on the target as an empty folder. It does not read the target
 back: damage on the target stays unseen.
 
 End of references/mirroring.md.
