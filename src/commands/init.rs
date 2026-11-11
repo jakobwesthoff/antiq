@@ -15,6 +15,7 @@ use crate::id::{IdSource, ObjectId};
 use crate::relpath::{Name, RelPath};
 use crate::report::{CommandReport, Warning};
 use crate::select::{Rules, SelectError, select};
+use crate::shown::Shown;
 use crate::tree::EntryKind;
 use crate::walk::{Hooks, RealFs};
 use jiff::Timestamp;
@@ -28,11 +29,11 @@ use std::path::{Path, PathBuf};
 /// Errors of the `init` command.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum InitError {
-    #[error("{} is already a collection", root.display())]
+    #[error("{} is already a collection", Shown(&root))]
     AlreadyACollection { root: PathBuf },
-    #[error("{} lies inside the collection at {}", directory.display(), root.display())]
+    #[error("{} lies inside the collection at {}", Shown(&directory), Shown(&root))]
     InsideACollection { directory: PathBuf, root: PathBuf },
-    #[error("{} exists and is not a directory", path.display())]
+    #[error("{} exists and is not a directory", Shown(&path))]
     AntiqIsNotADirectory { path: PathBuf },
     #[error(
         "these folders would be pieces and hold a collection of their own: {}",
@@ -53,7 +54,7 @@ pub enum InitError {
 fn list(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| path.display().to_string())
+        .map(|path| Shown(&path).to_string())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -64,7 +65,10 @@ impl crate::error::HasKind for InitError {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InitAction {
-    CreateCollection { path: String },
+    CreateCollection {
+        #[serde(serialize_with = "crate::shown::serialize_lossy")]
+        path: PathBuf,
+    },
 }
 
 /// Everything `init` decided before it creates anything.
@@ -86,7 +90,8 @@ pub struct InitReport {
     pub created: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
-    pub path: String,
+    #[serde(serialize_with = "crate::shown::serialize_lossy")]
+    pub path: PathBuf,
     pub patterns: Vec<String>,
     /// How many folders the next `archive` would archive. Absent in a dry
     /// run, and when the new collection could not be surveyed.
@@ -332,7 +337,7 @@ pub fn init(
 
 impl InitPlan {
     fn report(&self, id: Option<ObjectId>, config: Option<String>, dry_run: bool) -> InitReport {
-        let path = self.root.display().to_string();
+        let path = self.root.clone();
         InitReport {
             dry_run,
             created: id.is_some(),
@@ -370,6 +375,26 @@ mod tests {
 
     fn patterns(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn the_message_of_a_path_error_shows_the_path_by_the_rule_for_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let error = InitError::AlreadyACollection {
+            root: PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/a\xff%\nb")),
+        };
+        assert_eq!(
+            error.to_string(),
+            "/tmp/a%FF%25%0Ab is already a collection"
+        );
+    }
+
+    #[test]
+    fn the_nested_collections_are_listed_by_the_rule_for_names() {
+        let error = InitError::NestedCollections {
+            roots: vec![PathBuf::from("/a%b"), PathBuf::from("/c\nd")],
+        };
+        assert!(error.to_string().ends_with("/a%25b, /c%0Ad"), "{error}");
     }
 
     fn plan_of(tree: &Tree, list: &[&str]) -> InitPlan {

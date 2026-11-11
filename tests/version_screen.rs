@@ -5,6 +5,9 @@
 //! `antiq --version`: Archie's screen on a terminal that can show it, the
 //! plain version line everywhere else.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs::File;

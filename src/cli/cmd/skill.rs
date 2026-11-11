@@ -11,6 +11,7 @@ use crate::cli::output::Output;
 use crate::cli::skill_age;
 use crate::cli::{Context, SkillArgs};
 use antiq::report::Warning;
+use antiq::shown::Shown;
 use anyhow::Context as _;
 use serde::Serialize;
 use std::io;
@@ -113,14 +114,14 @@ fn install(ctx: &Context, root: &Path, out: &mut Output) -> anyhow::Result<u8> {
         if ctx.json {
             Ok(())
         } else {
-            out.line(&format!("installed {}", file.display()))
+            out.line(&format!("installed {}", Shown(&file)))
         }
     })
-    .with_context(|| format!("install the skill into {}", dir.display()))?;
+    .with_context(|| format!("install the skill into {}", Shown(&dir)))?;
     if ctx.json {
         let installed = written
             .iter()
-            .map(|file| file.display().to_string())
+            .map(|file| file.to_string_lossy().into_owned())
             .collect();
         out.json(Some("skill"), &Installed { installed })
             .context("print the installed files")?;
@@ -138,7 +139,7 @@ fn write_skill(
     mut announce: impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let at = |path: &Path| {
-        let path = path.display().to_string();
+        let path = Shown(&path).to_string();
         move |error: io::Error| io::Error::new(error.kind(), format!("{path}: {error}"))
     };
     std::fs::create_dir_all(dir).map_err(at(dir))?;

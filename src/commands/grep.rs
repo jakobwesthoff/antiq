@@ -11,6 +11,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::listing;
 use crate::relpath::{Name, RelPath};
 use crate::report::{self, Warning};
+use crate::shown::Shown;
 use crate::versions::VersionsError;
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
@@ -255,7 +256,7 @@ fn run_jobs(
     let store = TreeRoot::open(pieces_dir).map_err(|source| {
         GrepError::Store(VersionsError::Io {
             action: "open",
-            path: pieces_dir.display().to_string(),
+            path: Shown(&pieces_dir).to_string(),
             source,
         })
     })?;

@@ -19,6 +19,7 @@ pub mod space;
 pub mod tree;
 
 use crate::relpath::RelPath;
+use crate::shown::Shown;
 use std::io;
 use std::path::Path;
 use tree::TreeRoot;
@@ -56,7 +57,7 @@ pub(crate) fn io_error(
     action: &'static str,
     path: &Path,
 ) -> impl FnOnce(io::Error) -> FilesystemError {
-    let path = path.display().to_string();
+    let path = Shown(&path).to_string();
     move |source| FilesystemError::Io {
         action,
         path,

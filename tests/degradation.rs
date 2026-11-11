@@ -6,6 +6,9 @@
 //! commands that print tables: no escape sequences, and ASCII stand-ins
 //! for `…` and `·`.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use support::scenario::collection::{Clock, Collection};

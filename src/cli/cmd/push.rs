@@ -21,7 +21,7 @@ use antiq::commands::push::{Mismatch, PushOutcome, PushReport, PushRequest, push
 use antiq::external::Logs;
 use antiq::progress::Operation;
 use antiq::report::Warning;
-use antiq::shown::escape_controls;
+use antiq::shown::{Shown, escape_controls};
 use anyhow::Context as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -165,7 +165,9 @@ pub fn run(ctx: &Context, args: &PushArgs, out: &mut Output) -> anyhow::Result<u
                     report.reason.is_none() && !report.dry_run && !report.changes.pieces.is_empty()
                 });
                 let lines = if let Some(shown) = shown {
-                    let target = report.initialized.then(|| escape_controls(&report.target));
+                    let target = report
+                        .initialized
+                        .then(|| Shown(&report.target).to_string());
                     let summary = progress::push_summary(&report, target.as_deref(), shown.took());
                     // The card is gone. A terminal without cursor movement
                     // has the lines of its pieces above already.
@@ -286,7 +288,7 @@ fn claimed(report: &PushReport, env: &Env) -> Vec<String> {
     let total = |column: usize| rows.iter().map(|(_, row)| row[column]).sum::<u64>();
     let headline = format!(
         "Claimed the push target {}: {} created, {} updated, {} deleted",
-        escape_controls(&report.target),
+        Shown(&report.target),
         total(0),
         total(1),
         total(2),

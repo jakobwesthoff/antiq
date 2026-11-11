@@ -6,6 +6,9 @@
 //! harness writes by hand. The harness runs every command under
 //! `TZ=Pacific/Auckland`, which is +13:00 in November 2026.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

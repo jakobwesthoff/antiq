@@ -14,6 +14,7 @@ use crate::relpath::{RelPath, escape};
 use crate::repair::Repair;
 use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, RunError, RunGuard, Started};
+use crate::shown::Shown;
 use crate::versions::VersionsError;
 use crate::versions::names::VersionFile;
 use crate::versions::naming::{self, Candidate, VersionLookupError};
@@ -195,7 +196,7 @@ pub fn forget(
     let pieces = crate::filesystem::tree::TreeRoot::open(&request.collection.pieces_dir())
         .map_err(|source| VersionsError::Io {
             action: "open",
-            path: request.collection.pieces_dir().display().to_string(),
+            path: Shown(&request.collection.pieces_dir()).to_string(),
             source,
         })?;
     let mut forgotten = Vec::new();

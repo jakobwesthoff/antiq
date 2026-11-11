@@ -17,6 +17,7 @@ use crate::repair::{Destination, Repair};
 use crate::report::{self, CommandReport, Warning};
 use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError, select};
+use crate::shown::Shown;
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -290,7 +291,7 @@ fn locate(request: &PinRequest<'_>, coming: &[RelPath]) -> Result<Located, PinCo
     let collection = request.collection;
     let config = &collection.config().collection;
     let root = TreeRoot::open(collection.root()).map_err(|source| PinCommandError::Root {
-        path: collection.root().display().to_string(),
+        path: Shown(&collection.root()).to_string(),
         source,
     })?;
     let rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;

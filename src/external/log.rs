@@ -5,6 +5,7 @@
 //! The log of a run: everything the external programs of one antiq run
 //! printed, with the time each line arrived.
 
+use crate::shown::Shown;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -220,14 +221,13 @@ impl State {
                     self.path = Some(path);
                 }
                 Err(error) => {
-                    self.warning =
-                        Some(format!("no log was written to {}: {error}", path.display()));
+                    self.warning = Some(format!("no log was written to {}: {error}", Shown(&path)));
                 }
             },
             Err(error) => {
                 self.warning = Some(format!(
                     "no log was written to {}: {error}",
-                    target.root.display()
+                    Shown(&target.root)
                 ));
             }
         }
@@ -249,7 +249,7 @@ impl State {
             self.file = None;
             self.warning = Some(format!(
                 "the log stopped at {}: {error}",
-                self.path.as_deref().unwrap_or(Path::new("?")).display()
+                Shown(self.path.as_deref().unwrap_or(Path::new("?")))
             ));
         }
     }

@@ -9,6 +9,7 @@
 pub mod log;
 pub mod summary;
 
+use crate::shown::shell_word;
 use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
@@ -182,23 +183,9 @@ pub fn run(mut command: Command, log: &RunLog, on_segment: &mut Segments) -> io:
 fn command_line(command: &Command) -> String {
     std::iter::once(command.get_program())
         .chain(command.get_args())
-        .map(|word| shell_quote(&word.to_string_lossy()))
+        .map(|word| shell_word(&word.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `word` in single quotes unless it is plain, so that a shell reads it as
-/// one word.
-pub fn shell_quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
 }
 
 #[cfg(test)]
@@ -369,14 +356,6 @@ mod tests {
     fn a_discarded_log_leaves_the_outcome_without_a_path() {
         let outcome = run(script("true"), &RunLog::discard(), &mut keep_all).expect("it runs");
         assert_eq!(outcome.log, None);
-    }
-
-    #[test]
-    fn a_word_with_a_quote_or_a_space_is_quoted_in_the_log() {
-        assert_eq!(shell_quote("--exclude=/a"), "--exclude=/a");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        assert_eq!(shell_quote(""), "''");
     }
 
     #[test]

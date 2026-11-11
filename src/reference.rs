@@ -351,8 +351,8 @@ pub fn resolve_piece(
 /// output shows names the candidate only at the collection root. Anywhere
 /// else the absolute path does. The text is the raw path: the escaped form
 /// of a name that holds a `%` is the name of another path. A path that is
-/// not UTF-8 cannot be typed as text, so it is written in the byte quoting
-/// of a shell, `$'...\xff'`.
+/// not UTF-8 or holds a character that is shown escaped cannot be typed as
+/// text, so it is written in the byte quoting of a shell, `$'...\xff'`.
 fn exact_spelling(collection: &Collection, cwd: &Path, candidate: &RelPath) -> String {
     let at_root = matches!(
         resolve_path(collection, cwd, Path::new(".")),
@@ -366,22 +366,9 @@ fn exact_spelling(collection: &Collection, cwd: &Path, candidate: &RelPath) -> S
             .join(OsStr::from_bytes(candidate.as_bytes()))
     };
     match spelled.into_os_string().into_string() {
-        Ok(text) => text,
-        Err(raw) => {
-            let mut quoted = String::from("$'");
-            for &byte in raw.as_bytes() {
-                match byte {
-                    b'\\' | b'\'' => {
-                        quoted.push('\\');
-                        quoted.push(char::from(byte));
-                    }
-                    b' '..=b'~' => quoted.push(char::from(byte)),
-                    _ => quoted.push_str(&format!("\\x{byte:02x}")),
-                }
-            }
-            quoted.push('\'');
-            quoted
-        }
+        Ok(text) if !text.chars().any(crate::shown::is_escaped) => text,
+        Ok(text) => crate::shown::ansi_c(text.as_bytes()),
+        Err(raw) => crate::shown::ansi_c(raw.as_bytes()),
     }
 }
 

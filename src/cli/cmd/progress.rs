@@ -14,6 +14,7 @@ use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, Skipp
 use antiq::commands::import::ImportReport;
 use antiq::commands::push::PushReport;
 use antiq::progress::{Observer, Operation, Outcome};
+use antiq::shown::Shown as Named;
 use antiq::shown::escape_controls;
 use anyhow::Context as _;
 use std::path::Path;
@@ -274,8 +275,8 @@ pub(super) fn destination(root: &Path, path: &str, cwd: &Path) -> String {
     let absolute = root.join(path);
     match absolute.strip_prefix(cwd) {
         Ok(rest) if rest.as_os_str().is_empty() => ".".to_string(),
-        Ok(rest) => format!("./{}", rest.display()),
-        Err(_) => absolute.display().to_string(),
+        Ok(rest) => format!("./{}", Named(&rest)),
+        Err(_) => Named(&absolute).to_string(),
     }
 }
 

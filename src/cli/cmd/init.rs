@@ -13,7 +13,7 @@ use antiq::clock::SystemClock;
 use antiq::commands::init::{InitError, InitReport, InitRequest, init};
 use antiq::id::RandomIds;
 use antiq::select::SelectError;
-use antiq::shown::escape_controls;
+use antiq::shown::{Shown, escape_controls};
 use anyhow::Context as _;
 
 pub fn run(ctx: &Context, args: &InitArgs, out: &mut Output) -> anyhow::Result<u8> {
@@ -81,7 +81,7 @@ fn render(report: &InitReport, env: &Env) -> Lines {
             let frame = Symbols::for_env(env).frame;
             stdout.push(format!(
                 "Would create the antiq collection at {}",
-                report.path
+                Shown(&report.path)
             ));
             stdout.push(
                 "Would write .antiq/config.toml, the settings of the collection:".to_string(),
@@ -93,14 +93,11 @@ fn render(report: &InitReport, env: &Env) -> Lines {
             stdout.extend(without_id(config).map(str::to_string));
             stderr.push(Notice::Line(format!(
                 "Would create a collection at {}",
-                report.path
+                Shown(&report.path)
             )));
         }
     } else {
-        stdout.push(format!(
-            "Created the collection at {}",
-            escape_controls(&report.path)
-        ));
+        stdout.push(format!("Created the collection at {}", Shown(&report.path)));
         if let Some(id) = report.id {
             stdout.push(format!("  id: {id}"));
         }

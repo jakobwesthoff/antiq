@@ -28,6 +28,7 @@ use crate::progress::{Operation, Tracker};
 use crate::reference::{self, ReferenceError, SearchWord};
 use crate::relpath::{Name, RelPath};
 use crate::select::Rules;
+use crate::shown::Shown;
 use crate::tree::{EntryKind, TreeEntry};
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Damage, Places};
@@ -411,7 +412,7 @@ fn read_listing(
     stamp_text: &str,
 ) -> Result<Option<Listing>, RestoreError> {
     let store_root = TreeRoot::open(places.pieces_dir).map_err(|source| RestoreError::Read {
-        path: places.pieces_dir.display().to_string(),
+        path: Shown(&places.pieces_dir).to_string(),
         source,
     })?;
     let listing_path = piece.join(
@@ -1096,7 +1097,7 @@ pub(crate) fn bring_back_to(
     hooks: &dyn Hooks,
 ) -> Result<Brought, RestoreError> {
     let root =
-        TreeRoot::open(collection.root()).map_err(io_at("open", collection.root().display()))?;
+        TreeRoot::open(collection.root()).map_err(io_at("open", Shown(&collection.root())))?;
     let tmp = collection.tmp_dir();
     if let Some(listing) = source.listing {
         let needed = listing.bytes;

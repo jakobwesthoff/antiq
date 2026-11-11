@@ -8,6 +8,7 @@ use crate::code_span::CodeSpan;
 use crate::config::{Config, ConfigError};
 use crate::error::{ErrorKind, HasKind};
 use crate::id::ObjectId;
+use crate::shown::Shown;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -134,10 +135,10 @@ pub enum CollectionError {
     )]
     #[error(
         "{} is not inside an antiq collection, which has an `.antiq/` folder and none of its parent directories has one",
-        CodeSpan(.start.display())
+        CodeSpan(Shown(.start))
     )]
     NotACollection { start: PathBuf },
-    #[error("cannot look for a collection at {}: {source}", path.display())]
+    #[error("cannot look for a collection at {}: {source}", Shown(&path))]
     Io {
         path: PathBuf,
         source: std::io::Error,

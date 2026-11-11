@@ -4,6 +4,9 @@
 
 //! Scenario tests. The harness itself is tested in `harness`.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../support/mod.rs"]
 mod support;
 

@@ -4,6 +4,9 @@
 
 //! What `push_observed` tells an observer while a stand-in rsync answers.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use antiq::clock::SystemClock;

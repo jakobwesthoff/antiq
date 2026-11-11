@@ -6,6 +6,9 @@
 //! versions it writes are read back with the library, and its damage
 //! helpers change the file they name and no other.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use antiq::archive::check::{ChecksumFile, file_sha256};

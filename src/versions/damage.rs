@@ -12,6 +12,7 @@ use crate::archive::check::ChecksumFile;
 use crate::filesystem::tree::TreeRoot;
 use crate::listing::{self, Head, ListingError};
 use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
@@ -170,7 +171,7 @@ pub fn inspect(
     }
 
     let store = TreeRoot::open(places.pieces_dir)
-        .map_err(|source| io_error("open", places.pieces_dir.display().to_string(), source))?;
+        .map_err(|source| io_error("open", Shown(&places.pieces_dir).to_string(), source))?;
     match examine(&store, piece, version, check)? {
         Some(inspection) => Ok(inspection),
         None => without_archive(places, piece, version),

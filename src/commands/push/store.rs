@@ -15,6 +15,7 @@ use crate::relpath::{Name, RelPath};
 use crate::repair::{Area, Repair};
 use crate::report::Warning;
 use crate::select::{Rules, select};
+use crate::shown::shell_word;
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{StoreVersion, lookup_exact, scan};
@@ -262,7 +263,7 @@ impl VersionCommand {
         CodeSpan(format!(
             "antiq {} {} {}",
             self.verb,
-            shell_quote(&self.piece.to_string()),
+            shell_word(&self.piece.to_string()),
             self.stamp
         ))
         .to_string()
@@ -425,15 +426,6 @@ pub(super) fn find_clash(paths: &[RelPath]) -> Option<(RelPath, RelPath)> {
     None
 }
 
-/// `text` as one word of a POSIX shell.
-fn shell_quote(text: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "_./@%+=:,-".contains(c);
-    if !text.is_empty() && text.chars().all(plain) {
-        return text.to_string();
-    }
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,14 +575,6 @@ mod tests {
             text.contains(&format!("`antiq forget 'my docs/it'\\''s' {STAMP}`")),
             "{text}"
         );
-    }
-
-    #[test]
-    fn plain_words_stay_unquoted_and_the_rest_is_single_quoted() {
-        assert_eq!(shell_quote("projects/a-b_c.d"), "projects/a-b_c.d");
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     fn clash(paths: &[&str]) -> Option<(String, String)> {

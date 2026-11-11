@@ -8,6 +8,9 @@
 //! crate includes, so a new rendering needs no change in the code. A file
 //! whose name does not follow the pattern fails the build.
 
+// The build script prints paths for cargo and cannot use the library.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "src/cli/emblem/name.rs"]
 #[allow(dead_code)] // the crate uses what the build script does not
 mod name;

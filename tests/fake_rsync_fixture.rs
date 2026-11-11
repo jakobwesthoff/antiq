@@ -5,6 +5,9 @@
 //! The rsync stand-in of `support::fake_rsync`, seen from a binary test: it
 //! answers each transfer by its number and logs every call.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::process::{Command, Output};

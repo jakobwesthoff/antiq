@@ -10,6 +10,19 @@
 //! of them as `%` and the upper-case hex digits of each of its UTF-8 bytes.
 //! The characters are the Unicode control characters (category Cc), the bidi
 //! controls U+202A to U+202E and U+2066 to U+2069, and U+2028 and U+2029.
+//! A `%` is shown as `%25` and a byte that is not UTF-8 as `%XX`.
+//!
+//! Two kinds of text meet this rule. A raw name, such as a `Path`, goes
+//! through [`Shown`], which adds the `%25` and the `%XX`. Text that is
+//! already in the escaped form of [`crate::relpath::escape`], such as the
+//! `Display` of a `RelPath`, has those escapes and only needs
+//! [`escape_controls`].
+
+use crate::relpath::{Name, RelPath, escape};
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 /// Whether text shows `character` in its escaped form.
 pub fn is_escaped(character: char) -> bool {
@@ -38,6 +51,139 @@ pub fn escape_controls(text: &str) -> String {
     shown
 }
 
+/// What [`Shown`] can show: a raw name as the bytes the filesystem holds.
+pub trait Named {
+    fn name_bytes(&self) -> &[u8];
+}
+
+impl Named for str {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Named for String {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Named for OsStr {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Named for OsString {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Named for Path {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_os_str().as_bytes()
+    }
+}
+
+impl Named for PathBuf {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_os_str().as_bytes()
+    }
+}
+
+impl Named for RelPath {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Named for Name {
+    fn name_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl<T: Named + ?Sized> Named for &T {
+    fn name_bytes(&self) -> &[u8] {
+        (**self).name_bytes()
+    }
+}
+
+/// A name from the user's files, shown by the rule of this module, in the
+/// manner of `Path::display`: the value stays raw and only its display is
+/// escaped.
+pub struct Shown<T>(pub T);
+
+impl<T: Named> fmt::Display for Shown<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `escape` adds the `%25` and the `%XX` of the bytes that are not
+        // UTF-8; the control characters are in the valid text it leaves.
+        formatter.write_str(&escape_controls(&escape(self.0.name_bytes())))
+    }
+}
+
+/// `word` as one word of a command line that a shell reads back as the
+/// same bytes, and that holds no character of the escaped class.
+///
+/// A word of plain characters stays as it is. A word with a character of the
+/// escaped class is written in the ANSI-C quoting of bash, zsh and ksh,
+/// `$'...'`, which a `%0A` in single quotes could not be. Any other word is
+/// in single quotes. A `%` is a plain character to a shell, so the word names
+/// the path itself and not its shown form.
+pub fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+    if plain {
+        word.to_string()
+    } else if word.chars().any(is_escaped) {
+        ansi_c(word.as_bytes())
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+/// `bytes` in the `$'...'` quoting of a shell: printable ASCII and valid
+/// characters outside the escaped class as they are, `\`, `'`, newline and tab
+/// by their backslash escapes, everything else as `\xHH` per byte.
+pub fn ansi_c(bytes: &[u8]) -> String {
+    let mut quoted = String::from("$'");
+    for chunk in bytes.utf8_chunks() {
+        for character in chunk.valid().chars() {
+            match character {
+                '\\' => quoted.push_str("\\\\"),
+                '\'' => quoted.push_str("\\'"),
+                '\n' => quoted.push_str("\\n"),
+                '\t' => quoted.push_str("\\t"),
+                other if is_escaped(other) => {
+                    let mut buffer = [0u8; 4];
+                    for byte in other.encode_utf8(&mut buffer).bytes() {
+                        quoted.push_str(&format!("\\x{byte:02x}"));
+                    }
+                }
+                other => quoted.push(other),
+            }
+        }
+        for byte in chunk.invalid() {
+            quoted.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Writes `path` as the lossy text `Path::display` would show, for the JSON
+/// fields that hold a path as it is. The console shows the same field
+/// through [`Shown`].
+pub fn serialize_lossy<P: AsRef<Path>, S: serde::Serializer>(
+    path: &P,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.as_ref().to_string_lossy())
+}
+
 /// The positions `matched` (counted in characters of `raw`) as positions in
 /// `escape_controls(raw)`. A character that is escaped takes several
 /// positions; one that was matched marks all of them.
@@ -61,7 +207,119 @@ pub fn positions(raw: &str, matched: &[usize]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_controls, positions};
+    use super::{Shown, ansi_c, escape_controls, positions, shell_word};
+    use crate::relpath::RelPath;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+
+    #[test]
+    fn a_plain_word_stays_a_plain_word() {
+        assert_eq!(shell_word("projects/a-b_c.d"), "projects/a-b_c.d");
+        assert_eq!(shell_word("--exclude=/a"), "--exclude=/a");
+        assert_eq!(shell_word("100%"), "100%");
+    }
+
+    #[test]
+    fn a_word_a_shell_would_split_is_in_single_quotes() {
+        assert_eq!(shell_word("my docs"), "'my docs'");
+        assert_eq!(shell_word("it's"), "'it'\\''s'");
+        assert_eq!(shell_word(""), "''");
+    }
+
+    #[test]
+    fn a_word_with_an_escaped_character_is_in_ansi_c_quotes() {
+        assert_eq!(shell_word("a\nb"), "$'a\\nb'");
+        assert_eq!(shell_word("a\tb"), "$'a\\tb'");
+        assert_eq!(shell_word("a\x1bb"), "$'a\\x1bb'");
+        assert_eq!(shell_word("a\u{202e}b"), "$'a\\xe2\\x80\\xaeb'");
+        assert_eq!(shell_word("it's 100% \\ \n"), "$'it\\'s 100% \\\\ \\n'");
+    }
+
+    #[test]
+    fn ansi_c_writes_a_byte_that_is_not_utf_8_as_hex() {
+        assert_eq!(ansi_c(b"projects/d\xff"), "$'projects/d\\xff'");
+        assert_eq!(ansi_c(b"\xc3\xa4\xff"), "$'\u{e4}\\xff'");
+    }
+
+    /// What bash reads back from `word`: its bytes, through `printf %s`.
+    fn bash_reads(word: &str) -> Vec<u8> {
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("printf %s {word}"))
+            .output()
+            .expect("bash runs");
+        assert!(output.status.success(), "{word}");
+        output.stdout
+    }
+
+    #[test]
+    fn bash_reads_an_ansi_c_word_back_as_the_exact_bytes() {
+        for text in [
+            "a\nb",
+            "a\tb\x1b[2J",
+            "a\u{202e}b\u{2028}",
+            "it's \\ 100%\n",
+        ] {
+            assert_eq!(bash_reads(&shell_word(text)), text.as_bytes(), "{text:?}");
+        }
+        assert_eq!(bash_reads(&ansi_c(b"d\xff\n")), b"d\xff\n");
+    }
+
+    #[test]
+    fn bash_reads_a_single_quoted_or_plain_word_back_as_the_exact_bytes() {
+        for text in ["plain/path", "my docs", "it's", "a*b?", "100%"] {
+            assert_eq!(bash_reads(&shell_word(text)), text.as_bytes(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_percent_sign_in_a_name_is_shown_as_percent_25() {
+        assert_eq!(Shown("100%").to_string(), "100%25");
+        assert_eq!(
+            Shown(Path::new("/tmp/100% done")).to_string(),
+            "/tmp/100%25 done"
+        );
+    }
+
+    #[test]
+    fn a_control_character_in_a_path_is_shown_by_its_bytes() {
+        assert_eq!(Shown(Path::new("/tmp/a\nb")).to_string(), "/tmp/a%0Ab");
+        assert_eq!(Shown("\u{202e}gpj").to_string(), "%E2%80%AEgpj");
+    }
+
+    #[test]
+    fn a_byte_that_is_not_utf_8_is_shown_as_percent_and_its_hex_digits() {
+        assert_eq!(
+            Shown(OsStr::from_bytes(b"/tmp/a\xffb")).to_string(),
+            "/tmp/a%FFb"
+        );
+        assert_eq!(
+            Shown(Path::new(OsStr::from_bytes(b"a\xc3"))).to_string(),
+            "a%C3"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_is_shown_without_a_second_percent_escape() {
+        let path = RelPath::from_bytes(b"100%\n".to_vec()).expect("a valid path");
+        assert_eq!(Shown(&path).to_string(), "100%25%0A");
+        assert_eq!(escape_controls(&path.to_string()), "100%25%0A");
+    }
+
+    #[test]
+    fn an_owned_os_string_and_a_name_are_shown_by_the_rule() {
+        let os_string = std::ffi::OsString::from_vec(b"a\xff%".to_vec());
+        assert_eq!(Shown(&os_string).to_string(), "a%FF%25");
+        let name = crate::relpath::Name::from_bytes(b"a\nb".to_vec()).expect("a valid name");
+        assert_eq!(Shown(&name).to_string(), "a%0Ab");
+    }
+
+    #[test]
+    fn an_owned_value_is_shown_like_a_borrowed_one() {
+        assert_eq!(Shown(String::from("a%")).to_string(), "a%25");
+        assert_eq!(Shown(std::path::PathBuf::from("a\tb")).to_string(), "a%09b");
+    }
 
     #[test]
     fn a_name_without_escaped_characters_stays_as_it_is() {

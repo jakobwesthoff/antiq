@@ -21,6 +21,7 @@ use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
 use antiq::shown::escape_controls;
+use antiq::shown::shell_word;
 use antiq::versions::naming::{VersionLookupError, system_zone};
 use jiff::tz::TimeZone;
 use miette::Diagnostic;
@@ -456,20 +457,6 @@ fn version_table(
 // Commands to copy
 // =========================================================
 
-/// A word of a command line, in single quotes when a shell would split or
-/// expand it.
-pub(super) fn shell_word(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
-}
-
 /// `antiq` followed by `words`, quoted for a shell, with the `-C` of the
 /// run when it had one. The command can be pasted from anywhere.
 pub(super) fn pasteable_line(directory: Option<&std::path::Path>, words: &[String]) -> String {
@@ -870,14 +857,6 @@ mod tests {
             lines[lines.len() - 2..],
             ["▌ ℹ INFO", "▌ Nothing was forked."]
         );
-    }
-
-    #[test]
-    fn a_word_a_shell_would_split_is_quoted() {
-        assert_eq!(shell_word("projects/scanner"), "projects/scanner");
-        assert_eq!(shell_word("my docs"), "'my docs'");
-        assert_eq!(shell_word("it's"), "'it'\\''s'");
-        assert_eq!(shell_word(""), "''");
     }
 
     #[test]

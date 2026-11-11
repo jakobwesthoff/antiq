@@ -12,6 +12,7 @@
 
 use crate::clock::{Clock, whole_seconds};
 use crate::error::{ErrorKind, HasKind};
+use crate::shown::Shown;
 use jiff::Timestamp;
 use rustix::io::Errno;
 use rustix::process::{Pid, test_kill_process};
@@ -184,7 +185,7 @@ fn process_exists_with(pid: u32, signal_check: &dyn Fn(Pid) -> Result<(), Errno>
 }
 
 fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> LockError {
-    let path = path.display().to_string();
+    let path = Shown(&path).to_string();
     move |source| LockError::Io {
         action,
         path,

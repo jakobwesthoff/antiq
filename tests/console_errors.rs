@@ -6,6 +6,9 @@
 //! cause once, and the candidates of an ambiguous word. Every command that
 //! takes a piece reference runs through the binary in text mode.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

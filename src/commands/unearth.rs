@@ -21,6 +21,7 @@ use crate::repair::{Destination, Repair};
 use crate::report::{CommandReport, Warning, setting_notes};
 use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
+use crate::shown::Shown;
 use crate::versions::VersionsError;
 use crate::versions::damage::Places;
 use crate::versions::stamp::Stamp;
@@ -238,7 +239,7 @@ fn unearth_watched(
     }
 
     let root = TreeRoot::open(collection.root()).map_err(|source| UnearthError::Open {
-        path: collection.root().display().to_string(),
+        path: Shown(&collection.root()).to_string(),
         source,
     })?;
     let config = &collection.config().collection;
@@ -559,7 +560,7 @@ impl Run<'_> {
         let pieces =
             TreeRoot::open(self.places.pieces_dir).map_err(|source| VersionsError::Io {
                 action: "open",
-                path: self.places.pieces_dir.display().to_string(),
+                path: Shown(&self.places.pieces_dir).to_string(),
                 source,
             })?;
         // The folder was there when the version was chosen. One removed

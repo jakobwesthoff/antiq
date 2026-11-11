@@ -9,6 +9,9 @@
 //! leftover in `tmp/`, so that the repair `delete_temporary` is part of the
 //! run.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

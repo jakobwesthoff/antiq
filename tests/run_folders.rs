@@ -7,6 +7,9 @@
 //! command that writes creates the folders it finds missing, and a dry run
 //! lists their creation.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

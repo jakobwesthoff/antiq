@@ -6,6 +6,9 @@
 //! `src/main.rs` parses arguments and reports errors; everything else
 //! lives here.
 
+// Tests print paths in assertion messages, which no user reads as output.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 // Lets a fixture shared with the binary tests through `#[path]` use `antiq::`
 // paths in both crates.
 extern crate self as antiq;

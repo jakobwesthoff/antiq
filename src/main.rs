@@ -5,6 +5,8 @@
 // Output goes through `cli::output`, whose functions return `io::Result`.
 // A `println!` panics when the reader of the pipe is gone.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
+// Tests print paths in assertion messages, which no user reads as output.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod cli;
 

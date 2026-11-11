@@ -259,11 +259,12 @@ real; if it is not clearly the same, ask.
 Piece paths in JSON output (`piece`, `path`, `candidates`) are relative
 to the collection root, so run with `-C <collection root>` when you pass
 one back. The paths in status's `recovered`, `trash` and `doomed` are
-relative to `.antiq/`. A path that contains `%` or a byte that is not
-UTF-8 is escaped in the output and is then no path antiq reads back: for
-`unearth` and `forget`, use the spelling from the `fix` of
-`inexact_reference`, which may be shell quoting such as `$'...'`;
-otherwise ask the user.
+relative to `.antiq/`. A path that contains `%`, a byte that is not
+UTF-8 or a control character is escaped in the text output (`%25`, `%XX`,
+`%0A`) and is then no path antiq reads back: for `unearth` and `forget`,
+use the spelling from the `fix` of `inexact_reference`, which may be
+shell quoting such as `$'...'`; otherwise ask the user. The structured
+JSON fields carry the paths as they are.
 
 A version is named by its stamp, or by a prefix of the stamp that
 contains the `T`, such as `2026-11-04T09`. An input without `T`, such as

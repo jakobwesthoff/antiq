@@ -14,6 +14,7 @@ use crate::filesystem::FilesystemError;
 use crate::filesystem::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of, named};
 use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use crate::tree::EntryKind;
 use jiff::Timestamp;
 use std::collections::{BTreeMap, BTreeSet};
@@ -122,7 +123,7 @@ pub fn scan(pieces_dir: &Path) -> Result<StoreScan, VersionsError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(StoreScan::default());
         }
-        Err(source) => return Err(io_error("open", pieces_dir.display().to_string(), source)),
+        Err(source) => return Err(io_error("open", Shown(&pieces_dir).to_string(), source)),
     };
     scan_root(&root, &list_folder)
 }
@@ -417,7 +418,7 @@ fn open_if_present(path: &Path) -> Result<Option<TreeRoot>, VersionsError> {
     match TreeRoot::open(path) {
         Ok(root) => Ok(Some(root)),
         Err(error) if is_absent(&error) => Ok(None),
-        Err(source) => Err(io_error("open", path.display().to_string(), source)),
+        Err(source) => Err(io_error("open", Shown(&path).to_string(), source)),
     }
 }
 

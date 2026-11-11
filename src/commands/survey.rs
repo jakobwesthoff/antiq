@@ -13,6 +13,7 @@ use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
 use crate::rules::{PieceRules, RulesError};
 use crate::select::{Rules, SelectError, select};
+use crate::shown::Shown;
 use crate::tree::{PieceTree, Problem};
 use crate::walk::{Hooks, RealFs, WalkError, walk_piece_with};
 use jiff::Timestamp;
@@ -207,7 +208,7 @@ pub(crate) fn survey_with(
 ) -> Result<Survey, SurveyError> {
     let config = &collection.config().collection;
     let root = TreeRoot::open(collection.root()).map_err(|source| SurveyError::Root {
-        path: collection.root().display().to_string(),
+        path: Shown(&collection.root()).to_string(),
         source,
     })?;
     let select_rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;

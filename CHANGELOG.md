@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A `%` in a path or name is shown as `%25` in all text output, and a byte
+  that is not UTF-8 as `%XX`, so that a shown name stands for exactly one
+  name. The `message` and `fix` of errors and warnings in `--json` carry
+  the same form. The structured fields (`piece`, `path`, `candidates`) are
+  unchanged
+- A pasteable command that names a path with a control character writes it
+  in the `$'...'` quoting of a shell, as it did for a path that is not
+  UTF-8, so the command names the exact path
 - `archive -n` names, under each piece it would archive, the entries the
   version leaves out, as `import -n` does: a `Would leave out <path>` line
   for each ignored entry (a folder once, with a trailing `/`) and for
@@ -35,8 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a bidi control or the separators U+2028 and U+2029, is shown as `%`
   and the hex digits of its bytes in the `Would ...` lines of a dry run,
   in the result lines of `archive`, `import`, `push` and `init`, in notes
-  and warnings, and in the fix lines of `status`, as `find` already did. A newline in a name could forge a line of a dry run,
-  such as a `Would archive` line. `--json` is unchanged
+  and warnings, and in the fix lines of `status`, as `find` already did. A
+  newline in a name could forge a line of a dry run, such as a `Would
+  archive` line. `--json` carries the `message` and `fix` of errors and
+  warnings in that form too; its other fields are unchanged
 
 ## [1.3.0] - 2026-11-11
 

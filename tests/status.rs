@@ -6,6 +6,9 @@
 //! the scenario fixture. The run has no terminal, so the table uses the
 //! narrow layout without colour, and the time zone is UTC.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

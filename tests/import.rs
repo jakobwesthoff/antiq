@@ -5,6 +5,9 @@
 //! `antiq import` seen from outside the binary: a folder outside the
 //! collection becomes a version, and the folder stays.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

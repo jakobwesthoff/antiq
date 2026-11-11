@@ -10,6 +10,7 @@ use super::{Mismatch, PushError};
 use crate::external::summary::Said;
 use crate::filesystem::device;
 use crate::id::ObjectId;
+use crate::shown::Shown;
 use crate::target::marker::{FILE_NAME, Marker, MarkerError};
 use crate::target::rsync::{self, Call, Options, Outcome, Rsync, RsyncError};
 use crate::target::url::TargetUrl;
@@ -209,11 +210,11 @@ pub(super) fn failed(error: &io::Error, path: &Path) -> Stop {
     if is_gone(error) {
         Stop::Unreachable(format!(
             "the target {} cannot be reached: {error}",
-            path.display()
+            Shown(&path)
         ))
     } else {
         Stop::Refuse(PushError::Target {
-            problem: format!("the target {} cannot be read: {error}", path.display()),
+            problem: format!("the target {} cannot be read: {error}", Shown(&path)),
         })
     }
 }
@@ -244,7 +245,7 @@ pub(super) fn still_the_same(
     identity: &dyn Fn(&Path) -> io::Result<(u64, u64)>,
 ) -> Result<(), PushError> {
     let now = identity(canonical).map_err(|error| PushError::Target {
-        problem: format!("the target {} cannot be read: {error}", canonical.display()),
+        problem: format!("the target {} cannot be read: {error}", Shown(&canonical)),
     })?;
     if now == inspected {
         Ok(())
@@ -252,7 +253,7 @@ pub(super) fn still_the_same(
         Err(PushError::Target {
             problem: format!(
                 "the target {} is another directory than the one that was inspected",
-                canonical.display()
+                Shown(&canonical)
             ),
         })
     }
@@ -319,7 +320,7 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<Inspected, Stop> {
             return Err(Stop::Refuse(PushError::Target {
                 problem: format!(
                     "the target {} is the root of a mounted volume; use a folder on the volume, not its root",
-                    canonical.display()
+                    Shown(&canonical)
                 ),
             }));
         }
@@ -330,7 +331,7 @@ fn inspect(root: &Path, collection: &Path, io: &Io) -> Result<Inspected, Stop> {
     // cannot be listed is reported as such and not as a marker that is
     // missing.
     let empty = (io.is_empty)(&canonical).map_err(|error| failed(&error, &canonical))?;
-    let shown = canonical.display().to_string();
+    let shown = Shown(&canonical).to_string();
     let probe = match read_marker(&canonical).map_err(|error| marker_stop(&error, &shown))? {
         Some(probe) => probe,
         None if empty => Probe::Empty,
@@ -366,7 +367,7 @@ fn not_inside(
             return Err(Stop::Refuse(PushError::Target {
                 problem: format!(
                     "the target {} is the collection or lies inside it",
-                    shown.display()
+                    Shown(&shown)
                 ),
             }));
         }
@@ -383,7 +384,7 @@ fn not_holding(canonical: &Path, collection: &Path, io: &Io) -> Result<(u64, u64
             return Err(Stop::Refuse(PushError::Target {
                 problem: format!(
                     "the collection lies inside the target {}",
-                    canonical.display()
+                    Shown(&canonical)
                 ),
             }));
         }

@@ -5,6 +5,9 @@
 //! The command surface, the JSON envelope and the exit codes, seen from
 //! outside the binary.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;
@@ -200,6 +203,44 @@ mod status {
         );
         assert_eq!(run.error_kind(), "not_a_collection");
         assert_eq!(run.json()["command"], "status");
+    }
+
+    #[test]
+    fn a_percent_sign_in_the_directory_is_shown_as_percent_25_in_the_error() {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let folder = dir.path().join("100% done");
+        fs::create_dir(&folder).expect("a folder is made");
+        let run = Antiq::new()
+            .args(["--json", "-C"])
+            .arg(&folder)
+            .arg("status")
+            .run();
+        assert_eq!(run.error_kind(), "not_a_collection");
+        assert!(
+            run.error_message().contains("/100%25 done"),
+            "{}",
+            run.error_message()
+        );
+    }
+
+    #[test]
+    fn a_control_character_in_the_directory_cannot_forge_a_line_of_the_error() {
+        let dir = tempfile::tempdir().expect("the temp dir is writable");
+        let folder = dir.path().join("evil\nerror: forged");
+        fs::create_dir(&folder).expect("a folder is made");
+        let run = Antiq::new().arg("-C").arg(&folder).arg("status").run();
+        assert_eq!(run.code(), 1, "stderr: {}", run.stderr);
+        let errors = run
+            .stderr
+            .lines()
+            .filter(|line| line.starts_with("error: "))
+            .count();
+        assert_eq!(errors, 1, "{:?}", run.stderr);
+        assert!(
+            run.stderr.contains("evil%0Aerror: forged"),
+            "{:?}",
+            run.stderr
+        );
     }
 }
 

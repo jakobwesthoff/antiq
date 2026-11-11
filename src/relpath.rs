@@ -10,6 +10,7 @@
 //! becomes `%XX` with upper-case hex digits. Every byte sequence has
 //! exactly one escaped form, and only that form is read back.
 
+use crate::shown::{Shown, escape_controls};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
@@ -254,15 +255,15 @@ fn lexical_absolute(cwd: &Path, given: &Path) -> Result<PathBuf, RelPathError> {
 }
 
 fn shown(path: &Path) -> String {
-    escape(path.as_os_str().as_bytes())
+    Shown(path).to_string()
 }
 
 /// Errors of paths and names.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RelPathError {
-    #[error("`{0}` has an incomplete `%` escape")]
+    #[error("`{}` has an incomplete `%` escape", escape_controls(.0))]
     BadEscape(String),
-    #[error("`{0}` is not written the way `escape` writes it")]
+    #[error("`{}` is not written the way `escape` writes it", escape_controls(.0))]
     NonCanonical(String),
     #[error("a name cannot be {0}")]
     InvalidName(&'static str),
@@ -325,6 +326,24 @@ mod tests {
             unescape("%41"),
             Err(RelPathError::NonCanonical(_))
         ));
+    }
+
+    #[test]
+    fn the_message_of_a_bad_escape_shows_a_control_character_escaped() {
+        let message = unescape("a\n%G1").expect_err("a bad escape").to_string();
+        assert_eq!(message, "`a%0A%G1` has an incomplete `%` escape");
+    }
+
+    #[test]
+    fn the_messages_of_a_path_outside_the_root_show_the_names_by_the_rule() {
+        let message = below_root(
+            Path::new("/tmp/100%\n"),
+            Path::new("/other/a\nb"),
+            Path::new("/"),
+        )
+        .expect_err("outside the root")
+        .to_string();
+        assert_eq!(message, "`/other/a%0Ab` is not below `/tmp/100%25%0A`");
     }
 
     #[test]

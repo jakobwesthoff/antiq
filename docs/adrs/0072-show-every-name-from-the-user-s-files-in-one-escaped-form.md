@@ -27,7 +27,14 @@ and the upper-case hex digits of each of their UTF-8 bytes. A `%` is shown
 as `%25` and a byte that is not UTF-8 as `%XX`, so the shown form is
 unambiguous and can be turned back into the exact bytes.
 
-One library module, `src/shown.rs`, holds the rule.
+One library module, `src/shown.rs`, holds the rule. Names are formatted
+through its `Shown` adapter, which is to a path what `Path::display` is. A
+`clippy.toml` entry forbids `std::path::Path::display` outside tests.
+
+A word of a command that the user pastes keeps its `%` and names the exact
+path. A word with a character of the escaped class is written in the
+`$'...'` quoting of a shell, so the command holds no raw control character
+and still names the path.
 
 ## Consequences
 

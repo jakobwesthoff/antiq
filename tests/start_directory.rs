@@ -7,6 +7,9 @@
 //! binary with the process directory set, and its output must equal the
 //! output of the same command with an absolute `-C`.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

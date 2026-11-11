@@ -42,6 +42,7 @@ use crate::rules::RulesError;
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::SelectError;
 use crate::select::{Rules, select};
+use crate::shown::Shown;
 use crate::sysmem::SysmemError;
 use crate::tree::{EntryKind, PieceTree, TreeEntry};
 use crate::versions::VersionsError;
@@ -256,7 +257,7 @@ impl Setup {
     fn new(collection: &Collection, target: &Target) -> Result<Setup, ArchiveError> {
         let config = &collection.config().collection;
         let root = TreeRoot::open(collection.root()).map_err(|source| ArchiveError::Open {
-            path: collection.root().display().to_string(),
+            path: Shown(&collection.root()).to_string(),
             source,
         })?;
         let select_rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
@@ -805,7 +806,7 @@ pub(crate) fn stored_spelling_of(
 ) -> Result<RelPath, ArchiveError> {
     let pieces_dir = collection.pieces_dir();
     let pieces = TreeRoot::open(&pieces_dir).map_err(|source| ArchiveError::OpenStore {
-        path: pieces_dir.display().to_string(),
+        path: Shown(&pieces_dir).to_string(),
         source,
     })?;
     stored_spelling(&pieces, piece).map_err(|source| ArchiveError::Spelling {

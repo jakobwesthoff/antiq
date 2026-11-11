@@ -30,6 +30,7 @@ use crate::report::{Warning, setting_notes};
 use crate::rules::{PieceRules, RulesError};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::{Rules, SelectError};
+use crate::shown::Shown;
 use crate::sysmem::SysmemError;
 use crate::tree::{Class, EntryKind, PieceTree, Problem};
 use crate::versions::VersionsError;
@@ -572,7 +573,7 @@ fn prepare(
 ) -> Result<Prepared, ImportError> {
     let config = &collection.config().collection;
     let (canonical, name) = locate(request)?;
-    let source = canonical.display().to_string();
+    let source = Shown(&canonical).to_string();
 
     // A folder the collection already holds is a piece or part of one.
     match resolve_path(collection, &request.cwd, &canonical) {
@@ -714,7 +715,7 @@ fn prepare(
 /// walk never follows a link.
 fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportError> {
     let absolute = request.cwd.join(&request.folder);
-    let shown = absolute.display().to_string();
+    let shown = Shown(&absolute).to_string();
     let open_error = |source| ImportError::Open {
         path: shown.clone(),
         source,
@@ -736,7 +737,7 @@ fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportErro
     match name {
         Some(name) if metadata.is_dir() => Ok((canonical, name)),
         _ => Err(ImportError::NotAFolder {
-            path: canonical.display().to_string(),
+            path: Shown(&canonical).to_string(),
         }),
     }
 }

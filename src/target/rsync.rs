@@ -4,6 +4,7 @@
 
 //! The rsync executable.
 
+use crate::shown::Shown;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -22,13 +23,13 @@ use crate::config::TargetConfig;
 /// Errors of finding and running rsync.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum RsyncError {
-    #[error("`[target] rsync` must be an absolute path, not {}", .0.display())]
+    #[error("`[target] rsync` must be an absolute path, not {}", Shown(.0))]
     RelativePath(PathBuf),
     // The io error is in the text and not a source, so that a rendered chain
     // names it once.
-    #[error("cannot run {}: {cause}", path.display())]
+    #[error("cannot run {}: {cause}", Shown(&path))]
     Spawn { path: PathBuf, cause: io::Error },
-    #[error("{} is refused: {reason}; set `[target] rsync` to an rsync 3.2.4 or newer", path.display())]
+    #[error("{} is refused: {reason}; set `[target] rsync` to an rsync 3.2.4 or newer", Shown(&path))]
     Refused { path: PathBuf, reason: Refusal },
     #[error("no rsync 3.2.4 or later found{}; set `[target] rsync` to the path of one", refusals_text(.refusals))]
     NoneFound { refusals: Vec<(PathBuf, String)> },
@@ -39,7 +40,7 @@ impl crate::error::HasKind for RsyncError {}
 fn refusals_text(refusals: &[(PathBuf, String)]) -> String {
     refusals
         .iter()
-        .map(|(path, reason)| format!("; {}: {reason}", path.display()))
+        .map(|(path, reason)| format!("; {}: {reason}", Shown(&path)))
         .collect()
 }
 

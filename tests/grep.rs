@@ -5,6 +5,9 @@
 //! `antiq grep` seen from outside the binary. The binary runs with its
 //! stdout piped, so the output here is the pipe form and the JSON.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use antiq::versions::names::VersionFile;

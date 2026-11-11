@@ -17,6 +17,7 @@ use crate::relpath::RelPath;
 use crate::report::setting_notes;
 use crate::run::{self, RunError, Started};
 use crate::select::SelectError;
+use crate::shown::Shown;
 use crate::target::marker::{self, Marker, MarkerError};
 use crate::target::rsync::{Options, Rsync, RsyncError, quiet_option};
 use crate::target::url::{TargetUrl, UrlError};
@@ -58,7 +59,7 @@ pub enum PushError {
     ),
     #[error(
         "the collection path {} is not valid UTF-8, which the target marker cannot record",
-        .path.display()
+        Shown(.path)
     )]
     RootNotUtf8 { path: PathBuf },
     // The wrapped error is a source and not transparent, so that the
@@ -87,13 +88,13 @@ pub enum PushError {
         #[diagnostic_source]
         SelectError,
     ),
-    #[error("cannot open the collection {}", .path.display())]
+    #[error("cannot open the collection {}", Shown(.path))]
     Root {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("cannot read {}", .path.display())]
+    #[error("cannot read {}", Shown(.path))]
     Trash {
         path: PathBuf,
         #[source]
@@ -115,7 +116,7 @@ pub enum PushError {
         "`{first}` and `{second}` differ only in case or Unicode normalization, which the target's volume treats as one name"
     )]
     NameClash { first: RelPath, second: RelPath },
-    #[error(".antiq/trash/ still holds {}, which a repair could not put back", .path.display())]
+    #[error(".antiq/trash/ still holds {}, which a repair could not put back", Shown(.path))]
     TrashNotEmpty { path: PathBuf },
     #[error(
         "`[target] rsync_args` holds `{option}`, which silences the listing that tells antiq what the target holds; remove it"
@@ -158,7 +159,7 @@ pub enum PushError {
         #[diagnostic_source]
         MarkerError,
     ),
-    #[error("cannot prepare the target's marker in {}", .path.display())]
+    #[error("cannot prepare the target's marker in {}", Shown(.path))]
     Scratch {
         path: PathBuf,
         #[source]

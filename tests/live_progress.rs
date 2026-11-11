@@ -6,6 +6,9 @@
 //! and what stays after they end. The bytes of a run on a pseudo-terminal
 //! are replayed on a screen, so the tests read what a person would see.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

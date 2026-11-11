@@ -11,7 +11,8 @@ use super::unresolved::pasteable_line;
 use antiq::code_span::CodeSpan;
 use antiq::commands::push::PushError;
 use antiq::error::{explanation, find_said};
-use antiq::external::shell_quote;
+use antiq::shown::Shown;
+use antiq::shown::shell_word;
 use antiq::versions::naming::VersionLookupError;
 use miette::Diagnostic;
 use std::path::Path;
@@ -82,11 +83,11 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
     if let Some(note) = &description.log {
         let mut paragraphs = Vec::new();
         if let Some(path) = &note.path {
-            let path = path.display().to_string();
-            paragraphs.push(Para::Pre(format!("Full output: {path}")));
+            paragraphs.push(Para::Pre(format!("Full output: {}", Shown(path))));
+            // The command names the path itself, so its `%` stays as it is.
             paragraphs.push(Para::Pre(format!(
                 "Read it with: zstd -dc {} | less",
-                shell_quote(&path)
+                shell_word(&path.to_string_lossy())
             )));
         }
         if let Some(warning) = &note.warning {

@@ -5,6 +5,9 @@
 //! What `pin` and `unpin` print on a terminal: the result, and an info that
 //! says what a pin is. In a pipe the one-line sentences stay as they are.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use support::scenario::collection::{Clock, Collection, CollectionBuilder};

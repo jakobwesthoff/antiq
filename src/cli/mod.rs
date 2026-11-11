@@ -22,6 +22,7 @@ use self::console::rich::Rich;
 use self::output::{ErrorReport, Output};
 use antiq::commands::forget::{self, Which};
 use antiq::error::ErrorKind;
+use antiq::shown::Shown;
 use anyhow::Context as _;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{Map, Value};
@@ -282,7 +283,7 @@ pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
 fn start_directory(cli: &Cli) -> anyhow::Result<PathBuf> {
     let given = cli.directory.as_deref().unwrap_or(Path::new("."));
     std::fs::canonicalize(given)
-        .with_context(|| format!("resolve the directory {} to start from", given.display()))
+        .with_context(|| format!("resolve the directory {} to start from", Shown(&given)))
 }
 
 fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
@@ -394,9 +395,9 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
     if let Some(note) = &description.log {
         details.insert(
             "log".into(),
-            note.path
-                .as_ref()
-                .map_or(Value::Null, |path| Value::from(path.display().to_string())),
+            note.path.as_ref().map_or(Value::Null, |path| {
+                Value::from(path.to_string_lossy().into_owned())
+            }),
         );
         if let Some(warning) = &note.warning {
             details.insert("log_warning".into(), Value::from(warning.clone()));

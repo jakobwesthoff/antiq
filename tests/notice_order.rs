@@ -5,6 +5,9 @@
 //! Warnings and notes come after the result of a command. On a terminal
 //! both streams show on one screen, so the order is visible.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

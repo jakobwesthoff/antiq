@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "std::path::Path::display", reason = "a path shown to the user can hold control characters, a `%` or bytes that are not UTF-8; format it with `antiq::shown::Shown` instead" },
+]

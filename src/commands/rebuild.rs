@@ -21,6 +21,7 @@ use crate::relpath::{Name, RelPath};
 use crate::repair::Repair;
 use crate::report::{self, Warning};
 use crate::run::{self, RunError, RunGuard, Started};
+use crate::shown::Shown;
 use crate::versions::VersionsError;
 use crate::versions::damage::{self, Check, Condition, Damage, Places};
 use crate::versions::names::VersionFile;
@@ -688,7 +689,7 @@ fn write_missing(
 
 /// An I/O error as the error of the step `action` on `path`.
 fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> RebuildError {
-    let path = path.display().to_string();
+    let path = Shown(&path).to_string();
     move |source| RebuildError::Io {
         action,
         path,

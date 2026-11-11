@@ -5,6 +5,7 @@
 //! Values inside error messages, fenced so a reader of the text can tell
 //! them from the words around them.
 
+use crate::shown::escape_controls;
 use std::fmt::{self, Display};
 
 /// A value shown as a CommonMark code span: in backticks, with one more
@@ -21,7 +22,9 @@ pub struct CodeSpan<T>(pub T);
 
 impl<T: Display> Display for CodeSpan<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = self.0.to_string();
+        // A value is a name from the user's files, so it is shown by the rule
+        // for such names before the fence is measured around it.
+        let value = escape_controls(&self.0.to_string());
         let longest = value
             .split(|character| character != '`')
             .map(str::len)
@@ -73,6 +76,17 @@ mod tests {
         assert_eq!(CodeSpan("   ").to_string(), "`   `");
         assert_eq!(CodeSpan(" a").to_string(), "` a`");
         assert_eq!(CodeSpan("a ").to_string(), "`a `");
+    }
+
+    #[test]
+    fn a_control_character_in_the_value_is_escaped() {
+        assert_eq!(CodeSpan("a\nb").to_string(), "`a%0Ab`");
+        assert_eq!(CodeSpan("\u{202e}x").to_string(), "`%E2%80%AEx`");
+    }
+
+    #[test]
+    fn the_fence_is_counted_on_the_escaped_value() {
+        assert_eq!(CodeSpan("`\n`").to_string(), "`` `%0A` ``");
     }
 
     #[test]

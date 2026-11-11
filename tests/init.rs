@@ -4,6 +4,9 @@
 
 //! `antiq init` seen from outside the binary.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use antiq::config::Config;
@@ -341,6 +344,41 @@ fn a_directory_name_with_a_newline_cannot_forge_a_line_of_the_result() {
         "{lines:?}"
     );
     assert_eq!(lines.len(), 4, "{lines:?}");
+}
+
+#[test]
+fn a_percent_sign_in_the_directory_name_is_shown_as_percent_25_in_the_result() {
+    let mut tree = Tree::new();
+    let folder = tree.dir("100% done");
+
+    let run = init_at(&folder, &[]);
+
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let first = run.stdout.lines().next().expect("a first line");
+    assert!(first.ends_with("/100%25 done"), "{first}");
+}
+
+#[test]
+fn a_percent_sign_in_the_directory_name_is_shown_as_percent_25_in_a_dry_run() {
+    let mut tree = Tree::new();
+    let folder = tree.dir("100% done");
+
+    let run = init_at(&folder, &["-n"]);
+
+    assert_eq!(run.code(), 0, "stdout: {}", run.stdout);
+    assert!(run.stderr.contains("/100%25 done"), "{:?}", run.stderr);
+}
+
+#[test]
+fn the_json_path_of_a_directory_with_a_percent_sign_stays_as_it_is() {
+    let mut tree = Tree::new();
+    let folder = tree.dir("100% done");
+
+    let run = init_at(&folder, &["--json"]);
+
+    assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
+    let path = run.json()["path"].as_str().expect("a path").to_string();
+    assert!(path.ends_with("/100% done"), "{path}");
 }
 
 #[test]

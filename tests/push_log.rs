@@ -5,6 +5,9 @@
 //! The log of a push run: what the external programs printed, kept where
 //! the platform keeps logs.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

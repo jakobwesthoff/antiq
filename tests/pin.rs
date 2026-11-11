@@ -6,6 +6,9 @@
 //! collections the scenario harness writes by hand. Every case runs in text
 //! mode and in JSON mode.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

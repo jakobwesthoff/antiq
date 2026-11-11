@@ -7,6 +7,9 @@
 //! `TZ=Pacific/Auckland`, which is +13:00 in November 2026 and +12:00 in
 //! September 2026.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::ffi::OsString;
@@ -505,7 +508,7 @@ fn a_dry_run_judges_the_repairs_by_the_path_the_run_would_resolve() {
 }
 
 /// What a shell makes of `$'...'`: the bytes between the quotes, with the
-/// escapes `\\`, `\'` and `\xHH` resolved.
+/// escapes `\\`, `\'`, `\n` and `\xHH` resolved.
 fn bytes_of_dollar_quote(quoted: &str) -> Vec<u8> {
     let inner = quoted
         .strip_prefix("$'")
@@ -522,6 +525,9 @@ fn bytes_of_dollar_quote(quoted: &str) -> Vec<u8> {
             let hex = std::str::from_utf8(&raw[at + 2..at + 4]).expect("two hex digits");
             bytes.push(u8::from_str_radix(hex, 16).expect("hex digits"));
             at += 4;
+        } else if raw[at + 1] == b'n' {
+            bytes.push(b'\n');
+            at += 2;
         } else {
             bytes.push(raw[at + 1]);
             at += 2;
@@ -558,6 +564,34 @@ fn the_path_offered_for_a_name_that_is_not_utf8_reaches_the_piece() {
     let fix = json["error"]["fix"].as_str().expect("a text");
     let example = fix.split('`').nth(1).expect("the path is a code span");
     assert_eq!(example, "$'projects/d\\xff'");
+
+    let named = antiq()
+        .arg("unearth")
+        .arg(OsString::from_vec(bytes_of_dollar_quote(example)))
+        .run();
+    assert_eq!(named.status.code(), Some(0), "{}", named.stderr);
+    assert!(folder.join("a").exists());
+}
+
+#[test]
+fn the_path_offered_for_a_name_with_a_newline_is_ansi_c_quoted_and_reaches_the_piece() {
+    let world = world(Mode::Json, |_| {});
+    let root = world.collection().root();
+    let folder = world.collection().path("projects/d\ne");
+    fs::create_dir_all(&folder).expect("a folder with a newline in its name");
+    fs::write(folder.join("a"), "1\n").expect("a file is written");
+    let antiq = || Antiq::new().env("TZ", "UTC").arg("-C").arg(&root);
+    let archived = antiq().arg("archive").arg("projects/d\ne").run();
+    assert_eq!(archived.status.code(), Some(0), "{}", archived.stderr);
+    assert!(!folder.exists(), "the folder is archived away");
+
+    let word = antiq().args(["--json", "unearth", "projects/d"]).run();
+    assert_eq!(word.status.code(), Some(1), "{}", word.stderr);
+    let json: Value = serde_json::from_str(&word.stdout).expect("a JSON object");
+    assert_eq!(json["error"]["kind"], "inexact_reference");
+    let fix = json["error"]["fix"].as_str().expect("a text");
+    let example = fix.split('`').nth(1).expect("the path is a code span");
+    assert_eq!(example, "$'projects/d\\ne'");
 
     let named = antiq()
         .arg("unearth")

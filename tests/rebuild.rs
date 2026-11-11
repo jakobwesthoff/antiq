@@ -6,6 +6,9 @@
 //! harness writes by hand. The harness runs every command under
 //! `TZ=Pacific/Auckland`. Every test runs in text and in JSON mode.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::Value;

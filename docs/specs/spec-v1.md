@@ -1636,7 +1636,10 @@ fix. The sentence and the fix are the message and the help of the finding
 severity warning); leftovers in `doomed/` and spelling differences have no
 fix. The fix for exactly one damaged or incomplete version names the
 command that repairs it, written to paste: with the `-C` of the run and
-with each word quoted for a shell where it needs that. When a piece is due, a hint `Run antiq archive -n to see what the next
+with each word quoted for a shell where it needs that. A word with a
+character that the console shows escaped is written in the byte quoting
+of a shell, `$'...'`, so the command names the exact path and holds no raw
+control character. A `%` in a pasteable word stays `%`. When a piece is due, a hint `Run antiq archive -n to see what the next
 run would archive.` follows. It is the last thing the command prints, after
 the notices on stderr. A pipe gets the lines above and no hint.
 
@@ -2212,8 +2215,10 @@ terminal by the same info "Nothing was <done>.".
   <path>.", where the path is spelled so that it names the piece from the
   directory the command runs in: relative to the collection root when the
   command runs there, absolute otherwise, and as the raw text of the
-  path, so a `%` in a name is not an escape. A path that is not UTF-8 is
-  written in the byte quoting of a shell, such as `$'projects/d\xff'`. The caption is "The piece that
+  path, so a `%` in a name is not an escape. A path that is not UTF-8 or
+  holds a character that the console shows escaped (see "Console output")
+  is written in the byte quoting of a shell, such as `$'projects/d\xff'`
+  or `$'projects/d\ne'`. The caption is "The piece that
   matches `<word>`" and the table is that of the first case, with the
   matched letters bold red.
 - Several versions match a `--version` or version argument. The caption is
@@ -2295,10 +2300,13 @@ A control character in a path or name from the user's files is written as `%`
 and the two hexadecimal digits of each of its bytes, on a terminal and in a
 pipe, so that a name cannot end a line or forge another one. The characters
 are the Unicode control characters (category Cc), the bidi controls U+202A to
-U+202E and U+2066 to U+2069, and U+2028 and U+2029. This holds for the
+U+202E and U+2066 to U+2069, and U+2028 and U+2029. A `%` in a name is written
+`%25` and a byte that is not UTF-8 `%XX`, so the shown form of a name is
+unambiguous and stands for exactly one sequence of bytes. This holds for the
 result lines of every command, the `Would ...` lines of a dry run, the notes
-and warnings, and the findings of `status`. `--json` carries the text
-unchanged, as a JSON string. `grep` is the exception: on a terminal its paths
+and warnings, and the findings of `status`. `--json` carries the structured
+fields (`piece`, `path`, `candidates` and the like) unchanged, as JSON strings,
+and the `message` and `fix` of errors and warnings in the shown form. `grep` is the exception: on a terminal its paths
 use the comment-line escapes of a listing, and in a pipe its lines carry the
 raw bytes (see "grep").
 
@@ -2573,9 +2581,10 @@ naming a command has `"command": null`. An error is
   explanation. For a wrapper error such as `push` over a held lock, it is
   the innermost code in the chain.
 - `message` is the text of the error without the context lines a console
-  shows.
-- `fix` is the help of the explanation that gives `code`. It follows
-  `message` and is absent where that explanation has no help. A usage
+  shows. Names from the user's files in it are in the shown form of
+  "Console output", as in the console.
+- `fix` is the help of the explanation that gives `code`, in the same form.
+  It follows `message` and is absent where that explanation has no help. A usage
   error of the command line parser carries neither `code` nor `fix`.
 - The details are the keys that a kind adds, such as `pid` and `started`.
   The error of a failed rsync run adds `program_said`, and `log` and

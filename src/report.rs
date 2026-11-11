@@ -9,6 +9,7 @@ use crate::collection::Collection;
 use crate::filesystem::FilesystemError;
 use crate::filesystem::device::{self, FsKind};
 use crate::lock::{self, Holder};
+use crate::shown::escape_controls;
 use miette::Diagnostic;
 use serde::Serialize;
 use serde::ser::SerializeMap;
@@ -70,7 +71,7 @@ pub enum WarningKind {
 impl Warning {
     pub fn new(message: impl Into<String>) -> Self {
         Warning {
-            message: message.into(),
+            message: escape_controls(&message.into()),
             kind: None,
             lead: None,
         }
@@ -82,7 +83,7 @@ impl Warning {
     pub fn marked(lead: impl Display, rest: impl Display) -> Self {
         let lead = lead.to_string();
         Warning {
-            message: format!("{}{rest}", CodeSpan(&lead)),
+            message: format!("{}{}", CodeSpan(&lead), escape_controls(&rest.to_string())),
             kind: None,
             lead: Some(lead),
         }
@@ -98,7 +99,7 @@ impl Warning {
 
     pub fn of(kind: WarningKind) -> Self {
         Warning {
-            message: kind.to_string(),
+            message: escape_controls(&kind.to_string()),
             kind: Some(kind),
             lead: None,
         }
@@ -115,7 +116,7 @@ impl Serialize for Warning {
         }
         object.serialize_entry("message", &self.message)?;
         if let Some(help) = self.kind.as_ref().and_then(|kind| kind.help()) {
-            object.serialize_entry("fix", &help.to_string())?;
+            object.serialize_entry("fix", &escape_controls(&help.to_string()))?;
         }
         object.end()
     }
@@ -248,6 +249,41 @@ mod tests {
 
     fn messages(warnings: &[Warning]) -> Vec<&str> {
         warnings.iter().map(|w| w.message.as_str()).collect()
+    }
+
+    #[test]
+    fn a_warning_message_shows_a_control_character_escaped() {
+        assert_eq!(Warning::new("x\ny").message, "x%0Ay");
+    }
+
+    #[test]
+    fn a_marked_warning_escapes_the_text_after_its_value() {
+        let warning = Warning::marked("a\nb", ": cannot read\u{202e}");
+        assert_eq!(warning.message, "`a%0Ab`: cannot read%E2%80%AE");
+        assert_eq!(warning.lead(), Some(("a\nb", ": cannot read%E2%80%AE")));
+    }
+
+    #[test]
+    fn the_message_of_a_warning_kind_is_escaped() {
+        let warning = Warning::of(WarningKind::LockHeld {
+            pid: 7,
+            machine: "m\nx".into(),
+            started: "now".into(),
+        });
+        assert_eq!(
+            warning.message,
+            "another antiq run holds the lock: its pid is 7 on machine m%0Ax, started now"
+        );
+    }
+
+    #[test]
+    fn the_fix_of_a_warning_in_json_is_escaped() {
+        let warning = Warning::of(WarningKind::SkillOutdated {
+            message: "old".into(),
+            fix: "copy to a\nb".into(),
+        });
+        let json = serde_json::to_value(&warning).expect("a warning serialises");
+        assert_eq!(json["fix"], "copy to a%0Ab");
     }
 
     #[test]

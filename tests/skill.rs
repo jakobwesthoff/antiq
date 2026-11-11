@@ -6,6 +6,9 @@
 //! or by part, installed into a skills directory, and the warning about an
 //! installed copy older than this antiq.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use serde_json::{Value, json};

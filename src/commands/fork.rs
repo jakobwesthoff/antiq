@@ -21,6 +21,7 @@ use crate::repair::Repair;
 use crate::report::{CommandReport, Warning, setting_notes};
 use crate::run::{self, RunError, Started};
 use crate::select::{Rules, SelectError};
+use crate::shown::Shown;
 use crate::versions::damage::Places;
 use crate::versions::stamp::Stamp;
 use jiff::Timestamp;
@@ -231,7 +232,7 @@ fn fork_watched(
     }
 
     let root = TreeRoot::open(collection.root()).map_err(|source| ForkError::Open {
-        path: collection.root().display().to_string(),
+        path: Shown(&collection.root()).to_string(),
         source,
     })?;
     let config = &collection.config().collection;

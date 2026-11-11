@@ -7,6 +7,9 @@
 //! nothing, and then probes with a dry run of `archive` that lists no
 //! repair of the temporary files.
 
+// Tests print paths in assertion messages and in the commands they run.
+#![allow(clippy::disallowed_methods)]
+
 mod support;
 
 use std::fs;

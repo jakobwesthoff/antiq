@@ -12,6 +12,7 @@
 
 use crate::id::ObjectId;
 use crate::relpath::RelPath;
+use crate::shown::Shown;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use toml_edit::{Array, DocumentMut};
 /// Errors of the config file.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ConfigError {
-    #[error("cannot read the config file {}: {source}", path.display())]
+    #[error("cannot read the config file {}: {source}", Shown(&path))]
     Read {
         path: PathBuf,
         source: std::io::Error,
@@ -46,7 +47,7 @@ pub enum ConfigError {
 
 fn at(path: &Option<PathBuf>) -> String {
     match path {
-        Some(path) => format!(" in {}", path.display()),
+        Some(path) => format!(" in {}", Shown(&path)),
         None => String::new(),
     }
 }
