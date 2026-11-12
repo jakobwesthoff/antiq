@@ -170,6 +170,9 @@ pub(crate) enum Tone {
 pub(crate) struct Summary {
     pub tone: Tone,
     pub parts: Vec<(String, Tone)>,
+    /// The parts to use instead when the line with `parts` is wider than the
+    /// terminal.
+    pub short: Option<Vec<(String, Tone)>>,
     pub took: Duration,
 }
 
@@ -295,7 +298,7 @@ impl Layout {
 /// How much of the content size the archive kept, in whole percent. An
 /// archive that is not empty never reads as nothing, and the share has no
 /// upper bound: the headers of a tiny piece weigh more than its content.
-fn share_text(archive: u64, content: u64) -> Option<String> {
+pub(crate) fn share_text(archive: u64, content: u64) -> Option<String> {
     if content == 0 {
         return None;
     }
@@ -806,11 +809,21 @@ impl Cards {
     // The summary
     // =====================================================
 
-    /// The last line of a run.
+    /// The last line of a run. A line wider than the terminal takes the
+    /// shorter variant of the summary when it has one.
     pub(crate) fn summary_line(&self, summary: &Summary) -> String {
+        let full = self.summary_text(summary, &summary.parts);
+        match &summary.short {
+            Some(short) if visible_width(&full) > self.config.style.width => {
+                self.summary_text(summary, short)
+            }
+            _ => full,
+        }
+    }
+
+    fn summary_text(&self, summary: &Summary, parts: &[(String, Tone)]) -> String {
         let separator = format!(" {} ", self.symbols().separator);
-        let parts: Vec<String> = summary
-            .parts
+        let parts: Vec<String> = parts
             .iter()
             .map(|(text, tone)| self.paint(Self::tone_look(*tone), text))
             .collect();

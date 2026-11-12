@@ -409,6 +409,7 @@ fn the_summary_line_follows_the_mockup() {
             ("0 skipped".to_string(), Tone::Plain),
             ("1 refused".to_string(), Tone::Bad),
         ],
+        short: None,
         took: secs(19),
     };
     assert_eq!(
@@ -1191,6 +1192,7 @@ fn the_ascii_symbol_set_reaches_every_glyph_of_a_finished_line_and_the_summary()
             ("1 archived".to_string(), Tone::Ok),
             ("1 refused".to_string(), Tone::Bad),
         ],
+        short: None,
         took: secs(3),
     };
     assert_eq!(
@@ -1781,4 +1783,62 @@ fn the_share_is_the_archive_over_the_content_in_whole_percent() {
     assert_eq!(share_text(520, 500), Some("104 %".to_string()));
     assert_eq!(share_text(0, 500), Some("0 %".to_string()));
     assert_eq!(share_text(5, 0), None);
+}
+
+// =========================================================
+// The summary with a shorter variant
+// =========================================================
+
+fn summary_with_stored_total() -> Summary {
+    let parts = |stored: bool| {
+        let mut parts = vec![
+            ("3 archived".to_string(), Tone::Ok),
+            ("0 skipped".to_string(), Tone::Plain),
+            ("0 refused".to_string(), Tone::Plain),
+        ];
+        if stored {
+            parts.push(("1.3 GB stored".to_string(), Tone::Plain));
+        }
+        parts
+    };
+    Summary {
+        tone: Tone::Ok,
+        parts: parts(true),
+        short: Some(parts(false)),
+        took: secs(156),
+    }
+}
+
+#[test]
+fn a_summary_that_fits_the_terminal_keeps_all_its_parts() {
+    let cards = with_style(ARCHIVE, style_at(100, true));
+    assert_eq!(
+        cards.summary_line(&summary_with_stored_total()),
+        "✔ 3 archived · 0 skipped · 0 refused · 1.3 GB stored   took 2:36"
+    );
+}
+
+#[test]
+fn a_summary_wider_than_the_terminal_takes_its_shorter_variant() {
+    let cards = with_style(ARCHIVE, style_at(60, true));
+    assert_eq!(
+        cards.summary_line(&summary_with_stored_total()),
+        "✔ 3 archived · 0 skipped · 0 refused   took 2:36"
+    );
+}
+
+#[test]
+fn a_summary_exactly_as_wide_as_the_terminal_keeps_all_its_parts() {
+    let cards = with_style(ARCHIVE, style_at(64, true));
+    assert!(
+        cards
+            .summary_line(&summary_with_stored_total())
+            .contains("stored")
+    );
+    let narrower = with_style(ARCHIVE, style_at(63, true));
+    assert!(
+        !narrower
+            .summary_line(&summary_with_stored_total())
+            .contains("stored")
+    );
 }

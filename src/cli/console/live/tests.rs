@@ -933,6 +933,7 @@ fn a_run_with_a_session_leaves_the_lines_and_hands_back_its_value_and_cards() {
     let summary = observed.cards.summary_line(&Summary {
         tone: Tone::Ok,
         parts: vec![("2 archived".to_string(), Tone::Ok)],
+        short: None,
         took: observed.took,
     });
     assert!(summary.starts_with("✔ 2 archived"));

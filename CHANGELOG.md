@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as `412 MB → 96 MB`, followed by the share of the content size the
   archive kept, such as `23 %`. A narrow terminal or a long piece name drops
   the share first, then the archive size.
+- On a terminal, the closing line of `archive` ends with the total size of
+  the archives of the pieces it archived, such as `1.3 GB stored`, and the
+  closing line of `import` shows the content size, the archive size and the
+  share of the version, such as `(412 MB → 96 MB, 23 %)`. A line wider than
+  the terminal is written without them.
 
 ## [1.5.0] - 2026-11-12
 

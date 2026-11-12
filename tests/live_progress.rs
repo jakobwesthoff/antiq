@@ -82,11 +82,25 @@ fn stored_versions(world: &World) -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-/// `bytes` as a size below a kilobyte, which is all the tiny pieces of these
-/// tests need.
+/// `bytes` as `decimal_size` writes it below ten kilobytes, which the few
+/// tiny archives of these tests stay under.
 fn small_size(bytes: u64) -> String {
-    assert!(bytes < 1000, "{bytes} needs a unit");
-    format!("{bytes} B")
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    assert!(bytes < 9_950, "{bytes} needs another unit");
+    let tenths = (bytes + 50) / 100;
+    format!("{}.{} kB", tenths / 10, tenths % 10)
+}
+
+/// The part of the closing line of `archive` that totals the archives the
+/// run wrote, which `find --json` reports one by one.
+fn stored_part(world: &World) -> String {
+    let total: u64 = stored_versions(world)
+        .iter()
+        .map(|(_, archive, _)| archive)
+        .sum();
+    format!("{} stored", small_size(total))
 }
 
 /// The part of a line that tells what the archive of a piece became:
@@ -149,8 +163,12 @@ fn archive_leaves_one_finished_line_per_piece_and_the_summary() {
     }
     assert_eq!(lines.len(), 4 + 1, "{lines:#?}");
     assert_eq!(lines[3], "");
+    let stored = stored_part(&world);
     assert!(
-        is_summary(&lines[4], "✔ 3 archived · 0 skipped · 0 refused"),
+        is_summary(
+            &lines[4],
+            &format!("✔ 3 archived · 0 skipped · 0 refused · {stored}")
+        ),
         "{:?}",
         lines[4]
     );
@@ -241,10 +259,11 @@ fn archive_with_more_pieces_than_rows_keeps_every_line_in_the_scrollback() {
     let lines = screen.lines();
     let finished = lines.iter().filter(|line| line.starts_with("  ✔ ")).count();
     assert_eq!(finished, 12, "{lines:#?}");
+    let stored = stored_part(&world);
     assert!(
         is_summary(
             lines.last().expect("a last line"),
-            "✔ 12 archived · 0 skipped · 0 refused"
+            &format!("✔ 12 archived · 0 skipped · 0 refused · {stored}")
         ),
         "{lines:#?}"
     );
@@ -268,6 +287,19 @@ fn archive_on_a_narrow_terminal_keeps_its_lines_within_the_width() {
     assert_eq!(
         lines.iter().filter(|line| line.starts_with("  ✔ ")).count(),
         3
+    );
+}
+
+#[test]
+fn archive_on_a_narrow_terminal_leaves_the_stored_total_out_of_the_summary() {
+    let world = archive_world(3);
+    let run = world.run_tty_sized(&["archive"], 60, 10, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 60, 10).lines();
+    let summary = lines.last().expect("a last line");
+    assert!(
+        is_summary(summary, "✔ 3 archived · 0 skipped · 0 refused"),
+        "{lines:#?}"
     );
 }
 
@@ -325,7 +357,11 @@ fn archive_on_a_dumb_terminal_prints_each_line_when_its_piece_ends_and_never_mov
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["projects/p01", "projects/p02"]);
-    assert!(is_summary(lines[3], "✔ 2 archived · 0 skipped · 0 refused"));
+    let stored = stored_part(&world);
+    assert!(is_summary(
+        lines[3],
+        &format!("✔ 2 archived · 0 skipped · 0 refused · {stored}")
+    ));
 }
 
 #[test]
@@ -923,10 +959,12 @@ fn import_leaves_the_line_of_the_piece_and_a_summary() {
     assert!(lines[0].starts_with("  ✔ projects/imported "), "{lines:#?}");
     assert!(lines[0].contains("2 files"), "{lines:#?}");
     assert_eq!(lines.len(), 3, "{lines:#?}");
+    let (_, archive, content) = stored_versions(&world).remove(0);
+    let (sizes, share) = became(archive, content);
     assert!(
         is_summary(
             &lines[2],
-            &format!("✔ Imported projects/imported as version {IMPORT_STAMP}")
+            &format!("✔ Imported projects/imported as version {IMPORT_STAMP} ({sizes}, {share})")
         ),
         "{:?}",
         lines[2]

@@ -52,7 +52,11 @@ pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result
         Outcome::Imported(report) => {
             match &shown {
                 Some(shown) => {
-                    let summary = progress::import_summary(&report, shown.took());
+                    let summary = progress::import_summary(
+                        &report,
+                        shown.took(),
+                        &out.stdout_style().symbols(),
+                    );
                     shown.print_summary(out, &summary)?;
                     print_notes(&report, out)?;
                 }

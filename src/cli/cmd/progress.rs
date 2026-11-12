@@ -7,9 +7,11 @@
 //! and the pieces that never sent an event.
 
 use crate::cli::Context;
-use crate::cli::console::cards::{Cards, Config, Count, Ready, Summary, Tone};
+use crate::cli::console::cards::{Cards, Config, Count, Ready, Summary, Tone, share_text};
 use crate::cli::console::live::{Label, Setup, observed};
+use crate::cli::console::symbols::Symbols;
 use crate::cli::output::Output;
+use crate::cli::table::decimal_size;
 use antiq::commands::archive::{ArchiveReport, ArchivedPiece, RefusedPiece, SkippedPiece};
 use antiq::commands::import::ImportReport;
 use antiq::commands::push::PushReport;
@@ -170,6 +172,18 @@ fn listed_pieces(
     pieces
 }
 
+/// The total size of the archives of the pieces archived in the run, or
+/// `None` when no piece was.
+fn stored_part(archived: &[ArchivedPiece]) -> Option<(String, Tone)> {
+    if archived.is_empty() {
+        return None;
+    }
+    let total = archived.iter().fold(0u64, |total, piece| {
+        total.saturating_add(piece.archive_bytes)
+    });
+    Some((format!("{} stored", decimal_size(total)), Tone::Plain))
+}
+
 /// `None` when the run had no piece to tell about.
 pub(super) fn archive_summary(report: &ArchiveReport, took: Duration) -> Option<Summary> {
     let (archived, skipped, refused) = (
@@ -186,13 +200,19 @@ pub(super) fn archive_summary(report: &ArchiveReport, took: Duration) -> Option<
             if count > 0 { tone } else { Tone::Plain },
         )
     };
+    let mut parts = vec![
+        count(archived, "archived", Tone::Ok),
+        count(skipped, "skipped", Tone::Warn),
+        count(refused, "refused", Tone::Bad),
+    ];
+    // A line wider than the terminal falls back to the counts alone.
+    let stored = stored_part(&report.archived);
+    let short = stored.is_some().then(|| parts.clone());
+    parts.extend(stored);
     Some(Summary {
         tone: exit_tone(report.exit_code()),
-        parts: vec![
-            count(archived, "archived", Tone::Ok),
-            count(skipped, "skipped", Tone::Warn),
-            count(refused, "refused", Tone::Bad),
-        ],
+        parts,
+        short,
         took,
     })
 }
@@ -203,13 +223,24 @@ pub(super) fn archive_summary(report: &ArchiveReport, took: Duration) -> Option<
 
 /// The closing line of an import that showed its card: the version that
 /// came about, or that the folder was skipped.
-pub(super) fn import_summary(report: &ImportReport, took: Duration) -> Summary {
+pub(super) fn import_summary(report: &ImportReport, took: Duration, symbols: &Symbols) -> Summary {
+    let mut short = None;
     let (text, tone) = if let Some(version) = &report.imported {
         let piece = escape_controls(&version.piece);
-        (
-            format!("Imported {piece} as version {}", version.stamp),
-            Tone::Ok,
-        )
+        let imported = format!("Imported {piece} as version {}", version.stamp);
+        // What the archive became, which a narrow terminal leaves out.
+        let sizes = format!(
+            "{} {} {}",
+            decimal_size(version.bytes),
+            symbols.became,
+            decimal_size(version.archive_bytes)
+        );
+        let detail = match share_text(version.archive_bytes, version.bytes) {
+            Some(share) => format!("{sizes}, {share}"),
+            None => sizes,
+        };
+        short = Some(vec![(imported.clone(), Tone::Ok)]);
+        (format!("{imported} ({detail})"), Tone::Ok)
     } else {
         let skipped = (report.skipped.as_ref()).expect("an import ends with a version or a skip");
         (
@@ -220,6 +251,7 @@ pub(super) fn import_summary(report: &ImportReport, took: Duration) -> Summary {
     Summary {
         tone,
         parts: vec![(text, tone)],
+        short,
         took,
     }
 }
@@ -271,6 +303,7 @@ pub(super) fn push_summary(report: &PushReport, target: Option<&str>, took: Dura
     Summary {
         tone: Tone::Ok,
         parts,
+        short: None,
         took,
     }
 }
@@ -326,6 +359,7 @@ pub(super) fn restore_summary(
     Summary {
         tone,
         parts: vec![(text, tone)],
+        short: None,
         took,
     }
 }
@@ -383,6 +417,7 @@ pub(super) fn card_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::console::symbols::Symbols;
     use antiq::commands::import::{ImportedVersion, SkippedImport};
 
     #[test]
@@ -494,29 +529,94 @@ mod tests {
         }
     }
 
+    fn imported_version(archive_bytes: u64, bytes: u64) -> ImportedVersion {
+        ImportedVersion {
+            piece: "projects/scanner".to_string(),
+            stamp: "2023-11-14T221320".to_string(),
+            version: jiff::Timestamp::UNIX_EPOCH,
+            archive_bytes,
+            files: 4,
+            bytes,
+        }
+    }
+
+    fn parts_of(summary: &Summary) -> Vec<&str> {
+        summary
+            .parts
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect()
+    }
+
     #[test]
-    fn the_summary_of_an_import_names_the_piece_and_the_version() {
-        let report = imported_report(
-            Some(ImportedVersion {
-                piece: "projects/scanner".to_string(),
-                stamp: "2023-11-14T221320".to_string(),
-                version: jiff::Timestamp::UNIX_EPOCH,
-                archive_bytes: 3,
-                files: 4,
-                bytes: 9,
-            }),
-            None,
-        );
-        let summary = import_summary(&report, Duration::from_secs(5));
+    fn the_summary_of_an_import_names_the_piece_the_version_and_the_sizes() {
+        let report = imported_report(Some(imported_version(96_000_000, 412_000_000)), None);
+        let summary = import_summary(&report, Duration::from_secs(5), &Symbols::for_utf8(true));
         assert_eq!(summary.tone, Tone::Ok);
         assert_eq!(
             summary.parts,
+            [(
+                "Imported projects/scanner as version 2023-11-14T221320 (412 MB → 96 MB, 23 %)"
+                    .to_string(),
+                Tone::Ok
+            )]
+        );
+        assert_eq!(summary.took, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_summary_of_an_import_writes_an_ascii_arrow_in_an_ascii_run() {
+        let report = imported_report(Some(imported_version(96_000_000, 412_000_000)), None);
+        let summary = import_summary(&report, Duration::from_secs(5), &Symbols::for_utf8(false));
+        assert_eq!(
+            parts_of(&summary),
+            ["Imported projects/scanner as version 2023-11-14T221320 (412 MB -> 96 MB, 23 %)"]
+        );
+    }
+
+    #[test]
+    fn the_summary_of_an_import_without_content_bytes_has_no_share() {
+        let report = imported_report(Some(imported_version(120, 0)), None);
+        let summary = import_summary(&report, Duration::from_secs(5), &Symbols::for_utf8(true));
+        assert_eq!(
+            parts_of(&summary),
+            ["Imported projects/scanner as version 2023-11-14T221320 (0 B → 120 B)"]
+        );
+    }
+
+    #[test]
+    fn the_summary_of_an_import_has_a_variant_without_the_sizes_for_a_narrow_terminal() {
+        let report = imported_report(Some(imported_version(96_000_000, 412_000_000)), None);
+        let summary = import_summary(&report, Duration::from_secs(5), &Symbols::for_utf8(true));
+        let short = summary.short.expect("a shorter variant");
+        assert_eq!(
+            short,
             [(
                 "Imported projects/scanner as version 2023-11-14T221320".to_string(),
                 Tone::Ok
             )]
         );
-        assert_eq!(summary.took, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_total_of_the_stored_part_adds_up_the_archives_of_the_archived_pieces() {
+        let piece = |archive_bytes| ArchivedPiece {
+            piece: "a".to_string(),
+            stamp: "2026-11-05T130211".to_string(),
+            version: jiff::Timestamp::UNIX_EPOCH,
+            archive_bytes,
+            files: 4,
+            bytes: 9,
+        };
+        assert_eq!(
+            stored_part(&[piece(600_000_000), piece(700_000_000)]),
+            Some(("1.3 GB stored".to_string(), Tone::Plain))
+        );
+    }
+
+    #[test]
+    fn a_run_that_archived_no_piece_has_no_stored_part() {
+        assert_eq!(stored_part(&[]), None);
     }
 
     #[test]
@@ -529,7 +629,7 @@ mod tests {
                 message: "no room".to_string(),
             }),
         );
-        let summary = import_summary(&report, Duration::from_secs(5));
+        let summary = import_summary(&report, Duration::from_secs(5), &Symbols::for_utf8(true));
         assert_eq!(summary.tone, Tone::Warn);
         assert_eq!(
             summary.parts,

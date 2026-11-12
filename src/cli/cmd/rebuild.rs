@@ -121,6 +121,7 @@ fn summary(report: &RebuildReport, took: std::time::Duration) -> Summary {
     Summary {
         tone: Tone::Ok,
         parts: vec![(text.to_string(), Tone::Ok)],
+        short: None,
         took,
     }
 }

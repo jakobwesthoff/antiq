@@ -1416,7 +1416,11 @@ in place.
   the output is one line, `imported <piece>: version <stamp>`. On a
   terminal a real run shows the progress card of `archive` for the one
   piece instead (see "Progress cards") and ends with the summary `Imported
-  <piece> as version <stamp>`, or `Skipped <piece>` when it is skipped. The
+  <piece> as version <stamp> (<content size> → <archive size>, <share>)`,
+  such as `(412 MB → 96 MB, 23 %)` with `->` in the ASCII symbol set, or
+  `Skipped <piece>` when it is skipped. The share is left out when the
+  content size is 0, and a line wider than the terminal is written without
+  the parenthesis. The
   repairs and warnings follow the summary. A dry run, `--json` and a stdout
   that is not a terminal keep the line.
 - This is also the way to bring in old archive files: unpack them with
@@ -2542,7 +2546,10 @@ few as 8 columns before the version is left out. Sizes are in decimal units.
 The last line of the run follows the finished lines after an empty line. Its
 mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
 
-- `archive`: `4 archived · 0 skipped · 1 refused`.
+- `archive`: `4 archived · 0 skipped · 1 refused · 1.3 GB stored`. `stored` is
+  the total size of the archives of the pieces archived in the run, in plain
+  tone, and is left out when no piece was archived. A line wider than the
+  terminal is written without it.
 - `push`: `4 pieces pushed · 9 files changed`, where a push that created the
   marker with `--init` starts with `Claimed <target> ·` and is followed by the sentence
   that says what the marker is for.
