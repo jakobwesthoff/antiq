@@ -290,8 +290,8 @@ pub fn positions(raw: &str, matched: &[usize]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Shown, ansi_c, escape_controls, escape_lines, first_raw_character, positions, shell_word,
-        shell_word_os, strip_sgr,
+        Shown, ansi_c, command_text, escape_controls, escape_lines, first_raw_character, positions,
+        shell_word, shell_word_os, strip_sgr, unescaped_word,
     };
     use crate::relpath::RelPath;
     use std::ffi::OsStr;
@@ -329,6 +329,29 @@ mod tests {
         assert_eq!(shell_word("projects/a-b_c.d"), "projects/a-b_c.d");
         assert_eq!(shell_word("--exclude=/a"), "--exclude=/a");
         assert_eq!(shell_word("100%"), "100%");
+    }
+
+    #[test]
+    fn a_piece_in_the_escaped_form_stands_for_the_bytes_of_its_path() {
+        assert_eq!(
+            unescaped_word("projects/100%25"),
+            OsStr::new("projects/100%")
+        );
+        assert_eq!(
+            unescaped_word("projects/d%FF"),
+            OsStr::from_bytes(b"projects/d\xff")
+        );
+        // Text that is no escaped form is taken as it is.
+        assert_eq!(unescaped_word("100%zz"), OsStr::new("100%zz"));
+    }
+
+    #[test]
+    fn a_command_is_written_with_every_word_quoted_by_its_bytes() {
+        assert_eq!(
+            command_text(&["rebuild", "projects/100%", "my docs"]),
+            "antiq rebuild projects/100% 'my docs'"
+        );
+        assert_eq!(command_text::<&str>(&[]), "antiq");
     }
 
     #[test]
