@@ -687,8 +687,8 @@ messages that belong to a result).
 `pin`, `unpin` and `push`. A dry run takes no lock and changes nothing.
 It computes the repairs read-only and lists them first, as actions of
 kind `repair` (each naming the version or tree it would delete, rename
-back or move to `recovered/`, or the README it would write); its other actions assume the repairs were
-done. A dry run that finds the lock held says so, names the holder and
+back or move to `recovered/`, or the README it would write); its other
+actions assume the repairs were done. A dry run that finds the lock held says so, names the holder and
 lists no repairs, since the running command owns those directories; it
 reads nothing else. A holder that has not yet written its pid does not
 count as a holder here, so the repairs are listed, and neither does a pid

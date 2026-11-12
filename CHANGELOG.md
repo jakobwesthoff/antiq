@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is missing or differs from the text of the antiq that runs, so a
   collection made by an older antiq gets it with its first run, which
   reports `repaired: write .antiq/README.md`. A dry run lists the write
-  too. antiq owns the file, so a change made by hand is replaced
+  too. antiq owns the file, so a change made by hand is replaced.
 
 ## [1.4.1] - 2026-11-12
 
