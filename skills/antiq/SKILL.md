@@ -2,7 +2,7 @@
 name: antiq
 description: Find, inspect and bring back folders that antiq archived, and run antiq's commands (archive, unearth, fork, forget, import, pin, push, init) for the user. Use when a task concerns a folder that may have been archived by antiq, a directory that holds `.antiq/`, a folder that holds `.antiq-pin`, `.antiq-restored` or `.antiqignore`, or when the user asks to archive, unearth, find or mirror folders with antiq. Read-only commands (`status`, `find`, `grep`) and dry runs (`-n`) are fine on your own; every other command only on the user's explicit request.
 metadata:
-  antiq-version: "1.4.0"
+  antiq-version: "1.4.1"
 ---
 
 Read this file to its last line before you run antiq. The last line is
