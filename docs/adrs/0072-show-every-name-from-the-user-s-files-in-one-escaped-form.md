@@ -37,9 +37,15 @@ preformatted paragraphs are escaped on construction, so antiq's own
 styling sequences survive and those of a name do not. A line written to
 stdout or stderr is checked in a debug build: after the SGR sequences are
 removed it holds no character of the escaped class and no other control
-character than the tab of a pipe table. JSON lines are exempt, as the
-structured fields carry names as they are. The usage error of a command
+character than the tab of a pipe table. JSON lines are exempt from the check: the `message` and `fix` of errors
+and warnings carry the shown form, and the structured fields carry names
+as they are. The usage error of a command
 line with such a character is made from the escaped arguments.
+
+A test world of pieces, files, a target and failure cases with such names
+runs through every command in text mode. It asserts that stdout and stderr
+hold no raw character of the escaped class and that each name shows in the
+exact shown form.
 
 A word of a command that the user pastes keeps its `%` and names the exact
 path. A word with a character of the escaped class is written in the

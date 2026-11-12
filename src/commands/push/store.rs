@@ -15,7 +15,7 @@ use crate::relpath::{Name, RelPath};
 use crate::repair::{Area, Repair};
 use crate::report::Warning;
 use crate::select::{Rules, select};
-use crate::shown::shell_word;
+use crate::shown::{escape_controls, shell_word};
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{StoreVersion, lookup_exact, scan};
@@ -149,7 +149,7 @@ pub(super) fn check(collection: &Collection, mode: &Mode) -> Result<Vec<RelPath>
     for ((piece, version), inspection) in items.iter().zip(inspections) {
         let inspection = inspection.map_err(PushError::Versions)?;
         if let Some(refusal) = verdict(piece, version, &inspection.condition, mode) {
-            lines.push(refusal.line);
+            lines.push(escape_controls(&refusal.line));
             commands.extend(refusal.commands);
         }
     }

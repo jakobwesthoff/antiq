@@ -8,6 +8,7 @@ use super::summary::{Changes, Counts};
 use crate::plan::{HeldDryRun, Plan, PlanAction, Step, serialize_repairs};
 use crate::repair::Repair;
 use crate::report::Warning;
+use crate::shown::Shown;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
@@ -185,7 +186,7 @@ impl PushReport {
         } else if self.initialized {
             lines.push(format!(
                 "Claimed the push target {} for this antiq collection.",
-                self.target
+                Shown(&self.target)
             ));
         }
         let verb = if self.dry_run {
@@ -195,9 +196,9 @@ impl PushReport {
         };
         if self.changes.is_empty() {
             lines.push(if self.dry_run {
-                format!("The target {} is up to date.", self.target)
+                format!("The target {} is up to date.", Shown(&self.target))
             } else {
-                format!("Pushed to {}. Nothing changed.", self.target)
+                format!("Pushed to {}. Nothing changed.", Shown(&self.target))
             });
         } else {
             let counts = |counts: &Counts| {
@@ -206,7 +207,7 @@ impl PushReport {
                     counts.created, counts.updated, counts.deleted
                 )
             };
-            lines.push(format!("{verb} on {}:", self.target));
+            lines.push(format!("{verb} on {}:", Shown(&self.target)));
             for piece in &self.changes.pieces {
                 lines.push(format!("  {}: {}", piece.piece, counts(&piece.counts)));
             }
@@ -447,6 +448,49 @@ mod tests {
         dry.dry_run = true;
         dry.plan = Some(Plan::after_repairs(Vec::new()));
         assert!(dry.lines().iter().any(|l| l.starts_with("Would change on")));
+    }
+
+    #[test]
+    fn the_lines_show_the_target_by_the_rule_for_names() {
+        let mut named = report();
+        named.target = "/mnt/100%\nbackup".to_string();
+        named.initialized = true;
+        let lines = named.lines();
+        assert!(
+            lines.iter().any(|line| line
+                == "Claimed the push target /mnt/100%25%0Abackup for this antiq collection."),
+            "{lines:?}"
+        );
+        named.initialized = false;
+        named.dry_run = true;
+        named.plan = Some(Plan::after_repairs(Vec::new()));
+        assert!(
+            named
+                .lines()
+                .iter()
+                .any(|line| line == "Would change on /mnt/100%25%0Abackup:"),
+            "{:?}",
+            named.lines()
+        );
+        named.changes = Changes::default();
+        assert!(
+            named
+                .lines()
+                .last()
+                .is_some_and(|line| line == "The target /mnt/100%25%0Abackup is up to date."),
+            "{:?}",
+            named.lines()
+        );
+        named.dry_run = false;
+        named.plan = None;
+        assert!(
+            named
+                .lines()
+                .last()
+                .is_some_and(|line| line == "Pushed to /mnt/100%25%0Abackup. Nothing changed."),
+            "{:?}",
+            named.lines()
+        );
     }
 
     #[test]
