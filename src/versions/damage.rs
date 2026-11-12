@@ -92,7 +92,7 @@ impl fmt::Display for Damage {
             Damage::Doubled { kind, files } => {
                 let names: Vec<String> = files
                     .iter()
-                    .map(|file| format!("`{}`", file.to_string_lossy()))
+                    .map(|file| format!("`{}`", Shown(file)))
                     .collect();
                 write!(
                     f,
@@ -953,6 +953,22 @@ mod tests {
     fn inspect_all_of_nothing_is_nothing() {
         let (store, _) = nine_versions();
         assert!(inspect_all(&store.places(), &[], Check::Full, 4).is_empty());
+    }
+
+    #[test]
+    fn the_files_of_a_doubled_slot_are_shown_by_the_rule_for_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let doubled = Damage::Doubled {
+            kind: Listing,
+            files: vec![
+                "a%b--s.sha256.zst".into(),
+                OsString::from_vec(b"c\xff\n--s.sha256.zst".to_vec()),
+            ],
+        };
+        assert_eq!(
+            doubled.to_string(),
+            "2 files for the listing: `a%25b--s.sha256.zst`, `c%FF%0A--s.sha256.zst`"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ use antiq::code_span::CodeSpan;
 use antiq::commands::push::PushError;
 use antiq::error::{explanation, find_said};
 use antiq::shown::Shown;
-use antiq::shown::shell_word;
+use antiq::shown::shell_word_os;
 use antiq::versions::naming::VersionLookupError;
 use miette::Diagnostic;
 use std::path::Path;
@@ -87,7 +87,7 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
             // The command names the path itself, so its `%` stays as it is.
             paragraphs.push(Para::Pre(format!(
                 "Read it with: zstd -dc {} | less",
-                shell_word(&path.to_string_lossy())
+                shell_word_os(path.as_os_str())
             )));
         }
         if let Some(warning) = &note.warning {
@@ -558,6 +558,32 @@ mod tests {
         assert!(
             lines.contains(
                 &"       Read it with: zstd -dc '/my logs/push 1.log.zst' | less".to_string()
+            ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_log_path_that_is_no_utf_8_is_shown_escaped_and_quoted_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let error = PushError::Target {
+            problem: "x".into(),
+        };
+        let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/logs/100%\xff.log.zst"));
+        let error = anyhow::Error::new(antiq::Error::from(error))
+            .context("push the antiq collection")
+            .context(LogNote {
+                path: Some(path),
+                warning: None,
+            });
+        let lines = block_for(&describe(&error), None).render_plain();
+        assert!(
+            lines.contains(&"  log: Full output: /logs/100%25%FF.log.zst".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(
+                &"       Read it with: zstd -dc $'/logs/100%\\xff.log.zst' | less".to_string()
             ),
             "{lines:?}"
         );

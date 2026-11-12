@@ -330,7 +330,7 @@ fn pick(
                     _ => None,
                 })
                 .flatten()
-                .map(|file| file.to_string_lossy().into_owned())
+                .map(|file| Shown(file).to_string())
                 .collect();
             if !doubled.is_empty() {
                 return Err(RestoreError::Doubled {
@@ -2024,6 +2024,15 @@ mod choice_tests {
     #[test]
     fn a_cut_listing_is_damage() {
         assert_damaged(|v| v.cut_listing(), "listing is damaged");
+    }
+
+    #[test]
+    fn a_doubled_slot_shows_its_files_by_the_rule_for_names() {
+        let mut world = World::new();
+        let version = world.add("projects/scanner", NEW);
+        version.add_twin(VersionFile::Archive, "o%ther");
+        let error = world.choose("projects/scanner", None).expect_err("doubled");
+        assert!(error.to_string().contains("o%25ther--"), "{error}");
     }
 
     #[test]

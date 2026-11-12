@@ -495,10 +495,7 @@ fn judge(collection: &Collection, chosen: &Chosen) -> Result<Basis, RebuildError
                 Damage::Checksum { .. } => VersionFile::Checksum,
                 _ => return None,
             };
-            let file = version.files(kind)[0].to_string_lossy();
-            Some(format!(
-                "{damage}. rebuild does not overwrite `{file}`: delete it to have it rebuilt, or copy it back from the target"
-            ))
+            Some(refusal_to_overwrite(damage, &version.files(kind)[0]))
         })
         .collect();
     if !corrupt.is_empty() {
@@ -534,6 +531,14 @@ fn listing_is_newer(
         listing::read_head(file),
         Err(ListingError::FormatTooNew { .. })
     ))
+}
+
+/// Why `rebuild` leaves the damaged sidecar `file` alone.
+fn refusal_to_overwrite(damage: &Damage, file: &std::ffi::OsStr) -> String {
+    format!(
+        "{damage}. rebuild does not overwrite `{}`: delete it to have it rebuilt, or copy it back from the target",
+        Shown(file)
+    )
 }
 
 fn entry_of(chosen: &Chosen, basis: Basis) -> RebuildEntry {
@@ -737,6 +742,20 @@ fn remove_staging(collection: &Collection, files: &[(String, Vec<u8>)]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_file_that_rebuild_leaves_alone_is_shown_by_the_rule_for_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let damage = Damage::Head { reason: "x".into() };
+        let text = refusal_to_overwrite(
+            &damage,
+            std::ffi::OsStr::from_bytes(b"a%b\xff--s.sha256.zst"),
+        );
+        assert_eq!(
+            text,
+            "the head of the listing is damaged: x. rebuild does not overwrite `a%25b%FF--s.sha256.zst`: delete it to have it rebuilt, or copy it back from the target"
+        );
+    }
+
     use super::*;
     use crate::clock::FixedClock;
     use crate::lock::LockError;

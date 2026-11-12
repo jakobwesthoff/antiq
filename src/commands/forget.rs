@@ -314,7 +314,7 @@ pub fn plan(
 pub fn require_force(piece: &OsStr, which: Which<'_>, force: bool) -> Result<(), ForgetError> {
     if matches!(which, Which::All) && !force {
         return Err(ForgetError::AllVersionsNeedForce {
-            piece: piece.to_string_lossy().into_owned(),
+            piece: Shown(piece).to_string(),
         });
     }
     Ok(())

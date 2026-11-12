@@ -329,7 +329,7 @@ fn dispatch(cli: &Cli, out: &mut Output) -> anyhow::Result<u8> {
         };
         forget::require_force(&args.piece, which, args.force)
             .map_err(antiq::Error::from)
-            .with_context(|| format!("forget all versions of {}", args.piece.to_string_lossy()))?;
+            .with_context(|| format!("forget all versions of {}", Shown(&args.piece)))?;
     }
     let start = start_directory(cli)?;
     let ctx = Context {

@@ -588,10 +588,7 @@ fn prepare(
             // The user typed this path, so a path that cannot be one is a
             // mistake in the command line, as with `fork --name`.
             Err(ReferenceError::Path(source)) => {
-                return Err(ImportError::AsNotAPath {
-                    given: path.to_string_lossy().into_owned(),
-                    source,
-                });
+                return Err(as_not_a_path(path, source));
             }
             Err(error) => return Err(error.into()),
         },
@@ -713,6 +710,14 @@ fn prepare(
 /// The folder as an absolute path with its symlinks resolved above it, and
 /// its own name. The folder itself must be a directory and no symlink: a
 /// walk never follows a link.
+/// The usage error for an `--as` that no path can come from.
+fn as_not_a_path(given: &std::path::Path, source: RelPathError) -> ImportError {
+    ImportError::AsNotAPath {
+        given: Shown(given).to_string(),
+        source,
+    }
+}
+
 fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportError> {
     let absolute = request.cwd.join(&request.folder);
     let shown = Shown(&absolute).to_string();
@@ -833,6 +838,19 @@ pub(crate) fn parse_time(text: &str, zone: &TimeZone) -> Result<Timestamp, Impor
 mod tests {
     use super::*;
     use crate::testing::recording::Recorder;
+
+    #[test]
+    fn an_as_path_that_is_no_path_is_shown_by_the_rule_for_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let given = std::path::Path::new(std::ffi::OsStr::from_bytes(b"100%\xff\n"));
+        let error = as_not_a_path(given, RelPathError::InvalidName("empty"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("`100%25%FF%0A` is not a path: "),
+            "{error}"
+        );
+    }
 
     #[test]
     fn an_unreported_physical_memory_is_an_error_of_the_kind_other_with_the_cause_in_the_text() {

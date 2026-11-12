@@ -184,6 +184,15 @@ pub fn shell_word(word: &str) -> String {
     }
 }
 
+/// [`shell_word`] for a path or argument that need not be text: a word that
+/// is not UTF-8 is written by its bytes in `$'...'`.
+pub fn shell_word_os(word: &OsStr) -> String {
+    match word.to_str() {
+        Some(text) => shell_word(text),
+        None => ansi_c(word.as_bytes()),
+    }
+}
+
 /// `bytes` in the `$'...'` quoting of a shell: printable ASCII and valid
 /// characters outside the escaped class as they are, `\`, `'`, newline and tab
 /// by their backslash escapes, everything else as `\xHH` per byte.
@@ -259,7 +268,7 @@ pub fn positions(raw: &str, matched: &[usize]) -> Vec<usize> {
 mod tests {
     use super::{
         Shown, ansi_c, escape_controls, escape_lines, first_raw_character, positions, shell_word,
-        strip_sgr,
+        shell_word_os, strip_sgr,
     };
     use crate::relpath::RelPath;
     use std::ffi::OsStr;
@@ -297,6 +306,16 @@ mod tests {
         assert_eq!(shell_word("projects/a-b_c.d"), "projects/a-b_c.d");
         assert_eq!(shell_word("--exclude=/a"), "--exclude=/a");
         assert_eq!(shell_word("100%"), "100%");
+    }
+
+    #[test]
+    fn a_word_that_is_not_utf_8_is_written_by_its_bytes() {
+        assert_eq!(
+            shell_word_os(OsStr::from_bytes(b"/tmp/d\xff")),
+            "$'/tmp/d\\xff'"
+        );
+        assert_eq!(shell_word_os(OsStr::new("/tmp/d e")), "'/tmp/d e'");
+        assert_eq!(shell_word_os(OsStr::new("/tmp/de")), "/tmp/de");
     }
 
     #[test]

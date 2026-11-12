@@ -434,18 +434,15 @@ enum Shown {
 }
 
 impl Shown {
-    /// The skills directory as the warning names the copy's place, with a
-    /// character that would break the warning's line shown as U+FFFD.
+    /// The skills directory as the warning names the copy's place, by the
+    /// rule for names.
     fn skills_dir(&self) -> String {
         let (prefix, path) = match self {
             Shown::Relative(path) => ("", path),
             Shown::Home(path) => ("~/", path),
             Shown::Absolute(path) => ("", path),
         };
-        let text = format!("{prefix}{}", path.to_string_lossy());
-        text.chars()
-            .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-            .collect()
+        format!("{prefix}{}", antiq::shown::Shown(path))
     }
 
     /// The copy's directory as the warning names it.
@@ -1353,10 +1350,20 @@ mod tests {
 
         assert!(!hint.contains('\n'), "{hint:?}");
         assert!(
-            hint.contains("/work/a\u{fffd}b/.claude/skills/antiq is"),
+            hint.contains("/work/a%0Ab/.claude/skills/antiq is"),
             "{hint:?}"
         );
         assert!(hint.ends_with("`antiq skill --install <dir>`."), "{hint:?}");
+    }
+
+    #[test]
+    fn a_percent_sign_in_a_path_is_shown_as_percent_25() {
+        let hint = one_copy(Shown::Absolute("/work/100%/.claude/skills".into()));
+
+        assert!(
+            hint.contains("/work/100%25/.claude/skills/antiq is"),
+            "{hint:?}"
+        );
     }
 
     #[test]

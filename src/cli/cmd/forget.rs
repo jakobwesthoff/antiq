@@ -15,7 +15,7 @@ use antiq::commands::forget::{
     Action, ForgetPlan, ForgetReport, ForgetRequest, VersionEntry, Which, forget, plan,
 };
 use antiq::report::CommandReport;
-use antiq::shown::escape_controls;
+use antiq::shown::{Shown, escape_controls};
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -211,7 +211,7 @@ fn files_under_action(name: &str, piece: &str, entry: &VersionEntry) -> Vec<Stri
     // "checksum" is the longest part, so the file names line up whichever
     // files a version has left.
     for file in &entry.files {
-        lines.push(format!("  {:<8}   {}", part(file), escape_controls(file)));
+        lines.push(format!("  {:<8}   {}", part(file), Shown(file)));
     }
     lines
 }
@@ -255,7 +255,7 @@ fn render_plan(plan: &ForgetPlan, terminal: bool, zone: &TimeZone) -> Lines {
                     let files: Vec<String> = entry
                         .files
                         .iter()
-                        .map(|file| escape_controls(file))
+                        .map(|file| Shown(file).to_string())
                         .collect();
                     stdout.push(format!(
                         "Would delete {name} of {piece}: {}",
@@ -386,6 +386,22 @@ mod tests {
         assert_eq!(
             lines.stdout,
             ["Deleted version 2026-11-04T090211 of a%1B[31mb"]
+        );
+    }
+
+    #[test]
+    fn the_files_of_a_version_are_shown_by_the_rule_for_names() {
+        let plan = files_under_action(
+            "Would delete",
+            "tools/scan",
+            &with_files(
+                entry("tools/scan", "2026-11-04T090211", false),
+                &["a%b--s.tar.zst"],
+            ),
+        );
+        assert!(
+            plan.iter().any(|line| line.ends_with("a%25b--s.tar.zst")),
+            "{plan:?}"
         );
     }
 

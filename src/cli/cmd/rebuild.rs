@@ -19,7 +19,7 @@ use antiq::commands::rebuild::{
     rebuild_observed,
 };
 use antiq::progress::Operation;
-use antiq::shown::escape_controls;
+use antiq::shown::{Shown, escape_controls};
 use antiq::versions::naming::{local_labels, system_zone};
 use anyhow::Context as _;
 use jiff::tz::TimeZone;
@@ -151,7 +151,7 @@ fn render(report: &RebuildReport) -> Lines {
     let files: Vec<String> = report
         .written
         .iter()
-        .map(|file| escape_controls(file))
+        .map(|file| Shown(file).to_string())
         .collect();
     let stdout = vec![format!(
         "Rebuilt version {name} of {}: wrote {}",
@@ -179,7 +179,7 @@ fn explanation() -> Block {
 /// The rows of a version on a terminal: what is checked, against what, and
 /// which files are written, each under its role.
 fn rows(entry: &RebuildEntry) -> Vec<String> {
-    let row = |role: &str, file: &str| format!("  {role:<9}{}", escape_controls(file));
+    let row = |role: &str, file: &str| format!("  {role:<9}{}", Shown(file));
     let mut rows = Vec::new();
     match (&entry.basis, &entry.against) {
         (Basis::ChecksumFile, Some(against)) => {
@@ -227,16 +227,16 @@ fn render_plan(plan: &RebuildPlan, terminal: bool, zone: &TimeZone) -> Lines {
                 stdout.extend(rows(entry));
             }
             Action::RebuildVersion(entry) => {
-                let archive = escape_controls(&entry.archive);
+                let archive = Shown(&entry.archive).to_string();
                 let against = entry
                     .against
                     .as_deref()
-                    .map(escape_controls)
+                    .map(|file| Shown(file).to_string())
                     .unwrap_or_default();
                 let write: Vec<String> = entry
                     .write
                     .iter()
-                    .map(|file| escape_controls(file))
+                    .map(|file| Shown(file).to_string())
                     .collect();
                 let write = write.join(", ");
                 stdout.push(match entry.basis {
@@ -291,6 +291,23 @@ mod tests {
                 "  against  a.sha256.zst",
                 "  write    a.tar.zst.sha256",
             ]
+        );
+    }
+
+    #[test]
+    fn the_files_of_a_rebuild_are_shown_by_the_rule_for_names() {
+        let rows = rows(&entry(
+            Basis::Listing,
+            Some("a%b\n.sha256.zst"),
+            &["a%b.tar.zst.sha256"],
+        ));
+        assert_eq!(rows[1], "  against  a%25b%0A.sha256.zst");
+        assert_eq!(rows[2], "  write    a%25b.tar.zst.sha256");
+        let written = render(&report(Basis::Listing, &["a%b.tar.zst.sha256"]));
+        assert!(
+            written.stdout[0].ends_with("wrote a%25b.tar.zst.sha256"),
+            "{:?}",
+            written.stdout
         );
     }
 

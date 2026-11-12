@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument of the command line. A newline in a name could forge a line of
   an error, such as an `error:` line in a pipe. The lines of a regex error
   of `grep` are one line in a pipe, joined by `%0A`
+- A `%` or a byte that is not UTF-8 in a name shows as `%25` or `%XX` in the
+  messages about damaged and doubled version files, a refused `forget`, a
+  push refusal that names files to delete, the files of `rebuild` and
+  `forget`, the skills directory of the outdated-skill warning, and the
+  `-C` directory and typed piece of a command written to paste, which
+  keep a name that is not UTF-8 by its bytes in `$'...'`
 - `import -n` lists an ignored folder once when an ignored name sorts
   between the folder and its content, such as `cache.log` next to
   `cache/`. The content of the folder was listed as well

@@ -270,6 +270,11 @@ struct Run<'a> {
     observer: Option<&'a dyn Observer>,
 }
 
+/// The usage error for a `--name` that no path can come from.
+fn name_is_not_a_path(name: &std::ffi::OsStr, error: &dyn std::fmt::Display) -> RestoreError {
+    RestoreError::Usage(format!("`{}` is not a path: {error}", Shown(name)))
+}
+
 impl Run<'_> {
     /// The path the copy goes to: the one `--name` gives, else the
     /// piece's own, which only the chosen version knows.
@@ -282,10 +287,7 @@ impl Run<'_> {
         }
         match reference::resolve_path(self.collection, &self.request.cwd, Path::new(name)) {
             Ok(path) => Ok(Some(path)),
-            Err(ReferenceError::Path(error)) => Err(RestoreError::Usage(format!(
-                "`{}` is not a path: {error}",
-                name.to_string_lossy()
-            ))),
+            Err(ReferenceError::Path(error)) => Err(name_is_not_a_path(name, &error)),
             Err(error) => Err(error.into()),
         }
     }
@@ -532,6 +534,14 @@ fn dry_plan(plan: Plan<PlanStep<ForkAction>>, warnings: Vec<Warning>) -> DryRunP
 mod tests {
     use super::*;
     use crate::clock::FixedClock;
+
+    #[test]
+    fn a_name_that_is_no_path_is_shown_by_the_rule_for_names() {
+        use std::os::unix::ffi::OsStrExt;
+        let error = name_is_not_a_path(std::ffi::OsStr::from_bytes(b"100%\xff\n"), &"bad");
+        assert_eq!(error.to_string(), "`100%25%FF%0A` is not a path: bad");
+    }
+
     use crate::commands::restore::Step;
     use crate::error::Error;
     use crate::filesystem::FilesystemError;

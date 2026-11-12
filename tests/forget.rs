@@ -674,6 +674,23 @@ fn the_command_line_refuses_a_missing_or_doubled_target() {
 }
 
 #[test]
+fn a_percent_sign_in_the_piece_of_a_refused_forget_is_shown_as_percent_25() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run(&["forget", "100%", "--all-versions"]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("every stored version of `100%25`"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("forget all versions of 100%25"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+#[test]
 fn all_versions_without_force_is_an_error_block_with_an_info_on_a_terminal() {
     let world = world(Mode::Text, three_versions);
     let run = world.run_tty_stderr_from_root(

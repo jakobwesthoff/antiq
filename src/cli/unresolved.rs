@@ -21,7 +21,7 @@ use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
 use antiq::shown::escape_controls;
-use antiq::shown::shell_word;
+use antiq::shown::{shell_word, shell_word_os};
 use antiq::versions::naming::{VersionLookupError, system_zone};
 use jiff::tz::TimeZone;
 use miette::Diagnostic;
@@ -463,7 +463,7 @@ pub(super) fn pasteable_line(directory: Option<&std::path::Path>, words: &[Strin
     let mut line = vec!["antiq".to_string()];
     if let Some(directory) = directory {
         line.push("-C".to_string());
-        line.push(shell_word(&directory.to_string_lossy()));
+        line.push(shell_word_os(directory.as_os_str()));
     }
     line.extend(words.iter().map(|word| shell_word(word)));
     line.join(" ")
@@ -485,17 +485,23 @@ pub(super) fn forget_confirmation(cli: &Cli) -> String {
 /// A `-C` the run was given stays, as the copied command has to find the
 /// same collection from wherever it is pasted.
 fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force: bool) -> String {
-    let own = |piece_arg: &std::ffi::OsStr| piece_arg.to_string_lossy().into_owned();
-    let mut words: Vec<String> = vec!["antiq".to_string()];
-    let mut push = |word: &str| words.push(shell_word(word));
+    let words = std::cell::RefCell::new(vec!["antiq".to_string()]);
+    let push = |word: &str| words.borrow_mut().push(shell_word(word));
+    // What the user typed may not be text, so it is quoted by its bytes.
+    let push_os = |word: &std::ffi::OsStr| words.borrow_mut().push(shell_word_os(word));
+    // The piece is the given one where there is any, else what was typed.
+    let push_piece = |given: Option<&str>, typed: &std::ffi::OsStr| match given {
+        Some(text) => push(text),
+        None => push_os(typed),
+    };
     if let Some(directory) = &cli.directory {
         push("-C");
-        push(&own(directory.as_os_str()));
+        push_os(directory.as_os_str());
     }
     match &cli.command {
         Command::Archive(args) => {
             push("archive");
-            push(piece.unwrap_or(&own(args.piece.as_deref().unwrap_or_default())));
+            push_piece(piece, args.piece.as_deref().unwrap_or_default());
             if args.dry_run {
                 push("-n");
             }
@@ -506,14 +512,14 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
             } else {
                 "unpin"
             });
-            push(piece.unwrap_or(&own(&args.piece)));
+            push_piece(piece, &args.piece);
             if args.dry_run {
                 push("-n");
             }
         }
         Command::Unearth(args) => {
             push("unearth");
-            push(piece.unwrap_or(&own(&args.piece)));
+            push_piece(piece, &args.piece);
             if let Some(version) = version.or(args.version.as_deref()) {
                 push("--version");
                 push(version);
@@ -524,14 +530,14 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
         }
         Command::Fork(args) => {
             push("fork");
-            push(piece.unwrap_or(&own(&args.piece)));
+            push_piece(piece, &args.piece);
             if let Some(version) = version.or(args.version.as_deref()) {
                 push("--version");
                 push(version);
             }
             if let Some(name) = &args.name {
                 push("--name");
-                push(&own(name));
+                push_os(name);
             }
             if args.dry_run {
                 push("-n");
@@ -539,7 +545,7 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
         }
         Command::Forget(args) => {
             push("forget");
-            push(piece.unwrap_or(&own(&args.piece)));
+            push_piece(piece, &args.piece);
             if args.all_versions {
                 push("--all-versions");
                 if args.force || force {
@@ -554,7 +560,7 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
         }
         Command::Rebuild(args) => {
             push("rebuild");
-            push(piece.unwrap_or(&own(&args.piece)));
+            push_piece(piece, &args.piece);
             push(version.unwrap_or(&args.version));
             if args.dry_run {
                 push("-n");
@@ -562,11 +568,44 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
         }
         _ => {}
     }
-    words.join(" ")
+    words.into_inner().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_piece_and_directory_the_user_typed_are_quoted_by_their_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let line = vec![
+            std::ffi::OsString::from("antiq"),
+            std::ffi::OsString::from("-C"),
+            std::ffi::OsString::from_vec(b"/tmp/d\xff".to_vec()),
+            std::ffi::OsString::from("unearth"),
+            std::ffi::OsString::from_vec(b"p\xff\n".to_vec()),
+        ];
+        let cli = Cli::try_parse_from(line).expect("the arguments are valid");
+        assert_eq!(
+            command_line(&cli, None, None),
+            "antiq -C $'/tmp/d\\xff' unearth $'p\\xff\\n'"
+        );
+    }
+
+    #[test]
+    fn the_directory_of_a_pasteable_line_is_quoted_by_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let words = ["archive".to_string()];
+        let newline = std::path::Path::new("/tmp/a\nb");
+        assert_eq!(
+            pasteable_line(Some(newline), &words),
+            "antiq -C $'/tmp/a\\nb' archive"
+        );
+        let odd = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/d\xff"));
+        assert_eq!(
+            pasteable_line(Some(odd), &words),
+            "antiq -C $'/tmp/d\\xff' archive"
+        );
+    }
+
     use super::*;
     use crate::cli::console::render::render_parts;
     use clap::Parser;

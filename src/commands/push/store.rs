@@ -15,6 +15,7 @@ use crate::relpath::{Name, RelPath};
 use crate::repair::{Area, Repair};
 use crate::report::Warning;
 use crate::select::{Rules, select};
+use crate::shown::Shown;
 use crate::shown::{escape_controls, shell_word};
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
 use crate::versions::stamp::Stamp;
@@ -372,7 +373,7 @@ pub(super) fn refusal(
                 _ => continue,
             };
             for file in files {
-                let file = CodeSpan(file.to_string_lossy()).to_string();
+                let file = CodeSpan(Shown(file)).to_string();
                 if !deletable.contains(&file) {
                     deletable.push(file);
                 }
@@ -467,6 +468,18 @@ mod tests {
         refusal(&path(piece), version, condition)
             .expect("a refusal")
             .line
+    }
+
+    #[test]
+    fn a_file_to_delete_is_shown_by_the_rule_for_names() {
+        let mut stored = whole();
+        stored.listings = vec![OsString::from("a%b\n--s.sha256.zst")];
+        let text = line(
+            "projects/a",
+            &stored,
+            &damaged(vec![Damage::Head { reason: "x".into() }]),
+        );
+        assert!(text.contains("delete `a%25b%0A--s.sha256.zst`"), "{text}");
     }
 
     #[test]
