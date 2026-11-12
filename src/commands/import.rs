@@ -707,9 +707,6 @@ fn prepare(
     })
 }
 
-/// The folder as an absolute path with its symlinks resolved above it, and
-/// its own name. The folder itself must be a directory and no symlink: a
-/// walk never follows a link.
 /// The usage error for an `--as` that no path can come from.
 fn as_not_a_path(given: &std::path::Path, source: RelPathError) -> ImportError {
     ImportError::AsNotAPath {
@@ -718,6 +715,9 @@ fn as_not_a_path(given: &std::path::Path, source: RelPathError) -> ImportError {
     }
 }
 
+/// The folder as an absolute path with its symlinks resolved above it, and
+/// its own name. The folder itself must be a directory and no symlink: a
+/// walk never follows a link.
 fn locate(request: &Request) -> Result<(PathBuf, std::ffi::OsString), ImportError> {
     let absolute = request.cwd.join(&request.folder);
     let shown = Shown(&absolute).to_string();

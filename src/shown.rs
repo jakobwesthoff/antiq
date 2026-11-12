@@ -171,7 +171,9 @@ impl<T: Named> fmt::Display for Shown<T> {
 /// in single quotes. A `%` is a plain character to a shell, so the word names
 /// the path itself and not its shown form.
 pub fn shell_word(word: &str) -> String {
+    // zsh expands a word that starts with `=` to the path of a command.
     let plain = !word.is_empty()
+        && !word.starts_with('=')
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
@@ -306,6 +308,25 @@ mod tests {
         assert_eq!(shell_word("projects/a-b_c.d"), "projects/a-b_c.d");
         assert_eq!(shell_word("--exclude=/a"), "--exclude=/a");
         assert_eq!(shell_word("100%"), "100%");
+    }
+
+    #[test]
+    fn a_word_that_starts_with_an_equals_sign_is_quoted() {
+        assert_eq!(shell_word("=cmd"), "'=cmd'");
+        assert_eq!(shell_word("--exclude=/a"), "--exclude=/a");
+    }
+
+    #[test]
+    fn zsh_reads_a_quoted_equals_word_back_as_it_is() {
+        // Unquoted, zsh expands `=ls` to the path of `ls`.
+        let output = std::process::Command::new("zsh")
+            .arg("-c")
+            .arg(format!("printf %s {}", shell_word("=ls")))
+            .output();
+        let Ok(output) = output else {
+            return;
+        };
+        assert_eq!(output.stdout, b"=ls");
     }
 
     #[test]

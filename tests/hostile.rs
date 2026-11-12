@@ -397,7 +397,18 @@ fn a_directory_that_is_no_collection_shows_its_hostile_name_by_the_rule() {
 fn a_usage_error_shows_a_hostile_argument_by_the_rule() {
     let run = Antiq::new().args(["status", "a\nerror: forged%"]).run();
     assert_clean("usage", &run);
-    assert_shows("usage", &run, "a%0Aerror: forged%");
+    assert_shows("usage", &run, "a%0Aerror: forged%25");
+}
+
+#[test]
+fn a_usage_error_shows_an_argument_that_is_not_utf_8_by_its_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+    let run = Antiq::new()
+        .arg("status")
+        .arg(std::ffi::OsString::from_vec(b"x\xff".to_vec()))
+        .run();
+    assert_clean("usage", &run);
+    assert_shows("usage", &run, "x%FF");
 }
 
 // =========================================================

@@ -287,7 +287,7 @@ pub fn run(args: Vec<OsString>, out: &mut Output) -> u8 {
 fn escaped_usage_error(error: clap::Error, args: &[OsString]) -> clap::Error {
     let escaped: Vec<OsString> = args
         .iter()
-        .map(|arg| OsString::from(escape_controls(&arg.to_string_lossy())))
+        .map(|arg| OsString::from(Shown(arg.as_os_str()).to_string()))
         .collect();
     if escaped == args {
         return error;
