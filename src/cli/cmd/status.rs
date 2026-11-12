@@ -336,7 +336,7 @@ fn pasteable(meaning: &StatusFinding, help: String, directory: Option<&Path>) ->
     let Some(words) = meaning.command() else {
         return help;
     };
-    let written = CodeSpan(format!("antiq {}", words.join(" "))).to_string();
+    let written = CodeSpan(antiq::shown::command_text(&words)).to_string();
     help.replacen(
         &written,
         &CodeSpan(pasteable_line(directory, &words)).to_string(),

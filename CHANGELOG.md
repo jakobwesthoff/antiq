@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw path
 - A pasteable command that names a path with a control character writes it
   in the `$'...'` quoting of a shell, as it did for a path that is not
-  UTF-8, so the command names the exact path
+  UTF-8, so the command names the exact path. The commands of the status
+  fix, the refused push, the unpin hint of an archive card and the "did you
+  mean" hint wrote a piece with a `%` as `%25`, which named another piece;
+  they write the piece itself. A word that starts with `=` is quoted
 - `archive -n` names, under each piece it would archive, the entries the
   version leaves out, as `import -n` does: a `Would leave out <path>` line
   for each ignored entry (a folder once, with a trailing `/`) and for

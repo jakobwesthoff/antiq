@@ -16,14 +16,16 @@ use crate::repair::{Area, Repair};
 use crate::report::Warning;
 use crate::select::{Rules, select};
 use crate::shown::Shown;
-use crate::shown::{escape_controls, shell_word};
+use crate::shown::{command_text, escape_controls};
 use crate::versions::damage::{Check, Condition, Damage, Places, inspect_all};
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{StoreVersion, lookup_exact, scan};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 /// What the repairs that a dry run only lists would have done by the time
@@ -249,25 +251,19 @@ pub struct VersionCommand {
 }
 
 impl VersionCommand {
-    /// The words after `antiq`, with the piece as it is.
-    pub fn words(&self) -> Vec<String> {
+    /// The words after `antiq`, with the piece as the bytes of its path.
+    pub fn words(&self) -> Vec<OsString> {
         vec![
-            self.verb.to_string(),
-            self.piece.to_string(),
-            self.stamp.to_string(),
+            OsString::from(self.verb),
+            OsString::from_vec(self.piece.as_bytes().to_vec()),
+            OsString::from(self.stamp.to_string()),
         ]
     }
 
     /// The command as the line of the version writes it: a code span, with
     /// the piece quoted for a shell.
     pub fn written(&self) -> String {
-        CodeSpan(format!(
-            "antiq {} {} {}",
-            self.verb,
-            shell_word(&self.piece.to_string()),
-            self.stamp
-        ))
-        .to_string()
+        CodeSpan(command_text(&self.words())).to_string()
     }
 }
 
@@ -468,6 +464,32 @@ mod tests {
         refusal(&path(piece), version, condition)
             .expect("a refusal")
             .line
+    }
+
+    #[test]
+    fn the_command_of_a_version_names_the_exact_piece() {
+        let command = |piece: &[u8]| VersionCommand {
+            verb: "rebuild",
+            piece: RelPath::from_bytes(piece.to_vec()).expect("a path"),
+            stamp: Stamp::parse(STAMP).expect("a stamp"),
+        };
+        assert_eq!(
+            command(b"projects/100%").written(),
+            format!("`antiq rebuild projects/100% {STAMP}`")
+        );
+        assert_eq!(
+            command(b"projects/a\nb").written(),
+            format!("`antiq rebuild $'projects/a\\nb' {STAMP}`")
+        );
+        let words = command(b"projects/100%").words();
+        assert_eq!(
+            words,
+            [
+                OsString::from("rebuild"),
+                OsString::from("projects/100%"),
+                OsString::from(STAMP)
+            ]
+        );
     }
 
     #[test]

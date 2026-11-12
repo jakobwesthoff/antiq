@@ -21,7 +21,9 @@ use crate::versions::stamp::Stamp;
 use crate::versions::store::{StoreScan, StoreVersion, scan};
 use jiff::Timestamp;
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 
 /// Why status failed. A store or a leftover directory that cannot be read
 /// is a note of the report, not a failure.
@@ -119,7 +121,7 @@ impl StatusFinding {
     /// The words after `antiq` of the command the help names, when it
     /// names one: the group has exactly one version. A console that knows
     /// how antiq was started can write the command the way to paste it.
-    pub fn command(&self) -> Option<Vec<String>> {
+    pub fn command(&self) -> Option<Vec<OsString>> {
         match self {
             StatusFinding::Damaged { versions } => single_command("rebuild", versions),
             StatusFinding::Incomplete { versions } => single_command("forget", versions),
@@ -129,20 +131,20 @@ impl StatusFinding {
 }
 
 /// `verb piece stamp` for the one version of `versions`.
-fn single_command(verb: &str, versions: &[VersionNote]) -> Option<Vec<String>> {
+fn single_command(verb: &str, versions: &[VersionNote]) -> Option<Vec<OsString>> {
     match versions {
         [only] => Some(vec![
-            verb.to_string(),
-            only.piece.to_string(),
-            only.stamp.to_string(),
+            OsString::from(verb),
+            OsString::from_vec(only.piece.as_bytes().to_vec()),
+            OsString::from(only.stamp.to_string()),
         ]),
         _ => None,
     }
 }
 
 /// The command of [`StatusFinding::command`] as the help writes it.
-fn command_text(words: &[String]) -> String {
-    format!("antiq {}", words.join(" "))
+fn command_text(words: &[OsString]) -> String {
+    crate::shown::command_text(words)
 }
 
 /// The command that writes the missing file of the one damaged version, or

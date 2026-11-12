@@ -21,7 +21,7 @@ use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
 use antiq::shown::escape_controls;
-use antiq::shown::{shell_word, shell_word_os};
+use antiq::shown::{shell_word, shell_word_os, unescaped_word};
 use antiq::versions::naming::{VersionLookupError, system_zone};
 use jiff::tz::TimeZone;
 use miette::Diagnostic;
@@ -459,13 +459,16 @@ fn version_table(
 
 /// `antiq` followed by `words`, quoted for a shell, with the `-C` of the
 /// run when it had one. The command can be pasted from anywhere.
-pub(super) fn pasteable_line(directory: Option<&std::path::Path>, words: &[String]) -> String {
+pub(super) fn pasteable_line<S: AsRef<std::ffi::OsStr>>(
+    directory: Option<&std::path::Path>,
+    words: &[S],
+) -> String {
     let mut line = vec!["antiq".to_string()];
     if let Some(directory) = directory {
         line.push("-C".to_string());
         line.push(shell_word_os(directory.as_os_str()));
     }
-    line.extend(words.iter().map(|word| shell_word(word)));
+    line.extend(words.iter().map(|word| shell_word_os(word.as_ref())));
     line.join(" ")
 }
 
@@ -491,7 +494,7 @@ fn command_line_for(cli: &Cli, piece: Option<&str>, version: Option<&str>, force
     let push_os = |word: &std::ffi::OsStr| words.borrow_mut().push(shell_word_os(word));
     // The piece is the given one where there is any, else what was typed.
     let push_piece = |given: Option<&str>, typed: &std::ffi::OsStr| match given {
-        Some(text) => push(text),
+        Some(text) => push_os(&unescaped_word(text)),
         None => push_os(typed),
     };
     if let Some(directory) = &cli.directory {
@@ -587,6 +590,23 @@ mod tests {
         assert_eq!(
             command_line(&cli, None, None),
             "antiq -C $'/tmp/d\\xff' unearth $'p\\xff\\n'"
+        );
+    }
+
+    #[test]
+    fn a_given_piece_in_the_escaped_form_is_written_as_the_path_it_stands_for() {
+        let cli = cli(&["unearth", "scan"]);
+        assert_eq!(
+            command_line(&cli, Some("projects/100%25"), None),
+            "antiq unearth projects/100%"
+        );
+        assert_eq!(
+            command_line(&cli, Some("projects/a\nb"), None),
+            "antiq unearth $'projects/a\\nb'"
+        );
+        assert_eq!(
+            command_line(&cli, Some("projects/d%FF"), None),
+            "antiq unearth $'projects/d\\xff'"
         );
     }
 

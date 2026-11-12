@@ -803,6 +803,39 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
 }
 
 #[test]
+fn the_unpin_command_names_the_exact_piece_that_the_escaped_name_stands_for() {
+    let mut cards = Cards::new(Config {
+        counts: ARCHIVE,
+        name_prefix: "",
+        result_width: 12,
+        style: style(false, true),
+        directory: None,
+    });
+    for (name, word) in [
+        ("projects/100%25", "projects/100%"),
+        ("projects/a\nb", "$'projects/a\\nb'"),
+    ] {
+        cards.apply(
+            finished(
+                name,
+                220,
+                Outcome::Refused(vec![format!("pinned: {name}/.antiq-pin")]),
+            ),
+            secs(0),
+        );
+        let lines = lines_of(&mut cards, MOCKUP);
+        let line = lines
+            .iter()
+            .find(|line| line.contains("releases it"))
+            .expect("the hint line");
+        assert!(
+            line.contains(&format!("antiq unpin {word} releases it")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
 fn other_reasons_are_wrapped_one_block_each_and_never_cut() {
     let mut cards = cards(ARCHIVE);
     cards.apply(

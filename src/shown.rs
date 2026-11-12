@@ -21,7 +21,7 @@
 use crate::relpath::{Name, RelPath, escape};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 /// Whether text shows `character` in its escaped form.
@@ -193,6 +193,27 @@ pub fn shell_word_os(word: &OsStr) -> String {
         Some(text) => shell_word(text),
         None => ansi_c(word.as_bytes()),
     }
+}
+
+/// The word that a piece written in the escaped form of
+/// [`crate::relpath::escape`] stands for: the bytes of the path, so that a
+/// command that names it reaches the piece. Text that is no escaped form is
+/// taken as it is.
+pub fn unescaped_word(text: &str) -> OsString {
+    match crate::relpath::unescape(text) {
+        Ok(bytes) => OsString::from_vec(bytes),
+        Err(_) => OsString::from(text),
+    }
+}
+
+/// `antiq` and `words`, each quoted for a shell by its bytes.
+pub fn command_text<S: AsRef<OsStr>>(words: &[S]) -> String {
+    let mut text = String::from("antiq");
+    for word in words {
+        text.push(' ');
+        text.push_str(&shell_word_os(word.as_ref()));
+    }
+    text
 }
 
 /// `bytes` in the `$'...'` quoting of a shell: printable ASCII and valid

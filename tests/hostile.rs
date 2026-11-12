@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use support::cmd::{Antiq, Run};
 use support::fake_rsync::FakeRsync;
 use support::scenario::collection::{Clock, Collection};
+use support::scenario::world::{Mode, Setup, World};
 
 /// The names of the world, as they are on disk and as the rule shows them.
 const NEWLINE: (&str, &str) = ("projects/two\nlines", "projects/two%0Alines");
@@ -456,6 +457,107 @@ fn a_stray_file_with_a_percent_sign_in_the_store_is_shown_once_escaped() {
     }
     let run = antiq(&collection, &["status"]);
     assert_shows("stray status", &run, "a%25b--");
+}
+
+// =========================================================
+// Commands to paste
+// =========================================================
+
+/// Deletes the listing of the version of the piece whose file names start
+/// with `stem`, so that the version is damaged and `rebuild` repairs it.
+fn remove_listing(collection: &Collection, stem: &str, stamp: &str) {
+    fn find(dir: &Path, stem: &str, stamp: &str) -> Option<PathBuf> {
+        for entry in fs::read_dir(dir).expect("a directory reads") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, stem, stamp) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(stem) && name.ends_with(&format!("{stamp}.sha256.zst"))
+            }) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let listing = find(&collection.path(".antiq/pieces"), stem, stamp).expect("a listing exists");
+    fs::remove_file(listing).expect("the listing is removed");
+}
+
+/// The command `antiq -C <dir> rebuild <piece> <stamp>` that `text` tells to
+/// run, as written.
+fn pasted_rebuild(text: &str, piece: &str) -> String {
+    let pattern = format!(
+        r"antiq -C \S+ rebuild {} \d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}",
+        regex::escape(piece)
+    );
+    regex::Regex::new(&pattern)
+        .expect("a valid pattern")
+        .find(text)
+        .unwrap_or_else(|| panic!("no rebuild command in {text:?}"))
+        .as_str()
+        .to_string()
+}
+
+/// Runs a command as a shell reads it, with antiq as the binary under test.
+fn paste(command: &str) -> Run {
+    let binary = env!("CARGO_BIN_EXE_antiq");
+    Antiq::program("bash")
+        .arg("-c")
+        .arg(command.replacen("antiq ", &format!("{binary} "), 1))
+        .run()
+}
+
+#[test]
+fn the_rebuild_command_of_a_status_fix_names_the_exact_piece_and_runs() {
+    let collection = archived();
+    let stamp = stamp_of(&collection, PERCENT.1);
+    remove_listing(&collection, "projects-100-", &stamp);
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty_sized(&["status"], 250, 24, &[]);
+
+    let text = strip_sgr(&run.stdout);
+    let command = pasted_rebuild(&text, "projects/100%");
+    let pasted = paste(&command);
+    assert_eq!(
+        pasted.code(),
+        0,
+        "{command}: {}{}",
+        pasted.stdout,
+        pasted.stderr
+    );
+    assert_clean("rebuild pasted from status", &pasted);
+    let after = world.run(&["status"]);
+    assert!(!after.stdout.contains("damaged"), "{:?}", after.stdout);
+}
+
+#[test]
+fn the_rebuild_command_of_a_refused_push_names_the_exact_piece_and_runs() {
+    let collection = archived();
+    let stamp = stamp_of(&collection, PERCENT.1);
+    remove_listing(&collection, "projects-100-", &stamp);
+    let outside = tempfile::tempdir().expect("a temporary directory");
+    let target = target_folder(outside.path());
+    collection.use_target(&target);
+    collection.use_real_rsync();
+
+    let run = antiq(&collection, &["push", "--init"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stderr);
+    let command = pasted_rebuild(&run.stderr, "projects/100%");
+    let pasted = paste(&command);
+    assert_eq!(
+        pasted.code(),
+        0,
+        "{command}: {}{}",
+        pasted.stdout,
+        pasted.stderr
+    );
+    let again = antiq(&collection, &["push", "-n", "--init"]);
+    assert!(!again.stderr.contains("damaged"), "{:?}", again.stderr);
 }
 
 // =========================================================

@@ -612,7 +612,10 @@ impl Cards {
         if reason == format!("pinned: {name}/{PIN_FILE}") {
             let command = escape_controls(&pasteable_line(
                 self.config.directory.as_deref(),
-                &["unpin".to_string(), name.to_string()],
+                &[
+                    std::ffi::OsString::from("unpin"),
+                    antiq::shown::unescaped_word(name),
+                ],
             ));
             let text = format!("pinned, so it stays as it is. {command} releases it");
             return (text, Some(command));
