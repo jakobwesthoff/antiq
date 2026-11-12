@@ -97,14 +97,14 @@ impl Store {
         let header = Header {
             piece: piece.clone(),
             archived: stamp.time(),
-            archive: names.archive.clone(),
+            archive: names.archive.clone().into(),
             archive_bytes: packed.size,
             imported: None,
             rebuilt: None,
         };
         let listing = File::create(folder.join(&names.listing)).expect("the listing is created");
         listing::write(&header, &packed.listing, listing).expect("the listing is written");
-        let checksum = ChecksumFile::new(packed.sha256, names.archive.clone());
+        let checksum = ChecksumFile::new(packed.sha256, names.archive.clone().into());
         fs::write(folder.join(&names.checksum), checksum.to_bytes())
             .expect("the checksum file is written");
 

@@ -273,9 +273,8 @@ fn examine(
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|source| io_error("read", path.to_string(), source))?;
-            let archive_name = version.archives[0].to_string_lossy();
             if let Err(error) =
-                ChecksumFile::parse(&bytes).and_then(|line| line.check_for(&archive_name))
+                ChecksumFile::parse(&bytes).and_then(|line| line.check_for(&version.archives[0]))
             {
                 let reason = match error {
                     PackError::ChecksumFile(reason) => reason,
@@ -593,6 +592,41 @@ mod tests {
             },
             other => panic!("expected damage, found {other:?}"),
         }
+    }
+
+    /// The version with its archive renamed to a name that is not UTF-8,
+    /// and the name as the bytes it holds. Only filesystems that take such
+    /// names can hold it; APFS refuses them.
+    #[cfg(target_os = "linux")]
+    fn with_an_archive_that_is_not_utf8() -> (Store, StoredVersion, OsString) {
+        use std::os::unix::ffi::OsStringExt;
+        let (store, version) = sound();
+        let name =
+            OsString::from_vec([b"a\xffb--".as_slice(), STAMP.as_bytes(), b".tar.zst"].concat());
+        fs::rename(version.path(Archive), version.folder.join(&name)).expect("the archive moves");
+        (store, version, name)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_checksum_file_with_the_raw_name_beside_an_archive_that_is_not_utf8_is_sound() {
+        let (store, version, name) = with_an_archive_that_is_not_utf8();
+        let checksum = ChecksumFile::new("0".repeat(64), name);
+        version.overwrite(Checksum, &checksum.to_bytes());
+        assert_eq!(condition(&store, &version), Condition::Sound);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_checksum_file_with_the_lossy_name_beside_an_archive_that_is_not_utf8_is_damage() {
+        let (store, version, name) = with_an_archive_that_is_not_utf8();
+        let lossy = name.to_string_lossy().into_owned();
+        let checksum = ChecksumFile::new("0".repeat(64), lossy.into());
+        version.overwrite(Checksum, &checksum.to_bytes());
+        assert!(matches!(
+            condition(&store, &version),
+            Condition::Damaged(damages) if matches!(damages.as_slice(), [Damage::Checksum { .. }])
+        ));
     }
 
     fn doubled(kind: VersionFile) -> (Store, StoredVersion, Vec<OsString>) {

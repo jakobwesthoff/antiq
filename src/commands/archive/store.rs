@@ -338,7 +338,7 @@ fn stage_and_store(
     let header = Header {
         piece: request.stored.clone(),
         archived: stamp.time(),
-        archive: names.archive.clone(),
+        archive: names.archive.clone().into(),
         archive_bytes: packed.size,
         imported: request.imported,
         rebuilt: None,
@@ -354,7 +354,7 @@ fn stage_and_store(
     flush(&listing_file, &listing_rel, &names.listing)?;
 
     let (checksum_file, checksum_rel) = create(&names.checksum)?;
-    let checksum = ChecksumFile::new(packed.sha256.clone(), names.archive.clone());
+    let checksum = ChecksumFile::new(packed.sha256.clone(), names.archive.clone().into());
     (&checksum_file)
         .write_all(&checksum.to_bytes())
         .map_err(|source| {
@@ -1108,7 +1108,7 @@ mod tests {
         let archive = store_folder(&world).join(&stored.names.archive);
         let expected = ChecksumFile::new(
             file_sha256(&archive).expect("the archive is hashed"),
-            stored.names.archive.clone(),
+            stored.names.archive.clone().into(),
         );
         let found = fs::read(store_folder(&world).join(&stored.names.checksum))
             .expect("the checksum file exists");
@@ -1126,7 +1126,7 @@ mod tests {
         let listing = read_full(file).expect("the listing reads");
         assert_eq!(listing.header.piece, path("piece"));
         assert_eq!(listing.header.archived, WHEN.parse().expect("a time"));
-        assert_eq!(listing.header.archive, stored.names.archive);
+        assert_eq!(listing.header.archive, stored.names.archive.as_str());
         assert_eq!(listing.header.archive_bytes, stored.archive_bytes);
         assert_eq!(listing.header.imported, None);
         assert_eq!((listing.files, listing.bytes), (2, 9));

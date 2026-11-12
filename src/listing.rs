@@ -13,7 +13,9 @@ use ::zstd::stream::read::Decoder;
 use ::zstd::stream::write::Encoder;
 use jiff::Timestamp;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 /// The format of the listings this version reads and writes.
 pub const FORMAT: u32 = 1;
@@ -73,7 +75,8 @@ pub struct ListingEntry {
 pub struct Header {
     pub piece: RelPath,
     pub archived: Timestamp,
-    pub archive: String,
+    /// The bytes of the archive file's name.
+    pub archive: OsString,
     pub archive_bytes: u64,
     pub imported: Option<Timestamp>,
     pub rebuilt: Option<Timestamp>,
@@ -85,7 +88,7 @@ pub struct Header {
 pub struct Head {
     pub piece: Option<RelPath>,
     pub archived: Option<Timestamp>,
-    pub archive: Option<String>,
+    pub archive: Option<OsString>,
     pub archive_bytes: Option<u64>,
     pub files: Option<u64>,
     pub bytes: Option<u64>,
@@ -409,7 +412,7 @@ fn header_time(second: Timestamp) -> Result<String, ListingError> {
 }
 
 fn head_bytes(header: &Header, files: u64, bytes: u64) -> Result<Vec<u8>, ListingError> {
-    if header.archive.contains('\n') {
+    if header.archive.as_bytes().contains(&b'\n') {
         return Err(header_error("the archive name holds a line break"));
     }
     let mut out = format!("# antiq listing {FORMAT}\n").into_bytes();
@@ -689,7 +692,7 @@ fn apply(head: &mut Head, key: &str, value: &[u8]) {
                 .and_then(|bytes| RelPath::from_bytes(bytes).ok());
         }
         "archived" => head.archived = time(),
-        "archive" => head.archive = String::from_utf8(value.to_vec()).ok(),
+        "archive" => head.archive = Some(OsString::from_vec(value.to_vec())),
         "archive-bytes" => head.archive_bytes = parse_number(value),
         "files" => head.files = parse_number(value),
         "bytes" => head.bytes = parse_number(value),
@@ -1426,6 +1429,34 @@ mod tests {
             "the stream is cut inside its frame"
         );
         assert!(read_full(&bytes[..]).is_ok());
+    }
+
+    #[test]
+    fn a_header_names_an_archive_that_is_not_utf8_and_reads_back() {
+        let content = text(&small());
+        let name = b"projects-scanner--2026-11-04T090211.tar.zst";
+        let at = content
+            .windows(name.len())
+            .position(|window| window == name)
+            .expect("the header names the archive");
+        let mut raw = content[..at].to_vec();
+        raw.extend_from_slice(b"a\xffb--2026-11-04T090211.tar.zst");
+        raw.extend_from_slice(&content[at + name.len()..]);
+        let listing = compressed(&raw);
+
+        let name = OsString::from_vec(b"a\xffb--2026-11-04T090211.tar.zst".to_vec());
+        let head = read_head(&listing[..]).expect("a head");
+        assert_eq!(head.archive, Some(name.clone()));
+        let read = read_full(&listing[..]).expect("the whole listing reads");
+        assert_eq!(read.header.archive, name);
+
+        let rewritten = encode(&read.header, &small());
+        assert!(
+            decoded(&rewritten)
+                .windows(name.len())
+                .any(|window| window == name.as_bytes()),
+            "the writer keeps the bytes"
+        );
     }
 
     #[test]

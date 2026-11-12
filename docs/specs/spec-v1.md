@@ -379,8 +379,9 @@ checked before the idle and empty tests. (ADR 0024)
 - The checksum file holds one line, `<hash>  <archive file name>`, with
   the hash in lower-case hex, two spaces, the bare file name and a final
   newline, and nothing else, so `shasum -a 256 -c <checksum file>` run in the
-  store folder checks the archive. The listing is described under
-  "Listing format".
+  store folder checks the archive. The name is written as the bytes the
+  file name holds, also when they are not UTF-8: `shasum` opens the file
+  by those bytes. The listing is described under "Listing format".
 - Every directory antiq creates (store folders under `pieces/`, parents
   above an unearth destination, the `<stamp>/` chains in `trash/` and
   `doomed/`) is flushed together with its parent before any step relies on
@@ -479,7 +480,8 @@ tools read it as part of the file name.
 ```
 
 - **Header:** `piece` (the stored spelling), `archived` (the version time,
-  the one in the file name), `archive` (the archive file's name),
+  the one in the file name), `archive` (the archive file's name, as the
+  bytes it holds, also when they are not UTF-8),
   `archive-bytes` (its size, written when packing finishes), `files` and
   `bytes` (count and total size of the regular files, so `find` and
   `status` read only the head of a listing). The writer derives `files`

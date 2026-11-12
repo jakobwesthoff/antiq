@@ -77,13 +77,13 @@ fn the_listing_reads_in_full_and_matches_the_archive() {
         .expect("the archive exists")
         .len();
     assert_eq!(read.header.archive_bytes, archive_size);
-    assert_eq!(read.header.archive, version.names.archive);
+    assert_eq!(read.header.archive, version.names.archive.as_str());
     assert_eq!(read.header.piece.to_string(), "notes");
     assert_eq!(read.files, 2);
 
     let checksum = ChecksumFile::parse(&bytes(&version, VersionFile::Checksum))
         .expect("the checksum file parses");
-    assert_eq!(checksum.archive(), version.names.archive);
+    assert_eq!(checksum.archive(), version.names.archive.as_str());
     let archive_hash = file_sha256(&version.path(VersionFile::Archive)).expect("the archive reads");
     assert_eq!(checksum.sha256(), archive_hash);
 }

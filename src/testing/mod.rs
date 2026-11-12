@@ -236,7 +236,7 @@ mod version_fixture_tests {
         assert_eq!(scan.pieces[0].versions[0].stamp, version.stamp);
         let file = File::open(version.path(VersionFile::Listing)).expect("the listing exists");
         let read = listing::read_full(file).expect("the listing reads in full");
-        assert_eq!(read.header.archive, version.names.archive);
+        assert_eq!(read.header.archive, version.names.archive.as_str());
         assert_eq!(read.files, 1);
     }
 }

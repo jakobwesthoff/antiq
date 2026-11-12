@@ -660,7 +660,7 @@ fn write_missing(
     let header = |archive_bytes: u64| Header {
         piece: folder.clone(),
         archived: version.stamp.time(),
-        archive: archive_name.clone(),
+        archive: archive_name.clone().into(),
         archive_bytes,
         imported: None,
         rebuilt: Some(rebuilt),
@@ -689,7 +689,7 @@ fn write_missing(
             check_entries_against_listing(&read.entries, &listing.entries).map_err(from_pack)?;
             vec![(
                 sidecar_name(&archive_name, VersionFile::Checksum),
-                ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
+                ChecksumFile::new(read.digest.sha256, archive_name.clone().into()).to_bytes(),
             )]
         }
         Basis::ReadableOnly => {
@@ -701,7 +701,7 @@ fn write_missing(
                 ),
                 (
                     sidecar_name(&archive_name, VersionFile::Checksum),
-                    ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
+                    ChecksumFile::new(read.digest.sha256, archive_name.clone().into()).to_bytes(),
                 ),
             ]
         }
@@ -945,7 +945,7 @@ mod tests {
         mismatch.version.remove(VersionFile::Listing);
         let other = ChecksumFile::new(
             "0".repeat(64),
-            mismatch.version.names.of(VersionFile::Archive).to_string(),
+            mismatch.version.names.of(VersionFile::Archive).into(),
         );
         mismatch
             .version

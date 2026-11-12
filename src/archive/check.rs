@@ -11,8 +11,11 @@ use super::hashing::HashingReader;
 use super::verify::{Difference, Hashed, compare, read_hashed};
 use crate::listing::{ListingEntry, is_sha256_hex};
 use crate::progress::Counter;
+use crate::shown::Shown;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 // =========================================================
@@ -54,15 +57,19 @@ pub fn file_sha256(path: &Path) -> Result<String, PackError> {
 /// The one line of a checksum file: `<hash>  <archive file name>` and a
 /// newline. It is the format of `sha256sum`, so `shasum -a 256 -c` in the
 /// store folder checks the archive.
+///
+/// The name is the bytes of the file name, not text: `shasum` opens the
+/// file by the bytes it reads, so a name that is not UTF-8 is found only
+/// when the line holds those bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksumFile {
     sha256: String,
-    archive: String,
+    archive: OsString,
 }
 
 impl ChecksumFile {
     /// `sha256` is lower-case hex and `archive` the bare file name.
-    pub fn new(sha256: String, archive: String) -> ChecksumFile {
+    pub fn new(sha256: String, archive: OsString) -> ChecksumFile {
         ChecksumFile { sha256, archive }
     }
 
@@ -70,12 +77,15 @@ impl ChecksumFile {
         &self.sha256
     }
 
-    pub fn archive(&self) -> &str {
+    pub fn archive(&self) -> &OsStr {
         &self.archive
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        format!("{}  {}\n", self.sha256, self.archive).into_bytes()
+        let mut line = format!("{}  ", self.sha256).into_bytes();
+        line.extend_from_slice(self.archive.as_bytes());
+        line.push(b'\n');
+        line
     }
 
     /// Reads exactly the line [`ChecksumFile::to_bytes`] writes: nothing
@@ -98,20 +108,20 @@ impl ChecksumFile {
         if name.starts_with(b"\\") || name.contains(&b'\r') {
             return Err(refuse("the archive file name is written escaped"));
         }
-        let archive = String::from_utf8(name.to_vec())
-            .map_err(|_| refuse("the archive file name is not UTF-8"))?;
+        let archive = OsString::from_vec(name.to_vec());
         let sha256 = String::from_utf8(line[..64].to_vec()).expect("hex digits are ASCII");
         Ok(ChecksumFile { sha256, archive })
     }
 
     /// Whether the line names `archive_name`, the file it sits beside.
-    pub fn check_for(&self, archive_name: &str) -> Result<(), PackError> {
+    pub fn check_for(&self, archive_name: &OsStr) -> Result<(), PackError> {
         if self.archive == archive_name {
             return Ok(());
         }
         Err(PackError::ChecksumFile(format!(
-            "it names `{}`, the archive is `{archive_name}`",
-            self.archive
+            "it names `{}`, the archive is `{}`",
+            Shown(&self.archive),
+            Shown(archive_name)
         )))
     }
 }
@@ -278,7 +288,7 @@ mod tests {
             .expect("a name")
             .to_string_lossy()
             .into_owned();
-        let checksum = ChecksumFile::new(file_sha256(&file).expect("hashes"), name.clone());
+        let checksum = ChecksumFile::new(file_sha256(&file).expect("hashes"), name.clone().into());
         let sidecar = format!("{name}.sha256");
         fs::write(dir.path().join(&sidecar), checksum.to_bytes()).expect("writes");
         let output = Command::new("shasum")
@@ -353,17 +363,39 @@ mod tests {
         format!("{ABC}  a.tar.zst\n\n").into_bytes()
     );
     refuses!(a_missing_name_is_refused, format!("{ABC}  \n").into_bytes());
-    refuses!(
-        a_name_that_is_not_utf8_is_refused,
-        [format!("{ABC}  a").as_bytes(), b"\xff\n"].concat()
-    );
+    #[test]
+    fn a_name_that_is_not_utf8_is_written_and_read_by_its_bytes() {
+        let name = OsStr::from_bytes(b"a\xffb.tar.zst");
+        let checksum = ChecksumFile::new(ABC.into(), name.to_os_string());
+        let line = checksum.to_bytes();
+        assert_eq!(
+            line,
+            [format!("{ABC}  ").as_bytes(), b"a\xffb.tar.zst\n"].concat()
+        );
+        let parsed = ChecksumFile::parse(&line).expect("a name need not be text");
+        assert_eq!(parsed.archive(), name);
+        parsed.check_for(name).expect("the same bytes");
+    }
+
+    #[test]
+    fn a_line_for_the_lossy_name_does_not_name_an_archive_that_is_not_utf8() {
+        let archive = OsStr::from_bytes(b"a\xffb.tar.zst");
+        let lossy = ChecksumFile::new(ABC.into(), "a\u{fffd}b.tar.zst".into());
+        assert!(matches!(
+            lossy.check_for(archive),
+            Err(PackError::ChecksumFile(reason))
+                if reason == "it names `a\u{fffd}b.tar.zst`, the archive is `a%FFb.tar.zst`"
+        ));
+    }
 
     #[test]
     fn the_line_must_name_the_archive_it_sits_beside() {
         let checksum = ChecksumFile::new(ABC.into(), "a.tar.zst".into());
-        checksum.check_for("a.tar.zst").expect("the same name");
+        checksum
+            .check_for("a.tar.zst".as_ref())
+            .expect("the same name");
         assert!(matches!(
-            checksum.check_for("b.tar.zst"),
+            checksum.check_for("b.tar.zst".as_ref()),
             Err(PackError::ChecksumFile(reason)) if reason.contains("`a.tar.zst`") && reason.contains("`b.tar.zst`")
         ));
     }
