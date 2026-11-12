@@ -16,6 +16,7 @@
 mod support;
 
 use antiq::shown::{first_raw_character, strip_sgr};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use support::cmd::{Antiq, Run};
@@ -460,6 +461,112 @@ fn a_stray_file_with_a_percent_sign_in_the_store_is_shown_once_escaped() {
 }
 
 // =========================================================
+// On a terminal
+// =========================================================
+
+/// The bytes of a terminal run with the styling of antiq and the cursor
+/// movement of its live region taken out, which hold no other escape
+/// sequence and no raw character of the escaped class.
+fn assert_clean_terminal(label: &str, bytes: &str) {
+    let moves = regex::Regex::new(r"\x1b\[\d*A|\x1b\[J|\r").expect("a valid pattern");
+    let plain = moves.replace_all(&strip_sgr(bytes), "").to_string();
+    for line in plain.lines() {
+        assert_eq!(
+            first_raw_character(line),
+            None,
+            "{label}: a raw character on a terminal: {line:?}\n{plain:?}"
+        );
+    }
+    assert!(!plain.contains('\x1b'), "{label}: a stray ESC in {plain:?}");
+}
+
+#[test]
+fn a_terminal_shows_hostile_names_escaped_in_every_reading_command_and_failure() {
+    let collection = archived();
+    let world = World::new(Setup::new(collection), Mode::Text);
+    for args in [
+        &["status"][..],
+        &["find"][..],
+        &["grep", "(?s)src/a.b"][..],
+        &["archive", "-n"][..],
+        &["unearth", "-n", NEWLINE.0][..],
+    ] {
+        let run = world.run_tty_sized(args, 200, 24, &[]);
+        assert_clean_terminal(&format!("{args:?}"), &run.stdout);
+        assert_clean_terminal(&format!("{args:?} stderr"), &run.stderr);
+    }
+    for args in [
+        &["unearth", "no\nsuch%"][..],
+        &["unearth", "two"][..],
+        &["unearth", "projects/"][..],
+        &["pin", "no\nsuch"][..],
+    ] {
+        let run = world.run_tty_stderr(args, &[]);
+        assert_eq!(run.code(), 1, "{args:?}: {}", run.stderr);
+        assert_clean_terminal(&format!("{args:?}"), &run.stderr);
+    }
+}
+
+#[test]
+fn a_failing_push_shows_hostile_names_escaped_on_a_terminal() {
+    let collection = archived();
+    let outside = tempfile::tempdir().expect("a temporary directory");
+    let target = target_folder(outside.path());
+    collection.use_target(&target);
+    let fake = FakeRsync::new("rsync  version 3.2.7  protocol version 31\n");
+    let path = serde_json::to_string(fake.path().to_str().expect("a UTF-8 path"))
+        .expect("a string serialises");
+    let config = collection.path(".antiq/config.toml");
+    let text = fs::read_to_string(&config).expect("the config exists");
+    fs::write(
+        &config,
+        text.replacen("[target]\n", &format!("[target]\nrsync = {path}\n"), 1),
+    )
+    .expect("the config can be written");
+    fake.answer_all("", "rsync: bad \"/x/a\nerror: forged\x1b[2J\"\n", 23);
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty_stderr(&["push", "--init"], &[]);
+
+    assert_clean_terminal("push", &run.stderr);
+    assert!(
+        run.stderr.contains("error: forged%1B[2J"),
+        "{:?}",
+        run.stderr
+    );
+}
+
+// =========================================================
+// A held lock and the skill
+// =========================================================
+
+#[test]
+fn a_held_lock_is_reported_without_a_raw_character() {
+    let collection = archived();
+    let _lock = support::cmd::hold_lock(&collection.root());
+    for args in [&["archive"][..], &["pin", NEWLINE.0][..]] {
+        let run = antiq(&collection, args);
+        assert_clean("held lock", &run);
+        assert_eq!(run.code(), 1, "{args:?}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn the_skill_installed_into_a_hostile_directory_names_its_files_escaped() {
+    let outside = tempfile::tempdir().expect("a temporary directory");
+    let directory = outside.path().join("sk\nill%");
+    fs::create_dir_all(&directory).expect("a folder is made");
+    let run = Antiq::new()
+        .arg("skill")
+        .arg("--install")
+        .arg(&directory)
+        .run();
+    assert_eq!(run.code(), 0, "{}{}", run.stdout, run.stderr);
+    assert_clean("skill --install", &run);
+    assert_shows("skill --install", &run, "sk%0Aill%25/antiq/SKILL.md");
+}
+
+// =========================================================
 // Commands to paste
 // =========================================================
 
@@ -563,6 +670,62 @@ fn the_rebuild_command_of_a_refused_push_names_the_exact_piece_and_runs() {
 // =========================================================
 // JSON
 // =========================================================
+
+/// The keys whose strings are prose for a person, which carry names in the
+/// shown form. The structured fields (`piece`, `path`, `candidates`) are not
+/// in the list.
+const PROSE_KEYS: [&str; 10] = [
+    "message", "fix", "text", "reason", "note", "notes", "damage", "reasons", "line", "problem",
+];
+
+/// Every string under a prose key of `value` holds no raw character of the
+/// escaped class, except the line breaks of a text of several lines.
+fn assert_prose_clean(label: &str, value: &Value, in_prose: bool) {
+    match value {
+        Value::String(text) if in_prose => {
+            for line in text.split('\n') {
+                assert_eq!(
+                    first_raw_character(line),
+                    None,
+                    "{label}: a raw character in prose: {line:?}"
+                );
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| assert_prose_clean(label, item, in_prose)),
+        Value::Object(fields) => fields.iter().for_each(|(key, item)| {
+            assert_prose_clean(label, item, PROSE_KEYS.contains(&key.as_str()))
+        }),
+        _ => {}
+    }
+}
+
+#[test]
+fn the_prose_of_every_json_output_holds_no_raw_character() {
+    let collection = archived();
+    let stamp = stamp_of(&collection, ESCAPE.0);
+    for args in [
+        &["status"][..],
+        &["find"][..],
+        &["grep", "100"][..],
+        &["archive", "-n"][..],
+        &["unearth", "-n", NEWLINE.0][..],
+        &["fork", "-n", NEWLINE.0][..],
+        &["forget", "-n", ESCAPE.0, &stamp][..],
+        &["rebuild", "-n", BIDI.0, &stamp][..],
+        &["pin", "-n", TAB.0][..],
+        &["unearth", "no\nsuch%"][..],
+        &["unearth", "two"][..],
+        &["pin", "no\nsuch"][..],
+        &["grep", "(?s)(unclosed\nx"][..],
+    ] {
+        let mut full = vec!["--json"];
+        full.extend(args);
+        let run = antiq(&collection, &full);
+        assert_prose_clean(&format!("{args:?}"), &run.json(), false);
+    }
+}
 
 #[test]
 fn json_carries_hostile_names_as_they_are_and_does_not_panic() {

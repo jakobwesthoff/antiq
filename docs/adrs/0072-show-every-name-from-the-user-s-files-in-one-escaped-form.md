@@ -48,9 +48,12 @@ as they are. The usage error of a command
 line with such a character is made from the escaped arguments.
 
 A test world of pieces, files, a target and failure cases with such names
-runs through every command in text mode. It asserts that stdout and stderr
-hold no raw character of the escaped class and that each name shows in the
-exact shown form.
+runs through every command in text mode, on a pipe and on a terminal. It
+asserts that stdout and stderr hold no raw character of the escaped class
+and that each name shows in the exact shown form. It also runs a held lock,
+a refused push, the installation of the skill into a directory with such a
+name and the commands written to paste, and it checks that the prose texts of
+`--json` hold no raw character.
 
 A word of a command that the user pastes keeps its `%` and names the exact
 path. A word with a character of the escaped class is written in the
