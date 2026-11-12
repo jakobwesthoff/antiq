@@ -45,7 +45,9 @@ Adapt the comment syntax to the file's language, keeping the wording
 verbatim. In a script, the header goes directly below the shebang line.
 
 Manifests and configuration files (`Cargo.toml`, `Cargo.lock`, CI
-workflows), Markdown documents and the todo notes carry no header.
+workflows), Markdown documents and the todo notes carry no header. That
+includes `src/antiq-folder-readme.md`, which the binary embeds as the
+README it writes into `.antiq/`.
 
 Third-party files copied into the repository keep their own license and
 header and are listed here as exceptions, together with where their

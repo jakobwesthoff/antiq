@@ -357,6 +357,7 @@ impl CollectionBuilder {
             for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
                 tree.dir(&format!(".antiq/{directory}"));
             }
+            tree.file(".antiq/README.md", antiq::collection::README);
             tree.file(".antiq/config.toml", self.keys.render());
         }
         for (path, piece) in &self.pieces {

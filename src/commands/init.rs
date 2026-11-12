@@ -5,7 +5,7 @@
 //! The `init` command: making a directory a collection.
 
 use crate::clock::Clock;
-use crate::collection::{Collection, LAYOUT};
+use crate::collection::{Collection, LAYOUT, README, README_FILE};
 use crate::commands::survey::{Verdict, survey_with};
 use crate::config::{ConfigDoc, ConfigError};
 use crate::filesystem::atomic::{flush_dir, write_atomic};
@@ -69,6 +69,8 @@ pub enum InitAction {
         #[serde(serialize_with = "crate::shown::serialize_lossy")]
         path: PathBuf,
     },
+    /// The README that explains `.antiq/`.
+    WriteReadme,
 }
 
 /// Everything `init` decided before it creates anything.
@@ -305,6 +307,7 @@ fn fill_and_publish(root: &Path, staged: &Path, config: &str) -> Result<(), Init
         let made = staged.join(directory);
         fs::create_dir(&made).map_err(io_error("create", &made))?;
     }
+    write_atomic(&staged.join(README_FILE), README.as_bytes())?;
     // Written last: the write ends by flushing `staged`, which makes the
     // entries made above durable as well.
     write_atomic(&staged.join("config.toml"), config.as_bytes())?;
@@ -346,7 +349,10 @@ impl InitPlan {
             due: None,
             config,
             actions: if dry_run {
-                vec![InitAction::CreateCollection { path: path.clone() }]
+                vec![
+                    InitAction::CreateCollection { path: path.clone() },
+                    InitAction::WriteReadme,
+                ]
             } else {
                 Vec::new()
             },
@@ -585,6 +591,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "README.md",
                 "config.toml",
                 "doomed",
                 "pieces",
@@ -723,6 +730,14 @@ mod tests {
             .expect_err("no free temporary name");
         assert!(matches!(error, InitError::Filesystem(_)), "{error}");
         assert!(!tree.path(".antiq").exists());
+    }
+
+    #[test]
+    fn apply_writes_the_readme_that_every_run_keeps_current() {
+        let tree = Tree::new();
+        apply_plan(&plan_of(&tree, &[]));
+        let written = fs::read_to_string(tree.path(".antiq/README.md")).expect("the README exists");
+        assert_eq!(written, crate::collection::README);
     }
 
     #[test]

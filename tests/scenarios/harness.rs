@@ -76,6 +76,16 @@ fn an_uninitialised_collection_has_its_folders_and_no_antiq_directory() {
 }
 
 #[test]
+fn the_readme_of_antiq_exists() {
+    let clock = Clock::now();
+    let collection = Collection::build(&clock).finish();
+    assert_eq!(
+        fs::read_to_string(collection.path(".antiq/README.md")).expect("the README exists"),
+        antiq::collection::README
+    );
+}
+
+#[test]
 fn the_layout_directories_exist() {
     let clock = Clock::now();
     let collection = Collection::build(&clock).finish();

@@ -352,7 +352,8 @@ fn a_dry_init_names_its_action_by_kind() {
 
     assert_eq!(json["dry_run"], true);
     let actions = json["actions"].as_array().expect("a list of actions");
-    assert_eq!(actions.len(), 1, "{json}");
+    assert_eq!(actions.len(), 2, "{json}");
     assert!(actions[0].get("action").is_none(), "{}", actions[0]);
     assert_eq!(actions[0]["kind"], "create_collection");
+    assert_eq!(actions[1]["kind"], "write_readme");
 }

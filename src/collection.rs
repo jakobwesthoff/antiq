@@ -19,6 +19,13 @@ const ANTIQ_DIR: &str = ".antiq";
 /// `init` makes them. `lock` is made by the first run that needs it.
 pub(crate) const LAYOUT: [&str; 5] = ["tmp", "trash", "doomed", "recovered", "pieces"];
 
+/// The name of the README below `.antiq/`.
+pub const README_FILE: &str = "README.md";
+
+/// The text of `.antiq/README.md`, which `init` writes and every run that
+/// takes the lock writes again when the file is missing or differs.
+pub const README: &str = include_str!("antiq-folder-readme.md");
+
 /// A collection: the directory that holds `.antiq/`, with the config read
 /// from it.
 #[derive(Debug)]
@@ -78,6 +85,10 @@ impl Collection {
 
     pub fn antiq_dir(&self) -> PathBuf {
         self.root.join(ANTIQ_DIR)
+    }
+
+    pub fn readme_path(&self) -> PathBuf {
+        self.antiq_dir().join(README_FILE)
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -330,6 +341,35 @@ mod tests {
         );
         let collection = Collection::find(temp.root()).expect("a collection");
         assert_eq!(collection.config().collection.idle_days, 99);
+    }
+
+    #[test]
+    fn the_readme_names_what_a_reader_needs() {
+        for needle in [
+            "https://antiq.westhoffswelt.de",
+            "cargo install antiq",
+            "brew install jakobwesthoff/tap/antiq",
+            "antiq skill",
+            "antiq status",
+            "antiq find",
+            "antiq grep",
+            "antiq unearth",
+            "shasum -a 256 -c",
+            "zstd -dc",
+            "tar -x",
+        ] {
+            assert!(README.contains(needle), "the README lacks `{needle}`");
+        }
+    }
+
+    #[test]
+    fn the_readme_path_is_below_antiq() {
+        let temp = TempCollection::minimal();
+        let collection = Collection::find(temp.root()).expect("a collection");
+        assert_eq!(
+            collection.readme_path(),
+            canonical(temp.root()).join(".antiq/README.md")
+        );
     }
 
     #[test]

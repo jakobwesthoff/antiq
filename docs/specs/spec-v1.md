@@ -337,6 +337,7 @@ checked before the idle and empty tests. (ADR 0024)
 <collection>/
   projects/scanner/                     a live piece (a plain folder)
   .antiq/
+    README.md
     config.toml
     lock
     tmp/                                staging; pack/<stamp>/<piece path>/ while archiving
@@ -350,6 +351,9 @@ checked before the idle and empty tests. (ADR 0024)
         old-client-site--2026-09-03T101500.sha256.zst
 ```
 
+- `README.md` explains the folder to someone who finds it. Its text is
+  compiled into the binary and is the same for every collection of one
+  antiq. `init` writes it with the other files of `.antiq/`.
 - The folder under `.antiq/pieces/` is the piece's path, in its stored
   spelling. A folder there is a piece of the store when it holds at least
   one `.tar.zst`.
@@ -848,8 +852,8 @@ Makes a directory a collection: writes `.antiq/config.toml` with a new
 collection ID and the patterns given, without asking. `--pattern`
 (repeatable) sets the patterns; every other setting starts at its default
 and is changed in the config file. An invalid `--pattern` is a usage
-error: kind `usage`, exit 2. `init` creates `.antiq/` with `config.toml`,
-`tmp/`, `trash/`, `doomed/`, `recovered/` and `pieces/` in one step, so it
+error: kind `usage`, exit 2. `init` creates `.antiq/` with `README.md`,
+`config.toml`, `tmp/`, `trash/`, `doomed/`, `recovered/` and `pieces/` in one step, so it
 exists complete or not at all. It does not look for the layout of
 `archive.sh`; its old archive files are brought in by hand with `import`.
 
@@ -919,10 +923,11 @@ piece holds a `.antiq/` directory of its own, naming each such folder.
 `-n` prints the config it would write. The line of the collection ID in
 that config is the comment `# id is minted by the real run`, as a real run
 mints the ID. In a pipe the config is alone on stdout and `Would create a
-collection at <path>` is on stderr. On a terminal stdout has the two action
-lines `would create the antiq collection at <path>` and `would write
-.antiq/config.toml, the settings of the collection:`, the config below them
-behind a `│` on each line, and the dry-run footer. A pattern that contains `**` gets a note on stderr, in `warnings`
+collection at <path>` and `Would write .antiq/README.md` are on stderr. On a
+terminal stdout has the action lines `would create the antiq collection at
+<path>` and `would write .antiq/config.toml, the settings of the collection:`,
+the config below the second behind a `│` on each line, then `would write
+.antiq/README.md`, and the dry-run footer. A pattern that contains `**` gets a note on stderr, in `warnings`
 under `--json`.
 
 After creating the collection, `init` prints how many folders the next
@@ -2778,7 +2783,8 @@ collection root), `patterns`, `due` (the number of folders the next `archive`
 would archive; absent in a dry run and when the survey failed) and
 `warnings`. A dry run also has `config`, the text of the config that would be
 written, and `actions`, both before `warnings`; a real run has no `actions`.
-The action is `{"kind": "create_collection", "path": ...}`.
+The actions are `{"kind": "create_collection", "path": ...}` and
+`{"kind": "write_readme"}`, in this order.
 
 `skill` has `part` (the name of the part, or null for the core), `skill`
 (the text) and `warnings`, a list that holds the warning object about

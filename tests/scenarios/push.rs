@@ -134,14 +134,14 @@ fn a_terminal_gets_the_claim_of_the_target_after_the_table_of_the_pieces() {
             vec!["notes/daily", "1", "0", "0"],
             vec!["old/client-site", "3", "0", "0"],
             vec!["projects/scanner", "4", "0", "0"],
-            vec!["other", "files", "2", "0", "0"],
+            vec!["other", "files", "3", "0", "0"],
         ]
     );
     assert_eq!(lines[5], "");
     let (summary, rest) = (&lines[6], &lines[7..]);
     assert!(
         summary.starts_with(&format!(
-            "✔ Claimed {shown} · 3 pieces pushed · 10 files changed   took 0:0"
+            "✔ Claimed {shown} · 3 pieces pushed · 11 files changed   took 0:0"
         )),
         "{summary}"
     );
@@ -202,7 +202,7 @@ fn the_zeros_of_the_claim_table_are_dim() {
     run.expect_code(0);
     assert!(
         run.stdout
-            .contains("other files         2         \x1b[2m0\x1b[0m"),
+            .contains("other files         3         \x1b[2m0\x1b[0m"),
         "{:?}",
         run.stdout
     );
@@ -236,7 +236,7 @@ Changed on {shown}:
   notes/daily: 1 created, 0 updated, 0 deleted
   old/client-site: 3 created, 0 updated, 0 deleted
   projects/scanner: 4 created, 0 updated, 0 deleted
-  other files: 2 created, 0 updated, 0 deleted
+  other files: 3 created, 0 updated, 0 deleted
 "
                 )
             );
@@ -257,7 +257,7 @@ Changed on {shown}:
             );
             assert_eq!(
                 json["other"],
-                json!({"created": 2, "updated": 0, "deleted": 0})
+                json!({"created": 3, "updated": 0, "deleted": 0})
             );
             assert_eq!(json["vanished"], json!([]));
             assert_eq!(json["second_pass"], false);

@@ -196,6 +196,7 @@ impl TempCollection {
         for directory in ["tmp", "trash", "doomed", "recovered", "pieces"] {
             tree.dir(&format!(".antiq/{directory}"));
         }
+        tree.file(".antiq/README.md", antiq::collection::README);
         tree.file(
             ".antiq/config.toml",
             format!("[collection]\nid = \"{COLLECTION_ID}\"\n"),

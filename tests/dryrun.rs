@@ -168,6 +168,10 @@ fn an_init_dry_run_does_not_print_the_id_a_real_run_would_mint() {
         "{shown}"
     );
     assert!(
+        shown.contains("\n○ would write   .antiq/README.md\n"),
+        "{shown}"
+    );
+    assert!(
         shown.ends_with(
             "\n\x20○ DRY RUN  Nothing was written. Run again without -n to create the antiq\n            collection.\n"
         ),
@@ -195,6 +199,11 @@ fn an_init_dry_run_in_a_pipe_prints_the_config_with_the_comment_in_place_of_the_
     assert!(!run.stdout.contains("id = "), "{}", run.stdout);
     assert!(
         run.stderr.starts_with("Would create a collection at "),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("\nWould write .antiq/README.md\n"),
         "{}",
         run.stderr
     );

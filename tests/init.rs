@@ -111,6 +111,7 @@ fn init_with_json_describes_the_new_collection() {
     assert_eq!(
         names,
         [
+            "README.md",
             "config.toml",
             "doomed",
             "pieces",
@@ -389,9 +390,10 @@ fn a_directory_name_with_a_newline_cannot_forge_a_line_of_a_dry_run() {
     let run = init_at(&forging, &["-n"]);
 
     assert_eq!(run.code(), 0, "stdout: {}", run.stdout);
-    assert_eq!(run.stderr.lines().count(), 1, "{:?}", run.stderr);
+    assert_eq!(run.stderr.lines().count(), 2, "{:?}", run.stderr);
     assert!(
-        run.stderr.ends_with("evil%0AWould create fake\n"),
+        run.stderr
+            .ends_with("evil%0AWould create fake\nWould write .antiq/README.md\n"),
         "{:?}",
         run.stderr
     );
@@ -431,7 +433,7 @@ fn a_dry_run_prints_the_config_it_would_write() {
     assert_eq!(config.collection.patterns, ["a*"]);
     assert_eq!(
         normalised(&run.stderr, &tree),
-        "Would create a collection at <root>\n"
+        "Would create a collection at <root>\nWould write .antiq/README.md\n"
     );
 }
 
@@ -453,6 +455,7 @@ fn a_json_dry_run_carries_the_config() {
         ]
     );
     assert_eq!(json["actions"][0]["kind"], "create_collection");
+    assert_eq!(json["actions"][1], json!({"kind": "write_readme"}));
     let config = Config::parse(json["config"].as_str().expect("the config text"), None)
         .expect("the text is a config");
     assert_eq!(config.collection.patterns, ["*"]);

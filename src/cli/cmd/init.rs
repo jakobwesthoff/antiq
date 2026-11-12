@@ -10,6 +10,7 @@ use crate::cli::notice::{self, Notice};
 use crate::cli::output::Output;
 use crate::cli::{Context, InitArgs};
 use antiq::clock::SystemClock;
+use antiq::collection::README_FILE;
 use antiq::commands::init::{InitError, InitReport, InitRequest, init};
 use antiq::id::RandomIds;
 use antiq::select::SelectError;
@@ -89,12 +90,14 @@ fn render(report: &InitReport, env: &Env) -> Lines {
             stdout.extend(
                 without_id(config).map(|line| format!("{frame} {line}").trim_end().to_string()),
             );
+            stdout.push(format!("Would write .antiq/{README_FILE}"));
         } else {
             stdout.extend(without_id(config).map(str::to_string));
             stderr.push(Notice::Line(format!(
                 "Would create a collection at {}",
                 Shown(&report.path)
             )));
+            stderr.push(Notice::Line(format!("Would write .antiq/{README_FILE}")));
         }
     } else {
         stdout.push(format!("Created the collection at {}", Shown(&report.path)));
@@ -195,7 +198,11 @@ mod tests {
         );
         assert_eq!(
             pipe_lines(&lines.stderr),
-            ["Would create a collection at /work", "warning: watch out"]
+            [
+                "Would create a collection at /work",
+                "Would write .antiq/README.md",
+                "warning: watch out"
+            ]
         );
     }
 }

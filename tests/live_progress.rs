@@ -626,7 +626,7 @@ fn push_init_leaves_the_table_the_claim_and_no_card() {
             "PIECE CREATED UPDATED DELETED",
             "notes/daily 1 0 0",
             "projects/scanner 2 0 0",
-            "other files 1 0 0",
+            "other files 2 0 0",
         ]
     );
     assert!(
@@ -642,7 +642,7 @@ fn push_init_leaves_the_table_the_claim_and_no_card() {
         .find(|line| line.starts_with("✔ Claimed "))
         .expect("the claim summary");
     assert!(
-        summary.contains("2 pieces pushed · 4 files changed   took "),
+        summary.contains("2 pieces pushed · 5 files changed   took "),
         "{summary}"
     );
     assert!(lines.iter().any(|line| line.contains(".antiq-target")));
