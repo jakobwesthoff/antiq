@@ -78,15 +78,18 @@ stream() {
 }
 
 # Writes the files of a piece. The stream file is the part that does not
-# compress; the text file is the part that does, so that the pieces archive at
-# a mixed ratio.
+# compress; the text file is the part that does. <percent> of the bytes go to
+# the stream, so that the archive keeps about that share of the piece, and
+# each piece gets its own share: the finished lines of an archive show it.
 ballast() {
     piece=$1
     bytes=$2
     seed=$3
+    percent=$4
+    noise=$((bytes * percent / 100))
     mkdir -p "$root/experiments/$piece/data"
-    stream $((bytes / 2)) "$seed" > "$root/experiments/$piece/data/samples.bin"
-    yes 'timestamp=2026-10-02 reading=21.4 status=ok' | head -c $((bytes - bytes / 2)) \
+    stream "$noise" "$seed" > "$root/experiments/$piece/data/samples.bin"
+    yes 'timestamp=2026-10-02 reading=21.4 status=ok' | head -c $((bytes - noise)) \
         > "$root/experiments/$piece/data/readings.log" || true
 }
 
@@ -131,10 +134,10 @@ build() {
     make_piece fresh-idea notes.md
     make_piece keep-me draft.txt
 
-    ballast scanner $((150000000 / scale)) 1
-    ballast scan-old $((60000000 / scale)) 2
-    ballast recipe-api $((100000000 / scale)) 3
-    ballast ledger-cli $((20000000 / scale)) 4
+    ballast scanner $((150000000 / scale)) 1 23
+    ballast scan-old $((60000000 / scale)) 2 41
+    ballast recipe-api $((100000000 / scale)) 3 12
+    ballast ledger-cli $((20000000 / scale)) 4 17
 
     backdate_piece scanner 90
     backdate_piece scan-old 200

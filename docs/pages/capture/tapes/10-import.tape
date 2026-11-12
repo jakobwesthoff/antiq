@@ -17,9 +17,13 @@ Source common.tape
 # written by its full path, since a ~ on the line that sets HOME can still
 # mean the real home, and reached as ~/old-disk afterwards, once HOME points
 # at the demo world in this shell. Its files carry a time in March 2025,
-# which names the version.
+# which names the version. A glyph table that compresses well and an asset
+# that does not, both written the same on every render, make the archive
+# about 20 % of the content, as for a real project: two one-line files alone
+# make an archive several times larger than its content, as the tar headers
+# outweigh them.
 Hide
-Type `d="$ANTIQ_DEMO_ROOT/old-disk/pixel-clock" && mkdir -p "$d/src" && echo 'fn main() {}' > "$d/src/main.rs" && echo '# pixel clock' > "$d/README.md" && touch -t 202503141200 "$d/src/main.rs" "$d/README.md" && export HOME="$ANTIQ_DEMO_ROOT" && clear`
+Type `d="$ANTIQ_DEMO_ROOT/old-disk/pixel-clock" && mkdir -p "$d/src" "$d/assets" && echo 'fn main() {}' > "$d/src/main.rs" && echo '# pixel clock' > "$d/README.md" && seq 0 4095 | awk '{ printf "    Glyph { code: %d, rows: [%d, %d, %d, %d, %d, %d, %d, %d] },\n", $1, ($1*7)%256, ($1*13)%256, ($1*31)%256, ($1*61)%256, ($1*97)%256, ($1*127)%256, ($1*151)%256, ($1*199)%256 }' > "$d/src/font.rs" && LC_ALL=C awk 'BEGIN { srand(7); for (i = 0; i < 56000; i++) printf "%c", int(rand() * 255) + 1 }' > "$d/assets/splash.bin" && touch -t 202503141200 "$d/src/main.rs" "$d/src/font.rs" "$d/README.md" "$d/assets/splash.bin" && export HOME="$ANTIQ_DEMO_ROOT" && clear`
 Enter
 Sleep 500ms
 Show
