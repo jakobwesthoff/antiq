@@ -577,6 +577,29 @@ fn a_folder_name_with_an_escape_character_is_shown_escaped_in_an_import_dry_run(
 }
 
 #[test]
+fn a_percent_sign_in_the_folder_is_shown_as_percent_25_in_the_dry_run_line_and_stays_in_json() {
+    let collection = world();
+    let mut tree = Tree::new();
+    tree.file_with("x%y/a.txt", "alpha", 0o644, OLD);
+    let folder = tree.path("x%y");
+
+    let text = import(&collection, &[], &[&folder, &"-n"]);
+    assert_eq!(text.code(), 0, "{}", text.stderr);
+    assert!(text.stdout.contains("/x%25y as x%25y"), "{:?}", text.stdout);
+
+    let json = import(&collection, &["--json"], &[&folder, &"-n"]);
+    let value = json.json();
+    let last = value["actions"]
+        .as_array()
+        .expect("actions")
+        .last()
+        .expect("an action")
+        .clone();
+    let source = last["source"].as_str().expect("a source");
+    assert!(source.ends_with("/x%y"), "{source}");
+}
+
+#[test]
 fn a_dry_run_names_the_version_and_what_it_leaves_out_and_changes_nothing() {
     let collection = world();
     let mut tree = source();

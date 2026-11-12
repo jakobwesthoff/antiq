@@ -412,6 +412,53 @@ fn a_usage_error_shows_an_argument_that_is_not_utf_8_by_its_bytes() {
 }
 
 // =========================================================
+// A stray file in the store
+// =========================================================
+
+/// Copies the listing of the version with `stamp` to a file whose name holds
+/// a `%`, so that the slot of the listing holds two files.
+fn add_stray_listing(collection: &Collection, stamp: &str) {
+    fn find(dir: &Path, stamp: &str) -> Option<PathBuf> {
+        for entry in fs::read_dir(dir).expect("a directory reads") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, stamp) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .ends_with(&format!("{stamp}.sha256.zst"))
+            }) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let listing = find(&collection.path(".antiq/pieces"), stamp).expect("a listing exists");
+    let stray = listing.with_file_name(format!("a%b--{stamp}.sha256.zst"));
+    fs::copy(&listing, stray).expect("the file is copied");
+}
+
+#[test]
+fn a_stray_file_with_a_percent_sign_in_the_store_is_shown_once_escaped() {
+    let collection = archived();
+    let stamp = stamp_of(&collection, PERCENT.1);
+    add_stray_listing(&collection, &stamp);
+    for args in [
+        &["forget", "-n", PERCENT.0, &stamp][..],
+        &["status"][..],
+        &["push", "-n", "--init"][..],
+    ] {
+        let run = antiq(&collection, args);
+        assert_clean("stray", &run);
+        let text = format!("{}{}", run.stdout, run.stderr);
+        assert!(!text.contains("%2525"), "{args:?}: {text:?}");
+    }
+    let run = antiq(&collection, &["status"]);
+    assert_shows("stray status", &run, "a%25b--");
+}
+
+// =========================================================
 // JSON
 // =========================================================
 

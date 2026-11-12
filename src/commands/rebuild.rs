@@ -31,10 +31,10 @@ use crate::versions::store::{self, StoreVersion};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde::{Serialize, Serializer};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 /// The folder in `tmp/` where the new files are written before they move
@@ -196,6 +196,13 @@ pub struct RebuildEntry {
     pub against: Option<String>,
     /// The bare names of the files that are written, in order.
     pub write: Vec<String>,
+    /// The names above as the bytes the filesystem holds, for the console.
+    #[serde(skip)]
+    pub archive_name: OsString,
+    #[serde(skip)]
+    pub against_name: Option<OsString>,
+    #[serde(skip)]
+    pub write_names: Vec<OsString>,
 }
 
 /// One step of a run, as a plan lists it.
@@ -216,6 +223,9 @@ pub struct RebuildReport {
     pub basis: Basis,
     /// The bare names of the files that were written, in order.
     pub written: Vec<String>,
+    /// The names above as the bytes the filesystem holds, for the console.
+    #[serde(skip)]
+    pub written_names: Vec<OsString>,
     /// The repairs at the start of the run that were done.
     pub repairs: Vec<Action>,
     pub warnings: Vec<Warning>,
@@ -304,6 +314,7 @@ pub fn rebuild_observed(
         version: entry.version,
         basis,
         written: entry.write,
+        written_names: entry.write_names,
         repairs: guard
             .repaired()
             .iter()
@@ -543,26 +554,43 @@ fn refusal_to_overwrite(damage: &Damage, file: &std::ffi::OsStr) -> String {
 
 fn entry_of(chosen: &Chosen, basis: Basis) -> RebuildEntry {
     let version = &chosen.version;
-    let name = |kind: VersionFile| version.files(kind)[0].to_string_lossy().into_owned();
-    let archive = name(VersionFile::Archive);
-    let against = match basis {
-        Basis::ChecksumFile => Some(name(VersionFile::Checksum)),
-        Basis::Listing => Some(name(VersionFile::Listing)),
+    let raw = |kind: VersionFile| version.files(kind)[0].clone();
+    let text = |name: &OsString| name.to_string_lossy().into_owned();
+    let archive_name = raw(VersionFile::Archive);
+    let against_name = match basis {
+        Basis::ChecksumFile => Some(raw(VersionFile::Checksum)),
+        Basis::Listing => Some(raw(VersionFile::Listing)),
         Basis::ReadableOnly => None,
     };
+    let write_names: Vec<OsString> = basis
+        .written()
+        .iter()
+        .map(|kind| sidecar_name_os(&archive_name, *kind))
+        .collect();
     RebuildEntry {
         piece: chosen.folder.clone(),
         stamp: version.stamp,
         version: version.stamp.time(),
         basis,
-        write: basis
-            .written()
-            .iter()
-            .map(|kind| sidecar_name(&archive, *kind))
-            .collect(),
-        archive,
-        against,
+        write: write_names.iter().map(text).collect(),
+        archive: text(&archive_name),
+        against: against_name.as_ref().map(text),
+        archive_name,
+        against_name,
+        write_names,
     }
+}
+
+/// [`sidecar_name`] for an archive name that need not be text.
+fn sidecar_name_os(archive: &OsString, kind: VersionFile) -> OsString {
+    let suffix = VersionFile::Archive.suffix().as_bytes();
+    let bytes = archive.as_bytes();
+    let stem = bytes
+        .strip_suffix(suffix)
+        .expect("the scan found the archive by its suffix");
+    let mut name = stem.to_vec();
+    name.extend_from_slice(kind.suffix().as_bytes());
+    OsString::from_vec(name)
 }
 
 /// The name of the sidecar `kind` beside the archive `archive`: the archive

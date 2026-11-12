@@ -149,7 +149,7 @@ fn statement(basis: Basis) -> &'static str {
 fn render(report: &RebuildReport) -> Lines {
     let name = report.stamp.to_string();
     let files: Vec<String> = report
-        .written
+        .written_names
         .iter()
         .map(|file| Shown(file).to_string())
         .collect();
@@ -179,20 +179,26 @@ fn explanation() -> Block {
 /// The rows of a version on a terminal: what is checked, against what, and
 /// which files are written, each under its role.
 fn rows(entry: &RebuildEntry) -> Vec<String> {
-    let row = |role: &str, file: &str| format!("  {role:<9}{}", Shown(file));
+    let row = |role: &str, text: String| format!("  {role:<9}{text}");
+    let archive = Shown(&entry.archive_name);
     let mut rows = Vec::new();
-    match (&entry.basis, &entry.against) {
+    match (&entry.basis, &entry.against_name) {
         (Basis::ChecksumFile, Some(against)) => {
-            rows.push(row("check", &entry.archive));
-            rows.push(row("against", against));
+            rows.push(row("check", archive.to_string()));
+            rows.push(row("against", Shown(against).to_string()));
         }
         (Basis::Listing, Some(against)) => {
-            rows.push(row("check", &format!("every member of {}", entry.archive)));
-            rows.push(row("against", against));
+            rows.push(row("check", format!("every member of {archive}")));
+            rows.push(row("against", Shown(against).to_string()));
         }
-        _ => rows.push(row("read", &format!("{} to its end", entry.archive))),
+        _ => rows.push(row("read", format!("{archive} to its end"))),
     }
-    rows.extend(entry.write.iter().map(|file| row("write", file)));
+    rows.extend(
+        entry
+            .write_names
+            .iter()
+            .map(|file| row("write", Shown(file).to_string())),
+    );
     rows
 }
 
@@ -227,14 +233,14 @@ fn render_plan(plan: &RebuildPlan, terminal: bool, zone: &TimeZone) -> Lines {
                 stdout.extend(rows(entry));
             }
             Action::RebuildVersion(entry) => {
-                let archive = Shown(&entry.archive).to_string();
+                let archive = Shown(&entry.archive_name).to_string();
                 let against = entry
-                    .against
+                    .against_name
                     .as_deref()
                     .map(|file| Shown(file).to_string())
                     .unwrap_or_default();
                 let write: Vec<String> = entry
-                    .write
+                    .write_names
                     .iter()
                     .map(|file| Shown(file).to_string())
                     .collect();
@@ -274,6 +280,9 @@ mod tests {
             archive: "a.tar.zst".to_string(),
             against: against.map(str::to_string),
             write: write.iter().map(|file| file.to_string()).collect(),
+            archive_name: "a.tar.zst".into(),
+            against_name: against.map(Into::into),
+            write_names: write.iter().map(Into::into).collect(),
         }
     }
 
@@ -312,6 +321,21 @@ mod tests {
     }
 
     #[test]
+    fn a_file_name_that_is_not_utf_8_is_shown_by_its_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut odd = entry(Basis::Listing, None, &[]);
+        odd.archive_name = std::ffi::OsString::from_vec(b"a%\xff.tar.zst".to_vec());
+        odd.against_name = Some(std::ffi::OsString::from_vec(b"a%\xff.sha256.zst".to_vec()));
+        odd.write_names = vec![std::ffi::OsString::from_vec(
+            b"a%\xff.tar.zst.sha256".to_vec(),
+        )];
+        let rows = rows(&odd);
+        assert_eq!(rows[0], "  check    every member of a%25%FF.tar.zst");
+        assert_eq!(rows[1], "  against  a%25%FF.sha256.zst");
+        assert_eq!(rows[2], "  write    a%25%FF.tar.zst.sha256");
+    }
+
+    #[test]
     fn an_archive_without_sidecars_is_only_read() {
         let rows = rows(&entry(
             Basis::ReadableOnly,
@@ -330,6 +354,7 @@ mod tests {
             version: stamp.time(),
             basis,
             written: written.iter().map(|file| file.to_string()).collect(),
+            written_names: written.iter().map(Into::into).collect(),
             repairs: Vec::new(),
             warnings: Vec::new(),
         }

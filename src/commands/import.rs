@@ -151,7 +151,10 @@ impl PlanAction for ImportAction {
                 stamp,
                 skipped: None,
                 ..
-            } => format!("import {source} as {piece}, version {stamp}"),
+            } => format!(
+                "import {} as {piece}, version {stamp}",
+                Shown(source.as_str())
+            ),
             ImportAction::Import {
                 skipped: Some(skipped),
                 ..
@@ -573,11 +576,14 @@ fn prepare(
 ) -> Result<Prepared, ImportError> {
     let config = &collection.config().collection;
     let (canonical, name) = locate(request)?;
-    let source = Shown(&canonical).to_string();
+    // The JSON keeps the path as the lossy text it always was; the errors
+    // name it by the rule for names.
+    let source = canonical.to_string_lossy().into_owned();
+    let shown = Shown(&canonical).to_string();
 
     // A folder the collection already holds is a piece or part of one.
     match resolve_path(collection, &request.cwd, &canonical) {
-        Ok(_) => return Err(ImportError::InsideCollection { path: source }),
+        Ok(_) => return Err(ImportError::InsideCollection { path: shown }),
         Err(ReferenceError::Outside { .. }) => {}
         Err(error) => return Err(error.into()),
     }
@@ -600,7 +606,7 @@ fn prepare(
     // The collection's exclude list names paths of the collection, so it
     // does not apply inside the folder.
     let root = TreeRoot::open(&canonical).map_err(|source_error| ImportError::Open {
-        path: source.clone(),
+        path: shown.clone(),
         source: source_error,
     })?;
     let rules = PieceRules::new(&config.ignore, &config.timeless)?;
@@ -613,7 +619,7 @@ fn prepare(
         &KeptFolder(hooks),
     )
     .map_err(|source_error| ImportError::Walk {
-        folder: source.clone(),
+        folder: shown.clone(),
         source: source_error,
     })?;
 
@@ -630,7 +636,7 @@ fn prepare(
         .map(|problem| Reason::from(&Refusal::of(&top, problem)))
         .collect();
     let pinned = pin::is_pinned(&root, &top).map_err(|source_error| ImportError::Pin {
-        folder: source.clone(),
+        folder: shown.clone(),
         source: source_error,
     })?;
     if pinned {
@@ -663,7 +669,7 @@ fn prepare(
     }
     if !reasons.is_empty() {
         return Err(ImportError::Refused {
-            folder: source,
+            folder: shown,
             reasons,
         });
     }
