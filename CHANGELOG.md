@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `rebuild` names the listing and the checksum file it writes by the
+  bytes of the archive's file name. An archive name that is not UTF-8 no
+  longer gets sidecars under a name with U+FFFD in it, and its checksum
+  file names the archive, so `shasum -a 256 -c` finds it. A checksum file
+  that an earlier `rebuild` wrote for such a name names a different file
+  than the archive, so the version is now reported as damaged and `push`
+  refuses it: delete that checksum file and run `rebuild` again, which
+  checks the archive against the listing that is still there. A name with
+  a line break is refused by `rebuild`, also in a dry run, instead of
+  failing while the listing is written or leaving a checksum file that
+  antiq reads as damaged
+
 ## [1.4.0] - 2026-11-12
 
 ### Added

@@ -515,12 +515,23 @@ fn judge(collection: &Collection, chosen: &Chosen) -> Result<Basis, RebuildError
 
     let no_listing = damages.contains(&Damage::NoListing);
     let no_checksum = damages.contains(&Damage::NoChecksum);
-    match (no_listing, no_checksum) {
-        (true, true) => Ok(Basis::ReadableOnly),
-        (true, false) => Ok(Basis::ChecksumFile),
-        (false, true) => Ok(Basis::Listing),
+    let basis = match (no_listing, no_checksum) {
+        (true, true) => Basis::ReadableOnly,
+        (true, false) => Basis::ChecksumFile,
+        (false, true) => Basis::Listing,
         (false, false) => unreachable!("every other damage was refused above"),
+    };
+
+    // The refusal needs only the name, so a dry run raises it as well.
+    let archive = &version.files(VersionFile::Archive)[0];
+    let writes_checksum = basis.written().contains(&VersionFile::Checksum);
+    if let Some(cause) = unrecordable(archive, writes_checksum) {
+        return Err(refuse(format!(
+            "the archive's name `{}` {cause}",
+            Shown(archive)
+        )));
     }
+    Ok(basis)
 }
 
 /// Whether the listing, when there is one, names a higher format.
@@ -581,7 +592,9 @@ fn entry_of(chosen: &Chosen, basis: Basis) -> RebuildEntry {
     }
 }
 
-/// [`sidecar_name`] for an archive name that need not be text.
+/// The name of the sidecar `kind` beside the archive `archive`: the archive
+/// name with its suffix replaced. The bytes are kept as they are, so the
+/// sidecar sits beside the archive whatever the name holds.
 fn sidecar_name_os(archive: &OsString, kind: VersionFile) -> OsString {
     let suffix = VersionFile::Archive.suffix().as_bytes();
     let bytes = archive.as_bytes();
@@ -593,13 +606,24 @@ fn sidecar_name_os(archive: &OsString, kind: VersionFile) -> OsString {
     OsString::from_vec(name)
 }
 
-/// The name of the sidecar `kind` beside the archive `archive`: the archive
-/// name with its suffix replaced.
-fn sidecar_name(archive: &str, kind: VersionFile) -> String {
-    let stem = archive
-        .strip_suffix(VersionFile::Archive.suffix())
-        .expect("the scan found the archive by its suffix");
-    format!("{stem}{}", kind.suffix())
+/// Why the name of an archive cannot be recorded in the files `rebuild`
+/// writes, or `None` when it can.
+///
+/// The head of a listing and the checksum file are lines, so a name with a
+/// line break would split them. A checksum file that antiq reads refuses a
+/// name that starts with a backslash or holds a carriage return as written
+/// escaped, so writing one would leave the version damaged.
+fn unrecordable(archive: &OsStr, writes_checksum: bool) -> Option<&'static str> {
+    let bytes = archive.as_bytes();
+    if bytes.contains(&b'\n') {
+        return Some("holds a line break, which a listing head and a checksum line cannot hold");
+    }
+    if writes_checksum && (bytes.starts_with(b"\\") || bytes.contains(&b'\r')) {
+        return Some(
+            "starts with a backslash or holds a carriage return, which antiq does not read in a checksum file",
+        );
+    }
+    None
 }
 
 // =========================================================
@@ -652,15 +676,13 @@ fn write_missing(
         .pieces_dir()
         .join(OsStr::from_bytes(folder.as_bytes()));
     let sidecar = |kind: VersionFile| store_folder.join(&version.files(kind)[0]);
-    let archive_name = version.files(VersionFile::Archive)[0]
-        .to_string_lossy()
-        .into_owned();
+    let archive_name = version.files(VersionFile::Archive)[0].clone();
     let archive = sidecar(VersionFile::Archive);
 
     let header = |archive_bytes: u64| Header {
         piece: folder.clone(),
         archived: version.stamp.time(),
-        archive: archive_name.clone().into(),
+        archive: archive_name.clone(),
         archive_bytes,
         imported: None,
         rebuilt: Some(rebuilt),
@@ -671,7 +693,7 @@ fn write_missing(
         Ok::<_, RebuildError>(bytes)
     };
 
-    let files: Vec<(String, Vec<u8>)> = match basis {
+    let files: Vec<(OsString, Vec<u8>)> = match basis {
         Basis::ChecksumFile => {
             let path = sidecar(VersionFile::Checksum);
             let line = std::fs::read(&path).map_err(io_error("read", &path))?;
@@ -679,7 +701,7 @@ fn write_missing(
             let read =
                 read_archive_once(&archive, Some(&checksum), Some(verifying)).map_err(from_pack)?;
             vec![(
-                sidecar_name(&archive_name, VersionFile::Listing),
+                sidecar_name_os(&archive_name, VersionFile::Listing),
                 listing_bytes(&header(read.digest.bytes), &read.entries)?,
             )]
         }
@@ -688,20 +710,20 @@ fn write_missing(
             let read = read_archive_once(&archive, None, Some(verifying)).map_err(from_pack)?;
             check_entries_against_listing(&read.entries, &listing.entries).map_err(from_pack)?;
             vec![(
-                sidecar_name(&archive_name, VersionFile::Checksum),
-                ChecksumFile::new(read.digest.sha256, archive_name.clone().into()).to_bytes(),
+                sidecar_name_os(&archive_name, VersionFile::Checksum),
+                ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
             )]
         }
         Basis::ReadableOnly => {
             let read = read_archive_once(&archive, None, Some(verifying)).map_err(from_pack)?;
             vec![
                 (
-                    sidecar_name(&archive_name, VersionFile::Listing),
+                    sidecar_name_os(&archive_name, VersionFile::Listing),
                     listing_bytes(&header(read.digest.bytes), &read.entries)?,
                 ),
                 (
-                    sidecar_name(&archive_name, VersionFile::Checksum),
-                    ChecksumFile::new(read.digest.sha256, archive_name.clone().into()).to_bytes(),
+                    sidecar_name_os(&archive_name, VersionFile::Checksum),
+                    ChecksumFile::new(read.digest.sha256, archive_name.clone()).to_bytes(),
                 ),
             ]
         }
@@ -711,7 +733,7 @@ fn write_missing(
     let moved = staged.and_then(|staging| {
         let pieces_dir = collection.pieces_dir();
         let pieces = TreeRoot::open(&pieces_dir).map_err(io_error("open", &pieces_dir))?;
-        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&OsStr> = files.iter().map(|(name, _)| name.as_os_str()).collect();
         store::move_sidecars_in(&staging, &pieces, folder, &names).map_err(RebuildError::Store)
     });
     // A staging folder that stays is emptied by repair 2 at the start of the
@@ -731,7 +753,7 @@ fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Rebu
 }
 
 /// Writes `files` into the staging folder of `tmp/` and opens it.
-fn stage(collection: &Collection, files: &[(String, Vec<u8>)]) -> Result<TreeRoot, RebuildError> {
+fn stage(collection: &Collection, files: &[(OsString, Vec<u8>)]) -> Result<TreeRoot, RebuildError> {
     let tmp_dir = collection.tmp_dir();
     let tmp = TreeRoot::open(&tmp_dir).map_err(io_error("open", &tmp_dir))?;
     let folder = staging_folder();
@@ -755,7 +777,7 @@ fn staging_folder() -> RelPath {
 }
 
 /// Removes what [`stage`] wrote and is still there, then the folder.
-fn remove_staging(collection: &Collection, files: &[(String, Vec<u8>)]) {
+fn remove_staging(collection: &Collection, files: &[(OsString, Vec<u8>)]) {
     let Ok(tmp) = TreeRoot::open(&collection.tmp_dir()) else {
         return;
     };
@@ -1020,15 +1042,116 @@ mod tests {
 
     #[test]
     fn sidecars_are_named_after_the_archive() {
-        let archive = "tools-scan--2026-11-04T090211.tar.zst";
+        let archive = OsString::from("tools-scan--2026-11-04T090211.tar.zst");
         assert_eq!(
-            sidecar_name(archive, VersionFile::Listing),
+            sidecar_name_os(&archive, VersionFile::Listing),
             "tools-scan--2026-11-04T090211.sha256.zst"
         );
         assert_eq!(
-            sidecar_name(archive, VersionFile::Checksum),
+            sidecar_name_os(&archive, VersionFile::Checksum),
             "tools-scan--2026-11-04T090211.tar.zst.sha256"
         );
+    }
+
+    #[test]
+    fn sidecars_are_named_after_the_archive_by_its_bytes() {
+        let archive = OsString::from_vec(b"a\xffb--2026-11-04T090211.tar.zst".to_vec());
+        assert_eq!(
+            sidecar_name_os(&archive, VersionFile::Listing).as_bytes(),
+            b"a\xffb--2026-11-04T090211.sha256.zst"
+        );
+        assert_eq!(
+            sidecar_name_os(&archive, VersionFile::Checksum).as_bytes(),
+            b"a\xffb--2026-11-04T090211.tar.zst.sha256"
+        );
+    }
+
+    #[test]
+    fn a_name_is_unrecordable_when_a_head_or_a_checksum_line_would_break() {
+        let line_break = OsStr::new("a\nb.tar.zst");
+        assert!(unrecordable(line_break, false).is_some());
+        assert!(unrecordable(line_break, true).is_some());
+
+        for name in ["\\a.tar.zst", "a\rb.tar.zst"] {
+            let name = OsStr::new(name);
+            assert_eq!(unrecordable(name, false), None, "{name:?}");
+            assert!(unrecordable(name, true).is_some(), "{name:?}");
+        }
+        assert_eq!(unrecordable(OsStr::new("a\\b.tar.zst"), true), None);
+        assert_eq!(
+            unrecordable(OsStr::from_bytes(b"a\xffb.tar.zst"), true),
+            None
+        );
+    }
+
+    /// A world whose archive has `name` and whose sidecars are `missing`.
+    /// The checksum file of the world names the old archive, so a basis
+    /// that keeps it is damaged: the tests below keep only the other two.
+    fn world_with_archive_named(name: &str, missing: &[VersionFile]) -> World {
+        let world = World::new();
+        for kind in missing {
+            world.version.remove(*kind);
+        }
+        fs::rename(
+            world.version.path(VersionFile::Archive),
+            world.version.folder.join(name),
+        )
+        .expect("the archive moves");
+        world
+    }
+
+    fn plan_of(world: &World) -> Result<RebuildPlan, RebuildError> {
+        let collection = Collection::find(world.temp.root()).expect("the collection");
+        let cwd = world.temp.root().to_path_buf();
+        plan(
+            &RebuildRequest {
+                collection: &collection,
+                cwd: &cwd,
+                piece: OsStr::new("projects/scanner"),
+                version: STAMP,
+            },
+            &world.clock,
+            &TimeZone::UTC,
+        )
+    }
+
+    fn assert_refused_for_the_line_break(error: RebuildError) {
+        assert!(matches!(error, RebuildError::Refused { .. }), "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains("the archive's name `a%0Ab--2026-11-04T090211.tar.zst`")
+                && text.contains("a line break"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_archive_name_with_a_line_break_is_refused_before_anything_is_written() {
+        let name = "a\nb--2026-11-04T090211.tar.zst";
+        for missing in [
+            vec![VersionFile::Listing, VersionFile::Checksum],
+            vec![VersionFile::Checksum],
+        ] {
+            let world = world_with_archive_named(name, &missing);
+            let before = fs::read_dir(&world.version.folder).expect("lists").count();
+            let error = world
+                .rebuild(&Recorder::new())
+                .expect_err("the name cannot be recorded");
+            assert_refused_for_the_line_break(error);
+            assert_eq!(
+                fs::read_dir(&world.version.folder).expect("lists").count(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn a_dry_run_refuses_an_archive_name_with_a_line_break_too() {
+        let world = world_with_archive_named(
+            "a\nb--2026-11-04T090211.tar.zst",
+            &[VersionFile::Listing, VersionFile::Checksum],
+        );
+        assert_refused_for_the_line_break(plan_of(&world).expect_err("the name is refused"));
     }
 
     #[test]

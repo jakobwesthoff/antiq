@@ -1305,6 +1305,14 @@ only on the user's request, never as a repair. (ADR 0062)
 - An archive file whose size differs from its listing's `archive-bytes`
   cannot be repaired by `rebuild`, since the hash against the surviving
   checksum file can only fail; `rebuild` refuses and says so.
+- A file `rebuild` writes takes the bytes of the archive's name with the
+  suffix of the archive replaced, so it sits beside the archive whatever
+  bytes the name holds, and the checksum file names the archive by those
+  bytes. An archive name with a line break is refused, since a listing
+  head and a checksum line are lines. When the checksum file is among the
+  files to write, a name that starts with a backslash or holds a carriage
+  return is refused as well, since antiq reads a checksum file with such a
+  name as written escaped and calls the version damaged.
 - A sidecar that is present but corrupt (see "Damage") is not
   overwritten: `rebuild` refuses and names deleting that file (after which
   it is missing and can be rebuilt) or copying it back from the target.
@@ -1330,8 +1338,8 @@ notes. `-n` lists the repairs as `Would ...` lines, then one of `Would check
 <archive> against <checksum file> and write <listing>`, `Would check every
 member of <archive> against <listing> and write <checksum file>` and `Would
 read <archive> to its end and write <listing>, <checksum file>`. A dry run
-applies the refusals that follow from the sidecars and the size of the
-archive. It neither hashes nor reads the archive, so it can succeed where
+applies the refusals that follow from the sidecars, the size of the
+archive and its name. It neither hashes nor reads the archive, so it can succeed where
 the real run refuses a mismatch. On a terminal the version is the action
 `Would rebuild version <time> of <piece>`, followed by one indented row
 for each step: `check`, `against`, `write` (one row for each file) or

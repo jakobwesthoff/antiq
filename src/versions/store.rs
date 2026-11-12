@@ -524,7 +524,7 @@ pub fn move_sidecars_in(
     staging: &TreeRoot,
     pieces: &TreeRoot,
     folder: &RelPath,
-    files: &[&str],
+    files: &[&OsStr],
 ) -> Result<(), VersionsError> {
     move_sidecars_in_with(&RealDurable, staging, pieces, folder, files)
 }
@@ -534,7 +534,7 @@ pub(crate) fn move_sidecars_in_with(
     staging: &TreeRoot,
     pieces: &TreeRoot,
     folder: &RelPath,
-    files: &[&str],
+    files: &[&OsStr],
 ) -> Result<(), VersionsError> {
     for name in files {
         let target = file_in(folder, name)?;
@@ -673,10 +673,11 @@ fn transfer(
     durable: &dyn Durable,
     from: &Place<'_>,
     to: &Place<'_>,
-    name: &str,
+    name: impl AsRef<OsStr>,
     flush_source: bool,
 ) -> Result<(), Failure> {
     let before = Failure::Before;
+    let name = name.as_ref();
     let source = file_in(from.dir, name).map_err(before)?;
     let target = file_in(to.dir, name).map_err(before)?;
 
@@ -1460,7 +1461,8 @@ mod tests {
             durable: &dyn Durable,
             files: &[&str],
         ) -> Result<(), VersionsError> {
-            move_sidecars_in_with(durable, &self.staging(), &self.pieces(), &path("p"), files)
+            let files: Vec<&OsStr> = files.iter().map(OsStr::new).collect();
+            move_sidecars_in_with(durable, &self.staging(), &self.pieces(), &path("p"), &files)
         }
     }
 

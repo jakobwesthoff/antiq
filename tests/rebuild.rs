@@ -936,3 +936,243 @@ fn a_search_word_that_fits_one_piece_still_names_the_piece_to_rebuild() {
         .run(&["rebuild", "scanner", STAMP, "-n"])
         .expect_code(0);
 }
+
+// =========================================================
+// An archive name that is not UTF-8
+// =========================================================
+
+// APFS refuses a file name with such bytes, so the version can only exist
+// where the filesystem takes arbitrary bytes.
+#[cfg(target_os = "linux")]
+mod raw_name {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use support::scenario::outsider::{listing_check, shasum_check, tar_extract};
+
+    /// The stem of the version's files, with a byte that is not UTF-8.
+    fn stem() -> Vec<u8> {
+        [b"a\xffb--".as_slice(), STAMP.as_bytes()].concat()
+    }
+
+    fn named(suffix: &str) -> OsString {
+        OsString::from_vec([stem().as_slice(), suffix.as_bytes()].concat())
+    }
+
+    /// The name as text, with U+FFFD for the byte that is not UTF-8.
+    fn lossy(suffix: &str) -> String {
+        named(suffix).to_string_lossy().into_owned()
+    }
+
+    /// The name as the console shows it.
+    fn shown(suffix: &str) -> String {
+        lossy(suffix).replace('\u{fffd}', "%FF")
+    }
+
+    fn replace_bytes(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .expect("the bytes hold the name");
+        [&bytes[..at], to, &bytes[at + from.len()..]].concat()
+    }
+
+    /// The files of the version under their new names.
+    struct Raw {
+        folder: PathBuf,
+        archive: PathBuf,
+        listing: PathBuf,
+        checksum: PathBuf,
+    }
+
+    /// Renames the three files of the version to names that are not UTF-8
+    /// and rewrites the checksum file to name the new archive, since the
+    /// harness writes the old name into it.
+    fn rename_to_raw(world: &World) -> Raw {
+        let old = files(world, STAMP);
+        let folder = old.archive.parent().expect("a store folder").to_path_buf();
+        let raw = Raw {
+            archive: folder.join(named(".tar.zst")),
+            listing: folder.join(named(".sha256.zst")),
+            checksum: folder.join(named(".tar.zst.sha256")),
+            folder,
+        };
+        let content = replace_bytes(
+            &fs::read(&old.checksum).expect("the checksum file exists"),
+            name(&old.archive).as_bytes(),
+            named(".tar.zst").as_encoded_bytes(),
+        );
+        fs::rename(&old.archive, &raw.archive).expect("the archive moves");
+        fs::rename(&old.listing, &raw.listing).expect("the listing moves");
+        fs::rename(&old.checksum, &raw.checksum).expect("the checksum file moves");
+        fs::write(&raw.checksum, content).expect("the checksum file is written");
+        raw
+    }
+
+    fn names_in(folder: &Path) -> Vec<OsString> {
+        let mut names: Vec<OsString> = fs::read_dir(folder)
+            .expect("the folder lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Removes the sidecars `missing` names, rebuilds, and checks what the
+    /// store holds and what `shasum` and the listing make of it.
+    fn rebuild_with_missing(missing: &[&str]) {
+        both(one_version, |world| {
+            let raw = rename_to_raw(world);
+            let mut written = Vec::new();
+            for (suffix, path) in [
+                (".sha256.zst", &raw.listing),
+                (".tar.zst.sha256", &raw.checksum),
+            ] {
+                if missing.contains(&suffix) {
+                    remove(path);
+                    written.push(suffix);
+                }
+            }
+            let archive = fs::read(&raw.archive).expect("the archive exists");
+            let expected_checksum = [
+                format!("{}  ", hex(&archive)).as_bytes(),
+                stem().as_slice(),
+                b".tar.zst\n",
+            ]
+            .concat();
+
+            let run = world.run(&["rebuild", PIECE, STAMP]);
+            run.expect_code(0);
+            run.text_only(|out| {
+                let wrote: Vec<String> = written.iter().map(|suffix| shown(suffix)).collect();
+                assert_eq!(
+                    out,
+                    format!(
+                        "Rebuilt version {STAMP} of {PIECE}: wrote {}\n",
+                        wrote.join(", ")
+                    )
+                );
+            });
+            run.json_only(|json| {
+                let wrote: Vec<String> = written.iter().map(|suffix| lossy(suffix)).collect();
+                assert_eq!(json["written"], serde_json::json!(wrote));
+            });
+
+            let mut expected = vec![
+                named(".tar.zst"),
+                named(".sha256.zst"),
+                named(".tar.zst.sha256"),
+            ];
+            expected.sort();
+            assert_eq!(
+                names_in(&raw.folder),
+                expected,
+                "the sidecars sit beside the archive under its name"
+            );
+            assert_eq!(
+                fs::read(&raw.checksum).expect("the checksum file exists"),
+                expected_checksum
+            );
+            if written.contains(&".sha256.zst") {
+                let decoded = zstd::stream::decode_all(
+                    &fs::read(&raw.listing).expect("the listing exists")[..],
+                )
+                .expect("the listing decodes");
+                let line = [b"# archive       ".as_slice(), &stem(), b".tar.zst\n"].concat();
+                assert!(
+                    decoded
+                        .windows(line.len())
+                        .any(|window| window == line.as_slice()),
+                    "the head names the archive by its bytes"
+                );
+            }
+
+            // The checks of the spec's hand verification, with the tools
+            // of the machine.
+            shasum_check(&raw.folder, &raw.checksum);
+            let scratch = tempfile::tempdir().expect("a scratch directory");
+            let unpacked = scratch.path().join("unpacked");
+            tar_extract(&raw.archive, &unpacked);
+            listing_check(
+                &raw.listing,
+                &unpacked.join("scanner"),
+                &scratch.path().join("listing"),
+            );
+
+            let again = assert_refused(world, &["rebuild", PIECE, STAMP]);
+            assert_all_in(&error_text(&again), &["is not damaged"]);
+        });
+    }
+
+    #[test]
+    fn a_missing_listing_is_written_under_the_name_of_the_archive() {
+        rebuild_with_missing(&[".sha256.zst"]);
+    }
+
+    #[test]
+    fn a_missing_checksum_file_is_written_under_the_name_of_the_archive() {
+        rebuild_with_missing(&[".tar.zst.sha256"]);
+    }
+
+    #[test]
+    fn two_missing_sidecars_are_both_written_under_the_name_of_the_archive() {
+        rebuild_with_missing(&[".sha256.zst", ".tar.zst.sha256"]);
+    }
+
+    #[test]
+    fn a_dry_run_shows_the_name_escaped_and_names_it_by_its_text_in_json() {
+        both(one_version, |world| {
+            let raw = rename_to_raw(world);
+            remove(&raw.listing);
+            remove(&raw.checksum);
+            let before = state(world);
+
+            let run = world.run(&["rebuild", PIECE, STAMP, "-n"]);
+            run.expect_code(0);
+            run.text_only(|out| {
+                assert_eq!(
+                    out,
+                    format!(
+                        "Would read {} to its end and write {}, {}\n",
+                        shown(".tar.zst"),
+                        shown(".sha256.zst"),
+                        shown(".tar.zst.sha256")
+                    )
+                );
+            });
+            run.json_only(|json| {
+                let action = &json["actions"][0];
+                assert_eq!(action["archive"], lossy(".tar.zst"));
+                assert_eq!(
+                    action["write"],
+                    serde_json::json!([lossy(".sha256.zst"), lossy(".tar.zst.sha256")])
+                );
+            });
+            assert_eq!(state(world), before);
+        });
+    }
+
+    /// What a rebuild of 1.4.0 left: a checksum file under the name with
+    /// U+FFFD, holding that name.
+    #[test]
+    fn a_checksum_file_of_the_lossy_name_is_damaged_and_replaced_after_it_is_deleted() {
+        both(one_version, |world| {
+            let raw = rename_to_raw(world);
+            remove(&raw.checksum);
+            let archive = fs::read(&raw.archive).expect("the archive exists");
+            let stale = raw.folder.join(lossy(".tar.zst.sha256"));
+            fs::write(
+                &stale,
+                format!("{}  {}\n", hex(&archive), lossy(".tar.zst")),
+            )
+            .expect("the stale file is written");
+
+            let refused = assert_refused(world, &["rebuild", PIECE, STAMP]);
+            assert_all_in(&error_text(&refused), &["rebuild does not overwrite"]);
+
+            remove(&stale);
+            world.run(&["rebuild", PIECE, STAMP]).expect_code(0);
+            shasum_check(&raw.folder, &raw.checksum);
+        });
+    }
+}
