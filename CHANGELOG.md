@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A `%` in a path or name is shown as `%25` in all text output, and a byte
   that is not UTF-8 as `%XX`, so that a shown name stands for exactly one
-  name. The `message` and `fix` of errors and warnings in `--json` carry
-  the same form. The structured fields (`piece`, `path`, `candidates`) are
-  unchanged
+  name. The prose texts of `--json` carry the same form: the `message` and
+  `fix` of errors and warnings, the `text` of refusal reasons, the
+  `message` of skipped entries, the `damage` and `reasons` of versions and
+  the notes. The structured fields (`piece`, `path`, `candidates`,
+  `source`) are unchanged
 - `grep` shows the piece and the path by the same rule on a terminal and in
   a pipe: a control character as `%XX` of its bytes, a `%` as `%25` and a
   byte that is not UTF-8 as `%XX`. A pipe line used to carry the raw bytes

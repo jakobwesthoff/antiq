@@ -2595,6 +2595,13 @@ naming a command has `"command": null`. An error is
 - `fix` is the help of the explanation that gives `code`, in the same form.
   It follows `message` and is absent where that explanation has no help. A usage
   error of the command line parser carries neither `code` nor `fix`.
+- The prose texts of every JSON output, which are the `message` and `fix`
+  of errors and warnings, the `text` and `line` of refusal reasons, the
+  `message` and `reason` of skipped entries, the `damage` and `reasons` of
+  versions, `note`, `notes` and `problem`, carry names from the user's files
+  in the shown form of "Console output". A text of several lines keeps its
+  line breaks. The structured fields (`piece`, `path`, `candidates`,
+  `source` and the like) carry names as they are.
 - The details are the keys that a kind adds, such as `pid` and `started`.
   The error of a failed rsync run adds `program_said`, and `log` and
   `log_warning` where a log exists (see "Run log").
