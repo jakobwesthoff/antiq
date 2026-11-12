@@ -511,6 +511,11 @@ Everything antiq stores is in plain formats that standard tools read. Your
 versions do not depend on antiq: without it, `tar`, `zstd` and `shasum`
 get every file back and check it.
 
+`.antiq/README.md` says this to whoever finds the folder. `init` writes it,
+and every run that takes the lock writes it again when it is missing or
+differs from the text of the antiq that runs, so a change made by hand is
+replaced.
+
 Each piece has a folder in `.antiq/pieces/`, named by the piece's path.
 Each version in it is three files that share one name, made of the
 piece's name and the version's time in UTC:

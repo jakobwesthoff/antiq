@@ -339,6 +339,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_dry_run_lists_a_missing_readme_and_a_real_start_writes_it() {
+        let temp = TempCollection::minimal();
+        let readme = temp.root().join(".antiq/README.md");
+        std::fs::remove_file(&readme).expect("the fixture has a README");
+        let collection = collection(&temp);
+
+        let started = start(&collection, &clock(), true).expect("starts");
+
+        let Started::DryRun { repairs, .. } = started else {
+            panic!("a dry run");
+        };
+        assert_eq!(repairs, [Repair::WriteReadme { replaces: false }]);
+        assert!(!readme.exists(), "a dry run writes nothing");
+        let guard = begin(&collection).expect("starts");
+        assert_eq!(guard.repaired(), repairs);
+        assert_eq!(
+            std::fs::read_to_string(&readme).expect("the README is there"),
+            crate::collection::README
+        );
+    }
+
     fn crashed(temp: &mut TempCollection) {
         temp.tree().file(".antiq/tmp/upload.part", "x");
         temp.tree()

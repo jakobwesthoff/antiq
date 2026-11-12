@@ -247,7 +247,8 @@ pub(crate) fn ensure_same_device(
     Ok(())
 }
 
-/// Writes the marker `name` with `content` at `top`.
+/// Writes the marker `name` with `content` at `top`. The README of
+/// `.antiq/` is written the same way, with `.antiq` as `top`.
 ///
 /// The content is written and flushed in `.antiq/tmp/`, then renamed over
 /// the marker's place, then the top is flushed. A failure up to and including

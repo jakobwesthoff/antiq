@@ -80,7 +80,8 @@ impl Planned {
                 Repair::CreateFolder { .. }
                 | Repair::DeleteTemporary { .. }
                 | Repair::DeleteDoomed { .. }
-                | Repair::RemoveEmptyChain { .. } => {}
+                | Repair::RemoveEmptyChain { .. }
+                | Repair::WriteReadme { .. } => {}
             }
         }
         planned

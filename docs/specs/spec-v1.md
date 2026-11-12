@@ -353,7 +353,12 @@ checked before the idle and empty tests. (ADR 0024)
 
 - `README.md` explains the folder to someone who finds it. Its text is
   compiled into the binary and is the same for every collection of one
-  antiq. `init` writes it with the other files of `.antiq/`.
+  antiq. `init` writes it with the other files of `.antiq/`. Every locked
+  run writes it again when it is missing or differs from the text of the
+  antiq that runs (repair 7), so antiq owns the file and a change made by
+  hand is replaced. It is not a finding of `status`, and the commands that
+  take no lock do not write it. `push` mirrors it like `config.toml`.
+  (ADR 0073)
 - The folder under `.antiq/pieces/` is the piece's path, in its stored
   spelling. A folder there is a piece of the store when it holds at least
   one `.tar.zst`.
@@ -682,7 +687,7 @@ messages that belong to a result).
 `pin`, `unpin` and `push`. A dry run takes no lock and changes nothing.
 It computes the repairs read-only and lists them first, as actions of
 kind `repair` (each naming the version or tree it would delete, rename
-back or move to `recovered/`); its other actions assume the repairs were
+back or move to `recovered/`, or the README it would write); its other actions assume the repairs were
 done. A dry run that finds the lock held says so, names the holder and
 lists no repairs, since the running command owns those directories; it
 reads nothing else. A holder that has not yet written its pid does not
@@ -839,6 +844,17 @@ the volume and the free space of the staging on `.antiq/`.
    repair names it.
 6. **Empty store folders:** remove folders under `pieces/` that hold
    nothing.
+7. **README:** write `.antiq/README.md` when it is missing or when its
+   bytes differ from the text of the antiq that runs, and leave it when it
+   is current. The text is written in `.antiq/tmp/` and renamed over the
+   file, like a marker, so it comes after repair 2 has emptied `tmp/`; the
+   rename grants owner write on `.antiq/` when it lacks it and puts the
+   mode back right after. A dry run lists the write as `write
+   .antiq/README.md`, or as `replace .antiq/README.md, which differs from
+   the text of this antiq` when the file exists. An entry at that name that
+   is no regular file (a symlink, a directory) stays as it is and is a
+   warning, and so does a `.antiq/` on another device than `.antiq/tmp/`;
+   a write that fails is a warning too, and the run goes on. (ADR 0073)
 
 Sidecars without a `.tar.zst` and without a staged archive file in
 `tmp/pack/` are an incomplete version and stay (see "Damage"). The
@@ -2653,6 +2669,7 @@ is a version stamp or the name of a stamp folder.
 | `delete_restored_version` | 5 | `piece` (live path), `version` (stamp), `delete` (false when the stamp names no version and is only dropped from the marker) |
 | `remove_empty_folder` | 6 | `folder` (below `pieces/`) |
 | `remove_empty_chain` | 3, 4 | `area` (`trash` or `doomed`), `stamp`, `path` (below the stamp folder; empty for the stamp folder itself) |
+| `write_readme` | 7 | `replaces` (true when `.antiq/README.md` exists and differs, false when it is missing) |
 
 In a dry run `destination` is a prediction: whether the live path is free
 and its parent is a directory when the plan is made. The run decides.

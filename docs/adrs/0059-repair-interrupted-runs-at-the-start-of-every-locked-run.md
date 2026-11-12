@@ -6,6 +6,8 @@ Date: 2026-11-04
 
 Accepted
 
+Amended by [73. Keep a README in .antiq and write it again whenever it differs](0073-keep-a-readme-in-antiq-and-write-it-again-whenever-it-differs.md)
+
 ## Context
 
 A run can stop at any point and leave staged files, folders in `trash/`

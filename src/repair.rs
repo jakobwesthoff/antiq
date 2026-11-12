@@ -4,13 +4,13 @@
 
 //! The repairs that open every run, after the lock is taken.
 
-use crate::collection::{Collection, LAYOUT};
+use crate::collection::{Collection, LAYOUT, README, README_FILE};
 use crate::filesystem::atomic::{Durable, RealDurable, create_dir_chain, flush_dir_of};
 use crate::filesystem::moves::move_dir;
 use crate::filesystem::remove::{remove_tree, remove_tree_at};
 use crate::filesystem::tree::TreeRoot;
 use crate::lock::RunLock;
-use crate::markers::{self, RESTORED_FILE, RealSite, Restored};
+use crate::markers::{self, RESTORED_FILE, RealSite, Restored, Site};
 use crate::relpath::{Name, RelPath};
 use crate::report::Warning;
 use crate::select::{Rules, select};
@@ -26,7 +26,7 @@ use std::error::Error as StdError;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,9 @@ pub enum Repair {
         stamp: Name,
         path: RelPath,
     },
+    /// 7: `.antiq/README.md`, which is missing (`replaces` false) or differs
+    /// from the text of this antiq (`replaces` true).
+    WriteReadme { replaces: bool },
 }
 
 impl Repair {
@@ -168,6 +171,11 @@ impl Repair {
                 let folder = stamped(&area.to_string(), &Some(stamp.clone()), path);
                 format!("remove the empty folder {}", folder.trim_end_matches('/'))
             }
+            Repair::WriteReadme { replaces: false } => format!("write {}", readme_place()),
+            Repair::WriteReadme { replaces: true } => format!(
+                "replace {}, which differs from the text of this antiq",
+                readme_place()
+            ),
         }
     }
 }
@@ -236,6 +244,11 @@ fn place(area: &str, rel: &RelPath) -> String {
     }
 }
 
+/// `.antiq/README.md` as an error and a dry run name it.
+fn readme_place() -> String {
+    format!(".antiq/{README_FILE}")
+}
+
 fn name_of(bytes: &[u8]) -> Name {
     Name::from_bytes(bytes.to_vec()).expect("a component of a path is a name")
 }
@@ -270,8 +283,15 @@ fn open_dir(path: &Path) -> io::Result<Option<TreeRoot>> {
 /// them, without writing anything. A repair that cannot be planned because
 /// something cannot be read is a warning, and the others are still planned.
 pub fn plan(collection: &Collection) -> Planned {
+    plan_at(collection, &RealSite)
+}
+
+/// [`plan`] on a volume the `site` describes, so that a test can make
+/// the devices of two folders differ.
+fn plan_at(collection: &Collection, site: &dyn Site) -> Planned {
     let mut planner = Planner {
         collection,
+        site,
         scan: None,
         repairs: Vec::new(),
         warnings: Vec::new(),
@@ -288,6 +308,7 @@ pub fn plan(collection: &Collection) -> Planned {
     planner.trash();
     planner.restored();
     planner.empty_folders();
+    planner.readme();
     Planned {
         repairs: planner.repairs,
         warnings: planner.warnings,
@@ -297,6 +318,8 @@ pub fn plan(collection: &Collection) -> Planned {
 
 struct Planner<'a> {
     collection: &'a Collection,
+    /// Where the README repair asks whether a write can work.
+    site: &'a dyn Site,
     scan: Option<StoreScan>,
     repairs: Vec<Repair>,
     warnings: Vec<Warning>,
@@ -758,6 +781,42 @@ impl Planner<'_> {
         }
     }
 
+    // ---- 7: the README ----
+
+    /// Plans the write of `.antiq/README.md` when it is missing or differs
+    /// from the text of this antiq. An entry that is no regular file stays
+    /// as it is, as `markers::put` refuses to replace it, so the plan does
+    /// not promise a write that cannot happen.
+    fn readme(&mut self) {
+        let root = match TreeRoot::open(self.collection.root()) {
+            Ok(root) => root,
+            Err(error) => return self.cannot_read("", &RelPath::root(), error),
+        };
+        let readme = readme_path();
+        let replaces = match root.lstat(&readme) {
+            Ok(entry) if entry.kind == EntryKind::File => {
+                if holds_the_readme(&root, &readme) {
+                    return;
+                }
+                true
+            }
+            Ok(_) => {
+                let message = format!(
+                    "cannot write {}: it is not a file, so it stays as it is",
+                    readme_place()
+                );
+                return self.warnings.push(Warning::new(message));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return self.warn(failure("read", readme_place(), error)),
+        };
+        let antiq = RelPath::parse(".antiq").expect("the layout folder is a valid path");
+        if let Err(error) = markers::ensure_same_device(&root, &antiq, self.site) {
+            return self.warn(failure("write the README", readme_place(), error));
+        }
+        self.repairs.push(Repair::WriteReadme { replaces });
+    }
+
     /// The trees and leftovers below `trash/` or `doomed/`, then the
     /// chains of folders that hold nothing, in the order of the spec.
     ///
@@ -884,6 +943,22 @@ impl Planner<'_> {
             });
         }
     }
+}
+
+fn readme_path() -> RelPath {
+    RelPath::parse(&readme_place()).expect("the README path is a valid path")
+}
+
+/// Whether `readme` holds the text of this antiq and nothing more. A
+/// README that cannot be read does not.
+fn holds_the_readme(root: &TreeRoot, readme: &RelPath) -> bool {
+    let Ok(file) = root.open_read(readme) else {
+        return false;
+    };
+    // One byte more than the text, so that a longer file is told apart.
+    let mut bytes = Vec::new();
+    let limit = README.len() as u64 + 1;
+    file.take(limit).read_to_end(&mut bytes).is_ok() && bytes == README.as_bytes()
 }
 
 /// The store folders that hold a version with `stamp`, the shortest path
@@ -1238,6 +1313,10 @@ fn apply(
         Repair::RemoveEmptyFolder { folder } => {
             remove_store_folder(collection, folder)?.then(|| repair.clone())
         }
+        Repair::WriteReadme { .. } => {
+            write_readme(collection, &RealSite)?;
+            Some(repair.clone())
+        }
     };
     Ok(Applied::of(done))
 }
@@ -1341,6 +1420,17 @@ fn remove_store_folder(collection: &Collection, folder: &RelPath) -> Result<bool
     flush_dir_of(&RealDurable, &root, &parent_of(folder))
         .map_err(|error| failure(step, here, error))?;
     Ok(true)
+}
+
+/// Writes the text of this antiq as `.antiq/README.md`, in `tmp/` first and
+/// renamed into place, as a marker is written.
+fn write_readme(collection: &Collection, site: &dyn Site) -> Result<(), RepairError> {
+    let step = "write the README";
+    let root =
+        TreeRoot::open(collection.root()).map_err(|error| failure(step, readme_place(), error))?;
+    let antiq = RelPath::parse(".antiq").expect("the layout folder is a valid path");
+    markers::put(&root, &antiq, README_FILE, README.as_bytes(), site)
+        .map_err(|error| failure(step, readme_place(), error))
 }
 
 /// Whether any file of the version is there.
@@ -1566,6 +1656,8 @@ mod tests {
                 stamp: name("2026-11-04T090211"),
                 path: RelPath::root(),
             },
+            Repair::WriteReadme { replaces: false },
+            Repair::WriteReadme { replaces: true },
         ]
     }
 
@@ -1591,6 +1683,8 @@ mod tests {
                 r#"{"repair":"remove_empty_folder","folder":"a/b"}"#,
                 r#"{"repair":"remove_empty_chain","area":"trash","stamp":"2026-11-04T090211","path":"x/y"}"#,
                 r#"{"repair":"remove_empty_chain","area":"doomed","stamp":"2026-11-04T090211","path":""}"#,
+                r#"{"repair":"write_readme","replaces":false}"#,
+                r#"{"repair":"write_readme","replaces":true}"#,
             ]
         );
     }
@@ -1626,6 +1720,8 @@ mod tests {
                 "remove the empty folder .antiq/pieces/a/b",
                 "remove the empty folder .antiq/trash/2026-11-04T090211/x/y",
                 "remove the empty folder .antiq/doomed/2026-11-04T090211",
+                "write .antiq/README.md",
+                "replace .antiq/README.md, which differs from the text of this antiq",
             ]
         );
     }
@@ -3658,5 +3754,292 @@ mod tests {
             ]
         );
         assert!(planned.warnings.is_empty(), "{:?}", messages(&planned));
+    }
+
+    // =====================================================
+    // 7: the README of .antiq/
+    // =====================================================
+
+    use crate::collection::README;
+    use std::os::unix::fs::MetadataExt;
+
+    const WRITE: &str = "write .antiq/README.md";
+    const REPLACE: &str = "replace .antiq/README.md, which differs from the text of this antiq";
+
+    fn readme_file(temp: &TempCollection) -> PathBuf {
+        temp.root().join(".antiq/README.md")
+    }
+
+    fn without_readme() -> TempCollection {
+        let temp = TempCollection::minimal();
+        fs::remove_file(readme_file(&temp)).expect("the fixture has a README");
+        temp
+    }
+
+    #[test]
+    fn a_missing_readme_is_written_and_named() {
+        let temp = without_readme();
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), [WRITE]);
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+        let left: Vec<_> = fs::read_dir(temp.root().join(".antiq/tmp"))
+            .expect("lists")
+            .collect();
+        assert!(left.is_empty(), "the temp file is renamed away: {left:?}");
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    }
+
+    #[test]
+    fn a_readme_that_differs_is_replaced_and_named_as_a_replacement() {
+        let temp = TempCollection::minimal();
+        fs::write(readme_file(&temp), "edited by hand\n").expect("writes");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), [REPLACE]);
+        assert_eq!(outcome.done, [Repair::WriteReadme { replaces: true }]);
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+    }
+
+    #[test]
+    fn a_readme_that_only_continues_the_text_differs() {
+        let temp = TempCollection::minimal();
+        fs::write(readme_file(&temp), format!("{README}x")).expect("writes");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), [REPLACE]);
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+    }
+
+    /// Regression guard: it passes before the repair exists and fails when
+    /// a run writes the README although it is current.
+    #[test]
+    fn a_current_readme_is_not_written_again() {
+        let temp = TempCollection::minimal();
+        let before = fs::metadata(readme_file(&temp)).expect("exists");
+
+        let outcome = repaired(&temp);
+
+        assert!(outcome.done.is_empty(), "{:?}", outcome.done);
+        let after = fs::metadata(readme_file(&temp)).expect("exists");
+        assert_eq!(after.ino(), before.ino(), "the file was replaced");
+        assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+        assert_eq!(after.mtime(), before.mtime());
+    }
+
+    #[test]
+    fn a_readme_nobody_can_read_is_replaced() {
+        let temp = TempCollection::minimal();
+        assert_not_root();
+        fs::set_permissions(readme_file(&temp), fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let planned = plan(&collection(&temp));
+        assert_eq!(planned.repairs, [Repair::WriteReadme { replaces: true }]);
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), [REPLACE]);
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+    }
+
+    #[test]
+    fn a_readme_that_is_a_symlink_is_a_warning_and_stays() {
+        let temp = without_readme();
+        std::os::unix::fs::symlink("elsewhere", readme_file(&temp)).expect("links");
+
+        let planned = plan(&collection(&temp));
+
+        assert!(planned.repairs.is_empty(), "{:?}", planned.repairs);
+        assert_eq!(
+            messages(&planned),
+            ["cannot write .antiq/README.md: it is not a file, so it stays as it is"]
+        );
+        let outcome = repaired(&temp);
+        assert!(outcome.done.is_empty(), "{:?}", outcome.done);
+        assert_eq!(
+            fs::read_link(readme_file(&temp)).expect("still a link"),
+            PathBuf::from("elsewhere")
+        );
+    }
+
+    #[test]
+    fn a_readme_that_is_a_directory_is_a_warning_and_stays() {
+        let temp = without_readme();
+        fs::create_dir(readme_file(&temp)).expect("creates");
+
+        let planned = plan(&collection(&temp));
+
+        assert!(planned.repairs.is_empty(), "{:?}", planned.repairs);
+        assert_eq!(
+            messages(&planned),
+            ["cannot write .antiq/README.md: it is not a file, so it stays as it is"]
+        );
+        assert!(readme_file(&temp).is_dir());
+    }
+
+    #[test]
+    fn the_readme_comes_after_the_other_repairs_and_a_dry_run_writes_none() {
+        let mut temp = without_readme();
+        temp.tree().file(".antiq/tmp/README.md.1.0", "half a write");
+
+        let planned = plan(&collection(&temp));
+
+        let lines: Vec<String> = planned.repairs.iter().map(Repair::describe).collect();
+        assert_eq!(lines, ["delete .antiq/tmp/README.md.1.0", WRITE]);
+        assert!(!exists(&temp, ".antiq/README.md"), "planning wrote it");
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), lines);
+        assert!(!exists(&temp, ".antiq/tmp/README.md.1.0"));
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+    }
+
+    /// A volume on which `.antiq/` and `.antiq/tmp/` are different devices.
+    struct TwoDevices;
+
+    impl Site for TwoDevices {
+        fn durable(&self) -> &dyn Durable {
+            &RealDurable
+        }
+
+        fn device(&self, root: &TreeRoot, path: &RelPath) -> io::Result<u64> {
+            let device = root.lstat(path)?.device;
+            Ok(if path.to_string() == ".antiq/tmp" {
+                device
+            } else {
+                device + 1
+            })
+        }
+    }
+
+    #[test]
+    fn a_readme_on_another_device_than_tmp_is_a_warning_and_no_repair() {
+        let temp = without_readme();
+
+        let planned = plan_at(&collection(&temp), &TwoDevices);
+
+        assert!(planned.repairs.is_empty(), "{:?}", planned.repairs);
+        let messages = messages(&planned);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].starts_with("cannot write the README .antiq/README.md: "),
+            "{messages:?}"
+        );
+        assert!(messages[0].contains("mount point"), "{messages:?}");
+    }
+
+    #[test]
+    fn a_collection_root_that_cannot_be_opened_plans_no_readme() {
+        let temp = TempCollection::minimal();
+        let gone = temp.root().join("no-such-folder");
+        let config = Config::new(COLLECTION_ID.parse().expect("an ID"));
+
+        let planned = plan(&Collection::new(gone, config));
+
+        assert!(
+            planned
+                .repairs
+                .iter()
+                .all(|repair| !matches!(repair, Repair::WriteReadme { .. })),
+            "{:?}",
+            planned.repairs
+        );
+        assert!(
+            messages(&planned)
+                .iter()
+                .any(|message| message.starts_with("cannot read .: ")),
+            "{:?}",
+            messages(&planned)
+        );
+    }
+
+    #[test]
+    fn a_readme_that_cannot_be_looked_up_is_a_warning_and_no_repair() {
+        let temp = TempCollection::minimal();
+        let _restore = lock_out(&temp, &[".antiq"]);
+
+        let planned = plan(&collection(&temp));
+
+        assert!(
+            planned
+                .repairs
+                .iter()
+                .all(|repair| !matches!(repair, Repair::WriteReadme { .. })),
+            "{:?}",
+            planned.repairs
+        );
+        let about_readme = messages(&planned)
+            .iter()
+            .filter(|message| message.starts_with("cannot read .antiq/README.md: "))
+            .count();
+        assert_eq!(about_readme, 1, "{:?}", messages(&planned));
+    }
+
+    #[test]
+    fn a_readme_that_cannot_be_written_is_a_warning_and_the_other_repairs_ran() {
+        let mut temp = without_readme();
+        temp.tree().file(".antiq/doomed/leftover", "x");
+        let tmp = temp.root().join(".antiq/tmp");
+        assert_not_root();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let _restore = RestoreModes(vec![tmp.clone()]);
+        assert!(
+            fs::File::create(tmp.join("probe")).is_err(),
+            "the test needs a user that mode 0555 locks out"
+        );
+
+        let outcome = repaired(&temp);
+
+        assert_eq!(done_lines(&outcome), ["delete .antiq/doomed/leftover"]);
+        let warnings: Vec<&str> = outcome
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("cannot write the README .antiq/README.md: "),
+            "{warnings:?}"
+        );
+        assert!(!exists(&temp, ".antiq/README.md"));
+    }
+
+    #[test]
+    fn a_read_only_antiq_folder_still_gets_the_readme_and_its_mode_back() {
+        let temp = without_readme();
+        let collection = collection(&temp);
+        let lock = lock_of(&collection);
+        let antiq = temp.root().join(".antiq");
+        fs::set_permissions(&antiq, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let _restore = RestoreModes(vec![antiq.clone()]);
+
+        let outcome = run(&collection, &lock);
+
+        assert_eq!(done_lines(&outcome), [WRITE]);
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(
+            fs::read_to_string(readme_file(&temp)).expect("reads"),
+            README
+        );
+        let mode = fs::metadata(&antiq).expect("exists").permissions().mode();
+        assert_eq!(mode & 0o7777, 0o555);
     }
 }

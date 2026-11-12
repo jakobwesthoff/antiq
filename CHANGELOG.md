@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.antiq/README.md` tells whoever finds the folder what it is, what antiq
+  is and where to get it, the main commands, how to read a version with
+  `zstd`, `tar` and `shasum`, and that an AI agent runs `antiq skill`.
+  `init` writes it. Every run that takes the lock writes it again when it
+  is missing or differs from the text of the antiq that runs, so a
+  collection made by an older antiq gets it with its first run, which
+  reports `repaired: write .antiq/README.md`. A dry run lists the write
+  too. antiq owns the file, so a change made by hand is replaced
+
 ## [1.4.1] - 2026-11-12
 
 ### Fixed

@@ -121,7 +121,8 @@ left out; do not read it as empty.
   included: `{"format": 1, "command": "<name>", ...}`.
 - Do not create, move or delete anything under `.antiq/` yourself, and
   never delete `.antiq/lock`. The next locked run repairs what an
-  interrupted run left behind. Three things there are the user's to do or
+  interrupted run left behind. That includes `.antiq/README.md`, which
+  every locked run writes again when it differs from antiq's own text. Three things there are the user's to do or
   to ask you for explicitly: editing `.antiq/config.toml`, copying a
   version back from the target, and taking a folder out of
   `.antiq/recovered/` or `.antiq/trash/`. When `archive` reports that a
