@@ -30,7 +30,7 @@ use crate::report::{Warning, setting_notes};
 use crate::rules::{PieceRules, RulesError};
 use crate::run::{self, RunError, RunGuard, Started};
 use crate::select::{Rules, SelectError};
-use crate::shown::Shown;
+use crate::shown::{Shown, escape_controls};
 use crate::sysmem::SysmemError;
 use crate::tree::{Class, EntryKind, PieceTree, Problem};
 use crate::versions::VersionsError;
@@ -295,7 +295,7 @@ pub enum ImportError {
     NotAFolder { path: String },
     #[error("{path} lies inside the collection")]
     InsideCollection { path: String },
-    #[error("cannot use `{path}` as the piece: {reason}")]
+    #[error("cannot use `{}` as the piece: {reason}", escape_controls(path))]
     PiecePath { path: String, reason: String },
     #[error("cannot import {folder}: {}", reasons_text(.reasons))]
     Refused {

@@ -44,6 +44,8 @@ impl From<Rich> for Para {
 pub struct Block {
     pub(super) kind: Kind,
     pub(super) title: Rich,
+    /// The lines of a message that has more than one, below its title.
+    pub(super) body: Vec<String>,
     pub(super) text: Vec<Para>,
     pub(super) fix: Option<Rich>,
     pub(super) how: Vec<Para>,
@@ -62,6 +64,7 @@ impl Block {
         Block {
             kind,
             title,
+            body: Vec::new(),
             text: Vec::new(),
             fix: None,
             how: Vec::new(),
@@ -106,6 +109,14 @@ impl Block {
     /// message that `--json` carries.
     pub fn message(mut self, message: &str) -> Block {
         self.message = Some(escape_controls(message));
+        self
+    }
+
+    /// A line below the title of an error whose message has several lines,
+    /// such as the explanation of a parser. It is shown as written, not
+    /// wrapped, and a pipe indents it under the `error:` line.
+    pub fn body(mut self, line: &str) -> Block {
+        self.body.push(escape_controls(line));
         self
     }
 

@@ -31,14 +31,20 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
         .and_then(find::<PushError>)
         .is_some_and(|error| matches!(error, PushError::Unreachable { .. }));
     let mut block = match explained {
-        Some(explained) if free_text => plain_block(explained),
+        Some(explained) if free_text => titled_block(explained, true, None),
         Some(explained) => {
             let help = explained.help().map(|help| {
                 pasteable_commands(help.to_string(), description.library_error, directory)
             });
-            titled_block(explained, Rich::parse(&explained.to_string()), help)
+            titled_block(explained, false, help)
         }
-        None => Block::error(Rich::new().text(&description.root)),
+        None => {
+            let (first, rest) = split_message(&description.root);
+            rest.iter()
+                .fold(Block::error(Rich::new().text(first)), |block, line| {
+                    block.body(line)
+                })
+        }
     };
     let candidates = description
         .library_error
@@ -111,24 +117,35 @@ pub fn block_for(description: &Description, directory: Option<&Path>) -> Block {
 pub(super) fn explained_block(explained: &dyn Diagnostic) -> Block {
     titled_block(
         explained,
-        Rich::parse(&explained.to_string()),
+        false,
         explained.help().map(|help| help.to_string()),
     )
 }
 
-/// [`explained_block`] with the message as plain text. The reason of an
-/// unreachable target comes from the system, such as the output of ssh,
-/// and can hold backticks that are no code spans.
-fn plain_block(explained: &dyn Diagnostic) -> Block {
-    titled_block(
-        explained,
-        Rich::new().text(&explained.to_string()),
-        explained.help().map(|help| help.to_string()),
-    )
+/// The first line of a message and the lines after it. A message of one
+/// line has none after it; a parser's explanation has several.
+fn split_message(message: &str) -> (&str, Vec<&str>) {
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or_default();
+    (first, lines.collect())
 }
 
-fn titled_block(explained: &dyn Diagnostic, title: Rich, help: Option<String>) -> Block {
-    let mut block = Block::error(title).message(&explained.to_string());
+/// The block of `explained` with its first message line as the title and
+/// the lines after it below. `plain` shows the title as text and not as
+/// markup: the reason of an unreachable target comes from the system, such
+/// as the output of ssh, and can hold backticks that are no code spans.
+fn titled_block(explained: &dyn Diagnostic, plain: bool, help: Option<String>) -> Block {
+    let message = explained.to_string();
+    let (first, rest) = split_message(&message);
+    let title = if plain {
+        Rich::new().text(first)
+    } else {
+        Rich::parse(first)
+    };
+    let mut block = Block::error(title).message(first);
+    for line in rest {
+        block = block.body(line);
+    }
     if let Some(help) = help {
         for paragraph in help_paragraphs(&help) {
             block = block.how(paragraph);
@@ -585,6 +602,35 @@ mod tests {
             lines.contains(
                 &"       Read it with: zstd -dc $'/logs/100%\\xff.log.zst' | less".to_string()
             ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_names_a_volume_cannot_hold_are_lines_below_the_title() {
+        use antiq::archive::PackError;
+        use antiq::archive::names::NameProblem;
+        let problems = vec![
+            NameProblem::NotUtf8 {
+                path: RelPath::from_bytes(b"a\n100%\xff".to_vec()).expect("a path"),
+            },
+            NameProblem::HardLinkUnsupported {
+                path: RelPath::from_bytes(b"b".to_vec()).expect("a path"),
+            },
+        ];
+        let error = anyhow::Error::new(antiq::Error::from(PackError::UnholdableNames(problems)));
+        let block = block_for(&describe(&error), None);
+        assert_eq!(
+            block.render_plain(),
+            [
+                "error: the package holds names that the target volume cannot hold:",
+                "  `a%0A100%25%FF` is not valid UTF-8, which this volume cannot hold",
+                "  `b` is a hard link, which this volume cannot hold",
+            ]
+        );
+        let lines = block.render(&Env::new(true, false, true, 100));
+        assert!(
+            lines.contains(&"▌   `b` is a hard link, which this volume cannot hold".to_string()),
             "{lines:?}"
         );
     }

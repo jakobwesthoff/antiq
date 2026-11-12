@@ -302,7 +302,7 @@ fn an_invalid_pattern_is_a_usage_error() {
 }
 
 #[test]
-fn the_lines_of_a_regex_error_do_not_become_lines_of_the_output() {
+fn the_lines_of_a_regex_error_are_indented_under_one_error_line() {
     let collection = collection_of(&two_pieces());
 
     let run = grep(&collection, &["(unclosed\nerror: forged"]);
@@ -315,22 +315,23 @@ fn the_lines_of_a_regex_error_do_not_become_lines_of_the_output() {
         .count();
     assert_eq!(errors, 1, "{:?}", run.stderr);
     assert!(
-        run.stderr.contains("regex parse error:%0A"),
+        run.stderr.contains("regex parse error:\n"),
         "{:?}",
         run.stderr
     );
+    assert!(!run.stderr.contains("%0A"), "{:?}", run.stderr);
 }
 
 #[test]
-fn the_json_message_of_a_regex_error_holds_no_raw_newline() {
+fn the_json_message_of_a_regex_error_keeps_its_line_breaks() {
     let collection = collection_of(&two_pieces());
 
     let json = grep_json(&collection, "(unclosed\nerror: forged");
 
     assert_eq!(json.error_kind(), "usage");
     let message = json.error_message();
-    assert!(!message.contains('\n'), "{message:?}");
-    assert!(message.contains("regex parse error:%0A"), "{message:?}");
+    assert!(message.contains("regex parse error:\n"), "{message:?}");
+    assert!(!message.contains("%0A"), "{message:?}");
 }
 
 #[test]

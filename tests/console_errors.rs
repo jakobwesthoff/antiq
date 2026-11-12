@@ -273,3 +273,59 @@ fn a_pin_that_fails_below_a_marker_error_says_each_cause_once() {
     let causes = first.matches("Permission denied").count();
     assert_eq!(causes, 1, "{first}");
 }
+
+/// A collection whose config is no TOML, which the parser explains over
+/// several lines.
+fn broken_config() -> World {
+    let world = world(Mode::Text, |_| {});
+    let path = world.collection().path(".antiq/config.toml");
+    fs::write(path, "[collection\nid = 1\n").expect("the config is written");
+    world
+}
+
+#[test]
+fn a_message_of_several_lines_is_a_title_and_indented_lines_in_a_pipe() {
+    let world = broken_config();
+    let run = world.run(&["status"]);
+    run.expect_code(1);
+    let lines: Vec<&str> = run.stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("error: invalid config in ") && lines[0].ends_with("config.toml:"),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines[1], "  TOML parse error at line 1, column 12",
+        "{lines:?}"
+    );
+    assert_eq!(lines[3], "  1 | [collection", "{lines:?}");
+    assert!(!run.stderr.contains("%0A"), "{:?}", run.stderr);
+}
+
+#[test]
+fn a_message_of_several_lines_is_a_title_and_plain_lines_on_a_terminal() {
+    let world = broken_config();
+    let run = world.run_tty_stderr(&["status"], &[("NO_COLOR", "1")]);
+    run.expect_code(1);
+    let lines: Vec<&str> = run.stderr.lines().collect();
+    assert_eq!(lines[0], "▌ ✖ ERROR", "{lines:?}");
+    assert!(
+        lines.contains(&"▌   TOML parse error at line 1, column 12"),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"▌   1 | [collection"), "{lines:?}");
+    assert!(!run.stderr.contains("%0A"), "{:?}", run.stderr);
+}
+
+#[test]
+fn the_json_message_of_several_lines_keeps_its_line_breaks() {
+    let world = broken_config();
+    let run = world.run(&["--json", "status"]);
+    run.expect_code(1);
+    let json: Value = serde_json::from_str(&run.stdout).expect("a JSON object");
+    let message = json["error"]["message"].as_str().expect("a message");
+    assert!(
+        message.contains(":\nTOML parse error at line 1, column 12\n"),
+        "{message:?}"
+    );
+    assert!(!message.contains("%0A"), "{message:?}");
+}

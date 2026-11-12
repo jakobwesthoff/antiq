@@ -48,8 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lines, in the title, the text, "How to fix it", the candidates and the
   lines that rsync and other programs said, and in the usage error for an
   argument of the command line. A newline in a name could forge a line of
-  an error, such as an `error:` line in a pipe. The lines of a regex error
-  of `grep` are one line in a pipe, joined by `%0A`
+  an error, such as an `error:` line in a pipe
+- An error message of several lines, such as the explanation of an invalid
+  `config.toml`, the names a volume cannot hold or the regex error of
+  `grep`, shows its first line as the title and the lines after it below.
+  On a terminal they are lines under the title, in a pipe they are indented
+  by two spaces under the `error:` line, and the `message` of `--json` keeps
+  its line breaks. They were one line with `%0A` for each break
 - A `%` or a byte that is not UTF-8 in a name shows as `%25` or `%XX` in the
   messages about damaged and doubled version files, a refused `forget`, a
   push refusal that names files to delete, the files of `rebuild` and

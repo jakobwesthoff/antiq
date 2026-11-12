@@ -443,8 +443,9 @@ fn finish(cli: &Cli, result: anyhow::Result<u8>, out: &mut Output) -> u8 {
             .and_then(|error| antiq::error::explanation(error));
         // The library words names by the rule already. Text from other
         // programs and libraries, such as an rsync reason or a regex error,
-        // reaches the message as it is, so the message is escaped once more.
-        let message = escape_controls(&description.root);
+        // reaches the message as it is, so the message is escaped once more,
+        // its line breaks kept as in the `fix`.
+        let message = escape_lines(&description.root);
         out.json_error(
             Some(cli.command.name()),
             &ErrorReport {

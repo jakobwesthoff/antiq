@@ -2344,7 +2344,11 @@ An explanation is the innermost error in the chain that has a code; its
 message is the title, with the first letter in upper case, and its help
 is the section "How to fix it". A help of several paragraphs separates
 them by an empty line, and a paragraph whose lines start with two spaces
-is shown as written. These errors have an explanation: outside an antiq
+is shown as written. A message of several lines, such as the explanation
+of an invalid config file, shows its first line as the title and the lines
+after it below it as written, indented by two spaces under the `error:` line
+in a pipe, and the `message` of the JSON error keeps its line breaks. These
+errors have an explanation: outside an antiq
 collection, a piece reference that matches several pieces, one piece for a
 command that acts only on a path, no piece, or only pieces with
 incomplete versions, a path outside the antiq collection,

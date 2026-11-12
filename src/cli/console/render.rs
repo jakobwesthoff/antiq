@@ -217,6 +217,9 @@ impl Block {
                 ) {
                     lines.push(bar.line(&line));
                 }
+                for line in &self.body {
+                    lines.push(bar.line(&format!("  {line}")));
+                }
                 self.section(env, &bar, "How to fix it", &self.how, &mut lines);
                 self.section(env, &bar, &self.said_title(), &self.said, &mut lines);
                 let steps: Vec<Para> = self
@@ -363,6 +366,7 @@ impl Block {
         match self.kind {
             Kind::Error => {
                 lines.push(format!("error: {}", self.plain_title()));
+                lines.extend(self.body.iter().map(|line| format!("  {line}")));
                 labelled(&mut lines, "fix", &self.how);
                 labelled(&mut lines, &self.said_label(), &self.said);
                 for candidate in &self.candidates {
