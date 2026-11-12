@@ -546,6 +546,10 @@ instead, such as one line per piece and a summary for `archive`. `find` and `gre
 print one tab-separated line per version or match, ready for `cut` or
 `sort`.
 
+A name that holds a control character, a `%` or a byte that is not UTF-8
+is shown with `%` and hex digits, such as `%0A` for a newline and `%25`
+for a `%`, so no file name can break a line of the output or fake one.
+
 For a script that must know exactly what happened, every command takes
 `--json` and then prints its whole result as one JSON object, errors
 included. No command ever asks a question, so nothing waits for input.
