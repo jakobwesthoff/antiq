@@ -19,6 +19,7 @@ use crate::listing::ListingEntry;
 use crate::progress::Counter;
 use crate::relpath::{Name, RelPath};
 use crate::rules::PieceRules;
+use crate::shown::Shown;
 use crate::tree::{EntryKind, PieceTree, Problem, TreeEntry};
 use hashing::HashingWriter;
 use std::fmt;
@@ -298,7 +299,7 @@ impl Packager for TarZstd {
 /// Errors of packing and unpacking.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PackError {
-    #[error("cannot read `{path}`")]
+    #[error("cannot read `{path}`", path = Shown(path))]
     Read {
         path: RelPath,
         #[source]
@@ -322,7 +323,7 @@ pub enum PackError {
     OpenPackage(#[source] std::io::Error),
     #[error("the package is damaged: {0}")]
     Damaged(String),
-    #[error("cannot put the mode of `{path}` back to {mode:o}, so it keeps owner read and search")]
+    #[error("cannot put the mode of `{path}` back to {mode:o}, so it keeps owner read and search", path = Shown(path))]
     RestoreMode {
         path: RelPath,
         mode: u32,
@@ -355,7 +356,7 @@ pub enum PackError {
     },
     #[error("the package holds names that the target volume cannot hold:\n{}", lines(.0))]
     UnholdableNames(Vec<names::NameProblem>),
-    #[error("cannot extract `{path}`")]
+    #[error("cannot extract `{path}`", path = Shown(path))]
     Extract {
         path: RelPath,
         #[source]

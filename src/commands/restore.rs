@@ -112,7 +112,7 @@ pub enum RestoreError {
         stamp: String,
         name: String,
     },
-    #[error("cannot restore to `{path}`: {problem}")]
+    #[error("cannot restore to `{path}`: {problem}", path = Shown(path))]
     Target {
         path: RelPath,
         problem: TargetProblem,
@@ -484,13 +484,13 @@ impl std::fmt::Display for TargetProblem {
             TargetProblem::Root => f.write_str("it is the collection root"),
             TargetProblem::InsideAntiq => f.write_str("it is inside `.antiq/`"),
             TargetProblem::NotSelected => f.write_str("the patterns do not select it"),
-            TargetProblem::Excluded { at } => write!(f, "`{at}` is excluded"),
-            TargetProblem::InsidePiece { piece } => write!(f, "`{piece}` is a piece"),
+            TargetProblem::Excluded { at } => write!(f, "`{}` is excluded", Shown(at)),
+            TargetProblem::InsidePiece { piece } => write!(f, "`{}` is a piece", Shown(piece)),
             TargetProblem::NotAFolder { at } => {
-                write!(f, "`{at}` is a file or a symlink, not a folder")
+                write!(f, "`{}` is a file or a symlink, not a folder", Shown(at))
             }
             TargetProblem::SpelledDifferently { at } => {
-                write!(f, "`{at}` is spelled differently on disk")
+                write!(f, "`{}` is spelled differently on disk", Shown(at))
             }
             TargetProblem::Taken => f.write_str("it is taken"),
             TargetProblem::Unholdable { reason } => f.write_str(reason),

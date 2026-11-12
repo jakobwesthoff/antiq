@@ -13,7 +13,8 @@ use super::names::{MemberKind, MemberName, check_members};
 use super::{PackError, TargetRules, Unpacked, zstd};
 use crate::filesystem::tree::TreeRoot;
 use crate::progress::Counter;
-use crate::relpath::{RelPath, escape};
+use crate::relpath::RelPath;
+use crate::shown::Shown;
 use crate::walk::MAX_DEPTH;
 use std::collections::HashMap;
 use std::fmt;
@@ -204,7 +205,7 @@ fn classify<R: Read>(
     // `Entry::path_bytes` and `link_name_bytes` give the name a long-name
     // or pax record carries; the header's own field holds only a prefix.
     let raw = entry.path_bytes();
-    let shown = escape(&raw);
+    let shown = Shown(&raw[..]).to_string();
     let refuse = |refusal| PackError::Refused {
         member: shown.clone(),
         refusal,
@@ -664,7 +665,7 @@ fn scan<R: Read>(source: R) -> Result<(), PackError> {
     for entry in archive.entries().map_err(PackError::Archive)?.raw(true) {
         let mut entry = entry.map_err(PackError::Archive)?;
         let entry_type = entry.header().entry_type();
-        let shown = escape(&entry.path_bytes());
+        let shown = Shown(&entry.path_bytes()[..]).to_string();
         let refuse = |refusal| PackError::Refused {
             member: shown.clone(),
             refusal,
@@ -1576,6 +1577,23 @@ mod tests {
             .dir("proj/", 0o755, 1_000_000_000)
             .file("proj//x", 0o644, 1_000_000_000, b"x");
         assert_eq!(refusal_of(&archive), Refusal::InvalidPath);
+    }
+
+    #[test]
+    fn a_refused_member_is_named_by_the_rule_for_names() {
+        let mut archive = RawArchive::new();
+        archive.dir("proj/", 0o755, 1_000_000_000).file(
+            "proj/a\n100%\u{202e}//x",
+            0o644,
+            1_000_000_000,
+            b"x",
+        );
+        let (_dir, staged) = staging();
+        let error = unpack_bytes(&archive.finish(), &staged).expect_err("a member is refused");
+        let PackError::Refused { member, .. } = &error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(member, "proj/a%0A100%25%E2%80%AE//x");
     }
 
     #[test]

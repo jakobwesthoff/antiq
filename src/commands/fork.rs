@@ -56,7 +56,7 @@ pub enum ForkError {
         path: String,
         source: std::io::Error,
     },
-    #[error("cannot restore to `{path}`: it is taken; `--name` gives the copy another path")]
+    #[error("cannot restore to `{path}`: it is taken; `--name` gives the copy another path", path = Shown(path))]
     Taken { path: RelPath },
 }
 

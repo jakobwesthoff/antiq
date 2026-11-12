@@ -9,8 +9,9 @@ use crate::collection::Collection;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::query::Query;
-use crate::relpath::{RelPath, RelPathError, below_root, escape};
+use crate::relpath::{RelPath, RelPathError, below_root};
 use crate::select::Selection;
+use crate::shown::Shown;
 use crate::versions::VersionsError;
 use crate::versions::store::{StoreScan, lookup_exact};
 use serde::Serialize;
@@ -154,7 +155,7 @@ pub fn resolve_path(
 ) -> Result<RelPath, ReferenceError> {
     let root = collection.root();
     let root_identity = identity(root).map_err(|source| ReferenceError::Root {
-        path: escape(root.as_os_str().as_bytes()),
+        path: Shown(root).to_string(),
         source,
     })?;
 
@@ -162,8 +163,8 @@ pub fn resolve_path(
         Ok(folded) => folded,
         Err(RelPathError::AboveRoot(_)) => {
             return Err(ReferenceError::Outside {
-                path: escape(given.as_os_str().as_bytes()),
-                root: escape(root.as_os_str().as_bytes()),
+                path: Shown(given).to_string(),
+                root: Shown(root).to_string(),
             });
         }
         Err(error) => return Err(error.into()),
@@ -180,13 +181,8 @@ pub fn resolve_path(
         }
     }
     Err(ReferenceError::Outside {
-        path: escape(
-            Path::new("/")
-                .join(OsStr::from_bytes(folded.as_bytes()))
-                .as_os_str()
-                .as_bytes(),
-        ),
-        root: escape(root.as_os_str().as_bytes()),
+        path: Shown(&Path::new("/").join(OsStr::from_bytes(folded.as_bytes()))).to_string(),
+        root: Shown(root).to_string(),
     })
 }
 
@@ -267,7 +263,7 @@ impl CandidateSet {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => {
                 return Err(ReferenceError::Open {
-                    path: escape(self.directory.as_os_str().as_bytes()),
+                    path: Shown(&self.directory).to_string(),
                     reference: reference.to_string(),
                     source,
                 });
@@ -304,7 +300,7 @@ pub fn resolve_piece(
     set: &CandidateSet,
     word: SearchWord,
 ) -> Result<RelPath, ReferenceError> {
-    let reference = escape(given.as_bytes());
+    let reference = Shown(given).to_string();
     let path = resolve_path(collection, cwd, Path::new(given))?;
     if let Some(candidate) = set.find_path(&path, &reference)? {
         return Ok(candidate.clone());
@@ -428,7 +424,7 @@ pub fn resolve_stored_piece(
 
     // The exact path of a sidecar-only folder is what the person meant, so
     // no fuzzy match may steer them to another piece first.
-    let reference = escape(given.as_bytes());
+    let reference = Shown(given).to_string();
     let path = resolve_path(collection, cwd, Path::new(given))?;
     if store.find_path(&path, &reference)?.is_none()
         && let Some(piece) = wider.find_path(&path, &reference)?

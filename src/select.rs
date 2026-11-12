@@ -6,6 +6,7 @@
 
 use crate::filesystem::tree::{DirEntry, TreeRoot};
 use crate::relpath::{RelPath, escape};
+use crate::shown::Shown;
 use crate::tree::EntryKind;
 use crate::walk::{Call, Hooks, RealFs, is_out_of_descriptors};
 use glob::{MatchOptions, Pattern};
@@ -23,7 +24,7 @@ pub enum SelectError {
         #[source]
         source: io::Error,
     },
-    #[error("out of file descriptors while listing {path}")]
+    #[error("out of file descriptors while listing {path}", path = Shown(path))]
     OutOfDescriptors {
         path: RelPath,
         #[source]

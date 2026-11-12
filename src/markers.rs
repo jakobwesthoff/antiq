@@ -10,6 +10,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::filesystem::{FilesystemError, failure};
 use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use crate::tree::EntryKind;
 use crate::versions::stamp::Stamp;
 use jiff::Timestamp;
@@ -30,9 +31,9 @@ pub enum MarkerError {
         #[diagnostic_source]
         FilesystemError,
     ),
-    #[error("{path}: {reason}")]
+    #[error("{path}: {reason}", path = Shown(path))]
     Invalid { path: RelPath, reason: String },
-    #[error("cannot write a marker into {path}: mount point")]
+    #[error("cannot write a marker into {path}: mount point", path = Shown(path))]
     MountPoint { path: RelPath },
 }
 

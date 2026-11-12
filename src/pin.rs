@@ -9,6 +9,7 @@ use crate::filesystem::atomic::flush_dir_of;
 use crate::filesystem::tree::TreeRoot;
 use crate::markers::{self, MarkerError, RealSite, Site};
 use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use crate::tree::EntryKind;
 use std::io;
 
@@ -18,34 +19,34 @@ pub const PIN_FILE: &str = ".antiq-pin";
 /// Errors of pin files.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum PinError {
-    #[error("cannot look for the pin file {path}: {source}")]
+    #[error("cannot look for the pin file {path}: {source}", path = Shown(path))]
     Stat {
         path: RelPath,
         #[source]
         source: io::Error,
     },
-    #[error("cannot create the pin file {path}: {source}")]
+    #[error("cannot create the pin file {path}: {source}", path = Shown(path))]
     Create {
         path: RelPath,
         #[source]
         #[diagnostic_source]
         source: MarkerError,
     },
-    #[error("cannot remove the pin file {path}: {source}")]
+    #[error("cannot remove the pin file {path}: {source}", path = Shown(path))]
     Remove {
         path: RelPath,
         #[source]
         #[diagnostic_source]
         source: MarkerError,
     },
-    #[error("cannot make the pin of {path} durable: {source}")]
+    #[error("cannot make the pin of {path} durable: {source}", path = Shown(path))]
     Flush {
         path: RelPath,
         #[source]
         #[diagnostic_source]
         source: FilesystemError,
     },
-    #[error("{path} is neither a file nor a symlink, so it is no pin file")]
+    #[error("{path} is neither a file nor a symlink, so it is no pin file", path = Shown(path))]
     NotAFile { path: RelPath },
 }
 

@@ -8,7 +8,8 @@ use super::hashing::HashingReader;
 use super::{PackError, zstd};
 use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::progress::{Counter, Metered};
-use crate::relpath::{Name, RelPath, escape};
+use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -157,7 +158,7 @@ pub(crate) fn read_package_observing<R: io::Read>(
             container = Some((name, Container { mode, mtime }));
             continue;
         };
-        let shown = || escape(&path);
+        let shown = || Shown(&path[..]).to_string();
         let outside = || {
             PackError::Damaged(format!(
                 "`{}` lies outside the top-level directory",
@@ -355,6 +356,15 @@ mod tests {
     fn a_member_outside_the_container_is_damaged() {
         let reason = refused(&[RawMember::dir(b"proj/"), RawMember::file(b"other/a", b"1")]);
         assert!(reason.contains("outside"), "{reason}");
+    }
+
+    #[test]
+    fn a_member_name_is_shown_by_the_rule_for_names_in_the_reason() {
+        let reason = refused(&[
+            RawMember::dir(b"proj/"),
+            RawMember::file(b"other/a\n100%\xff", b"1"),
+        ]);
+        assert!(reason.contains("`other/a%0A100%25%FF`"), "{reason:?}");
     }
 
     #[test]

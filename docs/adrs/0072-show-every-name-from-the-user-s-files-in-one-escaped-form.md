@@ -31,6 +31,11 @@ One library module, `src/shown.rs`, holds the rule. Names are formatted
 through its `Shown` adapter, which is to a path what `Path::display` is. A
 `clippy.toml` entry forbids `std::path::Path::display` outside tests.
 
+`RelPath` and `Name` print their escaped storage form, which keeps a control
+character, and the compiler does not stop a message from printing it bare. A
+test reads the sources and rejects a `RelPath` or `Name` field that an
+`#[error]` attribute prints without `Shown` or `CodeSpan`.
+
 Where text reaches the console, the binary escapes it before it adds
 styling: the styled text of a message, the lines of a pipe and the
 preformatted paragraphs are escaped on construction, so antiq's own

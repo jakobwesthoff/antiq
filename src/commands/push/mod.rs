@@ -114,7 +114,7 @@ pub enum PushError {
     },
     #[error(
         "`{first}` and `{second}` differ only in case or Unicode normalization, which the target's volume treats as one name"
-    )]
+    , first = Shown(first), second = Shown(second))]
     NameClash { first: RelPath, second: RelPath },
     #[error(".antiq/trash/ still holds {}, which a repair could not put back", Shown(.path))]
     TrashNotEmpty { path: PathBuf },

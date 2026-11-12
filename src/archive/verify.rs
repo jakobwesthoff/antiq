@@ -14,6 +14,7 @@ use crate::listing::{LinkTarget, ListingEntry, ListingType};
 use crate::progress::{Counter, Metered};
 use crate::relpath::RelPath;
 use crate::select::Rules;
+use crate::shown::Shown;
 use crate::tree::{EntryKind, Problem, TreeEntry};
 use crate::walk::{Hooks, KeptFolder, MAX_DEPTH, RealFs, only_blocks_removal, walk_piece_with};
 use rustix::io::Errno;
@@ -64,12 +65,14 @@ impl Difference {
 impl fmt::Display for Difference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Difference::Removed(path) => write!(f, "`{path}` is gone from the folder"),
-            Difference::Added(path) => write!(f, "`{path}` is new in the folder"),
-            Difference::ChangedWhileRead(path) => write!(f, "`{path}` changed while it was read"),
+            Difference::Removed(path) => write!(f, "`{}` is gone from the folder", Shown(path)),
+            Difference::Added(path) => write!(f, "`{}` is new in the folder", Shown(path)),
+            Difference::ChangedWhileRead(path) => {
+                write!(f, "`{}` changed while it was read", Shown(path))
+            }
             Difference::Changed { path, fields } => {
                 let names: Vec<String> = fields.iter().map(|field| format!("{field:?}")).collect();
-                write!(f, "`{path}` differs in {}", names.join(", "))
+                write!(f, "`{}` differs in {}", Shown(path), names.join(", "))
             }
         }
     }

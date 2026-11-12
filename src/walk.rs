@@ -10,6 +10,7 @@ use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
 use crate::rules::{IGNORE_FILE, PieceRules, RulesError, Scope, TIMELESS_FILE, parse_rule_file};
 use crate::select::Rules;
+use crate::shown::Shown;
 use crate::tree::{Class, EntryKind, PieceTree, Problem, TreeEntry};
 use rustix::io::Errno;
 use std::io::{self, Read};
@@ -17,7 +18,7 @@ use std::io::{self, Read};
 /// Errors of the piece walk.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum WalkError {
-    #[error("out of file descriptors while reading {path} in {piece}")]
+    #[error("out of file descriptors while reading {path} in {piece}", piece = Shown(piece), path = Shown(path))]
     OutOfDescriptors {
         piece: RelPath,
         path: RelPath,

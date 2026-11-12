@@ -7,6 +7,7 @@
 use super::TargetRules;
 use crate::filesystem::tree::TreeRoot;
 use crate::relpath::{Name, RelPath};
+use crate::shown::Shown;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -95,7 +96,8 @@ impl fmt::Display for NameProblem {
             NameProblem::NotUtf8 { path } => {
                 write!(
                     f,
-                    "`{path}` is not valid UTF-8, which this volume cannot hold"
+                    "`{}` is not valid UTF-8, which this volume cannot hold",
+                    Shown(path)
                 )
             }
             NameProblem::TooLong {
@@ -109,7 +111,8 @@ impl fmt::Display for NameProblem {
                 };
                 write!(
                     f,
-                    "`{path}` has a name of {length} {unit}, the volume allows {}",
+                    "`{}` has a name of {length} {unit}, the volume allows {}",
+                    Shown(path),
                     limit.max
                 )
             }
@@ -117,15 +120,30 @@ impl fmt::Display for NameProblem {
                 let (last, earlier) = paths
                     .split_last()
                     .expect("a collision names at least two paths");
-                let earlier: Vec<String> = earlier.iter().map(|path| format!("`{path}`")).collect();
+                let earlier: Vec<String> = earlier
+                    .iter()
+                    .map(|path| format!("`{}`", Shown(path)))
+                    .collect();
                 let joined = earlier.join(", ");
-                write!(f, "{joined} and `{last}` become one name on this volume")
+                write!(
+                    f,
+                    "{joined} and `{}` become one name on this volume",
+                    Shown(last)
+                )
             }
             NameProblem::HardLinkUnsupported { path } => {
-                write!(f, "`{path}` is a hard link, which this volume cannot hold")
+                write!(
+                    f,
+                    "`{}` is a hard link, which this volume cannot hold",
+                    Shown(path)
+                )
             }
             NameProblem::SymlinkUnsupported { path } => {
-                write!(f, "`{path}` is a symlink, which this volume cannot hold")
+                write!(
+                    f,
+                    "`{}` is a symlink, which this volume cannot hold",
+                    Shown(path)
+                )
             }
             NameProblem::TargetTooLong {
                 path,
@@ -133,7 +151,8 @@ impl fmt::Display for NameProblem {
                 limit,
             } => write!(
                 f,
-                "`{path}` points to a target of {length} bytes, the volume allows {limit}"
+                "`{}` points to a target of {length} bytes, the volume allows {limit}",
+                Shown(path)
             ),
         }
     }

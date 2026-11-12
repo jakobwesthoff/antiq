@@ -175,7 +175,7 @@ impl fmt::Display for Refusal {
         let shown = if self.path.is_root() {
             ".".to_string()
         } else {
-            self.path.to_string()
+            Shown(&self.path).to_string()
         };
         match self.kind {
             RefusalKind::MountPoint => write!(f, "mount point: {shown}"),
@@ -189,7 +189,7 @@ impl fmt::Display for Refusal {
             },
             RefusalKind::NotAFile => {
                 let name = self.path.components().last().unwrap_or_default();
-                write!(f, "{} is not a file", crate::relpath::escape(name))
+                write!(f, "{} is not a file", Shown(name))
             }
             RefusalKind::UnreadableMarker => write!(f, "unreadable marker: {shown}"),
         }
@@ -721,6 +721,32 @@ mod tests {
 
     /// The text and the kind of a refusal for every kind of walk problem,
     /// with paths made relative to the collection.
+    #[test]
+    fn a_refusal_names_the_path_by_the_rule_for_names() {
+        let hostile = RelPath::from_bytes(b"a\n100%\xff/b".to_vec()).expect("a path");
+        for (kind, text) in [
+            (
+                RefusalKind::UnreadableEntry,
+                "unreadable entry: a%0A100%25%FF/b",
+            ),
+            (RefusalKind::NotAFile, "b is not a file"),
+        ] {
+            let refusal = Refusal {
+                kind,
+                path: hostile.clone(),
+                line: None,
+            };
+            assert_eq!(refusal.to_string(), text);
+        }
+        let name = RelPath::from_bytes(b"d/a\n%".to_vec()).expect("a path");
+        let not_a_file = Refusal {
+            kind: RefusalKind::NotAFile,
+            path: name,
+            line: None,
+        };
+        assert_eq!(not_a_file.to_string(), "a%0A%25 is not a file");
+    }
+
     #[test]
     fn every_walk_problem_has_its_refusal_text() {
         let top = path("area/piece");
