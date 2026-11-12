@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On a terminal, the finished line of a piece that `archive` or `import`
   archived shows the size of its archive next to the size of its content,
   such as `412 MB → 96 MB`, followed by the share of the content size the
-  archive kept, such as `23 %`. A narrow terminal or a long piece name drops
-  the share first, then the archive size.
+  archive kept, such as `23 %`. A long piece name or a narrow terminal drops
+  the share, and a terminal narrower still drops the archive size too.
 - On a terminal, the closing line of `archive` ends with the total size of
   the archives of the pieces it archived, such as `1.3 GB stored`, and the
   closing line of `import` shows the content size, the archive size and the
