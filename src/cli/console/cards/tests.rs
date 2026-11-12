@@ -48,6 +48,7 @@ fn with_style(counts: Counts, style: Style) -> Cards {
     Cards::new(Config {
         counts,
         name_prefix: "",
+        stored_size: false,
         result_width: 12,
         style,
         directory: None,
@@ -783,6 +784,7 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
     let mut cards = Cards::new(Config {
         counts: ARCHIVE,
         name_prefix: "",
+        stored_size: false,
         result_width: 12,
         style: style(false, true),
         directory: Some(PathBuf::from("/data/my notes")),
@@ -807,6 +809,7 @@ fn the_unpin_command_names_the_exact_piece_that_the_escaped_name_stands_for() {
     let mut cards = Cards::new(Config {
         counts: ARCHIVE,
         name_prefix: "",
+        stored_size: false,
         result_width: 12,
         style: style(false, true),
         directory: None,
@@ -1284,6 +1287,7 @@ fn prefixed(counts: Counts, prefix: &'static str) -> Cards {
     Cards::new(Config {
         counts,
         name_prefix: prefix,
+        stored_size: false,
         result_width: 12,
         style: style(false, true),
         directory: None,
@@ -1429,4 +1433,352 @@ fn a_rebuilt_piece_says_which_files_were_written() {
     assert!(lines[1].contains("  checksum rebuilt"), "{lines:?}");
     assert!(lines[2].contains("  both files rebuilt"), "{lines:?}");
     assert_eq!(lines.len(), 3, "a rebuilt piece has no reasons under it");
+}
+
+// =========================================================
+// The archive size on the line of an archived piece
+// =========================================================
+
+fn style_at(width: usize, utf8: bool) -> Style {
+    Style {
+        width,
+        color: false,
+        terminal: true,
+        utf8,
+    }
+}
+
+fn stored_cards(width: usize, utf8: bool) -> Cards {
+    Cards::new(Config {
+        counts: ARCHIVE,
+        name_prefix: "",
+        stored_size: true,
+        result_width: 12,
+        style: style_at(width, utf8),
+        directory: None,
+    })
+}
+
+fn archived(files: u64, archive_bytes: u64) -> Outcome {
+    Outcome::Archived {
+        files,
+        archive_bytes,
+    }
+}
+
+/// The line of one archived piece of 1 MB content in a run that has only
+/// that piece, on a terminal of `cols` columns.
+fn archived_line(name: &str, cols: usize, utf8: bool) -> String {
+    let mut cards = stored_cards(cols, utf8);
+    run_piece(&mut cards, name, 1_000_000, archived(3, 250_000), 0, 1);
+    let lines = lines_of(&mut cards, cols);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    lines[0].clone()
+}
+
+/// Two names that differ only in the middle, 41 columns each.
+const YEAR_2024: &str = "clients/acme/2024/website-relaunch-assets";
+const YEAR_2023: &str = "clients/acme/2023/website-relaunch-assets";
+
+#[test]
+fn an_archived_piece_shows_its_content_size_the_arrow_the_archive_size_and_the_share() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(
+        &mut cards,
+        "scanner",
+        412_000_000,
+        archived(12_345, 96_000_000),
+        0,
+        41,
+    );
+    run_piece(
+        &mut cards,
+        "photos-2019",
+        1_200_000_000,
+        archived(318, 1_190_000_000),
+        41,
+        112,
+    );
+    run_piece(
+        &mut cards,
+        "notes",
+        18_000_000,
+        archived(2, 2_100_000),
+        153,
+        3,
+    );
+    assert_eq!(
+        lines_of(&mut cards, MOCKUP),
+        [
+            "  ✔ scanner        412 MB → 96 MB     23 %  12 345 files  0:41",
+            "  ✔ photos-2019    1.2 GB → 1.2 GB    99 %     318 files  1:52",
+            "  ✔ notes           18 MB → 2.1 MB    12 %       2 files  0:03",
+        ]
+    );
+}
+
+#[test]
+fn the_share_is_dim_and_nothing_else_of_the_size_cell_is() {
+    let mut cards = Cards::new(Config {
+        counts: ARCHIVE,
+        name_prefix: "",
+        stored_size: true,
+        result_width: 12,
+        style: Style {
+            width: MOCKUP,
+            color: true,
+            terminal: true,
+            utf8: true,
+        },
+        directory: None,
+    });
+    run_piece(
+        &mut cards,
+        "scanner",
+        412_000_000,
+        archived(3, 96_000_000),
+        0,
+        1,
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    let dim = format!("{}23 %{:#}", theme::DIM, theme::DIM);
+    assert!(lines[0].contains(&dim), "{:?}", lines[0]);
+}
+
+#[test]
+fn a_share_may_pass_a_hundred_percent() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(&mut cards, "tiny", 1_000, archived(1, 1_040), 0, 1);
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("1.0 kB → 1.0 kB   104 %"), "{lines:?}");
+}
+
+#[test]
+fn a_share_that_rounds_to_nothing_of_a_non_empty_archive_reads_less_than_one_percent() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(
+        &mut cards,
+        "zeroes",
+        1_000_000_000,
+        archived(1, 1_000),
+        0,
+        1,
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("1.0 kB    <1 %"), "{lines:?}");
+}
+
+#[test]
+fn a_piece_without_content_bytes_shows_no_share() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(&mut cards, "empty-dir", 0, archived(0, 120), 0, 1);
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("0 B → 120 B"), "{lines:?}");
+    assert!(!lines[0].contains('%'), "{lines:?}");
+}
+
+#[test]
+fn a_piece_of_unknown_size_shows_no_share() {
+    let mut cards = stored_cards(MOCKUP, true);
+    cards.apply(
+        Msg::Started {
+            name: "unsized".to_string(),
+            bytes: None,
+            label: None,
+        },
+        secs(0),
+    );
+    cards.apply(finished("unsized", 5, archived(1, 120)), secs(1));
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert!(lines[0].contains("→ 120 B"), "{lines:?}");
+    assert!(!lines[0].contains('%'), "{lines:?}");
+}
+
+#[test]
+fn a_tiny_piece_widens_its_own_line_with_its_share() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(&mut cards, "big", 4_000_000, archived(3, 1_000_000), 0, 1);
+    run_piece(&mut cards, "tiny", 3, archived(1, 180), 1, 1);
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert_eq!(
+        lines[0],
+        "  ✔ big     4.0 MB → 1.0 MB    25 %       3 files  0:01"
+    );
+    assert_eq!(
+        lines[1],
+        "  ✔ tiny       3 B → 180 B    6000 %        1 file  0:01"
+    );
+}
+
+#[test]
+fn the_archive_size_is_written_with_an_ascii_arrow_in_an_ascii_run() {
+    let mut cards = stored_cards(MOCKUP, false);
+    run_piece(
+        &mut cards,
+        "scanner",
+        412_000_000,
+        archived(3, 96_000_000),
+        0,
+        1,
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    assert_eq!(
+        lines[0],
+        "  ok scanner    412 MB -> 96 MB     23 %       3 files  0:01"
+    );
+    assert!(lines[0].is_ascii(), "{lines:?}");
+}
+
+#[test]
+fn a_skipped_piece_of_an_archive_run_keeps_the_result_column_of_the_archived_ones() {
+    let mut cards = stored_cards(MOCKUP, true);
+    run_piece(
+        &mut cards,
+        "scanner",
+        412_000_000,
+        archived(3, 96_000_000),
+        0,
+        1,
+    );
+    cards.apply(
+        finished(
+            "recipe",
+            5_000_000,
+            Outcome::Skipped("it changed".to_string()),
+        ),
+        secs(2),
+    );
+    let lines = lines_of(&mut cards, MOCKUP);
+    let end = |line: &str, word: &str| line.find(word).map(|at| line[..at + word.len()].width());
+    assert_eq!(
+        end(&lines[0], "3 files"),
+        end(&lines[1], "skipped"),
+        "{lines:?}"
+    );
+    assert!(lines[1].contains("5.0 MB"), "{lines:?}");
+    assert!(!lines[1].contains('→'), "{lines:?}");
+}
+
+#[test]
+fn the_lines_of_an_unearth_run_keep_their_size_column() {
+    let mut cards = cards(UNEARTH);
+    run_piece(&mut cards, "scanner", 412_000_000, Outcome::Files(3), 0, 1);
+    assert_eq!(
+        lines_of(&mut cards, MOCKUP),
+        ["  ✔ scanner    412 MB       3 files  0:01"]
+    );
+}
+
+// The forms of the line follow the width. The columns besides the name are
+// 51 for the full form, 44 for the form without the share and 34 for the
+// size alone, one more each in an ASCII run (the mark `ok` and the arrow
+// `->` take two columns).
+
+fn has_share(line: &str) -> bool {
+    line.contains('%')
+}
+
+fn has_arrow(line: &str) -> bool {
+    line.contains('→') || line.contains("->")
+}
+
+#[test]
+fn the_full_form_shows_where_the_widest_name_fits_whole() {
+    let line = archived_line(YEAR_2024, 92, true);
+    assert!(has_share(&line) && line.contains(YEAR_2024), "{line:?}");
+    assert!(line.width() <= 92, "{line:?}");
+}
+
+#[test]
+fn the_share_goes_first_where_the_widest_name_no_longer_fits_beside_it() {
+    let line = archived_line(YEAR_2024, 91, true);
+    assert!(has_arrow(&line) && !has_share(&line), "{line:?}");
+    assert!(line.contains(YEAR_2024), "{line:?}");
+}
+
+#[test]
+fn the_arrow_form_keeps_the_whole_name_down_to_85_columns() {
+    let line = archived_line(YEAR_2024, 85, true);
+    assert!(has_arrow(&line) && line.contains(YEAR_2024), "{line:?}");
+    assert!(line.width() <= 85, "{line:?}");
+}
+
+#[test]
+fn the_arrow_form_cuts_the_name_in_the_middle_from_84_columns_on() {
+    let line = archived_line(YEAR_2024, 84, true);
+    assert!(has_arrow(&line) && !has_share(&line), "{line:?}");
+    assert!(!line.contains(YEAR_2024), "{line:?}");
+    assert!(line.contains(&mid(YEAR_2024, 40, "…")), "{line:?}");
+}
+
+#[test]
+fn the_arrow_form_leaves_the_name_16_columns_at_60_columns() {
+    let line = archived_line(YEAR_2024, 60, true);
+    assert!(has_arrow(&line), "{line:?}");
+    assert!(line.contains(&mid(YEAR_2024, 16, "…")), "{line:?}");
+    assert_eq!(line.width(), 60, "{line:?}");
+}
+
+#[test]
+fn below_60_columns_the_line_has_the_content_size_alone() {
+    let line = archived_line(YEAR_2024, 59, true);
+    assert!(!has_arrow(&line) && !has_share(&line), "{line:?}");
+    assert!(line.contains("1.0 MB"), "{line:?}");
+    assert!(line.contains(&mid(YEAR_2024, 25, "…")), "{line:?}");
+}
+
+#[test]
+fn the_content_size_stays_down_to_50_columns_and_goes_below() {
+    assert!(archived_line(YEAR_2024, 50, true).contains("1.0 MB"));
+    assert!(!archived_line(YEAR_2024, 49, true).contains("1.0 MB"));
+}
+
+#[test]
+fn the_same_forms_start_later_in_an_ascii_run() {
+    let at = |cols| archived_line(YEAR_2024, cols, false);
+    assert!(has_share(&at(94)) && !has_share(&at(93)));
+    assert!(at(87).contains(YEAR_2024) && !at(86).contains(YEAR_2024));
+    assert!(has_arrow(&at(62)) && !has_arrow(&at(61)));
+    assert!(at(51).contains("1.0 MB") && !at(50).contains("1.0 MB"));
+    for cols in [94, 93, 87, 86, 62, 61, 51] {
+        assert!(at(cols).width() <= cols, "{cols}: {:?}", at(cols));
+    }
+}
+
+#[test]
+fn names_that_differ_in_the_middle_are_cut_only_where_even_the_arrow_form_cannot_hold_them() {
+    let mut cards = stored_cards(70, true);
+    run_piece(&mut cards, YEAR_2024, 1_000_000, archived(3, 250_000), 0, 1);
+    run_piece(&mut cards, YEAR_2023, 1_000_000, archived(3, 250_000), 1, 1);
+    let lines = lines_of(&mut cards, 70);
+    assert!(has_arrow(&lines[0]) && !has_share(&lines[0]), "{lines:?}");
+    assert!(lines[0].contains(&mid(YEAR_2024, 26, "…")), "{lines:?}");
+    assert!(lines[1].contains(&mid(YEAR_2023, 26, "…")), "{lines:?}");
+}
+
+#[test]
+fn the_card_shows_more_of_a_name_than_the_line_of_an_archived_piece() {
+    let mut cards = stored_cards(80, true);
+    cards.apply(started(YEAR_2024, 1_000_000), secs(0));
+    let (operation, _counter) = operation(YEAR_2024, Operation::Removing, 1, 4);
+    cards.apply(operation, secs(0));
+    let region = cards.region(secs(0), 80, 24);
+    assert!(region[0].contains(YEAR_2024), "{region:?}");
+    cards.apply(
+        finished(YEAR_2024, 1_000_000, archived(3, 250_000)),
+        secs(1),
+    );
+    let lines = lines_of(&mut cards, 80);
+    assert!(!lines[0].contains(YEAR_2024), "{lines:?}");
+}
+
+#[test]
+fn the_share_is_the_archive_over_the_content_in_whole_percent() {
+    assert_eq!(share_text(96, 412), Some("23 %".to_string()));
+    assert_eq!(share_text(1, 200), Some("1 %".to_string()));
+    assert_eq!(share_text(1, 201), Some("<1 %".to_string()));
+    assert_eq!(share_text(200, 200), Some("100 %".to_string()));
+    assert_eq!(share_text(520, 500), Some("104 %".to_string()));
+    assert_eq!(share_text(0, 500), Some("0 %".to_string()));
+    assert_eq!(share_text(5, 0), None);
 }

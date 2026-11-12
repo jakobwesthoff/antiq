@@ -12,7 +12,7 @@
 use crate::cli::console::symbols::Symbols;
 use crate::cli::console::theme;
 use crate::cli::output::Style;
-use crate::cli::table::{decimal_size, mid, pad_left, thousands, wrap};
+use crate::cli::table::{decimal_size, mid, pad, pad_left, thousands, wrap};
 use crate::cli::unresolved::pasteable_line;
 use anstyle::Style as Look;
 use antiq::pin::PIN_FILE;
@@ -27,8 +27,17 @@ const MAX_WIDTH: usize = 100;
 /// The columns of the size and of the time of a line.
 const SIZE: usize = 8;
 const TIME: usize = 4;
+/// The columns of the archive size and of its share on the line of an
+/// archived piece, and the space before the share. A longer text widens its
+/// own line.
+const ARCHIVE_SIZE: usize = 7;
+const SHARE: usize = 5;
+const SHARE_GAP: usize = 2;
 /// A name never gets less than this.
 const MIN_NAME: usize = 6;
+/// The line of an archived piece gives up the share and then the archive
+/// size before its name gets less than this many columns.
+const MIN_ARCHIVED_NAME: usize = 16;
 /// A name shown with a version is cut to this many columns before the
 /// version is dropped.
 const MIN_LABELLED_NAME: usize = 8;
@@ -94,6 +103,10 @@ pub(crate) struct Config {
     /// Printed before the name on the card of a running piece, not on the
     /// line of a finished one.
     pub name_prefix: &'static str,
+    /// Whether the finished lines of the run have room for the archive size
+    /// of an archived piece, so that every line of the run keeps its result
+    /// column in the same place.
+    pub stored_size: bool,
     pub style: Style,
     /// The `-C` of the run, for the commands a card tells the reader to type.
     pub directory: Option<PathBuf>,
@@ -198,10 +211,22 @@ pub(crate) struct Cards {
     widest: usize,
 }
 
+/// How much of the size column a finished line has room for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Size {
+    None,
+    /// The content size.
+    Content,
+    /// The content size, an arrow and the archive size of an archived piece.
+    Arrow,
+    /// [`Size::Arrow`] and the share of the content size the archive kept.
+    Full,
+}
+
 /// The columns of a line at a terminal width.
 struct Layout {
     name: usize,
-    size: bool,
+    size: Size,
     bar: usize,
     detail: bool,
 }
@@ -209,10 +234,15 @@ struct Layout {
 impl Layout {
     fn of(cols: usize, result: usize) -> Layout {
         let width = cols.min(MAX_WIDTH);
-        let size = width >= 50;
-        let fixed = 4 + 2 + result + 2 + TIME + if size { 2 + SIZE } else { 0 };
+        let size = if width >= 50 {
+            Size::Content
+        } else {
+            Size::None
+        };
         Layout {
-            name: width.saturating_sub(fixed).max(MIN_NAME),
+            name: width
+                .saturating_sub(Layout::fixed(result, 1, 1, size))
+                .max(MIN_NAME),
             size,
             bar: match width {
                 70.. => 40,
@@ -222,6 +252,59 @@ impl Layout {
             detail: width >= 60,
         }
     }
+
+    /// The layout of the finished lines of a run whose archived pieces show
+    /// their archive size. The share goes first when the widest name of the
+    /// run would no longer fit whole beside it, then the arrow and the archive
+    /// size give way to the size alone, which they do only when even the cut
+    /// name would have less than `MIN_ARCHIVED_NAME` columns.
+    fn finished(cols: usize, result: usize, mark: usize, arrow: usize, widest: usize) -> Layout {
+        let width = cols.min(MAX_WIDTH);
+        let room = |size| width.saturating_sub(Layout::fixed(result, mark, arrow, size));
+        let size = if room(Size::Full) >= widest {
+            Size::Full
+        } else if room(Size::Arrow) >= widest.min(MIN_ARCHIVED_NAME) {
+            Size::Arrow
+        } else if room(Size::Content) >= MIN_ARCHIVED_NAME {
+            Size::Content
+        } else {
+            Size::None
+        };
+        Layout {
+            name: room(size).max(MIN_NAME),
+            size,
+            ..Layout::of(cols, result)
+        }
+    }
+
+    /// The columns of a finished line besides its name: the mark, the gaps,
+    /// the result, the time and the size cell.
+    fn fixed(result: usize, mark: usize, arrow: usize, size: Size) -> usize {
+        let content = 2 + SIZE;
+        let archive = content + 1 + arrow + 1 + ARCHIVE_SIZE;
+        let cell = match size {
+            Size::None => 0,
+            Size::Content => content,
+            Size::Arrow => archive,
+            Size::Full => archive + SHARE_GAP + SHARE,
+        };
+        3 + mark + 2 + result + 2 + TIME + cell
+    }
+}
+
+/// How much of the content size the archive kept, in whole percent. An
+/// archive that is not empty never reads as nothing, and the share has no
+/// upper bound: the headers of a tiny piece weigh more than its content.
+fn share_text(archive: u64, content: u64) -> Option<String> {
+    if content == 0 {
+        return None;
+    }
+    let percent = (u128::from(archive) * 100 + u128::from(content) / 2) / u128::from(content);
+    Some(if percent == 0 && archive > 0 {
+        "<1 %".to_string()
+    } else {
+        format!("{percent} %")
+    })
 }
 
 /// `line` cut to `cols` columns. A cut that falls inside a coloured stretch
@@ -516,12 +599,39 @@ impl Cards {
         (self.paint(theme::BOLD, &shown), cell_width)
     }
 
-    fn size_cell(&self, bytes: Option<u64>, layout: &Layout) -> String {
-        if !layout.size {
+    /// The size column of a finished line. In a run that shows archive sizes,
+    /// the lines of the other pieces leave the room of the arrow and the
+    /// share blank, so that the results of all lines start in one column.
+    fn size_cell(&self, ready: &Ready, layout: &Layout) -> String {
+        if layout.size == Size::None {
             return String::new();
         }
-        let size = bytes.map(decimal_size).unwrap_or_default();
-        format!("  {}", pad_left(&size, SIZE))
+        let content = ready.bytes.map(decimal_size).unwrap_or_default();
+        let mut cell = format!("  {}", pad_left(&content, SIZE));
+        if layout.size == Size::Content {
+            return cell;
+        }
+        let became = self.symbols().became;
+        let archive = match &ready.outcome {
+            Outcome::Archived { archive_bytes, .. } => Some(*archive_bytes),
+            _ => None,
+        };
+        match archive {
+            Some(bytes) => cell.push_str(&format!(
+                " {became} {}",
+                pad(&decimal_size(bytes), ARCHIVE_SIZE)
+            )),
+            None => cell.push_str(&" ".repeat(1 + became.width() + 1 + ARCHIVE_SIZE)),
+        }
+        if layout.size == Size::Full {
+            let share = archive
+                .zip(ready.bytes)
+                .and_then(|(archive, content)| share_text(archive, content))
+                .unwrap_or_default();
+            cell.push_str(&" ".repeat(SHARE_GAP + SHARE.saturating_sub(share.width())));
+            cell.push_str(&self.paint(theme::DIM, &share));
+        }
+        cell
     }
 
     fn time_text(elapsed: Duration) -> String {
@@ -535,7 +645,10 @@ impl Cards {
 
     fn outcome_tone(outcome: &Outcome) -> Tone {
         match outcome {
-            Outcome::Files(_) | Outcome::Changes { .. } | Outcome::Rebuilt { .. } => Tone::Ok,
+            Outcome::Files(_)
+            | Outcome::Archived { .. }
+            | Outcome::Changes { .. }
+            | Outcome::Rebuilt { .. } => Tone::Ok,
             Outcome::Refused(_) | Outcome::Unfinished(_) => Tone::Bad,
             Outcome::Skipped(_) | Outcome::NoRoom { .. } => Tone::Warn,
         }
@@ -543,8 +656,10 @@ impl Cards {
 
     fn result_text(outcome: &Outcome) -> String {
         match outcome {
-            Outcome::Files(1) => "1 file".to_string(),
-            Outcome::Files(count) => format!("{} files", thousands(*count)),
+            Outcome::Files(count) | Outcome::Archived { files: count, .. } => match count {
+                1 => "1 file".to_string(),
+                count => format!("{} files", thousands(*count)),
+            },
             Outcome::Changes {
                 created,
                 updated,
@@ -602,7 +717,10 @@ impl Cards {
                 },
                 None,
             )],
-            Outcome::Files(_) | Outcome::Changes { .. } | Outcome::Rebuilt { .. } => Vec::new(),
+            Outcome::Files(_)
+            | Outcome::Archived { .. }
+            | Outcome::Changes { .. }
+            | Outcome::Rebuilt { .. } => Vec::new(),
         }
     }
 
@@ -626,11 +744,20 @@ impl Cards {
     /// The one line of a finished piece and, under it, the reasons it did
     /// not finish cleanly, wrapped to the width and never cut.
     pub(crate) fn finished_lines(&self, ready: &Ready, cols: usize) -> Vec<String> {
-        let layout = Layout::of(cols, self.config.result_width);
-        let name_column = self.name_column(
-            Self::full_width(&ready.name, ready.label.as_deref()),
-            &layout,
-        );
+        let own = Self::full_width(&ready.name, ready.label.as_deref());
+        let layout = if self.config.stored_size {
+            let symbols = self.symbols();
+            Layout::finished(
+                cols,
+                self.config.result_width,
+                symbols.done.width(),
+                symbols.became.width(),
+                self.widest.max(own),
+            )
+        } else {
+            Layout::of(cols, self.config.result_width)
+        };
+        let name_column = self.name_column(own, &layout);
         let tone = Self::outcome_tone(&ready.outcome);
         let (cell, cell_width) = self.name_cell(&ready.name, ready.label.as_deref(), name_column);
         let result = Self::result_text(&ready.outcome);
@@ -655,7 +782,7 @@ impl Cards {
             self.tone_symbol(tone),
             cell,
             " ".repeat(name_column.saturating_sub(cell_width)),
-            self.size_cell(ready.bytes, &layout),
+            self.size_cell(ready, &layout),
             result,
             time
         );

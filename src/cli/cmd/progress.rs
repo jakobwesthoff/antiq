@@ -30,6 +30,9 @@ pub(super) struct Description {
     pub counts: &'static [(Operation, Count)],
     /// Printed before the name on the card of a running piece.
     pub name_prefix: &'static str,
+    /// Whether the finished lines carry the archive size of an archived
+    /// piece: `archive` and `import`.
+    pub stored_size: bool,
     /// The width of the result column of a finished line, sized to the
     /// longest result the command usually leaves.
     pub result_width: usize,
@@ -42,6 +45,7 @@ impl Description {
         Description {
             counts,
             name_prefix: "",
+            stored_size: false,
             result_width: DEFAULT_RESULT_WIDTH,
             label: Box::new(|stamp, _| stamp.to_string()),
         }
@@ -96,6 +100,7 @@ pub(super) fn watch<T>(
         config: Config {
             counts: description.counts,
             name_prefix: description.name_prefix,
+            stored_size: description.stored_size,
             result_width: description.result_width,
             style: out.stdout_style(),
             directory: ctx.directory.clone(),
@@ -139,23 +144,28 @@ fn listed_pieces(
     skipped: &[SkippedPiece],
     refused: &[RefusedPiece],
 ) -> Vec<Ready> {
-    let ready = |name: &str, outcome| Ready {
+    let ready = |name: &str, bytes, outcome| Ready {
         name: name.to_string(),
-        bytes: None,
+        bytes,
         label: None,
         outcome,
         elapsed: None,
     };
     let mut pieces = Vec::new();
     for piece in archived {
-        pieces.push(ready(&piece.piece, Outcome::Files(piece.files)));
+        let outcome = Outcome::Archived {
+            files: piece.files,
+            archive_bytes: piece.archive_bytes,
+        };
+        pieces.push(ready(&piece.piece, Some(piece.bytes), outcome));
     }
     for piece in skipped {
-        pieces.push(ready(&piece.piece, Outcome::Skipped(piece.message.clone())));
+        let outcome = Outcome::Skipped(piece.message.clone());
+        pieces.push(ready(&piece.piece, None, outcome));
     }
     for piece in refused {
         let reasons = piece.reasons.iter().map(|r| r.text.clone()).collect();
-        pieces.push(ready(&piece.piece, Outcome::Refused(reasons)));
+        pieces.push(ready(&piece.piece, None, Outcome::Refused(reasons)));
     }
     pieces
 }
@@ -337,6 +347,7 @@ pub(super) fn card_of(
     let mut cards = Cards::new(Config {
         counts,
         name_prefix: "",
+        stored_size: false,
         result_width: DEFAULT_RESULT_WIDTH,
         style: Style {
             width: 96,
@@ -421,17 +432,30 @@ mod tests {
                 line: None,
             }],
         }];
-        let listed: Vec<(String, Outcome)> = listed_pieces(&archived, &skipped, &refused)
-            .into_iter()
-            .map(|ready| (ready.name, ready.outcome))
-            .collect();
+        let listed: Vec<(String, Option<u64>, Outcome)> =
+            listed_pieces(&archived, &skipped, &refused)
+                .into_iter()
+                .map(|ready| (ready.name, ready.bytes, ready.outcome))
+                .collect();
         assert_eq!(
             listed,
             [
-                ("a".to_string(), Outcome::Files(4)),
-                ("b".to_string(), Outcome::Skipped("it changed".to_string())),
+                (
+                    "a".to_string(),
+                    Some(9),
+                    Outcome::Archived {
+                        files: 4,
+                        archive_bytes: 3
+                    }
+                ),
+                (
+                    "b".to_string(),
+                    None,
+                    Outcome::Skipped("it changed".to_string())
+                ),
                 (
                     "c".to_string(),
+                    None,
                     Outcome::Refused(vec!["empty: c".to_string()])
                 ),
             ]

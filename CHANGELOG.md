@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- On a terminal, the finished line of a piece that `archive` or `import`
+  archived shows the size of its archive next to the size of its content,
+  such as `412 MB → 96 MB`, followed by the share of the content size the
+  archive kept, such as `23 %`. A narrow terminal or a long piece name drops
+  the share first, then the archive size.
+
 ## [1.5.0] - 2026-11-12
 
 ### Added

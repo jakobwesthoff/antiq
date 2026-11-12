@@ -104,8 +104,11 @@ pub struct Planned {
 /// How an item ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Archive and unearth: the files of the version.
+    /// Unearth and fork: the files of the version.
     Files(u64),
+    /// Archive and import: the files of the version and the size of the
+    /// archive it was packed into.
+    Archived { files: u64, archive_bytes: u64 },
     /// Push: what the mirror changed for the piece.
     Changes {
         created: u64,

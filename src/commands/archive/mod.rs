@@ -663,7 +663,10 @@ fn process(shared: &Shared<'_>, piece: &RelPath, planned: bool) -> Done {
     tracker.started(Some(bytes), None, &[]);
     let done = store_and_remove(shared, piece, &tree, tracker);
     let outcome = match &done.finished {
-        Finished::Archived(archived) => Progress::Files(archived.files),
+        Finished::Archived(archived) => Progress::Archived {
+            files: archived.files,
+            archive_bytes: archived.archive_bytes,
+        },
         Finished::Skipped(skipped) => Progress::Skipped(skipped.message.clone()),
         Finished::Refused(_) | Finished::Quiet => {
             unreachable!("a piece that went on is archived or skipped")
@@ -2562,7 +2565,7 @@ mod tests {
     // Progress events
     // =========================================================
 
-    use crate::testing::recording::Recorder;
+    use crate::testing::recording::{Recorder, Seen};
 
     #[test]
     fn a_lone_piece_reports_its_operations_with_counters_that_reach_their_totals() {
@@ -2570,20 +2573,23 @@ mod tests {
         add(&mut world, "piece", 40);
         let recorder = Recorder::new();
 
-        execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
             .expect("the run ends");
 
         // The 9 bytes of content are packed once and counted twice in the
-        // verify, as a member and as a file of the folder.
+        // verify, as a member and as a file of the folder. The size of the
+        // archive depends on the compressor, so the last event is built from
+        // the report.
+        let archive_bytes = report.archived[0].archive_bytes;
         assert_eq!(
             recorder.lines(),
             [
-                "started piece 9",
-                "piece Packing 9/9",
-                "piece Verifying 18/18",
-                "piece Storing 0/0",
-                "piece Removing 4/4",
-                "finished piece 9 Files(2)",
+                "started piece 9".to_string(),
+                "piece Packing 9/9".to_string(),
+                "piece Verifying 18/18".to_string(),
+                "piece Storing 0/0".to_string(),
+                "piece Removing 4/4".to_string(),
+                format!("finished piece 9 Archived {{ files: 2, archive_bytes: {archive_bytes} }}"),
             ]
         );
     }
@@ -2626,6 +2632,28 @@ mod tests {
                 "piece Verifying 18/18".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn the_content_bytes_of_the_finished_event_are_those_of_the_report() {
+        let mut world = world("");
+        add(&mut world, "piece", 40);
+        world.tree().hard_link("piece/a.txt", "piece/link.txt");
+        world.tree().symlink("piece/pointer", "a.txt");
+        let recorder = Recorder::new();
+
+        let report = execute_observed(&world, &Target::Due, &RealSeams, 1, Some(&recorder))
+            .expect("the run ends");
+
+        let sent: Vec<u64> = recorder
+            .seen()
+            .into_iter()
+            .filter_map(|seen| match seen {
+                Seen::Finished { bytes, .. } => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [report.archived[0].bytes]);
     }
 
     #[test]
@@ -2689,13 +2717,18 @@ mod tests {
         };
         let recorder = Recorder::new();
 
-        execute_observed(&world, &Target::Due, &seams, 1, Some(&recorder)).expect("the run ends");
+        let report = execute_observed(&world, &Target::Due, &seams, 1, Some(&recorder))
+            .expect("the run ends");
 
         assert_eq!(recorder.lines()[0], "planned a b");
         assert_eq!(recorder.lines_of("b"), ["dropped b"]);
+        let archive_bytes = report.archived[0].archive_bytes;
         assert_eq!(
             recorder.lines_of("a").last().map(String::as_str),
-            Some("finished a 9 Files(2)")
+            Some(
+                format!("finished a 9 Archived {{ files: 2, archive_bytes: {archive_bytes} }}")
+                    .as_str()
+            )
         );
     }
 

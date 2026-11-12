@@ -61,6 +61,44 @@ fn has_colour(bytes: &str) -> bool {
 
 /// Whether `time` is an elapsed time as `m:ss` or `h:mm:ss`, whatever the
 /// machine made of it.
+/// The piece, the archive bytes and the content bytes of every version in
+/// the store, read from `find --json`. The size of an archive depends on the
+/// compressor, so the lines of a run are checked against what the store holds.
+fn stored_versions(world: &World) -> Vec<(String, u64, u64)> {
+    let run = world.run(&["find", "--json"]);
+    run.expect_code(0);
+    let json: serde_json::Value = serde_json::from_str(&run.stdout).expect("one JSON object");
+    json["versions"]
+        .as_array()
+        .expect("a list of versions")
+        .iter()
+        .map(|version| {
+            (
+                version["piece"].as_str().expect("a piece").to_string(),
+                version["archive_bytes"].as_u64().expect("archive bytes"),
+                version["bytes"].as_u64().expect("content bytes"),
+            )
+        })
+        .collect()
+}
+
+/// `bytes` as a size below a kilobyte, which is all the tiny pieces of these
+/// tests need.
+fn small_size(bytes: u64) -> String {
+    assert!(bytes < 1000, "{bytes} needs a unit");
+    format!("{bytes} B")
+}
+
+/// The part of a line that tells what the archive of a piece became:
+/// `21 B → 162 B` and the share of the content it kept.
+fn became(archive: u64, content: u64) -> (String, String) {
+    let share = (archive * 100 + content / 2) / content;
+    (
+        format!("{} → {}", small_size(content), small_size(archive)),
+        format!("{share} %"),
+    )
+}
+
 fn is_elapsed(time: &str) -> bool {
     let parts: Vec<&str> = time.split(':').collect();
     let digits = |part: &&str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
@@ -116,6 +154,44 @@ fn archive_leaves_one_finished_line_per_piece_and_the_summary() {
         "{:?}",
         lines[4]
     );
+}
+
+#[test]
+fn archive_shows_the_size_of_each_archive_next_to_the_size_of_its_content() {
+    let world = archive_world(3);
+    let run = world.run_tty_sized(&["archive"], 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    let versions = stored_versions(&world);
+    assert_eq!(versions.len(), 3, "{versions:?}");
+    for (piece, archive, content) in versions {
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with(&format!("  ✔ {piece} ")))
+            .unwrap_or_else(|| panic!("{piece} in {lines:#?}"));
+        let (sizes, share) = became(archive, content);
+        let after = line
+            .split_once(&sizes)
+            .unwrap_or_else(|| panic!("{sizes:?} in {line:?}"))
+            .1;
+        assert!(after.contains(&share), "{share:?} in {line:?}");
+        assert!(line.contains("2 files"), "{line:?}");
+    }
+}
+
+#[test]
+fn archive_in_a_non_utf8_locale_writes_the_archive_size_with_an_ascii_arrow() {
+    let world = archive_world(1);
+    let run = world.run_tty_sized(&["archive"], 100, 24, &[("LC_ALL", "C")]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    let (_, archive, content) = stored_versions(&world).remove(0);
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("  ok projects/p01 "))
+        .unwrap_or_else(|| panic!("no line in {lines:#?}"));
+    let expected = format!("{} -> {}", small_size(content), small_size(archive));
+    assert!(line.contains(&expected), "{expected:?} in {line:?}");
 }
 
 #[test]
@@ -856,6 +932,23 @@ fn import_leaves_the_line_of_the_piece_and_a_summary() {
         lines[2]
     );
     assert!(!run.stdout.contains("imported projects/imported: version"));
+}
+
+#[test]
+fn import_shows_the_size_of_its_archive_on_the_line_of_the_piece() {
+    let world = import_world();
+    let source = import_source();
+    let args = import_args(&source, &[]);
+    let run = world.run_tty_sized(&as_strs(&args), 100, 24, &[]);
+    run.expect_code(0);
+    let lines = replay(&run.stdout, 100, 24).lines();
+    let (_, archive, content) = stored_versions(&world).remove(0);
+    let (sizes, share) = became(archive, content);
+    let after = lines[0]
+        .split_once(&sizes)
+        .unwrap_or_else(|| panic!("{sizes:?} in {lines:#?}"))
+        .1;
+    assert!(after.contains(&share), "{share:?} in {lines:#?}");
 }
 
 #[test]

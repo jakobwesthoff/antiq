@@ -2489,6 +2489,26 @@ reads `<size> needed, <size> free`, and a volume that ran full during the
 extraction of a version without a listing reads `out of space during the
 extraction, <size> free`.
 
+On the line of a piece that `archive` or `import` archived, the size is the
+content size, an arrow and the size of the archive the piece was packed into,
+such as `412 MB → 96 MB` (`->` in the ASCII symbol set). The share of the
+content size that the archive kept follows in dim, as a whole percent such as
+`23 %`. The share can pass 100 %, such as `104 %`, reads `<1 %` when it rounds
+to 0 for an archive that is not empty, and is left out when the content size is
+0 or not known. In a run of `archive` or `import` the lines of the skipped
+and refused pieces keep the room of the arrow and the share blank, so that the
+results of all lines start in one column. A size or a share longer than its
+column widens its own line. The line shows the first of these forms that the
+terminal and the names allow:
+
+1. the arrow and the share, when the whole name of the longest piece of the
+   run fits beside them;
+2. the arrow without the share, when the whole name fits;
+3. the arrow without the share, with the names shortened in the middle to as
+   few as 16 columns;
+4. the content size alone, from 50 columns (51 in the ASCII symbol set);
+5. no size below that.
+
 The finished lines scroll away like any output, so that the scrollback
 holds all of them in the order the pieces finished. At the bottom stay the
 cards of the running pieces in the order they started, then, for `archive`
@@ -2509,7 +2529,9 @@ Counts group their thousands with a space, `1 203/2 931 files`. Lines are
 laid out for at most 100 columns. The name column of the finished lines is as
 wide as the longest name of the run: the names `archive` announces before
 its first piece finishes, the one name of every other command. A piece with a
-longer name widens its own line, and a card cuts a name to the same width.
+longer name widens its own line, and a card cuts a name to the same width,
+except on the line of an archived piece, where the size column can leave the
+name fewer columns than the card has.
 The result column is 12 columns wide, 18 for `rebuild` and 20 for `push`;
 a longer result widens its line. The size column is left out
 below 50 columns, the count below 60, and the bar is 40 cells wide from 70
@@ -2536,7 +2558,8 @@ mark is `✔` for exit code 0 and `✖` otherwise, and it ends with `took m:ss`:
 A run with no piece to tell about prints the line of the pipe form, such as
 `Archived 0, skipped 0, refused 0.`. A piece that never reported progress, as
 when the files `archive` may hold open ran out, gets its finished line at the
-end without size and time. A claim that sends no piece keeps the headline, the sentence and the
+end without time, and without size unless it was archived: the line of an
+archived piece has the sizes of the report. A claim that sends no piece keeps the headline, the sentence and the
 table of what was sent.
 
 A `push` on a terminal that moves the cursor is one run of rsync over the

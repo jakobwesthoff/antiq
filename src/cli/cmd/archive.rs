@@ -66,11 +66,13 @@ pub fn run(ctx: &Context, args: &ArchiveArgs, out: &mut Output) -> anyhow::Resul
     };
     // On a terminal the pieces show as cards while they work, and the lines
     // they leave behind replace the lines of the pipe.
+    let mut description = Description::new(COUNTS);
+    description.stored_size = true;
     let (result, shown) = progress::watch(
         ctx,
         out,
         args.dry_run,
-        Description::new(COUNTS),
+        description,
         |observer| archive_observed(&collection, &SystemClock, &request, observer),
         || archive(&collection, &SystemClock, &request),
         |result| match result {

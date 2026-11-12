@@ -29,11 +29,13 @@ pub fn run(ctx: &Context, args: &ImportArgs, out: &mut Output) -> anyhow::Result
     };
     // On a terminal the piece shows as a card while it is packed, as for an
     // archive, and its closing line replaces the line of the pipe.
+    let mut description = Description::new(COUNTS);
+    description.stored_size = true;
     let (result, shown) = progress::watch(
         ctx,
         out,
         args.dry_run,
-        Description::new(COUNTS),
+        description,
         |observer| import_observed(&collection, &SystemClock, &request, observer),
         || import(&collection, &SystemClock, &request),
         |_| Vec::new(),

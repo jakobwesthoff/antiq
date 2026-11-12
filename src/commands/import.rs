@@ -518,7 +518,13 @@ pub(crate) fn execute(
                 files: stored_version.files,
                 bytes: stored_version.bytes,
             });
-            tracker.finished(bytes, &Progress::Files(stored_version.files));
+            tracker.finished(
+                bytes,
+                &Progress::Archived {
+                    files: stored_version.files,
+                    archive_bytes: stored_version.archive_bytes,
+                },
+            );
         }
         Err(StoreFailure::NoRoom(error)) => {
             report.skipped = Some(skip(SkipReason::NoRoom, chain_text(error.as_ref())));
@@ -1171,16 +1177,20 @@ mod tests {
         let world = world();
         let recorder = Recorder::new();
 
-        execute_observed(&world, &RealSeams, Some(&recorder)).expect("the import ends");
+        let report =
+            execute_observed(&world, &RealSeams, Some(&recorder)).expect("the import ends");
 
+        // The size of the archive depends on the compressor, so the last
+        // event is built from the report.
+        let archive_bytes = report.imported.expect("imported").archive_bytes;
         assert_eq!(
             recorder.lines_of("piece"),
             [
-                "started piece 9",
-                "piece Packing 9/9",
-                "piece Verifying 18/18",
-                "piece Storing 0/0",
-                "finished piece 9 Files(2)",
+                "started piece 9".to_string(),
+                "piece Packing 9/9".to_string(),
+                "piece Verifying 18/18".to_string(),
+                "piece Storing 0/0".to_string(),
+                format!("finished piece 9 Archived {{ files: 2, archive_bytes: {archive_bytes} }}"),
             ]
         );
     }

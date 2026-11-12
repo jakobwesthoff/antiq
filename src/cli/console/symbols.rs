@@ -24,6 +24,8 @@ pub struct Symbols {
     pub frame: &'static str,
     /// Stands for the middle of a text that was cut to fit a column.
     pub ellipsis: &'static str,
+    /// Between the content size and the archive size of an archived piece.
+    pub became: &'static str,
     /// Joins the parts of a one-line summary.
     pub separator: &'static str,
     /// The frames of the mark in front of a piece that is working.
@@ -50,6 +52,7 @@ const UNICODE: Symbols = Symbols {
     rule: "─",
     frame: "│",
     ellipsis: "…",
+    became: "→",
     separator: "·",
     spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
     waiting: "○",
@@ -70,6 +73,7 @@ const ASCII: Symbols = Symbols {
     rule: "-",
     frame: "|",
     ellipsis: "...",
+    became: "->",
     separator: "-",
     spinner: &["|", "/", "-", "\\"],
     waiting: "o",
