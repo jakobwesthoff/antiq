@@ -795,9 +795,17 @@ impl Cards {
             for wrapped in wrap(&reason, room) {
                 let shown = match &command {
                     Some(command) if wrapped.contains(command.as_str()) => {
-                        wrapped.replacen(command, &self.paint(theme::BOLD, command), 1)
+                        let (before, after) = wrapped
+                            .split_once(command.as_str())
+                            .expect("the line holds the command");
+                        format!(
+                            "{}{}{}",
+                            self.paint(theme::ITALIC, before),
+                            self.paint(theme::BOLD_ITALIC, command),
+                            self.paint(theme::ITALIC, after)
+                        )
                     }
-                    _ => wrapped,
+                    _ => self.paint(theme::ITALIC, &wrapped),
                 };
                 lines.push(format!("    {shown}"));
             }

@@ -5,12 +5,34 @@
 //! Scenario: what `status` shows of a collection that needs a look.
 
 use crate::support::scenario::collection::Collection;
-use crate::support::scenario::world::{Setup, both_modes};
+use crate::support::scenario::world::{Mode, Setup, World, both_modes};
 use serde_json::json;
 use std::fs;
 
 const SOUND: &str = "2025-02-11T184007";
 const NO_LISTING: &str = "2025-03-01T080000";
+
+#[test]
+fn status_on_a_terminal_sets_the_what_column_in_dim_italics() {
+    let collection = Collection::build(&crate::support::scenario::collection::Clock::now())
+        .patterns(&["*/*"])
+        .idle_days(30)
+        .piece("old/client-site", |piece| {
+            piece.age_days(141).file("index.html", "<html>");
+        })
+        .finish();
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty(&["status"]);
+
+    run.expect_code(0);
+    assert!(
+        run.stdout
+            .contains("\x1b[2m\x1b[3marchives next run\x1b[0m"),
+        "{:?}",
+        run.stdout
+    );
+}
 
 #[test]
 fn status_shows_every_state_and_notes_what_needs_a_look() {

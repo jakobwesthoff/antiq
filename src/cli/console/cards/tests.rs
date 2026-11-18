@@ -418,7 +418,7 @@ fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
                 pad(3),
                 pad(5)
             ),
-            "    kept by .antiq-pin. \x1b[1mantiq unpin projects/antiq\x1b[0m releases it"
+            "    \x1b[3mkept by .antiq-pin. \x1b[0m\x1b[1m\x1b[3mantiq unpin projects/antiq\x1b[0m\x1b[3m releases it\x1b[0m"
                 .to_string(),
         ]
     );
@@ -936,7 +936,73 @@ fn a_skipped_piece_shows_its_message_in_yellow_and_no_room_shows_sizes() {
     let lines = lines_of(&mut cards, MOCKUP);
     assert!(lines[0].starts_with("  \x1b[33m⚠\x1b[0m "));
     assert!(lines[0].contains("\x1b[33mskipped\x1b[0m"));
-    assert_eq!(lines[1], "    25 B needed, 3 B free");
+    assert_eq!(lines[1], "    \x1b[3m25 B needed, 3 B free\x1b[0m");
+}
+
+#[test]
+fn the_message_of_a_skipped_piece_is_italic() {
+    let mut cards = with_style(UNEARTH, style(true, true));
+    cards.apply(
+        finished("p", 25, Outcome::Skipped("it changed".to_string())),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, MOCKUP);
+
+    assert_eq!(lines[1], "    \x1b[3mit changed\x1b[0m");
+}
+
+#[test]
+fn the_message_of_an_unfinished_piece_is_italic() {
+    let mut cards = with_style(UNEARTH, style(true, true));
+    cards.apply(
+        finished("p", 25, Outcome::Unfinished("it stopped".to_string())),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, MOCKUP);
+
+    assert_eq!(lines[1], "    \x1b[3mit stopped\x1b[0m");
+}
+
+#[test]
+fn a_reason_that_wraps_is_italic_on_each_of_its_lines() {
+    let mut cards = with_style(ARCHIVE, style(true, true));
+    cards.apply(
+        finished(
+            "a",
+            1,
+            Outcome::Refused(vec![nested(
+                "a/inner has its own .antiq folder and so it cannot be archived as a piece",
+            )]),
+        ),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, 60);
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(
+        lines[1],
+        "    \x1b[3mnested antiq collection: a/inner has its own .antiq\x1b[0m"
+    );
+    assert_eq!(
+        lines[2],
+        "    \x1b[3mfolder and so it cannot be archived as a piece\x1b[0m"
+    );
+}
+
+#[test]
+fn without_colour_the_reasons_carry_no_escape() {
+    let mut cards = cards(ARCHIVE);
+    cards.apply(
+        finished("a", 1, Outcome::Refused(vec![pinned("a"), empty("a")])),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, MOCKUP);
+
+    assert!(lines.iter().all(|line| !line.contains('\x1b')), "{lines:?}");
 }
 
 #[test]

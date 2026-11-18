@@ -5,11 +5,29 @@
 //! Scenario: finding a path in the archived files of several versions.
 
 use crate::support::scenario::collection::Collection;
-use crate::support::scenario::world::{Mode, Setup, both_modes};
+use crate::support::scenario::world::{Mode, Setup, World, both_modes};
 
 const SCANNER_OLD: &str = "2026-09-03T121500";
 const SCANNER_NEW: &str = "2026-11-04T090211";
 const SCAN_OLD: &str = "2025-02-11T184007";
+
+#[test]
+fn grep_on_a_terminal_sets_the_right_column_in_italics() {
+    let collection = Collection::build(&crate::support::scenario::collection::Clock::now())
+        .version("projects/scanner", SCANNER_OLD, &[("src/main.rs", "a")])
+        .version("projects/scanner", SCANNER_NEW, &[("src/main.rs", "a")])
+        .finish();
+    let world = World::new(Setup::new(collection), Mode::Text);
+
+    let run = world.run_tty(&["grep", r"main\.rs"]);
+
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("\x1b[3mboth versions\x1b[0m"),
+        "{:?}",
+        run.stdout
+    );
+}
 
 #[test]
 fn grep_finds_a_path_in_two_versions_of_two_pieces() {

@@ -10,6 +10,12 @@ use anstyle::{AnsiColor, Style};
 
 pub const BOLD: Style = Style::new().bold();
 pub const DIM: Style = Style::new().dimmed();
+/// The text that explains the data beside it.
+pub const ITALIC: Style = Style::new().italic();
+/// The explanation in a column whose other text is dim.
+pub const DIM_ITALIC: Style = Style::new().dimmed().italic();
+/// A command inside an explanation.
+pub const BOLD_ITALIC: Style = Style::new().bold().italic();
 pub const RED: Style = AnsiColor::Red.on_default();
 pub const YELLOW: Style = AnsiColor::Yellow.on_default();
 pub const GREEN: Style = AnsiColor::Green.on_default();

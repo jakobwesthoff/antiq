@@ -4,9 +4,10 @@
 
 //! The `grep` command: searches the paths of all archived files.
 
+use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
 use crate::cli::output::{Output, Style};
-use crate::cli::table::{Color, WIDE_FROM, mid, paint, spaces};
+use crate::cli::table::{Color, WIDE_FROM, mid, paint, painted, spaces};
 use crate::cli::{Context, GrepArgs};
 use antiq::collection::Collection;
 use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep_collection};
@@ -191,7 +192,7 @@ fn render_terminal(
             format!(
                 "{text}{}{}",
                 spaces(left.saturating_sub(width) + GAP),
-                row.right
+                painted(style, &row.right, theme::ITALIC, &[])
             )
         })
         .collect();
@@ -487,6 +488,7 @@ mod tests {
     const OLD: &str = "2026-09-03T121500";
     const ANCIENT: &str = "2025-02-11T194007";
     const RED: &str = "\x1b[31m";
+    const ITALIC: &str = "\x1b[3m";
     const END: &str = "\x1b[0m";
 
     fn stamp(text: &str) -> Stamp {
@@ -698,7 +700,10 @@ mod tests {
 
         let lines = render(&found, "XY", style(120, true));
 
-        assert_eq!(lines[1], format!("  a%09b{RED}XY{END}   2026-11-04"),);
+        assert_eq!(
+            lines[1],
+            format!("  a%09b{RED}XY{END}   {ITALIC}2026-11-04{END}")
+        );
     }
 
     #[test]
@@ -708,8 +713,11 @@ mod tests {
         let straddling = render(&found, "es/xy", style(120, true));
         let in_the_piece = render(&found, "es/", style(120, true));
 
-        assert_eq!(straddling[1], format!("  {RED}xy{END}z   2026-11-04"));
-        assert_eq!(in_the_piece[1], "  xyz   2026-11-04");
+        assert_eq!(
+            straddling[1],
+            format!("  {RED}xy{END}z   {ITALIC}2026-11-04{END}")
+        );
+        assert_eq!(in_the_piece[1], format!("  xyz   {ITALIC}2026-11-04{END}"));
     }
 
     #[test]
@@ -718,7 +726,10 @@ mod tests {
 
         let lines = render(&found, r"\t", style(120, true));
 
-        assert_eq!(lines[1], format!("  a{RED}%09{END}b   2026-11-04"));
+        assert_eq!(
+            lines[1],
+            format!("  a{RED}%09{END}b   {ITALIC}2026-11-04{END}")
+        );
     }
 
     #[test]
@@ -729,8 +740,29 @@ mod tests {
 
         assert_eq!(
             lines[1],
-            format!("  a%25{RED}b{END}%0A{RED}b{END}   2026-11-04")
+            format!("  a%25{RED}b{END}%0A{RED}b{END}   {ITALIC}2026-11-04{END}")
         );
+    }
+
+    #[test]
+    fn the_right_column_of_a_piece_row_is_italic_and_its_left_column_is_not() {
+        let found = report(vec![hits("notes", &[NEW], &[("abc", &[NEW])])]);
+
+        let lines = render(&found, "b", style(120, true));
+
+        assert_eq!(
+            lines[0],
+            format!("\x1b[1mnotes\x1b[0m   {ITALIC}1 version, 2026-11-04{END}")
+        );
+    }
+
+    #[test]
+    fn the_right_column_of_a_file_row_with_several_dates_is_italic() {
+        let found = report(vec![hits("notes", &[NEW, OLD], &[("abc", &[NEW])])]);
+
+        let lines = render(&found, "zz", style(120, true));
+
+        assert_eq!(lines[1], format!("  abc   {ITALIC}2026-11-04{END}"));
     }
 
     #[test]
@@ -762,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_terminal_cuts_the_left_column_in_the_middle_and_paints_nothing() {
+    fn a_narrow_terminal_cuts_the_left_column_in_the_middle_and_does_not_highlight_it() {
         let lines = render(&long_path(), "file", style(WIDE_FROM - 1, false));
         // 99 columns minus the longest right text (29) and the gap leave 67,
         // which holds this path; 45 columns cut it.
@@ -771,8 +803,9 @@ mod tests {
         let narrow = render(&long_path(), "file", style(45, true));
         assert!(narrow[1].contains('…'), "{}", narrow[1]);
         assert!(!narrow[1].contains(RED), "{}", narrow[1]);
-        assert!(narrow[1].ends_with("   both versions"), "{}", narrow[1]);
-        let left = narrow[1].trim_end_matches("   both versions");
+        let right = format!("   {ITALIC}both versions{END}");
+        assert!(narrow[1].ends_with(&right), "{}", narrow[1]);
+        let left = narrow[1].trim_end_matches(&right);
         assert_eq!(left.width(), 20);
     }
 

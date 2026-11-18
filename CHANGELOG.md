@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On a terminal with colour, the explanatory text is set in italics: the
+  WHAT column of `status` (dim as before), the reasons under the finished
+  line of a refused, skipped (for lack of room too) or unfinished piece,
+  and the right column of `grep`. The result of a piece and the marks of
+  `find` and `list` are not.
 - A reason why `archive` or `import` leaves a folder alone has one wording
   in every view, the one of the WHAT column of `status`. A nested
   collection reads `nested antiq collection: <dir>` and a pin reads `kept

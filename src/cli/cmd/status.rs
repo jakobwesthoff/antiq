@@ -286,12 +286,12 @@ fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
         } else {
             wrap(&row.what, what_width)
         };
-        let dim = |text: &str| painted(style, text, theme::DIM, &[]);
-        lines.push(format!("{prefix}{}", dim(&wrapped.remove(0))));
+        let comment = |text: &str| painted(style, text, theme::DIM_ITALIC, &[]);
+        lines.push(format!("{prefix}{}", comment(&wrapped.remove(0))));
         lines.extend(
             wrapped
                 .into_iter()
-                .map(|rest| format!("{continuation}{}", dim(&rest))),
+                .map(|rest| format!("{continuation}{}", comment(&rest))),
         );
     }
     lines
@@ -938,7 +938,37 @@ mod tests {
         );
         assert_eq!(
             lines(&shown)[3],
-            "\x1b[33mdue\x1b[0m      a       33d  \x1b[2marchives next run\x1b[0m"
+            "\x1b[33mdue\x1b[0m      a       33d  \x1b[2m\x1b[3marchives next run\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn every_line_of_a_wrapped_what_is_dim_and_italic_and_its_indent_is_plain() {
+        let colored = Style {
+            color: true,
+            ..narrow()
+        };
+        let reasons = vec![
+            refusal(
+                RefusalKind::UnreadableEntry,
+                "media/a-rather-long-name/first",
+            ),
+            refusal(RefusalKind::Locked, "media/a-rather-long-name/second"),
+        ];
+        let report = one(piece("media", Verdict::Refused(reasons), Some(52)));
+
+        let shown = render(&report, colored, &TimeZone::UTC, now());
+
+        let rows = &lines(&shown)[3..];
+        assert!(rows.len() >= 2, "{rows:?}");
+        let continuation = rows[1];
+        let (indent, text) = continuation.split_at(continuation.find('\x1b').expect("a paint"));
+        assert!(indent.chars().all(|c| c == ' '), "{continuation:?}");
+        assert!(rows.iter().all(|row| row.ends_with("\x1b[0m")), "{rows:?}");
+        assert!(text.starts_with("\x1b[2m\x1b[3m"), "{continuation:?}");
+        assert!(
+            rows[0].contains("  \x1b[2m\x1b[3munreadable entry:"),
+            "{rows:?}"
         );
     }
 

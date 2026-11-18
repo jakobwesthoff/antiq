@@ -1560,7 +1560,8 @@ The left column is as wide as the longest piece or indented path, and three
 spaces separate it from the right column. On a terminal of 100 columns or
 more a path is never cut. On a narrower one the left column gets the width
 that the longest right text leaves, but at least 20 columns, and a longer
-path is cut in the middle and not highlighted.
+path is cut in the middle and not highlighted. On a terminal with colour the
+right column is italic.
 
 The pattern is matched against the unescaped path bytes; text output shows
 the piece and the path by the rule of "Console output", on a terminal and in
@@ -1597,7 +1598,7 @@ and the versions (those that have a `.tar.zst`), gives the sum of the
 `archive-bytes` their listings record in decimal units, and repeats
 `idle_days`. A blank line and the table follow: one row per piece that has
 a state, sorted by path, the state coloured in the first column and the
-header row and the WHAT column dim: `due`
+header row dim and the WHAT column dim and italic: `due`
 (archived on the next run), `soon` (due within `soon_days`), `pinned`, and
 `refused` for the pieces `archive` refuses. Plain live folders are only
 counted in the header; when no piece has a state, the blank line and the
@@ -2486,7 +2487,8 @@ line of an `unearth`, a `fork` or a `rebuild` has `version <local time>` after t
 piece, in the form `unearth` uses on a terminal. A `fork` or a `rebuild` of a
 version without a listing has no size. A refused, skipped or unfinished piece
 has its reasons under the line, indented by four columns and wrapped to the
-width, one paragraph for each reason. A named piece that carries a pin
+width, one paragraph for each reason, in italics on a terminal with colour
+(the command in it bold and italic). A named piece that carries a pin
 reads `kept by .antiq-pin. antiq unpin <piece> releases it`, with
 the `-C` of the run in the command when it had one. A skip for lack of room
 reads `<size> needed, <size> free`, and a volume that ran full during the
