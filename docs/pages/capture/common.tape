@@ -8,8 +8,9 @@
 
 Set Shell "bash"
 # Victor Mono, the font of the author's terminal. vhs draws with the fonts that
-# are installed on the machine; the file is assets/social/fonts/VictorMono-Variable.ttf
-# and render.sh refuses to run without the family.
+# are installed on the machine; the files are assets/social/fonts/VictorMono-Variable.ttf
+# and VictorMono-Italic-Variable.ttf (for italic text), and render.sh refuses to
+# run without the family and its italic.
 Set FontFamily "Victor Mono"
 Set FontSize 28
 Set Padding 40

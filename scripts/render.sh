@@ -75,9 +75,15 @@ if [ "$free_kb" -lt 1500000 ]; then
 fi
 
 # vhs draws with the fonts installed on the machine and falls back to another
-# one for a family it does not find, which would change every image.
-if ! fc-list : family | grep 'Victor Mono' > /dev/null; then
+# one for a family it does not find, which would change every image. A
+# family without an italic face is drawn with a slanted copy of the upright
+# one, so the italic face is required too.
+if ! fc-list : family slant | grep '^Victor Mono' | grep 'slant=0' > /dev/null; then
     echo "render.sh: the font Victor Mono is not installed; install $repo/assets/social/fonts/VictorMono-Variable.ttf" >&2
+    exit 1
+fi
+if ! fc-list : family slant | grep '^Victor Mono' | grep 'slant=100' > /dev/null; then
+    echo "render.sh: the italic of Victor Mono is not installed; install $repo/assets/social/fonts/VictorMono-Italic-Variable.ttf" >&2
     exit 1
 fi
 

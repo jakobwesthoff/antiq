@@ -738,8 +738,9 @@ in the todo vault at `todos/`.
 The images of this README and of the project page are rendered from real
 runs of antiq in a demo world. `just shots` renders them again into
 `docs/pages/assets/shots/`. It needs `vhs`, `ttyd`, `ffmpeg`, `oxipng`, an
-rsync of 3.2.4 or newer and the font Victor Mono installed (the file is
-`assets/social/fonts/VictorMono-Variable.ttf`). `just demo-video` renders
+rsync of 3.2.4 or newer and the font Victor Mono installed, upright and
+italic (the files are `assets/social/fonts/VictorMono-Variable.ttf` and
+`assets/social/fonts/VictorMono-Italic-Variable.ttf`). `just demo-video` renders
 only the demo video (`docs/pages/assets/demo.webm` and `demo.mp4`) and the
 GIF at the top of this README. `just shots-test` tests the script that
 builds the demo world.

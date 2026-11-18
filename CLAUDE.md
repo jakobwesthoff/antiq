@@ -58,6 +58,10 @@ license text lives.
 - `assets/social/fonts/VictorMono-Variable.ttf`: Victor Mono, SIL Open
   Font License 1.1, text in `assets/social/fonts/VictorMono-OFL.txt`. The
   social image and the captures of `docs/pages/capture/` use it.
+- `assets/social/fonts/VictorMono-Italic-Variable.ttf`: the italic of the
+  same family, SIL Open Font License 1.1, text in
+  `assets/social/fonts/VictorMono-OFL.txt`. The captures of
+  `docs/pages/capture/` use it for italic text.
 
 ## Documentation conventions
 
