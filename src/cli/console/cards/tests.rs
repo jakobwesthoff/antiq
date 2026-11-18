@@ -3,6 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use super::*;
+use antiq::commands::survey::{Refusal, RefusalKind};
+use antiq::relpath::RelPath;
 
 /// The width the three approved final mockups are laid out for.
 const MOCKUP: usize = 96;
@@ -14,6 +16,29 @@ fn style(color: bool, utf8: bool) -> Style {
         terminal: true,
         utf8,
     }
+}
+
+fn rel(text: &str) -> RelPath {
+    RelPath::from_bytes(text.as_bytes().to_vec()).expect("a test path is a path")
+}
+
+/// The reason of a pinned piece at `piece`.
+fn pinned(piece: &str) -> Reason {
+    Reason::pinned(&rel(piece))
+}
+
+/// The reason of a piece with no file that counts.
+fn empty(piece: &str) -> Reason {
+    Reason::empty(&rel(piece))
+}
+
+/// The reason of a nested collection at `dir`.
+fn nested(dir: &str) -> Reason {
+    Reason::from(&Refusal {
+        kind: RefusalKind::NestedCollection,
+        path: rel(dir),
+        line: None,
+    })
 }
 
 type Counts = &'static [(Operation, Count)];
@@ -121,7 +146,7 @@ fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
         finished(
             "projects/antiq",
             220,
-            Outcome::Refused(vec!["pinned: projects/antiq/.antiq-pin".to_string()]),
+            Outcome::Refused(vec![pinned("projects/antiq")]),
         ),
         secs(1),
     );
@@ -373,7 +398,7 @@ fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
         finished(
             "projects/antiq",
             220,
-            Outcome::Refused(vec!["pinned: projects/antiq/.antiq-pin".to_string()]),
+            Outcome::Refused(vec![pinned("projects/antiq")]),
         ),
         secs(2),
     );
@@ -794,7 +819,7 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
         finished(
             "projects/antiq",
             220,
-            Outcome::Refused(vec!["pinned: projects/antiq/.antiq-pin".to_string()]),
+            Outcome::Refused(vec![pinned("projects/antiq")]),
         ),
         secs(0),
     );
@@ -820,11 +845,7 @@ fn the_unpin_command_names_the_exact_piece_that_the_escaped_name_stands_for() {
         ("projects/a\nb", "$'projects/a\\nb'"),
     ] {
         cards.apply(
-            finished(
-                name,
-                220,
-                Outcome::Refused(vec![format!("pinned: {name}/.antiq-pin")]),
-            ),
+            finished(name, 220, Outcome::Refused(vec![pinned(name)])),
             secs(0),
         );
         let lines = lines_of(&mut cards, MOCKUP);
@@ -847,8 +868,8 @@ fn other_reasons_are_wrapped_one_block_each_and_never_cut() {
             "a",
             1,
             Outcome::Refused(vec![
-                "nested collection: a/inner has its own .antiq folder and so it cannot be archived as a piece".to_string(),
-                "empty: a".to_string(),
+                nested("a/inner has its own .antiq folder and so it cannot be archived as a piece"),
+                empty("a"),
             ]),
         ),
         secs(0),
@@ -1173,7 +1194,7 @@ fn the_ascii_symbol_set_reaches_every_glyph_of_a_finished_line_and_the_summary()
     let name = "archive/2019/client-work/with-a-very-long-folder-name/acme-warehouse-dashboard-v2";
     run_piece(&mut cards, name, 5, Outcome::Files(1), 0, 1);
     cards.apply(
-        finished("p", 1, Outcome::Refused(vec!["empty: p".to_string()])),
+        finished("p", 1, Outcome::Refused(vec![empty("p")])),
         secs(1),
     );
     cards.apply(
@@ -1269,7 +1290,7 @@ fn a_command_in_a_reason_that_is_cut_by_wrapping_is_not_bold() {
         finished(
             "projects/antiq",
             1,
-            Outcome::Refused(vec!["pinned: projects/antiq/.antiq-pin".to_string()]),
+            Outcome::Refused(vec![pinned("projects/antiq")]),
         ),
         secs(0),
     );

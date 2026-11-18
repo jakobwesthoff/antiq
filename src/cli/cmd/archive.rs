@@ -13,7 +13,7 @@ use crate::cli::{ArchiveArgs, Context};
 use antiq::clock::SystemClock;
 use antiq::collection::Collection;
 use antiq::commands::archive::{
-    ArchivePlan, ArchiveReport, Outcome, Request, Target, archive, archive_observed,
+    ArchivePlan, ArchiveReport, Outcome, Reasons, Request, Target, archive, archive_observed,
 };
 use antiq::plan::{PlanAction, Step};
 use antiq::progress::Operation;
@@ -189,7 +189,7 @@ fn print_pipe_lines(report: &ArchiveReport, out: &mut Output) -> anyhow::Result<
         out.line(&format!(
             "refused {}: {}",
             escape_controls(&piece.piece),
-            escape_controls(&piece.reasons_text())
+            escape_controls(&Reasons(&piece.reasons).to_string())
         ))
         .context("print the result")?;
     }

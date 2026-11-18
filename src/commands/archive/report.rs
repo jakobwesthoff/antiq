@@ -5,11 +5,14 @@
 //! What a run of `archive` and its dry run report.
 
 use crate::commands::survey::Refusal;
+use crate::pin::PIN_FILE;
 use crate::plan::{HeldDryRun, PlanAction, Step};
-use crate::relpath::RelPath;
+use crate::relpath::{Name, RelPath};
 use crate::report::{CommandReport, Warning};
 use jiff::Timestamp;
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
+use std::fmt;
 
 /// The outcome of `archive`.
 #[derive(Debug)]
@@ -53,47 +56,109 @@ pub struct SkippedPiece {
     pub message: String,
 }
 
-/// One reason `archive` leaves a piece alone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Reason {
-    pub kind: &'static str,
-    /// Relative to the collection root; for `import`, to the folder.
-    pub path: String,
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line: Option<usize>,
+/// One reason `archive` or `import` leaves a folder alone. `Display` is
+/// the wording every view shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The walk or a marker file refuses the folder.
+    Walk(Refusal),
+    /// The folder carries a pin. `pin` is the pin file, relative to the
+    /// collection root; for `import`, to the folder.
+    Pinned { pin: RelPath },
+    /// No file in the folder counts. `piece` is relative to the collection
+    /// root; for `import`, it is the folder itself, which is the root.
+    Empty { piece: RelPath },
 }
 
 impl Reason {
-    /// A piece named on the command line carries a pin.
-    pub(super) fn pinned(pin: &RelPath) -> Reason {
-        Reason {
-            kind: "pinned",
-            path: pin.to_string(),
-            text: format!("pinned: {pin}"),
-            line: None,
+    /// The pin of the piece at `top`.
+    pub fn pinned(top: &RelPath) -> Reason {
+        let name =
+            Name::from_bytes(PIN_FILE.as_bytes().to_vec()).expect("the pin file name is a name");
+        Reason::Pinned {
+            pin: top.join(&name),
         }
     }
 
-    /// A piece named on the command line has no file that counts.
-    pub(super) fn empty(piece: &RelPath) -> Reason {
-        Reason {
-            kind: "empty",
-            path: piece.to_string(),
-            text: format!("empty: {piece}"),
-            line: None,
+    /// The piece at `piece` has no file that counts.
+    pub fn empty(piece: &RelPath) -> Reason {
+        Reason::Empty {
+            piece: piece.clone(),
+        }
+    }
+
+    /// The name of the reason in JSON.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Reason::Walk(refusal) => refusal.kind.as_str(),
+            Reason::Pinned { .. } => "pinned",
+            Reason::Empty { .. } => "empty",
+        }
+    }
+
+    /// The path the reason is about, relative to the collection root; for
+    /// `import`, to the folder, which is `.` itself.
+    pub fn path(&self) -> String {
+        match self {
+            Reason::Walk(refusal) => refusal.path.to_string(),
+            Reason::Pinned { pin } => pin.to_string(),
+            Reason::Empty { piece } if piece.is_root() => ".".to_string(),
+            Reason::Empty { piece } => piece.to_string(),
+        }
+    }
+
+    /// The line of the rule file at fault.
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Reason::Walk(refusal) => refusal.line,
+            Reason::Pinned { .. } | Reason::Empty { .. } => None,
         }
     }
 }
 
 impl From<&Refusal> for Reason {
     fn from(refusal: &Refusal) -> Reason {
-        Reason {
-            kind: refusal.kind.as_str(),
-            path: refusal.path.to_string(),
-            text: refusal.to_string(),
-            line: refusal.line,
+        Reason::Walk(refusal.clone())
+    }
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reason::Walk(refusal) => refusal.fmt(f),
+            Reason::Pinned { pin } => write!(f, "pinned: {pin}"),
+            Reason::Empty { piece } if piece.is_root() => f.write_str("empty: no file counts"),
+            Reason::Empty { piece } => write!(f, "empty: {piece}"),
         }
+    }
+}
+
+impl Serialize for Reason {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let line = self.line();
+        let mut found = serializer.serialize_struct("Reason", 3 + usize::from(line.is_some()))?;
+        found.serialize_field("kind", self.kind())?;
+        found.serialize_field("path", &self.path())?;
+        found.serialize_field("text", &self.to_string())?;
+        if let Some(line) = line {
+            found.serialize_field("line", &line)?;
+        }
+        found.end()
+    }
+}
+
+/// The reasons of one folder as one piece of text.
+pub struct Reasons<'a>(pub &'a [Reason]);
+
+impl fmt::Display for Reasons<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, reason) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{reason}")?;
+        }
+        Ok(())
     }
 }
 
@@ -101,14 +166,6 @@ impl From<&Refusal> for Reason {
 pub struct RefusedPiece {
     pub piece: String,
     pub reasons: Vec<Reason>,
-}
-
-impl RefusedPiece {
-    /// `reason, reason`
-    pub fn reasons_text(&self) -> String {
-        let texts: Vec<&str> = self.reasons.iter().map(|r| r.text.as_str()).collect();
-        texts.join(", ")
-    }
 }
 
 /// What a real run did.
@@ -219,7 +276,7 @@ impl ArchivePlan {
         lines.extend(
             self.refused
                 .iter()
-                .map(|piece| format!("Refused {}: {}", piece.piece, piece.reasons_text())),
+                .map(|piece| format!("Refused {}: {}", piece.piece, Reasons(&piece.reasons))),
         );
         if lines.is_empty() {
             lines.push("Nothing to do.".to_string());
@@ -240,5 +297,67 @@ impl CommandReport for ArchivePlan {
 
     fn warnings(&self) -> &[Warning] {
         &self.warnings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::survey::RefusalKind;
+    use serde_json::json;
+
+    fn path(text: &str) -> RelPath {
+        RelPath::from_bytes(text.as_bytes().to_vec()).expect("a test path is a path")
+    }
+
+    #[test]
+    fn a_walk_reason_serialises_with_its_line_after_the_text() {
+        let reason = Reason::from(&Refusal {
+            kind: RefusalKind::RuleFile,
+            path: path("piece/.antiqignore"),
+            line: Some(3),
+        });
+
+        let text = serde_json::to_string(&reason).expect("serialises");
+
+        assert_eq!(
+            text,
+            r#"{"kind":"rule_file","path":"piece/.antiqignore","text":"rule file: piece/.antiqignore:3","line":3}"#
+        );
+    }
+
+    #[test]
+    fn a_reason_without_a_line_serialises_without_the_key() {
+        let pinned = serde_json::to_value(Reason::pinned(&path("piece"))).expect("serialises");
+        let empty = serde_json::to_value(Reason::empty(&path("piece"))).expect("serialises");
+
+        assert_eq!(
+            pinned,
+            json!({"kind": "pinned", "path": "piece/.antiq-pin", "text": "pinned: piece/.antiq-pin"})
+        );
+        assert_eq!(
+            empty,
+            json!({"kind": "empty", "path": "piece", "text": "empty: piece"})
+        );
+    }
+
+    #[test]
+    fn several_reasons_read_as_one_text() {
+        let reasons = [
+            Reason::pinned(&path("piece")),
+            Reason::empty(&path("piece")),
+        ];
+
+        assert_eq!(
+            Reasons(&reasons).to_string(),
+            "pinned: piece/.antiq-pin, empty: piece"
+        );
+    }
+
+    #[test]
+    fn the_folder_itself_is_shown_as_a_dot() {
+        let reason = Reason::empty(&RelPath::root());
+
+        assert_eq!(reason.path(), ".");
     }
 }

@@ -11,6 +11,7 @@
 //! whenever it likes, so the loops that do the work send no messages and an
 //! observer cannot slow them down.
 
+use crate::commands::archive::Reason;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -116,7 +117,7 @@ pub enum Outcome {
         deleted: u64,
     },
     /// The item is left as it was, with the reasons.
-    Refused(Vec<String>),
+    Refused(Vec<Reason>),
     /// The item was not processed; the text says why.
     Skipped(String),
     /// The item was not processed for lack of room: it needs `needed` bytes

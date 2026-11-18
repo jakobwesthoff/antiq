@@ -15,12 +15,12 @@ use crate::commands::archive::store::{
     Folder, StoreContext, StoreFailure, StoreRequest, apparent_size, remove_staging, staging_chain,
     store_version,
 };
-use crate::commands::archive::{ArchiveError, Reason, SkipReason, stored_spelling_of};
+use crate::commands::archive::{ArchiveError, Reason, Reasons, SkipReason, stored_spelling_of};
 use crate::commands::survey::Refusal;
 use crate::error::{ErrorKind, HasKind, chain_text};
 use crate::filesystem::space::{ReserveError, SpaceLedger};
 use crate::filesystem::tree::TreeRoot;
-use crate::pin::{self, PIN_FILE, PinError};
+use crate::pin::{self, PinError};
 use crate::plan::{HeldDryRun, PlanAction, Step};
 use crate::progress::{Observer, Outcome as Progress, Silent, Tracker};
 use crate::reference::{ReferenceError, resolve_path};
@@ -297,7 +297,7 @@ pub enum ImportError {
     InsideCollection { path: String },
     #[error("cannot use `{}` as the piece: {reason}", escape_controls(path))]
     PiecePath { path: String, reason: String },
-    #[error("cannot import {folder}: {}", reasons_text(.reasons))]
+    #[error("cannot import {folder}: {}", Reasons(.reasons))]
     Refused {
         folder: String,
         reasons: Vec<Reason>,
@@ -308,11 +308,6 @@ pub enum ImportError {
     FutureTime { time: Timestamp },
     #[error("the version time is outside the years a version stamp covers")]
     OutOfRange,
-}
-
-fn reasons_text(reasons: &[Reason]) -> String {
-    let texts: Vec<&str> = reasons.iter().map(|reason| reason.text.as_str()).collect();
-    texts.join(", ")
 }
 
 impl HasKind for ImportError {
@@ -646,12 +641,7 @@ fn prepare(
         source: source_error,
     })?;
     if pinned {
-        reasons.push(Reason {
-            kind: "pinned",
-            path: PIN_FILE.to_string(),
-            text: format!("pinned: {PIN_FILE}"),
-            line: None,
-        });
+        reasons.push(Reason::pinned(&top));
     }
 
     // The newest counted file gives the version time. The first of equal
@@ -666,12 +656,7 @@ fn prepare(
                 .then_with(|| b.path.cmp(&a.path))
         });
     if reasons.is_empty() && newest.is_none() {
-        reasons.push(Reason {
-            kind: "empty",
-            path: ".".to_string(),
-            text: "empty: no file counts".to_string(),
-            line: None,
-        });
+        reasons.push(Reason::empty(&top));
     }
     if !reasons.is_empty() {
         return Err(ImportError::Refused {

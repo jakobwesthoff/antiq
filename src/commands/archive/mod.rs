@@ -10,8 +10,8 @@ pub(crate) mod seams;
 pub(crate) mod store;
 
 pub use report::{
-    ArchiveAction, ArchivePlan, ArchiveReport, ArchivedPiece, Outcome, Reason, RefusedPiece,
-    SkipReason, SkippedPiece,
+    ArchiveAction, ArchivePlan, ArchiveReport, ArchivedPiece, Outcome, Reason, Reasons,
+    RefusedPiece, SkipReason, SkippedPiece,
 };
 
 use crate::archive::PackError;
@@ -33,7 +33,7 @@ use crate::plan::Step;
 use crate::progress::{Event, Observer, Outcome as Progress, Planned, Silent, Tracker};
 use crate::reference::ReferenceError;
 use crate::reference::{CandidateSet, SearchWord, resolve_piece, stored_spelling};
-use crate::relpath::{Name, RelPath};
+use crate::relpath::RelPath;
 use crate::repair::RepairError;
 use crate::repair::{Destination, Repair};
 use crate::report::{Warning, setting_notes};
@@ -328,11 +328,7 @@ impl Setup {
             Ok(check) => match check.verdict {
                 IdleVerdict::Idle { .. } => Judged::Go,
                 IdleVerdict::Active { .. } | IdleVerdict::Soon { .. } if self.named => Judged::Go,
-                IdleVerdict::Pinned if self.named => {
-                    let pin = Name::from_bytes(PIN_FILE.as_bytes().to_vec())
-                        .expect("the pin file name is a name");
-                    refused(vec![Reason::pinned(&top.join(&pin))])
-                }
+                IdleVerdict::Pinned if self.named => refused(vec![Reason::pinned(top)]),
                 IdleVerdict::Empty if self.named => refused(vec![Reason::empty(top)]),
                 _ => Judged::Quiet,
             },
@@ -650,12 +646,7 @@ fn process(shared: &Shared<'_>, piece: &RelPath, planned: bool) -> Done {
             return Done::new(Finished::Quiet);
         }
         Judged::Refused(refused) => {
-            let reasons = refused
-                .reasons
-                .iter()
-                .map(|reason| reason.text.clone())
-                .collect();
-            tracker.finished(bytes, &Progress::Refused(reasons));
+            tracker.finished(bytes, &Progress::Refused(refused.reasons.clone()));
             return Done::new(Finished::Refused(refused));
         }
     }
@@ -1245,7 +1236,7 @@ mod tests {
     }
 
     fn kinds(refused: &RefusedPiece) -> Vec<&'static str> {
-        refused.reasons.iter().map(|reason| reason.kind).collect()
+        refused.reasons.iter().map(|reason| reason.kind()).collect()
     }
 
     fn pieces_of(report: &ArchiveReport) -> Vec<&str> {
@@ -1719,7 +1710,7 @@ mod tests {
 
         assert!(report.archived.is_empty() && report.skipped.is_empty());
         assert_eq!(kinds(&report.refused[0]), ["pinned"]);
-        assert_eq!(report.refused[0].reasons[0].path, "piece/.antiq-pin");
+        assert_eq!(report.refused[0].reasons[0].path(), "piece/.antiq-pin");
         assert_eq!(report.exit_code(), 1);
         assert!(world.root().join("piece/a.txt").exists());
     }
@@ -1733,7 +1724,7 @@ mod tests {
         let report = execute_with(&world, &named(&world, "piece"), &RealSeams, 1).expect("ends");
 
         assert_eq!(kinds(&report.refused[0]), ["empty"]);
-        assert_eq!(report.refused[0].reasons[0].path, "piece");
+        assert_eq!(report.refused[0].reasons[0].path(), "piece");
         assert_eq!(report.exit_code(), 1);
     }
 
@@ -1746,7 +1737,7 @@ mod tests {
         let report = execute_with(&world, &named(&world, "piece"), &RealSeams, 1).expect("ends");
 
         assert_eq!(kinds(&report.refused[0]), ["nested_collection"]);
-        assert_eq!(report.refused[0].reasons[0].path, "piece/inner");
+        assert_eq!(report.refused[0].reasons[0].path(), "piece/inner");
         assert_eq!(report.exit_code(), 1);
     }
 
@@ -1773,7 +1764,7 @@ mod tests {
         let refused = &report.refused[0];
         assert_eq!(refused.piece, "piece");
         assert_eq!(kinds(refused), ["not_a_file"], "{refused:?}");
-        assert_eq!(refused.reasons[0].path, "piece/.antiq-pin");
+        assert_eq!(refused.reasons[0].path(), "piece/.antiq-pin");
         assert!(world.root().join("piece/a.txt").exists());
     }
 

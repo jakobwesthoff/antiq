@@ -166,8 +166,8 @@ fn listed_pieces(
         pieces.push(ready(&piece.piece, None, outcome));
     }
     for piece in refused {
-        let reasons = piece.reasons.iter().map(|r| r.text.clone()).collect();
-        pieces.push(ready(&piece.piece, None, Outcome::Refused(reasons)));
+        let outcome = Outcome::Refused(piece.reasons.clone());
+        pieces.push(ready(&piece.piece, None, outcome));
     }
     pieces
 }
@@ -458,14 +458,12 @@ mod tests {
             reason: SkipReason::Differs,
             message: "it changed".to_string(),
         }];
+        let empty = Reason::empty(
+            &antiq::relpath::RelPath::from_bytes(b"c".to_vec()).expect("c is a path"),
+        );
         let refused = [RefusedPiece {
             piece: "c".to_string(),
-            reasons: vec![Reason {
-                kind: "empty",
-                path: "c".to_string(),
-                text: "empty: c".to_string(),
-                line: None,
-            }],
+            reasons: vec![empty.clone()],
         }];
         let listed: Vec<(String, Option<u64>, Outcome)> =
             listed_pieces(&archived, &skipped, &refused)
@@ -488,11 +486,7 @@ mod tests {
                     None,
                     Outcome::Skipped("it changed".to_string())
                 ),
-                (
-                    "c".to_string(),
-                    None,
-                    Outcome::Refused(vec!["empty: c".to_string()])
-                ),
+                ("c".to_string(), None, Outcome::Refused(vec![empty])),
             ]
         );
     }

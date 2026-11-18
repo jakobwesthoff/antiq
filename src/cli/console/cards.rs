@@ -15,7 +15,7 @@ use crate::cli::output::Style;
 use crate::cli::table::{decimal_size, mid, pad, pad_left, thousands, wrap};
 use crate::cli::unresolved::pasteable_line;
 use anstyle::Style as Look;
-use antiq::pin::PIN_FILE;
+use antiq::commands::archive::Reason;
 use antiq::progress::{Counter, Operation, Outcome};
 use antiq::shown::escape_controls;
 use std::path::PathBuf;
@@ -729,8 +729,8 @@ impl Cards {
 
     /// A named piece that carries a pin is told how to release it; every
     /// other reason is shown as the library words it.
-    fn reason_text(&self, name: &str, reason: &str) -> (String, Option<String>) {
-        if reason == format!("pinned: {name}/{PIN_FILE}") {
+    fn reason_text(&self, name: &str, reason: &Reason) -> (String, Option<String>) {
+        if matches!(reason, Reason::Pinned { .. }) {
             let command = escape_controls(&pasteable_line(
                 self.config.directory.as_deref(),
                 &[
@@ -741,7 +741,7 @@ impl Cards {
             let text = format!("pinned, so it stays as it is. {command} releases it");
             return (text, Some(command));
         }
-        (escape_controls(reason), None)
+        (escape_controls(&reason.to_string()), None)
     }
 
     /// The one line of a finished piece and, under it, the reasons it did
