@@ -2,7 +2,6 @@
 title: "Set the comment text of status, the cards and grep in italics"
 kind: improvement
 component: cli
-status: blocked
 horizon: next
 origin: discussion
 tags: [ux]
@@ -49,7 +48,3 @@ optional.
 - `docs/specs/spec-v1.md` describes the italics where it describes the
   styling of each of the three.
 - The CHANGELOG has an entry under Unreleased.
-
-## Relations
-
-- Depends on: [Give refusal reasons one typed form and the wording of status](01M7Q4N592G2SPEDZRSFSMC9C3-give-refusal-reasons-one-typed-form-and-the-wording-of-status.md)

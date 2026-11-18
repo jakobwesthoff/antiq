@@ -738,7 +738,7 @@ impl Cards {
                     antiq::shown::unescaped_word(name),
                 ],
             ));
-            let text = format!("pinned, so it stays as it is. {command} releases it");
+            let text = format!("{reason}. {command} releases it");
             return (text, Some(command));
         }
         (escape_controls(&reason.to_string()), None)

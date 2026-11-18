@@ -440,7 +440,7 @@ fn a_named_pinned_piece_is_refused_with_the_command_that_releases_it() {
         .flat_map(|line| line.split_whitespace())
         .collect();
     let expected = format!(
-        "pinned, so it stays as it is. antiq -C {} unpin projects/antiq releases it",
+        "kept by .antiq-pin. antiq -C {} unpin projects/antiq releases it",
         root.display()
     );
     assert_eq!(

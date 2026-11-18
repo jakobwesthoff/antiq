@@ -179,7 +179,7 @@ fn an_archive_run_leaves_the_lines_of_the_approved_mockup() {
         [
             "  ✔ experiments/ray-marcher                               222 B       3 files  0:01",
             "  ✖ projects/antiq                                        220 B       refused  0:00",
-            "    pinned, so it stays as it is. antiq unpin projects/antiq releases it",
+            "    kept by .antiq-pin. antiq unpin projects/antiq releases it",
             "  ✔ projects/recipe-api                                   48 MB      15 files  0:05",
             "  ✔ archive/2019/client-work/acme-warehouse-dashboard    1.8 GB     518 files  0:11",
             "  ✔ tools/pdf-merge                                      3.1 MB       9 files  0:02",
@@ -418,7 +418,7 @@ fn the_colours_of_a_finished_line_are_those_of_the_mockup() {
                 pad(3),
                 pad(5)
             ),
-            "    pinned, so it stays as it is. \x1b[1mantiq unpin projects/antiq\x1b[0m releases it"
+            "    kept by .antiq-pin. \x1b[1mantiq unpin projects/antiq\x1b[0m releases it"
                 .to_string(),
         ]
     );
@@ -826,7 +826,7 @@ fn a_pinned_piece_names_the_command_with_the_directory_of_the_run() {
     let lines = lines_of(&mut cards, MOCKUP);
     assert_eq!(
         lines[1],
-        "    pinned, so it stays as it is. antiq -C '/data/my notes' unpin projects/antiq releases it"
+        "    kept by .antiq-pin. antiq -C '/data/my notes' unpin projects/antiq releases it"
     );
 }
 
@@ -858,6 +858,38 @@ fn the_unpin_command_names_the_exact_piece_that_the_escaped_name_stands_for() {
             "{lines:?}"
         );
     }
+}
+
+#[test]
+fn a_pin_reason_gets_the_hint_whatever_path_it_holds() {
+    let mut cards = cards(ARCHIVE);
+    cards.apply(
+        finished("a", 1, Outcome::Refused(vec![pinned("elsewhere")])),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, MOCKUP);
+
+    assert_eq!(
+        lines[1],
+        "    kept by .antiq-pin. antiq unpin a releases it"
+    );
+}
+
+#[test]
+fn a_reason_that_is_no_pin_gets_no_hint() {
+    let mut cards = cards(ARCHIVE);
+    cards.apply(
+        finished("a", 1, Outcome::Refused(vec![empty("a"), nested("a/b")])),
+        secs(0),
+    );
+
+    let lines = lines_of(&mut cards, MOCKUP);
+
+    assert!(
+        lines.iter().all(|line| !line.contains("releases it")),
+        "{lines:?}"
+    );
 }
 
 #[test]

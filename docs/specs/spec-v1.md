@@ -2487,7 +2487,7 @@ piece, in the form `unearth` uses on a terminal. A `fork` or a `rebuild` of a
 version without a listing has no size. A refused, skipped or unfinished piece
 has its reasons under the line, indented by four columns and wrapped to the
 width, one paragraph for each reason. A named piece that carries a pin
-reads `pinned, so it stays as it is. antiq unpin <piece> releases it`, with
+reads `kept by .antiq-pin. antiq unpin <piece> releases it`, with
 the `-C` of the run in the command when it had one. A skip for lack of room
 reads `<size> needed, <size> free`, and a volume that ran full during the
 extraction of a version without a listing reads `out of space during the
@@ -2731,8 +2731,7 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `empty`. `text` is the wording of the reason: the texts listed under
 "status" for the walk refusals, `kept by .antiq-pin` for `pinned` and
 `empty: no file counts` for `empty`; the `refused` lines of `archive`, the
-dry run, the reasons under a card (a pinned named piece has its own
-text there, see "Progress cards") and the error of `import` show the same
+dry run, the reasons under a card and the error of `import` show the same
 texts. `repairs` lists the repairs of the start of the run, each as
 `{"kind": "repair", "repair": "<name>", ...}`, and `warnings` is a list of
 warning objects. A warning object is `{message}`; one about an unknown

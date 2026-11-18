@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `archive` said `empty: <piece>`. Several reasons of one folder are
   joined by `; `, where `archive` and `import` used `, `. The `path` of a
   reason in the JSON is unchanged.
+- On a terminal, the card of a pinned piece that `archive` was told by name
+  reads `kept by .antiq-pin. antiq unpin <piece> releases it`, where it
+  said `pinned, so it stays as it is. antiq unpin <piece> releases it`.
 
 ## [1.6.0] - 2026-11-12
 
