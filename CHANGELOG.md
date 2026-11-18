@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-18
+
 ### Changed
 
 - On a terminal with colour, the explanatory text is set in italics: the
@@ -231,7 +233,8 @@ target.
   terminal with 24-bit colour, and the plain version in a pipe
 - macOS and Linux
 
-[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/jakobwesthoff/antiq/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/jakobwesthoff/antiq/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jakobwesthoff/antiq/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/jakobwesthoff/antiq/compare/v1.4.0...v1.4.1
