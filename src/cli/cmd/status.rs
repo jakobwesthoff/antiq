@@ -18,8 +18,9 @@ use crate::cli::unresolved::pasteable_line;
 use antiq::clock::{Clock, SystemClock, whole_seconds};
 use antiq::code_span::CodeSpan;
 use antiq::collection::Collection;
+use antiq::commands::archive::Reason;
 use antiq::commands::status::{DoomedCause, StatusFinding, StatusReport, VersionNote, status};
-use antiq::commands::survey::{FutureTime, Refusal, RefusalKind, SurveyedPiece, Verdict};
+use antiq::commands::survey::{FutureTime, SurveyedPiece, Verdict};
 use antiq::relpath::RelPath;
 use antiq::report::lock_note;
 use antiq::shown::escape_controls;
@@ -201,11 +202,15 @@ fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
             Color::Cyan,
             format!("archives in {}", plural(*days_left as usize, "day", "days")),
         ),
-        Verdict::Pinned => ("pinned", Color::Magenta, "kept by .antiq-pin".to_string()),
+        Verdict::Pinned => (
+            "pinned",
+            Color::Magenta,
+            Reason::pinned(&piece.piece).to_string(),
+        ),
         Verdict::Refused(reasons) => {
             let joined = reasons
                 .iter()
-                .map(|reason| escape_controls(&reason_text(reason)))
+                .map(|reason| escape_controls(&reason.to_string()))
                 .collect::<Vec<_>>()
                 .join("; ");
             ("refused", Color::Red, joined)
@@ -217,16 +222,6 @@ fn row_of(piece: &SurveyedPiece) -> Option<Row<'_>> {
         color,
         what,
     })
-}
-
-/// What the WHAT column says of a refusal. It spells out "antiq
-/// collection" where the library's text, which `--json` carries as well,
-/// says "collection".
-fn reason_text(reason: &Refusal) -> String {
-    match reason.kind {
-        RefusalKind::NestedCollection => format!("nested antiq collection: {}", reason.path),
-        _ => reason.to_string(),
-    }
 }
 
 fn table(rows: &[Row<'_>], style: Style, now: Timestamp) -> Vec<String> {
@@ -921,7 +916,7 @@ mod tests {
             .join(" ");
         assert!(
             joined.contains(
-                "unreadable entry: media/a-rather-long-name/first; nested collection: media/a-rather-long-name/second"
+                "unreadable entry: media/a-rather-long-name/first; nested antiq collection: media/a-rather-long-name/second"
             ) || joined.contains("unreadable entry: media/a-rather-long-name/first;"),
             "{joined}"
         );

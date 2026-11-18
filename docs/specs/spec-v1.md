@@ -1020,7 +1020,8 @@ not judged.
    Whenever a tree leaves `trash/` or `doomed/`, the parents that became
    empty are removed, up to and including `<stamp>/`.
 8. One output line per folder on stdout, `archived <piece>`, `skipped
-   <piece>: <message>` or `refused <piece>: <reasons>`, then the summary
+   <piece>: <message>` or `refused <piece>: <reasons>` (the reasons of one
+   piece joined by `; `), then the summary
    `Archived N, skipped N, refused N.` On a terminal the folders show as
    cards and leave one finished line each, then a summary line (see
    "Progress cards"); these lines are for a pipe. The repairs of the start of the run
@@ -1614,9 +1615,8 @@ joined by `; `. A reason is one of these, with paths relative to the
 collection root:
 
 - `mount point: <path>`
-- `nested collection: <dir>`, the directory that holds the nested marker;
-  the WHAT column of `status` says `nested antiq collection: <dir>`, and
-  `--json` and the `refused` lines of `archive` keep `nested collection`
+- `nested antiq collection: <dir>`, the directory that holds the nested
+  marker
 - `unreadable entry: <path>`, the first entry that failed
 - `exclude entry: <path>`
 - `locked: <path>`, also for the directory that holds the piece's top
@@ -2425,8 +2425,8 @@ with a backtick, or starts and ends with a space. The line is followed by a `  f
 candidate of an ambiguous or inexact reference (for an ambiguous version, one per
 matching stamp) and one
 `  while attempting to <action>` line per context, the innermost first. The
-reasons why one piece is refused are joined with `, ` by `archive` and with
-`; ` by `status`. A cause whose text the cause above it already
+reasons why one piece is refused are joined with `; ` by `archive`,
+`import` and `status`. A cause whose text the cause above it already
 contains is not repeated, on the console and in the JSON `message`. Under
 `--json` an error is data: its JSON goes to stdout, like any other JSON
 output, and a usage error too prints the JSON envelope (kind `usage`) and
@@ -2728,7 +2728,12 @@ and `message`. An element of `refused` has `piece` and `reasons`, each with
 `kind`, `path`, `text` and, for a rule file at fault, `line`. The kinds are
 `mount_point`, `nested_collection`, `unreadable_entry`, `exclude_entry`,
 `locked`, `rule_file`, `not_a_file`, `unreadable_marker`, `pinned` and
-`empty`. `repairs` lists the repairs of the start of the run, each as
+`empty`. `text` is the wording of the reason: the texts listed under
+"status" for the walk refusals, `kept by .antiq-pin` for `pinned` and
+`empty: no file counts` for `empty`; the `refused` lines of `archive`, the
+dry run, the reasons under a card (a pinned named piece has its own
+text there, see "Progress cards") and the error of `import` show the same
+texts. `repairs` lists the repairs of the start of the run, each as
 `{"kind": "repair", "repair": "<name>", ...}`, and `warnings` is a list of
 warning objects. A warning object is `{message}`; one about an unknown
 config key, a collection on an SMB or NFS mount, a filesystem that cannot

@@ -878,10 +878,13 @@ fn other_reasons_are_wrapped_one_block_each_and_never_cut() {
     assert_eq!(lines.len(), 4);
     assert_eq!(
         lines[1],
-        "    nested collection: a/inner has its own .antiq folder and"
+        "    nested antiq collection: a/inner has its own .antiq"
     );
-    assert_eq!(lines[2], "    so it cannot be archived as a piece");
-    assert_eq!(lines[3], "    empty: a");
+    assert_eq!(
+        lines[2],
+        "    folder and so it cannot be archived as a piece"
+    );
+    assert_eq!(lines[3], "    empty: no file counts");
 }
 
 #[test]

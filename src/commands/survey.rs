@@ -179,7 +179,7 @@ impl fmt::Display for Refusal {
         };
         match self.kind {
             RefusalKind::MountPoint => write!(f, "mount point: {shown}"),
-            RefusalKind::NestedCollection => write!(f, "nested collection: {shown}"),
+            RefusalKind::NestedCollection => write!(f, "nested antiq collection: {shown}"),
             RefusalKind::UnreadableEntry => write!(f, "unreadable entry: {shown}"),
             RefusalKind::ExcludeEntry => write!(f, "exclude entry: {shown}"),
             RefusalKind::Locked => write!(f, "locked: {shown}"),
@@ -589,7 +589,10 @@ mod tests {
 
         let found = surveyed(&temp);
 
-        assert_eq!(reasons(&found, "piece"), ["nested collection: piece/sub"]);
+        assert_eq!(
+            reasons(&found, "piece"),
+            ["nested antiq collection: piece/sub"]
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -703,7 +706,7 @@ mod tests {
             reasons(&found, "piece"),
             [
                 "unreadable entry: piece/locked",
-                "nested collection: piece/sub"
+                "nested antiq collection: piece/sub"
             ]
         );
     }
@@ -779,7 +782,7 @@ mod tests {
                     root: path("inner"),
                 },
                 RefusalKind::NestedCollection,
-                "nested collection: area/piece/inner",
+                "nested antiq collection: area/piece/inner",
             ),
             (
                 Problem::Locked { path: path("held") },

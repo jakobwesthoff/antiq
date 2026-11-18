@@ -552,7 +552,7 @@ fn import_refuses_what_the_spec_names_and_changes_nothing() {
                     .file(".antiq/config.toml", "");
             });
             let run = world.run(&["import", as_str(&nested.path()), "--as", "projects/nested"]);
-            refused(&run, 1, "other", "nested collection");
+            refused(&run, 1, "other", "nested antiq collection");
 
             // A time that is not one.
             let run = world.run(&[

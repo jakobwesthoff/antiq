@@ -292,7 +292,7 @@ fn a_pin_at_the_top_refuses_and_a_restored_marker_is_left_out() {
     let pinned = import(&collection, &["--json"], &[&tree.path("pinned")]);
     let restored = import(&collection, &["--json"], &[&tree.path("restored")]);
 
-    assert_refused(&pinned, "pinned");
+    assert_refused(&pinned, "kept by .antiq-pin");
     assert_eq!(restored.code(), 0, "{}", restored.stdout);
     assert_eq!(restored.json()["imported"]["stamp"], OLD_STAMP);
     assert!(!listing_text(&collection, "restored").contains("antiq-restored"));
@@ -311,7 +311,7 @@ fn a_pin_that_a_rule_ignores_and_a_pin_that_is_a_directory_still_refuse() {
     let ignored = import(&collection, &["--json"], &[&tree.path("ignored")]);
     let directory = import(&collection, &["--json"], &[&tree.path("dir")]);
 
-    assert_refused(&ignored, "pinned");
+    assert_refused(&ignored, "kept by .antiq-pin");
     assert_refused(&directory, "not a file");
 }
 
@@ -474,8 +474,23 @@ fn a_nested_collection_in_the_source_refuses() {
 
     let run = import(&collection, &["--json"], &[&tree.path("data")]);
 
-    assert_refused(&run, "nested collection");
+    assert_refused(&run, "nested antiq collection");
     assert_nothing_stored(&collection, "data");
+}
+
+#[test]
+fn the_reasons_of_a_refused_folder_are_joined_by_semicolons() {
+    let collection = world();
+    let mut tree = source();
+    tree.dir("data/x/.antiq");
+    tree.dir("data/y/.antiq");
+
+    let run = import(&collection, &["--json"], &[&tree.path("data")]);
+
+    assert_refused(
+        &run,
+        ": nested antiq collection: x; nested antiq collection: y",
+    );
 }
 
 #[test]
@@ -668,7 +683,7 @@ fn a_dry_run_predicts_the_exit_code_of_a_refusal() {
 
     let run = import(&collection, &["--json"], &[&tree.path("empty"), &"-n"]);
 
-    assert_refused(&run, "empty");
+    assert_refused(&run, "empty: no file counts");
 }
 
 #[test]

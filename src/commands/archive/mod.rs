@@ -1915,7 +1915,7 @@ mod tests {
         assert!(lines[0].starts_with("Would "), "{lines:?}");
         assert_eq!(lines[2], "Would archive due");
         assert!(
-            lines[3].starts_with("Refused refused: nested collection: refused/inner"),
+            lines[3].starts_with("Refused refused: nested antiq collection: refused/inner"),
             "{lines:?}"
         );
         assert_eq!(plan.exit_code(), 0);
@@ -2026,7 +2026,7 @@ mod tests {
 
         let plan = plan_of(&world, &named(&world, "piece"));
 
-        assert_eq!(plan.lines(), ["Refused piece: pinned: piece/.antiq-pin"]);
+        assert_eq!(plan.lines(), ["Refused piece: kept by .antiq-pin"]);
         assert_eq!(plan.exit_code(), 1);
     }
 
@@ -2055,7 +2055,7 @@ mod tests {
         let reason = &json["refused"][0]["reasons"][0];
         assert_eq!(reason["kind"], "nested_collection");
         assert_eq!(reason["path"], "refused/inner");
-        assert_eq!(reason["text"], "nested collection: refused/inner");
+        assert_eq!(reason["text"], "nested antiq collection: refused/inner");
         assert!(reason.get("line").is_none());
         assert!(json["repairs"].is_array() && json["warnings"].is_array());
         assert!(json.get("named").is_none());

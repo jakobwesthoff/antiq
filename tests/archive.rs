@@ -479,7 +479,7 @@ fn a_named_pinned_piece_exits_1_and_names_the_reason() {
     assert_eq!(
         text.stdout.lines().collect::<Vec<_>>(),
         [
-            "refused a/pinned: pinned: a/pinned/.antiq-pin",
+            "refused a/pinned: kept by .antiq-pin",
             "Archived 0, skipped 0, refused 1."
         ]
     );
@@ -497,6 +497,62 @@ fn a_named_piece_the_walk_refuses_exits_1_and_names_the_reason() {
     assert_eq!(reason["kind"], "nested_collection");
     assert_eq!(reason["path"], "a/nested/inner");
     assert!(collection.path("a/nested/f").exists());
+}
+
+fn two_nested_collections_world() -> Collection {
+    Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .piece("a/two", |piece| {
+            piece
+                .age_days(40)
+                .file("f", "x")
+                .dir("x/.antiq")
+                .dir("y/.antiq");
+        })
+        .finish()
+}
+
+#[test]
+fn the_reasons_of_a_refused_piece_are_joined_by_semicolons_on_its_pipe_line() {
+    let collection = two_nested_collections_world();
+
+    let run = archive(&collection, &[], &["a/two"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().next(),
+        Some("refused a/two: nested antiq collection: a/two/x; nested antiq collection: a/two/y")
+    );
+}
+
+#[test]
+fn the_reasons_of_a_refused_piece_are_joined_by_semicolons_in_the_dry_run() {
+    let collection = two_nested_collections_world();
+
+    let run = archive(&collection, &[], &["-n", "a/two"]);
+
+    assert_eq!(
+        run.stdout.lines().collect::<Vec<_>>(),
+        ["Refused a/two: nested antiq collection: a/two/x; nested antiq collection: a/two/y"]
+    );
+}
+
+#[test]
+fn a_named_piece_without_a_file_that_counts_says_so_on_its_pipe_line() {
+    let collection = Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .piece("a/hollow", |piece| {
+            piece.age_days(40).dir("d");
+        })
+        .finish();
+
+    let run = archive(&collection, &[], &["a/hollow"]);
+
+    assert_eq!(run.code(), 1, "{}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().next(),
+        Some("refused a/hollow: empty: no file counts")
+    );
 }
 
 #[test]
@@ -519,7 +575,7 @@ fn without_a_named_piece_refusals_leave_the_exit_code_at_0() {
     assert_eq!(text.code(), 0);
     assert!(
         text.stdout
-            .contains("refused a/nested: nested collection: a/nested/inner"),
+            .contains("refused a/nested: nested antiq collection: a/nested/inner"),
         "{}",
         text.stdout
     );
@@ -636,13 +692,13 @@ fn a_piece_name_with_a_newline_cannot_forge_a_line_of_a_refused_piece() {
     assert_eq!(dry.code(), 1, "{}", dry.stderr);
     assert_eq!(
         dry.stdout.lines().collect::<Vec<_>>(),
-        ["Refused a/pinned%0AWould archive fake: pinned: a/pinned%0AWould archive fake/.antiq-pin"]
+        ["Refused a/pinned%0AWould archive fake: kept by .antiq-pin"]
     );
     assert_eq!(run.code(), 1, "{}", run.stderr);
     assert_eq!(
         run.stdout.lines().collect::<Vec<_>>(),
         [
-            "refused a/pinned%0AWould archive fake: pinned: a/pinned%0AWould archive fake/.antiq-pin",
+            "refused a/pinned%0AWould archive fake: kept by .antiq-pin",
             "Archived 0, skipped 0, refused 1."
         ]
     );

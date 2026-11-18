@@ -318,7 +318,7 @@ fn archive_takes_one_piece_now_and_refuses_a_pinned_one() {
                 pinned.text_only(|out| {
                     assert_eq!(
                         out,
-                        "refused old/pinned: pinned: old/pinned/.antiq-pin\nArchived 0, skipped 0, refused 1.\n"
+                        "refused old/pinned: kept by .antiq-pin\nArchived 0, skipped 0, refused 1.\n"
                     );
                 });
                 pinned.json_only(|json| {
@@ -334,7 +334,7 @@ fn archive_takes_one_piece_now_and_refuses_a_pinned_one() {
                     assert_eq!(reasons.len(), 1);
                     assert_eq!(reasons[0]["kind"], "pinned");
                     assert_eq!(reasons[0]["path"], "old/pinned/.antiq-pin");
-                    assert_eq!(reasons[0]["text"], "pinned: old/pinned/.antiq-pin");
+                    assert_eq!(reasons[0]["text"], "kept by .antiq-pin");
                 });
             });
         },

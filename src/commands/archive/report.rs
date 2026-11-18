@@ -126,9 +126,8 @@ impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Reason::Walk(refusal) => refusal.fmt(f),
-            Reason::Pinned { pin } => write!(f, "pinned: {pin}"),
-            Reason::Empty { piece } if piece.is_root() => f.write_str("empty: no file counts"),
-            Reason::Empty { piece } => write!(f, "empty: {piece}"),
+            Reason::Pinned { .. } => write!(f, "kept by {PIN_FILE}"),
+            Reason::Empty { .. } => f.write_str("empty: no file counts"),
         }
     }
 }
@@ -154,7 +153,7 @@ impl fmt::Display for Reasons<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, reason) in self.0.iter().enumerate() {
             if index > 0 {
-                f.write_str(", ")?;
+                f.write_str("; ")?;
             }
             write!(f, "{reason}")?;
         }
@@ -333,11 +332,11 @@ mod tests {
 
         assert_eq!(
             pinned,
-            json!({"kind": "pinned", "path": "piece/.antiq-pin", "text": "pinned: piece/.antiq-pin"})
+            json!({"kind": "pinned", "path": "piece/.antiq-pin", "text": "kept by .antiq-pin"})
         );
         assert_eq!(
             empty,
-            json!({"kind": "empty", "path": "piece", "text": "empty: piece"})
+            json!({"kind": "empty", "path": "piece", "text": "empty: no file counts"})
         );
     }
 
@@ -350,7 +349,7 @@ mod tests {
 
         assert_eq!(
             Reasons(&reasons).to_string(),
-            "pinned: piece/.antiq-pin, empty: piece"
+            "kept by .antiq-pin; empty: no file counts"
         );
     }
 

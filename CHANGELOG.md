@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A reason why `archive` or `import` leaves a folder alone has one wording
+  in every view, the one of the WHAT column of `status`. A nested
+  collection reads `nested antiq collection: <dir>` and a pin reads `kept
+  by .antiq-pin` on the `refused` lines of `archive`, in its dry run, in
+  the reasons under the card of a refused piece, in the error of `import`
+  and in the `text` of `--json`, where they read `nested collection:
+  <dir>` and `pinned: <path>`. A piece without a file that counts reads
+  `empty: no file counts` in `archive`, as it did in `import`, where
+  `archive` said `empty: <piece>`. Several reasons of one folder are
+  joined by `; `, where `archive` and `import` used `, `. The `path` of a
+  reason in the JSON is unchanged.
+
 ## [1.6.0] - 2026-11-12
 
 ### Added

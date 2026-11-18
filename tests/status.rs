@@ -43,6 +43,37 @@ fn json(collection: &Collection) -> Value {
     run.json()
 }
 
+fn nested_collection_world() -> Collection {
+    Collection::build(&Clock::now())
+        .patterns(&["*/*"])
+        .piece("a/nested", |piece| {
+            piece.age_days(40).file("f", "x").dir("inner/.antiq");
+        })
+        .finish()
+}
+
+#[test]
+fn the_json_text_of_a_nested_collection_is_the_text_of_the_what_column() {
+    let found = json(&nested_collection_world());
+
+    assert_eq!(
+        found["pieces"][0]["reasons"][0]["text"],
+        "nested antiq collection: a/nested/inner"
+    );
+}
+
+#[test]
+fn the_what_column_names_a_nested_collection_as_an_antiq_collection() {
+    let run = status(&nested_collection_world(), &[]);
+
+    assert!(
+        run.stdout
+            .contains("nested antiq collection: a/nested/inner"),
+        "{}",
+        run.stdout
+    );
+}
+
 /// Two levels of folders are pieces, as in the example of the spec.
 fn example(clock: &Clock) -> Collection {
     Collection::build(clock)
