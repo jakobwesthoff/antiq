@@ -45,4 +45,9 @@ A piece without a file that counts reads `empty: no file counts` in
 
 ## Consequences
 
-None further.
+The JSON `text` of a `pinned`, `empty` or `nested_collection` reason
+changes. A script that tells reasons apart reads `kind`, which stays as it
+was.
+
+The module `progress` depends on `commands::archive`, because the progress
+event of a refused piece carries its `Reason` rather than a text.
