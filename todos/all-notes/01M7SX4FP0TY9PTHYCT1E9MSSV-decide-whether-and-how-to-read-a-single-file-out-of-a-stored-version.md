@@ -44,9 +44,7 @@ at an acceptable cost, or whether it has to change.
    versions keep the old format, so option 1 stays as the fallback.
 3. **Cache.** Keep an extracted version (or the files read from it) in a
    cache after the first access, so reading several files of one version,
-   or the same file again, decompresses once. Raises where the cache lives
-   (`.antiq/tmp/` or a per-user cache directory), how large it may grow,
-   and when it is dropped.
+   or the same file again, decompresses once.
 
 ## Open questions
 
@@ -54,6 +52,10 @@ at an acceptable cost, or whether it has to change.
   moot? Measure on the largest versions before deciding anything.
 - How large a frame keeps the compression loss acceptable, if option 2
   comes up again?
+- If a cache is used: where does it live (`.antiq/tmp/` or a per-user
+  cache directory), how large may it grow, and when is it dropped?
+- How does a partial read deal with the archive checksum: read unverified
+  with a warning, verify the whole archive first, or offer both?
 - Name: `cat` and `show` are recognisable; ADR 0023 asks for names that fit
   antiq while staying recognisable.
 - Is it one command with a stdout mode and an extract mode, or two? Data on
