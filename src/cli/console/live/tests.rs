@@ -966,9 +966,41 @@ fn an_error_of_the_run_leaves_no_region_behind() {
     assert!(watcher.sync().visible().is_empty());
 }
 
-/// The panic hook is global to the process, so the tests that replace it
-/// run one after the other, and each puts the hook back when it ends.
-static HOOK_TESTS: Mutex<()> = Mutex::new(());
+/// Set in the environment of the child process in which [`alone`] runs a
+/// test.
+const ALONE: &str = "ANTIQ_HOOK_TEST_ALONE";
+
+/// Runs `body` as the test `name` of this module in a process of its own,
+/// which runs no other test.
+///
+/// The panic hook is global to the process. In the process of the other
+/// tests, a hook that a test installs takes their panics too: their text
+/// lands on the screen of the test instead of in their own output, and their
+/// panic halts its renderer. A test that installs a hook therefore runs this
+/// test binary again with only itself selected, and passes when that child
+/// does.
+fn alone(name: &str, body: impl FnOnce()) {
+    if std::env::var_os(ALONE).is_some() {
+        body();
+        return;
+    }
+    let module = module_path!()
+        .split_once("::")
+        .expect("the module lies inside the crate")
+        .1;
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([&format!("{module}::{name}"), "--exact", "--test-threads=1"])
+        .env(ALONE, "1")
+        .output()
+        .expect("the test binary runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A name that matches no test passes with nothing run.
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} in a process of its own:\n{stdout}\n{stderr}"
+    );
+}
 
 type Hook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
@@ -1037,21 +1069,32 @@ fn rows_at_the_panic(panic_hook: bool) -> (usize, bool) {
 
 #[test]
 fn a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_text() {
-    let _serial = HOOK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
-    let (rows, drawn) = rows_at_the_panic(false);
-    assert!(drawn);
-    assert_eq!(
-        rows, 2,
-        "without the hook the cards are still on the screen"
+    alone(
+        "a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_text",
+        || {
+            let (rows, drawn) = rows_at_the_panic(false);
+            assert!(drawn);
+            assert_eq!(
+                rows, 2,
+                "without the hook the cards are still on the screen"
+            );
+            let (rows, drawn) = rows_at_the_panic(true);
+            assert!(drawn);
+            assert_eq!(rows, 0, "the hook cleared the cards first");
+        },
     );
-    let (rows, drawn) = rows_at_the_panic(true);
-    assert!(drawn);
-    assert_eq!(rows, 0, "the hook cleared the cards first");
 }
 
 #[test]
 fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling_thread_unwinds() {
-    let _serial = HOOK_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
+    alone(
+        "a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling_thread_unwinds",
+        panic_on_a_worker_thread,
+    );
+}
+
+/// The body of the test above, which runs in a process of its own.
+fn panic_on_a_worker_thread() {
     let (capture, mut out) = terminal(100, 24, true);
     // The hook that stands for the default one: its text goes to the same
     // screen as the cards, the way the default hook writes to the terminal.
@@ -1128,5 +1171,36 @@ fn a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling
     assert!(
         after[before..].starts_with("panicked: after the run"),
         "{after:?}"
+    );
+}
+
+#[test]
+fn the_hook_tests_hold_while_another_test_of_the_process_panics() {
+    // Stands for a test that fails while a hook test runs: its panic goes
+    // through whatever hook the process has at that moment.
+    let stop = Arc::new(AtomicBool::new(false));
+    let bystander = {
+        let stop = stop.clone();
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let _ = panic::catch_unwind(|| panic!("another test failed"));
+                thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
+    let outcome = panic::catch_unwind(|| {
+        a_panicking_run_ends_the_renderer_and_the_hook_clears_the_region_before_the_text();
+        a_panic_on_a_worker_thread_is_written_whole_on_a_clean_screen_and_the_calling_thread_unwinds();
+    });
+    stop.store(true, Ordering::SeqCst);
+    bystander.join().expect("the bystander catches its panics");
+
+    // A hook test that failed left its own hook in place, which would take
+    // the text of this assertion too; `take_hook` puts the default back.
+    let _ = panic::take_hook();
+    assert!(
+        outcome.is_ok(),
+        "a hook test failed while another test panicked"
     );
 }
