@@ -129,10 +129,14 @@ fn install(ctx: &Context, root: &Path, out: &mut Output) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-/// Writes the core and every part into `dir`, pushing each file onto
+/// Writes every part and then the core into `dir`, pushing each file onto
 /// `written` and handing it to `announce` once it is written. A failure
 /// names the path it happened at, since the message of the JSON error
 /// carries no context lines.
+///
+/// The core goes last because its `antiq-version` stamp is what marks the
+/// copy as current: an install that fails at a part leaves the stamp of
+/// the copy before it, so the warning about older copies still fires.
 fn write_skill(
     dir: &Path,
     written: &mut Vec<PathBuf>,
@@ -143,10 +147,6 @@ fn write_skill(
         move |error: io::Error| io::Error::new(error.kind(), format!("{path}: {error}"))
     };
     std::fs::create_dir_all(dir).map_err(at(dir))?;
-    let core = dir.join("SKILL.md");
-    std::fs::write(&core, SKILL).map_err(at(&core))?;
-    announce(&core)?;
-    written.push(core);
 
     // antiq owns `references/`: it is replaced whole, so a part an older
     // antiq wrote and this one no longer ships disappears. Any other file
@@ -165,5 +165,10 @@ fn write_skill(
         announce(&file)?;
         written.push(file);
     }
+
+    let core = dir.join("SKILL.md");
+    std::fs::write(&core, SKILL).map_err(at(&core))?;
+    announce(&core)?;
+    written.push(core);
     Ok(())
 }

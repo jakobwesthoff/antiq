@@ -1741,10 +1741,12 @@ and the parts `mirroring`, `import` and `damage`, each
 - `skill` prints the core and `skill <part>` one part, as they are, on a
   terminal too, and exits 0. A part this antiq does not know is a usage
   error, exit 2, whose message names the parts.
-- `skill --install <dir>` writes the core to `<dir>/antiq/SKILL.md` and
-  every part to `<dir>/antiq/references/<part>.md`, creating the folders
-  it needs. `references/` is replaced whole; any other file in
-  `<dir>/antiq/` stays. A relative `<dir>` starts at the directory `-C`
+- `skill --install <dir>` writes every part to
+  `<dir>/antiq/references/<part>.md` and then the core to
+  `<dir>/antiq/SKILL.md`, creating the folders it needs. An install that
+  fails at a part leaves the `SKILL.md` that was there before.
+  `references/` is replaced whole; any other file in `<dir>/antiq/`
+  stays. A relative `<dir>` starts at the directory `-C`
   names, else at the current directory. It prints `installed <path>` on
   stdout for each file once it is written, with the absolute path. A
   failure is the error kind `other`, exit 1, and names the path. `--install`

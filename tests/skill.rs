@@ -13,11 +13,12 @@ mod support;
 
 use serde_json::{Value, json};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use support::cmd::{Antiq, Run};
 
-/// The parts of the skill, in the order `--install` writes them. Each is
-/// `references/<name>.md` beside `SKILL.md`.
+/// The parts of the skill, in the order `--install` writes them before
+/// `SKILL.md`. Each is `references/<name>.md` beside `SKILL.md`.
 const PARTS: [&str; 3] = ["mirroring", "import", "damage"];
 
 /// The skill's directory in the repository.
@@ -274,17 +275,20 @@ fn install_names_each_file_it_wrote() {
 
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let root = fs::canonicalize(cwd.path()).expect("the temp dir exists");
-    let mut expected = vec![format!(
+    let mut expected: Vec<String> = PARTS
+        .iter()
+        .map(|name| {
+            format!(
+                "installed {}",
+                root.join(format!("skills/antiq/references/{name}.md"))
+                    .display()
+            )
+        })
+        .collect();
+    expected.push(format!(
         "installed {}",
         root.join("skills/antiq/SKILL.md").display()
-    )];
-    expected.extend(PARTS.iter().map(|name| {
-        format!(
-            "installed {}",
-            root.join(format!("skills/antiq/references/{name}.md"))
-                .display()
-        )
-    }));
+    ));
     assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
@@ -331,16 +335,19 @@ fn install_under_json_lists_the_files_it_wrote() {
 
     assert_eq!(run.code(), 0, "stderr: {}", run.stderr);
     let root = fs::canonicalize(cwd.path()).expect("the temp dir exists");
-    let mut installed = vec![Value::from(
+    let mut installed: Vec<Value> = PARTS
+        .iter()
+        .map(|name| {
+            Value::from(
+                root.join(format!("skills/antiq/references/{name}.md"))
+                    .display()
+                    .to_string(),
+            )
+        })
+        .collect();
+    installed.push(Value::from(
         root.join("skills/antiq/SKILL.md").display().to_string(),
-    )];
-    installed.extend(PARTS.iter().map(|name| {
-        Value::from(
-            root.join(format!("skills/antiq/references/{name}.md"))
-                .display()
-                .to_string(),
-        )
-    }));
+    ));
     assert_eq!(
         run.json(),
         json!({"format": 1, "command": "skill", "installed": installed})
@@ -364,6 +371,43 @@ fn install_into_a_file_fails_and_names_the_directory() {
         "{}",
         run.error_message()
     );
+}
+
+/// Makes `path` writable again when dropped, also after a panic, so the
+/// temporary directory can always be removed.
+struct Restore(PathBuf);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn an_install_that_fails_at_a_part_leaves_the_stamp_of_the_copy_before_it() {
+    // The stamp in `SKILL.md` is what tells an agent and the warning about
+    // older copies whether the copy is current, so it may only change once
+    // every part is in place.
+    let cwd = empty_dir();
+    put_copy(&cwd.path().join("skills"), "0.1.0");
+    let references = cwd.path().join("skills/antiq/references");
+    fs::create_dir_all(&references).expect("a creatable directory");
+    fs::write(references.join("mirroring.md"), "an earlier part").expect("writable");
+    fs::set_permissions(&references, fs::Permissions::from_mode(0o555)).expect("read-only");
+    let _restore = Restore(references.clone());
+    assert!(
+        fs::remove_file(references.join("mirroring.md")).is_err(),
+        "the test needs a user that a read-only directory stops"
+    );
+
+    let run = skill(cwd.path(), &["--install", "skills"]);
+
+    assert_eq!(run.code(), 1, "stdout: {}", run.stdout);
+    assert_eq!(
+        fs::read_to_string(cwd.path().join("skills/antiq/SKILL.md")).expect("the core stays"),
+        installed_skill("0.1.0")
+    );
+    assert_eq!(run.stdout, "", "no file was written");
 }
 
 #[test]

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `antiq skill --install` writes the parts under `references/` first and
+  `SKILL.md` last. An install that failed at a part used to leave a
+  `SKILL.md` stamped with the new version over missing or old parts, so
+  the warning about an older installed copy stayed silent; now the copy
+  keeps the `SKILL.md` it had. The `installed` lines and the JSON
+  `installed` list name `SKILL.md` last.
+
 ## [1.7.0] - 2026-11-18
 
 ### Changed
