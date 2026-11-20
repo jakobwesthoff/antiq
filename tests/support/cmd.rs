@@ -336,13 +336,63 @@ impl Run {
 }
 
 /// Holds the run lock of the collection at `root` in this process.
+///
+/// A lock this process has just released can still read as held for a
+/// moment: a fork in another test thread copies the descriptor of the lock
+/// file, and the child keeps it until its `exec`. So a held lock is tried
+/// again for up to two seconds, as the library tests do with
+/// `retry_while_held`.
 pub fn hold_lock(root: &Path) -> antiq::lock::RunLock {
-    antiq::lock::acquire(
-        &root.join(".antiq/lock"),
-        "imperius",
-        &antiq::clock::SystemClock,
-    )
-    .expect("the lock is free")
+    let lock_file = root.join(".antiq/lock");
+    let attempt = || antiq::lock::acquire(&lock_file, "imperius", &antiq::clock::SystemClock);
+    let held = |result: &Result<_, antiq::lock::LockError>| {
+        matches!(
+            result,
+            Err(antiq::lock::LockError::Held { .. } | antiq::lock::LockError::HeldUnknown)
+        )
+    };
+    let mut result = attempt();
+    for _ in 0..100 {
+        if !held(&result) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        result = attempt();
+    }
+    result.expect("the lock is free")
 }
 
 pub use super::tree::snapshot;
+
+#[test]
+fn hold_lock_takes_a_lock_that_a_fork_child_still_has_open() {
+    // The child of a fork in another test thread holds a copy of every open
+    // descriptor until its `exec`; this child holds the copy for 300 ms.
+    let collection = tempfile::tempdir().expect("the temp dir is writable");
+    std::fs::create_dir(collection.path().join(".antiq")).expect("a creatable directory");
+    let first = hold_lock(collection.path());
+    let child = {
+        let _guard = fork_lock();
+        // SAFETY: the child calls only `usleep` and `_exit`, which are
+        // async-signal-safe.
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    libc::usleep(300_000);
+                    libc::_exit(0);
+                }
+                -1 => panic!("fork failed: {}", io::Error::last_os_error()),
+                child => child,
+            }
+        }
+    };
+    drop(first);
+
+    let second = hold_lock(collection.path());
+
+    drop(second);
+    let mut status = 0;
+    // SAFETY: `child` is a child of this process that nothing else waits for.
+    let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(reaped, child, "the child is reaped");
+}
