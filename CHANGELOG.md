@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the warning about an older installed copy stayed silent; now the copy
   keeps the `SKILL.md` it had. The `installed` lines and the JSON
   `installed` list name `SKILL.md` last.
+- On a terminal without UTF-8, the finished line of a piece of `unearth`,
+  `fork`, `push` and `rebuild` whose name had to be shortened was one
+  column wider than the terminal and could wrap, because the layout
+  counted the mark `ok` as one column. The name gives up that column.
 
 ## [1.7.0] - 2026-11-18
 

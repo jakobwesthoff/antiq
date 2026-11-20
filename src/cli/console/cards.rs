@@ -235,7 +235,10 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(cols: usize, result: usize) -> Layout {
+    /// The layout of a line whose mark in front of the name takes `mark`
+    /// columns: the spinner of a card, or the mark of a finished line, which
+    /// is two columns wide in the ASCII set (`ok`).
+    fn of(cols: usize, result: usize, mark: usize) -> Layout {
         let width = cols.min(MAX_WIDTH);
         let size = if width >= 50 {
             Size::Content
@@ -244,7 +247,7 @@ impl Layout {
         };
         Layout {
             name: width
-                .saturating_sub(Layout::fixed(result, 1, 1, size))
+                .saturating_sub(Layout::fixed(result, mark, 1, size))
                 .max(MIN_NAME),
             size,
             bar: match width {
@@ -276,7 +279,7 @@ impl Layout {
         Layout {
             name: room(size).max(MIN_NAME),
             size,
-            ..Layout::of(cols, result)
+            ..Layout::of(cols, result, mark)
         }
     }
 
@@ -748,8 +751,8 @@ impl Cards {
     /// not finish cleanly, wrapped to the width and never cut.
     pub(crate) fn finished_lines(&self, ready: &Ready, cols: usize) -> Vec<String> {
         let own = Self::full_width(&ready.name, ready.label.as_deref());
+        let symbols = self.symbols();
         let layout = if self.config.stored_size {
-            let symbols = self.symbols();
             Layout::finished(
                 cols,
                 self.config.result_width,
@@ -758,7 +761,7 @@ impl Cards {
                 self.widest.max(own),
             )
         } else {
-            Layout::of(cols, self.config.result_width)
+            Layout::of(cols, self.config.result_width, symbols.done.width())
         };
         let name_column = self.name_column(own, &layout);
         let tone = Self::outcome_tone(&ready.outcome);
@@ -1033,7 +1036,8 @@ impl Cards {
     /// the width it is drawn for; how far a later redraw climbs is decided in
     /// `reflow::rows_to_climb`.
     pub(crate) fn region(&self, now: Duration, cols: usize, rows: usize) -> Vec<String> {
-        let layout = Layout::of(cols, self.config.result_width);
+        let spinner = self.symbols().spinner[0].width();
+        let layout = Layout::of(cols, self.config.result_width, spinner);
         let mut running: Vec<&Item> = self
             .items
             .iter()

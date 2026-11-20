@@ -1793,6 +1793,21 @@ fn the_lines_of_an_unearth_run_keep_their_size_column() {
     );
 }
 
+#[test]
+fn a_cut_name_fills_the_line_of_an_unearth_run_to_the_exact_width_in_either_symbol_set() {
+    // The mark `ok` of the ASCII set takes two columns, `✔` one, so the name
+    // column of an ASCII run is one narrower.
+    let name = format!("{YEAR_2024}/{YEAR_2024}");
+    for utf8 in [true, false] {
+        for cols in [50, 60, MOCKUP] {
+            let mut cards = with_style(UNEARTH, style(false, utf8));
+            run_piece(&mut cards, &name, 1_000_000, Outcome::Files(3), 0, 1);
+            let lines = lines_of(&mut cards, cols);
+            assert_eq!(lines[0].width(), cols, "utf8 {utf8}: {:?}", lines[0]);
+        }
+    }
+}
+
 // The forms of the line follow the width. The columns besides the name are
 // 51 for the full form, 44 for the form without the share and 34 for the
 // size alone, one more each in an ASCII run (the mark `ok` and the arrow
