@@ -17,6 +17,10 @@ todo vault at `todos/`.
   `tests/<command>.rs` that runs the binary; whole user tasks are
   scenarios in `tests/scenarios/`, run in text and in JSON mode (how to
   write one: `tests/support/scenario/mod.rs`).
+- The integration tests are one test binary, `it`, built from
+  `tests/main.rs`: a new file in `tests/` needs a `mod` line there (in
+  `tests/scenarios/mod.rs` for a scenario group), and one file runs with
+  `cargo test --test it <file>::`.
 - Tests start the antiq binary only through `tests/support/cmd.rs`. It
   holds a lock around every spawn, because a `pre_exec` child forked
   while another test thread initialises a macOS system library aborts

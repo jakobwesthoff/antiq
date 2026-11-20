@@ -6,21 +6,16 @@
 //! exist, and every run that takes the lock writes it again when it is
 //! missing or differs from the text of this antiq.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::target::Target;
+use crate::support::tree::Tree;
 use antiq::collection::README;
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::target::Target;
-use support::tree::Tree;
 
 /// The commands the README shows are the lines of its code blocks that
 /// start with `antiq `, cut where the description of the command begins:

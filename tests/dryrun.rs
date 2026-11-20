@@ -7,15 +7,10 @@
 //! in a pipe. The harness runs every command under `TZ=Pacific/Auckland`,
 //! +13:00 in November 2026.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
-use support::cmd::Antiq;
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World, run_on_terminal};
-use support::tree::Tree;
+use crate::support::cmd::Antiq;
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World, run_on_terminal};
+use crate::support::tree::Tree;
 
 const NEW: &str = "2026-11-04T090211";
 

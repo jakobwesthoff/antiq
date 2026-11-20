@@ -5,14 +5,9 @@
 //! What a command line that does not parse, help and the version print,
 //! on a terminal and on a pipe.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
-use support::cmd::Antiq;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::world::{Mode, Setup, World};
+use crate::support::cmd::Antiq;
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::world::{Mode, Setup, World};
 
 fn world() -> World {
     let clock = Clock::now();

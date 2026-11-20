@@ -4,19 +4,14 @@
 
 //! `antiq push` seen from outside the binary.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::fake_rsync::FakeRsync;
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::target::Target;
+use crate::support::scenario::world::run_on_terminal;
+use crate::support::ssh_shim::SshShim;
 use std::fs;
 use std::path::Path;
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::fake_rsync::FakeRsync;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::target::Target;
-use support::scenario::world::run_on_terminal;
-use support::ssh_shim::SshShim;
 
 fn collection() -> Collection {
     Collection::build(&Clock::now())
@@ -1399,7 +1394,7 @@ fn real_rsync() -> std::path::PathBuf {
 fn expected_marker(collection: &Collection) -> Vec<u8> {
     antiq::target::marker::Marker::new(
         collection.id().parse().expect("a collection ID"),
-        support::cmd::machine_name(),
+        crate::support::cmd::machine_name(),
         collection.root().to_str().expect("UTF-8").to_string(),
     )
     .to_bytes()
@@ -2328,7 +2323,7 @@ fn take_over_rewrites_the_marker_of_this_collection_and_pushes_on() {
         notes.contains(MOVED_HOST) && notes.contains(MOVED_PATH),
         "{notes}"
     );
-    let own_host = support::cmd::machine_name();
+    let own_host = crate::support::cmd::machine_name();
     let own_path = collection.root().to_str().expect("UTF-8").to_string();
     assert!(
         notes.contains(&own_host) && notes.contains(&own_path),
@@ -2371,7 +2366,11 @@ fn take_over_with_only_another_host_names_only_the_host() {
 fn take_over_with_only_another_path_names_only_the_path() {
     let target = Target::new();
     let collection = with_real_rsync(&target.path());
-    target.marker_with(&collection.id(), &support::cmd::machine_name(), MOVED_PATH);
+    target.marker_with(
+        &collection.id(),
+        &crate::support::cmd::machine_name(),
+        MOVED_PATH,
+    );
 
     let run = push(&collection, &["--take-over"]);
 
@@ -2390,7 +2389,7 @@ fn take_over_rewrites_a_marker_that_a_size_only_check_would_skip() {
     let own_path = collection.root().to_str().expect("UTF-8").to_string();
     // Same size as the new marker: the old host has the length of this
     // machine's name.
-    let old_host = "x".repeat(support::cmd::machine_name().len());
+    let old_host = "x".repeat(crate::support::cmd::machine_name().len());
     target.marker_with(&collection.id(), &old_host, &own_path);
     assert_eq!(
         marker_bytes(&target).len(),
@@ -2409,7 +2408,7 @@ fn take_over_on_a_marker_of_another_collection_is_refused_as_without_it() {
     let (collection, fake) = targeted(&target.path());
     target.marker_with(
         "01BX5ZZKBKACTAV9WEVGEMMVRY",
-        &support::cmd::machine_name(),
+        &crate::support::cmd::machine_name(),
         "/elsewhere",
     );
     let before = marker_bytes(&target);
@@ -2535,7 +2534,7 @@ fn a_dry_run_of_a_take_over_lists_it_and_writes_nothing() {
     let text = push_text(&collection, &["--take-over", "-n"]);
 
     assert_eq!(text.code(), 0, "{} {}", text.stdout, text.stderr);
-    let own_host = support::cmd::machine_name();
+    let own_host = crate::support::cmd::machine_name();
     let own_path = collection.root().to_str().expect("UTF-8").to_string();
     let expected = format!(
         "Would take over the target: host {MOVED_HOST} -> {own_host}, path {MOVED_PATH} -> {own_path}"
@@ -2612,8 +2611,8 @@ fn every_marker_run_compares_checksums() {
 }
 
 /// A target directory whose name would end the line that names it.
-fn forging_target() -> (support::tree::Tree, std::path::PathBuf) {
-    let mut tree = support::tree::Tree::new();
+fn forging_target() -> (crate::support::tree::Tree, std::path::PathBuf) {
+    let mut tree = crate::support::tree::Tree::new();
     let target = tree.dir("evil\nPushed fake");
     (tree, target)
 }

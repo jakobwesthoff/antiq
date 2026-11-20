@@ -5,13 +5,8 @@
 //! The ssh stand-in of `support::ssh_shim`: it skips the options rsync
 //! passes, runs the command locally and can be made to fail like ssh.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::ssh_shim::SshShim;
 use std::process::{Command, Output};
-use support::ssh_shim::SshShim;
 
 fn run(shim: &SshShim, args: &[&str]) -> Output {
     Command::new(shim.path())

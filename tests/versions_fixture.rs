@@ -6,11 +6,9 @@
 //! versions it writes are read back with the library, and its damage
 //! helpers change the file they name and no other.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::tree::Tree;
+use crate::support::versions::{Store, StoredVersion};
 use antiq::archive::check::{ChecksumFile, file_sha256};
 use antiq::listing;
 use antiq::relpath::RelPath;
@@ -19,9 +17,6 @@ use antiq::versions::stamp::Stamp;
 use antiq::versions::store::is_being_stored;
 use std::ffi::OsString;
 use std::fs;
-use support::scenario::collection::{Clock, Collection};
-use support::tree::Tree;
-use support::versions::{Store, StoredVersion};
 
 const STAMP: &str = "2026-11-04T090211";
 

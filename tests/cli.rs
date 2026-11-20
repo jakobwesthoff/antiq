@@ -5,16 +5,11 @@
 //! The command surface, the JSON envelope and the exit codes, seen from
 //! outside the binary.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::Antiq;
 use serde_json::Value;
 use std::fs;
 use std::io;
 use std::process::Stdio;
-use support::cmd::Antiq;
 
 const COMMANDS: [&str; 14] = [
     "init", "status", "archive", "unearth", "fork", "forget", "rebuild", "import", "find", "grep",
@@ -22,7 +17,7 @@ const COMMANDS: [&str; 14] = [
 ];
 
 /// Runs `antiq --json <args>`.
-fn json_run(args: &[&str]) -> support::cmd::Run {
+fn json_run(args: &[&str]) -> crate::support::cmd::Run {
     Antiq::new().arg("--json").args(args).run()
 }
 
@@ -690,7 +685,7 @@ fn a_child_keeps_the_environment_of_the_test_run() {
 #[test]
 fn a_test_run_does_not_inherit_colour_and_locale_settings_of_the_developer() {
     let mut command = std::process::Command::new("antiq");
-    support::cmd::make_hermetic(&mut command);
+    crate::support::cmd::make_hermetic(&mut command);
     let envs: std::collections::HashMap<_, _> = command
         .get_envs()
         .map(|(key, value)| (key.to_string_lossy().into_owned(), value.is_some()))

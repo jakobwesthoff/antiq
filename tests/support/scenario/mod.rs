@@ -40,7 +40,7 @@
 //! `json_only`, or into an `if world.mode() == Mode::Json` block.
 //!
 //! A scenario group is a file `tests/scenarios/<group>.rs` with one
-//! `mod <group>;` line in `tests/scenarios/main.rs`. The tests of the
+//! `mod <group>;` line in `tests/scenarios/mod.rs`. The tests of the
 //! harness itself are in `tests/scenarios/harness.rs`.
 //!
 //! # The fixed clock

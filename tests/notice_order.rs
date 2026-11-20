@@ -5,15 +5,10 @@
 //! Warnings and notes come after the result of a command. On a terminal
 //! both streams show on one screen, so the order is visible.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::target::Target;
+use crate::support::scenario::world::{Mode, Setup, World};
 use std::fs;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::target::Target;
-use support::scenario::world::{Mode, Setup, World};
 
 const STAMP: &str = "2026-11-04T090211";
 

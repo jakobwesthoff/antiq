@@ -9,20 +9,15 @@
 //! leftover in `tmp/`, so that the repair `delete_temporary` is part of the
 //! run.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::Antiq;
+use crate::support::fake_rsync::FakeRsync;
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::target::Target;
+use crate::support::scenario::world::{Mode, Outcome, Setup, World};
+use crate::support::tree::Tree;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use support::cmd::Antiq;
-use support::fake_rsync::FakeRsync;
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::target::Target;
-use support::scenario::world::{Mode, Outcome, Setup, World};
-use support::tree::Tree;
 
 const PIECE: &str = "projects/scanner";
 const STAMP: &str = "2026-11-04T090211";

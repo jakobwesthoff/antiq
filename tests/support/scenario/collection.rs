@@ -29,10 +29,6 @@ impl Clock {
         Clock { base }
     }
 
-    pub fn base(&self) -> i64 {
-        self.base
-    }
-
     /// Seconds since the epoch, `days` before the base.
     pub fn days_ago(&self, days: i64) -> i64 {
         self.base - days * 86_400

@@ -7,20 +7,15 @@
 //! command that writes creates the folders it finds missing, and a dry run
 //! lists their creation.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::target::Target;
+use crate::support::tree::Tree;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::target::Target;
-use support::tree::Tree;
 
 const LEFT_OUT_BY_PUSH: [&str; 3] = ["tmp", "trash", "doomed"];
 const LAYOUT: [&str; 5] = ["tmp", "trash", "doomed", "recovered", "pieces"];

@@ -10,19 +10,14 @@
 //! except the line ends and the tabs of a pipe table, and the names show in
 //! the exact form of the rule: `%0A` for a newline, `%25` for a `%`.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run};
+use crate::support::fake_rsync::FakeRsync;
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::world::{Mode, Setup, World};
 use antiq::shown::{first_raw_character, strip_sgr};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run};
-use support::fake_rsync::FakeRsync;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::world::{Mode, Setup, World};
 
 /// The names of the world, as they are on disk and as the rule shows them.
 const NEWLINE: (&str, &str) = ("projects/two\nlines", "projects/two%0Alines");
@@ -543,7 +538,7 @@ fn a_failing_push_shows_hostile_names_escaped_on_a_terminal() {
 #[test]
 fn a_held_lock_is_reported_without_a_raw_character() {
     let collection = archived();
-    let _lock = support::cmd::hold_lock(&collection.root());
+    let _lock = crate::support::cmd::hold_lock(&collection.root());
     for args in [&["archive"][..], &["pin", NEWLINE.0][..]] {
         let run = antiq(&collection, args);
         assert_clean("held lock", &run);

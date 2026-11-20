@@ -6,18 +6,13 @@
 //! collections the scenario harness writes by hand. Every case runs in text
 //! mode and in JSON mode.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World};
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World};
 
 fn world(mode: Mode, build: impl FnOnce(&mut CollectionBuilder)) -> World {
     let clock = Clock::now();
@@ -208,7 +203,7 @@ fn refused(
     args: &[&str],
     code: i32,
     kind: &str,
-) -> support::scenario::world::Outcome {
+) -> crate::support::scenario::world::Outcome {
     let before = snapshot(&world.collection().root());
     let run = world.run(args);
     run.expect_code(code);

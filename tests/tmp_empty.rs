@@ -7,21 +7,16 @@
 //! nothing, and then probes with a dry run of `archive` that lists no
 //! repair of the temporary files.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::world::{Mode, Setup, World};
 use std::fs;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::world::{Mode, Setup, World};
 
 const PIECE: &str = "projects/scanner";
 const STAMP: &str = "2026-11-04T090211";
 
 fn world(
     mode: Mode,
-    build: impl FnOnce(&mut support::scenario::collection::CollectionBuilder),
+    build: impl FnOnce(&mut crate::support::scenario::collection::CollectionBuilder),
 ) -> World {
     let clock = Clock::now();
     let mut builder = Collection::build(&clock);
@@ -30,11 +25,11 @@ fn world(
     World::new(Setup::new(builder.finish()), mode)
 }
 
-fn stored(builder: &mut support::scenario::collection::CollectionBuilder) {
+fn stored(builder: &mut crate::support::scenario::collection::CollectionBuilder) {
     builder.version(PIECE, STAMP, &[("src/main.rs", "fn main() {}\n")]);
 }
 
-fn live_pieces(builder: &mut support::scenario::collection::CollectionBuilder) {
+fn live_pieces(builder: &mut crate::support::scenario::collection::CollectionBuilder) {
     builder.idle_days(30);
     builder.piece("projects/alpha", |piece| {
         piece.age_days(40).file("a.txt", "a");

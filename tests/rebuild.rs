@@ -6,20 +6,15 @@
 //! harness writes by hand. The harness runs every command under
 //! `TZ=Pacific/Auckland`. Every test runs in text and in JSON mode.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Outcome, Setup, World};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use support::cmd::{hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Outcome, Setup, World};
 
 const PIECE: &str = "projects/scanner";
 const STAMP: &str = "2026-11-04T090211";
@@ -108,7 +103,7 @@ fn remove(path: &Path) {
 
 /// The collection as it is, without the lock file that every locked run
 /// leaves behind.
-fn state(world: &World) -> std::collections::BTreeMap<String, support::tree::Seen> {
+fn state(world: &World) -> std::collections::BTreeMap<String, crate::support::tree::Seen> {
     let mut seen = snapshot(&world.collection().root());
     seen.remove(".antiq/lock");
     seen
@@ -946,9 +941,9 @@ fn a_search_word_that_fits_one_piece_still_names_the_piece_to_rebuild() {
 #[cfg(target_os = "linux")]
 mod raw_name {
     use super::*;
+    use crate::support::scenario::outsider::{listing_check, shasum_check, tar_extract};
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
-    use support::scenario::outsider::{listing_check, shasum_check, tar_extract};
 
     /// The stem of the version's files, with a byte that is not UTF-8.
     fn stem() -> Vec<u8> {

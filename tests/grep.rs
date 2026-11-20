@@ -5,19 +5,14 @@
 //! `antiq grep` seen from outside the binary. The binary runs with its
 //! stdout piped, so the output here is the pipe form and the JSON.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock};
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::tree::Tree;
+use crate::support::versions::{Store, StoredVersion};
 use antiq::versions::names::VersionFile;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use support::cmd::{Antiq, Run, hold_lock};
-use support::scenario::collection::{Clock, Collection};
-use support::tree::Tree;
-use support::versions::{Store, StoredVersion};
 
 const NEW: &str = "2026-11-04T100211";
 const OLD: &str = "2026-09-03T121500";
@@ -526,9 +521,9 @@ fn an_unknown_config_key_is_a_note_and_a_warning() {
 #[test]
 fn the_search_leaves_the_store_as_it_was() {
     let collection = collection_of(&two_pieces());
-    let before = support::cmd::snapshot(&collection.root());
+    let before = crate::support::cmd::snapshot(&collection.root());
 
     grep(&collection, &["main"]);
 
-    assert_eq!(support::cmd::snapshot(&collection.root()), before);
+    assert_eq!(crate::support::cmd::snapshot(&collection.root()), before);
 }

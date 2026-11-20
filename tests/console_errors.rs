@@ -6,17 +6,12 @@
 //! cause once, and the candidates of an ambiguous word. Every command that
 //! takes a piece reference runs through the binary in text mode.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Outcome, Setup, World};
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Outcome, Setup, World};
 
 const STAMP: &str = "2026-11-04T090211";
 

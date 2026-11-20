@@ -345,6 +345,4 @@ pub fn hold_lock(root: &Path) -> antiq::lock::RunLock {
     .expect("the lock is free")
 }
 
-// Not every test crate that includes this file compares snapshots.
-#[allow(unused_imports)]
 pub use super::tree::snapshot;

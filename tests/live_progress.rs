@@ -6,18 +6,13 @@
 //! and what stays after they end. The bytes of a run on a pseudo-terminal
 //! are replayed on a screen, so the tests read what a person would see.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::hold_lock;
+use crate::support::fake_rsync::FakeRsync;
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World};
+use crate::support::screen::Screen;
+use crate::support::tree::Tree;
 use std::fs;
-use support::cmd::hold_lock;
-use support::fake_rsync::FakeRsync;
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World};
-use support::screen::Screen;
-use support::tree::Tree;
 
 const NEW: &str = "2026-11-04T090211";
 
@@ -706,7 +701,7 @@ fn push_world() -> World {
         .finish();
     World::new(
         Setup::new(collection)
-            .with_target(support::scenario::target::Target::new())
+            .with_target(crate::support::scenario::target::Target::new())
             .with_real_rsync(),
         Mode::Text,
     )
@@ -803,7 +798,7 @@ fn a_second_push_shows_the_pieces_that_changed_in_the_table() {
 
 /// A world whose rsync is a stand-in that prints `listing` slowly, so that
 /// the cards have time to be drawn.
-fn slow_push(listing: &str) -> (World, FakeRsync, support::scenario::target::Target) {
+fn slow_push(listing: &str) -> (World, FakeRsync, crate::support::scenario::target::Target) {
     let clock = Clock::now();
     let collection = Collection::build(&clock)
         .patterns(&["*/*"])
@@ -811,7 +806,7 @@ fn slow_push(listing: &str) -> (World, FakeRsync, support::scenario::target::Tar
             piece.age_days(5).file("today.md", "fresh\n");
         })
         .finish();
-    let target = support::scenario::target::Target::new();
+    let target = crate::support::scenario::target::Target::new();
     target.marker(&collection);
     let fake = FakeRsync::new("rsync  version 3.2.4  protocol version 31\n");
     fake.answer_all(listing, "", 0);
@@ -871,7 +866,7 @@ fn push_on_a_dumb_terminal_makes_no_dry_run_to_forecast_and_lists_its_pieces_at_
             piece.age_days(5).file("today.md", "fresh\n");
         })
         .finish();
-    let target = support::scenario::target::Target::new();
+    let target = crate::support::scenario::target::Target::new();
     target.marker(&collection);
     let fake = FakeRsync::new("rsync  version 3.2.4  protocol version 31\n");
     fake.answer_all(">f+++++++++ notes/daily/today.md\n", "", 0);

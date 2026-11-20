@@ -4,18 +4,13 @@
 
 //! `antiq init` seen from outside the binary.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run};
+use crate::support::tree::{TempCollection, Tree};
 use antiq::config::Config;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run};
-use support::tree::{TempCollection, Tree};
 
 fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).expect("the path exists")
@@ -280,7 +275,7 @@ fn the_written_config_names_every_setting() {
 /// changed just now.
 fn tree_with_old_folders(old: usize) -> Tree {
     let mut tree = Tree::new();
-    let long_ago = support::tree::days_ago(400);
+    let long_ago = crate::support::tree::days_ago(400);
     for number in 0..old {
         tree.file_with(&format!("old{number}/file"), "x", 0o644, long_ago);
     }

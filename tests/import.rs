@@ -5,16 +5,11 @@
 //! `antiq import` seen from outside the binary: a folder outside the
 //! collection becomes a version, and the folder stays.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::tree::Tree;
 use std::fs;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection};
-use support::tree::Tree;
 
 /// 2023-11-14T22:13:20Z.
 const OLD: i64 = 1_700_000_000;

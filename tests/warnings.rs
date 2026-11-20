@@ -4,14 +4,9 @@
 
 //! Warnings and the findings of `status`, on a terminal and on a pipe.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World};
 use std::fs;
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World};
 
 const STAMP: &str = "2026-11-04T090211";
 

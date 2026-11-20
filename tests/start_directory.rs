@@ -7,16 +7,11 @@
 //! binary with the process directory set, and its output must equal the
 //! output of the same command with an absolute `-C`.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run};
+use crate::support::scenario::collection::{Clock, Collection};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run};
-use support::scenario::collection::{Clock, Collection};
 
 const STORED: &str = "2026-09-03T121500";
 

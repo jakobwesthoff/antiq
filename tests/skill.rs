@@ -6,16 +6,11 @@
 //! or by part, installed into a skills directory, and the warning about an
 //! installed copy older than this antiq.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run};
 
 /// The parts of the skill, in the order `--install` writes them before
 /// `SKILL.md`. Each is `references/<name>.md` beside `SKILL.md`.

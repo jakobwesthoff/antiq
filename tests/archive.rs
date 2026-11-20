@@ -5,17 +5,12 @@
 //! `antiq archive` seen from outside the binary, on collections built with
 //! the scenario fixture.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection};
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection};
 
 fn archive(collection: &Collection, global: &[&str], args: &[&str]) -> Run {
     Antiq::new()

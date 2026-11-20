@@ -24,6 +24,14 @@ include = [
     "/CHANGELOG.md",
     "/LICENSE",
 ]
+# The files in `tests/` are modules of the one test binary below rather than
+# test binaries of their own, so a build links one binary instead of one per
+# file.
+autotests = false
+
+[[test]]
+name = "it"
+path = "tests/main.rs"
 
 [dependencies]
 anstream = "1.0.0"

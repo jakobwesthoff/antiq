@@ -6,17 +6,12 @@
 //! the scenario fixture. The run has no terminal, so the table uses the
 //! narrow layout without colour, and the time zone is UTC.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, Run, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection};
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use support::cmd::{Antiq, Run, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection};
 
 const OLD_STAMP: &str = "2024-06-30T081245";
 const NEWER_STAMP: &str = "2024-07-01T081245";

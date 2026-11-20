@@ -5,18 +5,13 @@
 //! `antiq --version`: Archie's screen on a terminal that can show it, the
 //! plain version line everywhere else.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::Stdio;
 use std::time::Duration;
 
-use support::cmd::Antiq;
+use crate::support::cmd::Antiq;
 
 const PLAIN: &str = concat!("antiq ", env!("CARGO_PKG_VERSION"), "\n");
 

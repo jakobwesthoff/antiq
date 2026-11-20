@@ -6,15 +6,10 @@
 //! harness writes by hand. The harness runs every command under
 //! `TZ=Pacific/Auckland`, which is +13:00 in November 2026.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World};
 use std::fs;
-use support::cmd::{hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World};
 
 const NEW: &str = "2026-11-04T090211";
 const OLD: &str = "2026-09-03T121500";

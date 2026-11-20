@@ -4,20 +4,15 @@
 
 //! What `push_observed` tells an observer while a stand-in rsync answers.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::fake_rsync::FakeRsync;
+use crate::support::scenario::collection::{Clock, Collection};
+use crate::support::scenario::target::Target;
 use antiq::clock::SystemClock;
 use antiq::commands::push::{PushOutcome, PushRequest, push_observed};
 use antiq::external::RunLog;
 use antiq::progress::{Event, Observer};
 use std::fs;
 use std::sync::Mutex;
-use support::fake_rsync::FakeRsync;
-use support::scenario::collection::{Clock, Collection};
-use support::scenario::target::Target;
 
 const RSYNC_3_2_4: &str = "rsync  version 3.2.4  protocol version 31\n";
 

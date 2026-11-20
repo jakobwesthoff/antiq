@@ -7,17 +7,12 @@
 //! `TZ=Pacific/Auckland`, which is +13:00 in November 2026 and +12:00 in
 //! September 2026.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
-mod support;
-
+use crate::support::cmd::{Antiq, hold_lock, snapshot};
+use crate::support::scenario::collection::{Clock, Collection, CollectionBuilder};
+use crate::support::scenario::world::{Mode, Setup, World};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
-use support::cmd::{Antiq, hold_lock, snapshot};
-use support::scenario::collection::{Clock, Collection, CollectionBuilder};
-use support::scenario::world::{Mode, Setup, World};
 
 use serde_json::Value;
 

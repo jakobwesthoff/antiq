@@ -4,26 +4,26 @@
 
 //! Fixtures shared by library tests.
 
-// The integration tests include the same file; each test crate uses a part of it.
+// The integration tests include the same file and use a part of it.
 #[allow(
     dead_code,
-    reason = "shared with the integration tests, which each use a part"
+    reason = "shared with the integration tests, which use a part"
 )]
 #[path = "../../tests/support/tree.rs"]
 pub mod tree;
 
-// The integration tests include the same file; each test crate uses a part of it.
+// The integration tests include the same file and use a part of it.
 #[allow(
     dead_code,
-    reason = "shared with the integration tests, which each use a part"
+    reason = "shared with the integration tests, which use a part"
 )]
 #[path = "../../tests/support/versions.rs"]
 pub mod versions;
 
-// The integration tests include the same file; each test crate uses a part of it.
+// The integration tests include the same file and use a part of it.
 #[allow(
     dead_code,
-    reason = "shared with the integration tests, which each use a part"
+    reason = "shared with the integration tests, which use a part"
 )]
 #[path = "../../tests/support/fake_rsync.rs"]
 pub mod fake_rsync;

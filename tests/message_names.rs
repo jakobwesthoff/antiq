@@ -10,9 +10,6 @@
 //! interpolates bare, as `{piece}` or as a plain argument, prints that form
 //! into the message. This test reads the sources and rejects such a field.
 
-// Tests print paths in assertion messages and in the commands they run.
-#![allow(clippy::disallowed_methods)]
-
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
