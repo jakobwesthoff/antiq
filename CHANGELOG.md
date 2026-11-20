@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-20
+
 ### Fixed
 
 - `antiq skill --install` writes the parts under `references/` first and
@@ -246,7 +248,8 @@ target.
   terminal with 24-bit colour, and the plain version in a pipe
 - macOS and Linux
 
-[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/jakobwesthoff/antiq/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/jakobwesthoff/antiq/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/jakobwesthoff/antiq/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/jakobwesthoff/antiq/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jakobwesthoff/antiq/compare/v1.4.1...v1.5.0
