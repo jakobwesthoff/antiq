@@ -17,6 +17,7 @@ use super::output::Style;
 use super::table::{WIDE_FROM, mid, pad, pad_left, painted, spaces};
 use super::{Cli, Command, Description, error_block};
 use antiq::commands::list::{Row, list};
+use antiq::commands::live::Scope;
 use antiq::error::explanation;
 use antiq::query::Query;
 use antiq::reference::{Candidate, ReferenceError};
@@ -151,7 +152,8 @@ pub(super) fn group(cli: &Cli, description: &Description, env: &Env) -> Option<V
 /// Every row of the listing of the collection around `start`.
 fn all_rows(start: &Path) -> Option<Vec<Row>> {
     let collection = antiq::collection::Collection::find(start).ok()?;
-    Some(list(&collection, None).ok()?.versions)
+    // A reference names a version, so only the store is listed.
+    Some(list(&collection, None, Scope::Archived).ok()?.versions)
 }
 
 /// The parts of the report: the error as `explained` words it, the table
@@ -438,7 +440,9 @@ fn version_table(
         .iter()
         .zip(&labels)
         .map(|(row, label)| {
-            let chosen = stamps.contains(&row.stamp.to_string());
+            let chosen = row
+                .stamp
+                .is_some_and(|stamp| stamps.contains(&stamp.to_string()));
             RowLook {
                 chosen,
                 piece_matched: Vec::new(),
@@ -957,8 +961,8 @@ mod tests {
         let stamp: antiq::versions::stamp::Stamp = stamp.parse().expect("a stamp");
         Row {
             piece: antiq::relpath::RelPath::parse(piece).expect("a piece"),
-            stamp,
-            version: stamp.time(),
+            stamp: Some(stamp),
+            version: Some(stamp.time()),
             state: antiq::commands::list::State::Ok,
             archive_bytes: Some(10),
             bytes: Some(20),

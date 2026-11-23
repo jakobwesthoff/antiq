@@ -1442,16 +1442,27 @@ the same output. The help lists `find` alone, and the help and the usage
 of `list` read as those of `find`. The envelope of `--json` carries `find`
 (see "JSON output"). `search` is not a name of the command. (ADR 0069)
 
-`find [query]` prints one row per version: pieces by the score of the
-match, best first, and by path among equal scores, the versions of a piece
-newest first. The query matches piece paths fuzzily, as a search word does,
-and keeps the pieces that match. A query that scores every match alike
-(none, or only negated words) lists the pieces by path. A query of several
-words scores each word on its own against the path and adds the scores;
-a path is scored in its stored or its composed form, whichever scores
-higher. (ADR 0076)
+`find [query]` prints one row per version and one row per live piece, a
+folder that the patterns of the collection select (see "Selection"):
+pieces by the score of the match, best first, and by path among equal
+scores, the versions of a piece newest first. A piece that is live and has
+versions lists its live row directly before its versions. The query matches
+piece paths fuzzily, as a search word does, and keeps the pieces that
+match, live and archived alike. A query that scores every match alike
+(none, or only negated words) lists the pieces by path, so without a query
+every piece is listed, live ones included. A query of several words scores
+each word on its own against the path and adds the scores; a path is
+scored in its stored or its composed form, whichever scores higher.
+(ADR 0076, ADR 0077)
 
-Each row reads only the head of its listing. SIZE is the archive file's
+`--live` lists the live pieces only and reads no store. `--archived` lists
+the versions only and selects no live piece. Both together are a usage
+error. Without either, `find` lists both. The live pieces are selected
+before the store is read. `find` walks no live piece.
+
+Each version row reads only the head of its listing. A live piece has no
+version: its VERSION reads `live`, in green on a terminal with colour, and
+SIZE and FILES are `-`. SIZE is the archive file's
 size (`archive-bytes`) in decimal units (B, kB, MB, GB, TB; 1 kB = 1000
 bytes; one decimal below 10, none from 10 on); `--json` also carries the
 unpacked size and the file count. The piece is in every row, so each row stands on its own after `sort` or
@@ -1478,7 +1489,7 @@ numbers sits at the right edge of the column, over its right-aligned values.
 Without a terminal there is
 no header and a row is one line of tab-separated
 fields, `piece  stamp  archive-bytes  files  state`, with the version stamp
-and the numbers unformatted. A control character in a piece path, as
+and the numbers unformatted. A live piece is `piece  -  -  -  live`. A control character in a piece path, as
 described in "Console output", is written as `%` and the two hexadecimal
 digits of each of its bytes, on a terminal and in a pipe.
 
@@ -1492,6 +1503,7 @@ the `state` field in a pipe and in the `state` key of `--json`:
 | `incomplete` | `incomplete` | yellow | an incomplete version; its VERSION is the stamp, as it is named by its stamp only |
 | `newer-format` | `newer format` | magenta | a listing of a newer format than antiq reads |
 | `unreadable` | `unreadable` | red | a file of the version cannot be read; SIZE and FILES are `-` |
+| `live` | none | | a live piece: VERSION reads `live`, SIZE and FILES are `-`, the stamp is `-` in a pipe and null under `--json` |
 
 SIZE and FILES are `-` on a terminal and in a pipe, and null in `--json`,
 where the head of the listing lacks the number; SIZE is the size the listing
@@ -1509,14 +1521,26 @@ On a narrow terminal (see "Console output") a piece path that does not fit is
 shortened in the middle to the width the other columns leave, but not below
 8 columns.
 
-With no version in the store `find` exits 0 and says `note: no versions in
-the collection` on stderr; with versions but no piece matching the query it
-exits 0 and says ``note: no piece matches `<query>` ``, also under `--json`.
+With nothing to list, `find` exits 0 and says on stderr what the scope
+covers: `note: no live pieces and no versions in the collection`, with
+`--archived` `note: no versions in the collection`, with `--live` `note: no
+live pieces in the collection`. With something to list but no piece
+matching the query it exits 0 and says ``note: no piece matches `<query>` ``.
+Both notes are printed under `--json` too. Where the live pieces could not
+be told (a directory selection could not read, and no piece was found),
+neither note speaks of them and the warning alone does.
 Damaged versions do not change the exit code. `find` takes no lock and
 writes nothing. A held lock is noted on stderr, `note: another run holds the
 lock (pid ..., machine ..., started ...)`, and under `--json` in the `note`
 field instead of on stderr. Notes on stderr come in the order: settings of
 the collection, the lock, nothing to list, the faults of damaged versions.
+
+A directory that selection could not read hides the pieces below it. When
+the scope includes live pieces, each such directory is a warning,
+`warning: unreadable: <dir>`, as for `archive`, in text output and in the
+`warnings` of `--json`. A pattern or exclude entry that selection cannot use
+fails the run, as it does for `status`; `--archived` selects nothing and so
+never fails that way.
 
 ### grep
 
@@ -2180,7 +2204,7 @@ error naming the key, exit 1.
 | `forget <piece> (<version> \| --all-versions --force) [-n]` | deletes a version, or all of them |
 | `rebuild <piece> <version> [-n]` | repairs a damaged version |
 | `import <folder> [--as <path>] [--time <time>] [-n]` | packs a folder as a version |
-| `find [<query>]` | finds and lists the versions of pieces; also called `list` |
+| `find [<query>] [--live \| --archived]` | finds and lists the pieces and their versions; also called `list` |
 | `grep <pattern>` | searches the paths of all archived files |
 | `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
 | `push [--init] [--force] [--take-over] [--if-reachable] [-n]` | mirrors the collection to the target |
@@ -2244,7 +2268,8 @@ terminal by the same info "Nothing was <done>.".
 - Several pieces match a word. The caption is "The N pieces that match
   `<word>`" and the "How to fix it" is "Name the piece by more of its
   path.". For `unearth`, `fork`, `rebuild` and `forget` the table is the
-  table of `antiq find` with all versions of the candidate pieces, in which
+  table of `antiq find --archived` with all versions of the candidate pieces,
+  in which
   the letters the word matched are bold red. For `archive`, `pin` and
   `unpin` it has the columns PIECE and VERSIONS, the number of stored
   versions, which is 0 for a live piece without any. The commands on the
@@ -2721,7 +2746,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `--init`, `--force` or `--take-over` is given with `--if-reachable`, `--take-over` is given with `--init` or `--force`, or `forget --all-versions` is given without `--force` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `find` is given `--live` with `--archived`, `--init`, `--force` or `--take-over` is given with `--if-reachable`, `--take-over` is given with `--init` or `--force`, or `forget --all-versions` is given without `--force` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `inexact_reference` | 1 | `unearth` or `forget` is given a search word that matches exactly one candidate | `candidates`: list of one `{path}` |
@@ -2786,12 +2811,15 @@ warnings hold the notes on the settings of the collection (an unknown key
 under `[target]` among them) besides those of the repairs.
 
 `find` adds `versions`, `warnings` (the notes on the settings of the
-collection and the messages about files that could not be read, as
-warning objects) and, while a run holds the lock, `note`
-(a text). Each version is `piece`, `stamp` (the version stamp, which has the
-counter), `version` (the time of the stamp in UTC, RFC 3339), `state` (see
-"find"), `archive_bytes`, `bytes` (the unpacked size) and `files` (numbers,
-null where the head of the listing lacks them) and `damage` (a list of texts).
+collection, the messages about files that could not be read and the
+directories selection could not read, as warning objects) and, while a run
+holds the lock, `note` (a text). Each version is `piece`, `stamp` (the
+version stamp, which has the counter), `version` (the time of the stamp in
+UTC, RFC 3339), `state` (see "find"), `archive_bytes`, `bytes` (the
+unpacked size) and `files` (numbers, null where the head of the listing
+lacks them) and `damage` (a list of texts). A live piece is in the same
+list with `state` `live` and null for `stamp`, `version`, `archive_bytes`,
+`bytes` and `files`.
 
 `grep` adds `pattern`, `pieces`, `skipped` and `warnings` (the notes on the
 settings of the collection and on the lock file, as warning objects),

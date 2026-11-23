@@ -11,6 +11,7 @@ pub mod grep;
 pub mod import;
 pub mod init;
 pub mod list;
+pub mod live;
 pub mod pin;
 pub mod push;
 pub mod rebuild;

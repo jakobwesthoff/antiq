@@ -22,7 +22,7 @@ Install antiq with `cargo install antiq` or
 
 ```text
 antiq status           which folders are due or pinned, and what needs attention
-antiq find [query]     list the archived versions
+antiq find [query]     list the live pieces and the archived versions
 antiq grep <pattern>   search the paths of the archived files
 antiq unearth <piece>  bring a folder back and remove that version
 ```

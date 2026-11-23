@@ -216,10 +216,12 @@ either.
 ### What is in the archive
 
 The folders are gone from `experiments`, and their pieces live in the
-archive now. `find` shows every archived piece with its versions. Once the
-archive has grown, a search word narrows the list down: `find scan` shows
-only the pieces whose path fits `scan`. On a terminal with colour, the
-letters the search word matched are bold red.
+archive now. `find` shows every piece with its versions, and the folders
+of the collection as `live`. Once the archive has grown, a search word
+narrows the list down: `find scan` shows only the pieces whose path fits
+`scan`. On a terminal with colour, the letters the search word matched are
+bold red. `find --archived` shows the versions only and `find --live` the
+live folders only.
 
 ```bash
 antiq find
@@ -608,7 +610,7 @@ Commands:
   forget   Delete a version, or all of them
   rebuild  Repair a damaged version
   import   Pack a folder as a version
-  find     Find and list the versions of pieces
+  find     Find and list the pieces and their versions
   grep     Search the paths of all archived files
   pin      Keep a piece from being archived
   unpin    Let a piece be archived again

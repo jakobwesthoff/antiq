@@ -330,7 +330,10 @@ fn an_empty_store_exits_0_with_a_note_in_every_form() {
         let world = world(mode, |_| {});
         let run = world.run(&["find"]);
         run.expect_code(0);
-        assert_eq!(run.stderr, "note: no versions in the collection\n");
+        assert_eq!(
+            run.stderr,
+            "note: no live pieces and no versions in the collection\n"
+        );
         run.text_only(|out| assert_eq!(out, ""));
         run.json_only(|json| assert_eq!(json["versions"], Value::Array(Vec::new())));
     }
@@ -554,4 +557,130 @@ fn a_usage_error_on_a_stderr_terminal_is_an_error_block_with_the_usage_as_fix() 
          ▌   To pass '--to' as a value, use '-- --to'.\n\
          ▌   Usage: antiq unearth <PIECE>\n"
     );
+}
+
+// =========================================================
+// Live pieces
+// =========================================================
+
+const OLD_ONE: &str = "2025-02-11T184007";
+
+/// `notes` is live only, `old` is stored only, and `scanner` is both: a
+/// folder of the collection with a stored version.
+fn live_and_stored(builder: &mut CollectionBuilder) {
+    builder
+        .piece("notes", |piece| {
+            piece.file("a.txt", "a");
+        })
+        .piece("scanner", |piece| {
+            piece.file("main.rs", "fn main() {}\n");
+        })
+        .version("old", OLD_ONE, &[("run.sh", "echo\n")])
+        .version("scanner", SCANNER_OLD, &[("main.rs", "fn main() {}\n")]);
+}
+
+#[test]
+fn a_live_piece_is_a_pipe_line_with_dashes_and_live_as_its_state() {
+    let world = world(Mode::Text, live_and_stored);
+    let run = world.run(&["find"]);
+    run.expect_code(0);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "{:?}", run.stdout);
+    assert_eq!(lines[0], "notes\t-\t-\t-\tlive");
+    assert_eq!(&fields(lines[1])[..2], ["old", OLD_ONE]);
+    assert_eq!(lines[2], "scanner\t-\t-\t-\tlive");
+    assert_eq!(&fields(lines[3])[..2], ["scanner", SCANNER_OLD]);
+    assert_eq!(run.stderr, "");
+}
+
+#[test]
+fn a_terminal_shows_live_in_the_version_column_in_green() {
+    let world = world(Mode::Text, live_and_stored);
+    let run = world.run_tty(&["find"]);
+    run.expect_code(0);
+    let plain = run.plain();
+    let lines: Vec<&str> = plain.lines().collect();
+    assert!(lines[1].starts_with("notes     live"), "{:?}", lines[1]);
+    assert!(lines[1].trim_end().ends_with("-       -"), "{:?}", lines[1]);
+    assert!(
+        run.stdout.contains("\x1b[32mlive\x1b[0m"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn json_has_a_live_row_with_nulls_and_the_state_live() {
+    let world = world(Mode::Json, live_and_stored);
+    let run = world.run(&["find", "notes"]);
+    run.expect_code(0);
+    run.json_only(|json| {
+        let versions = json["versions"].as_array().expect("a list");
+        assert_eq!(versions.len(), 1);
+        let row = &versions[0];
+        assert_eq!(row["piece"], "notes");
+        assert_eq!(row["state"], "live");
+        for key in ["stamp", "version", "archive_bytes", "bytes", "files"] {
+            assert_eq!(row[key], Value::Null, "{key}");
+        }
+        assert_eq!(row["damage"], Value::Array(Vec::new()));
+    });
+}
+
+#[test]
+fn the_live_flag_lists_the_live_pieces_only() {
+    let world = world(Mode::Text, live_and_stored);
+    let run = world.run(&["find", "--live"]);
+    run.expect_code(0);
+    assert_eq!(run.stdout, "notes\t-\t-\t-\tlive\nscanner\t-\t-\t-\tlive\n");
+}
+
+#[test]
+fn the_archived_flag_lists_the_versions_only() {
+    let world = world(Mode::Text, live_and_stored);
+    let run = world.run(&["find", "--archived"]);
+    run.expect_code(0);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{:?}", run.stdout);
+    assert_eq!(&fields(lines[0])[..2], ["old", OLD_ONE]);
+    assert_eq!(&fields(lines[1])[..2], ["scanner", SCANNER_OLD]);
+}
+
+#[test]
+fn the_flags_come_after_list_too() {
+    let world = world(Mode::Text, live_and_stored);
+    let found = world.run(&["find", "--live", "scan"]);
+    let listed = world.run(&["list", "--live", "scan"]);
+    found.expect_code(0);
+    assert_eq!(found.stdout, "scanner\t-\t-\t-\tlive\n");
+    assert_eq!(listed.stdout, found.stdout);
+}
+
+#[test]
+fn both_flags_together_are_a_usage_error() {
+    let world = world(Mode::Json, live_and_stored);
+    let run = world.run(&["find", "--live", "--archived"]);
+    run.expect_code(2);
+    assert_eq!(run.error_kind().as_deref(), Some("usage"));
+    run.json_only(|json| {
+        let message = json["error"]["message"].as_str().expect("a message");
+        assert!(message.contains("cannot be used with"), "{message}");
+    });
+}
+
+#[test]
+fn the_live_flag_without_a_live_piece_says_so() {
+    let world = world(Mode::Text, three_versions);
+    let run = world.run(&["find", "--live"]);
+    run.expect_code(0);
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.stderr, "note: no live pieces in the collection\n");
+}
+
+#[test]
+fn a_query_that_no_live_piece_matches_says_so() {
+    let world = world(Mode::Text, live_and_stored);
+    let run = world.run(&["find", "--live", "zzz"]);
+    run.expect_code(0);
+    assert_eq!(run.stderr, "note: no piece matches `zzz`\n");
 }

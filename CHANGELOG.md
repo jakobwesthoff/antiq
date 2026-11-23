@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `find` lists the live pieces, the folders the patterns of the collection
+  select, as rows of their own. Their VERSION reads `live`, their SIZE and
+  FILES read `-`, and under `--json` they have `"state": "live"` and null
+  for the stamp, the version and the sizes. `--live` lists only them and
+  `--archived` only the versions, as `find` did before. Both together are
+  a usage error.
+
+### Changed
+
+- `find` without a query lists the live pieces as well as the archived
+  ones, and a query ranks both together. A piece that is live and has
+  versions lists its live row directly before its versions.
+- A listing without a row says `no live pieces and no versions in the
+  collection` where it said `no versions in the collection`, which stays
+  the note of `find --archived`.
+- The help line of `find` reads `Find and list the pieces and their
+  versions`. The README that antiq keeps in `.antiq` names the live pieces
+  in its `find` line, so every collection writes it again at the next run
+  that takes the lock.
+
 ## [1.8.0] - 2026-11-23
 
 ### Changed

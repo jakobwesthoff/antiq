@@ -324,3 +324,97 @@ fn the_candidates_of_an_ambiguous_word_come_by_score_and_by_path_among_equals() 
         },
     );
 }
+
+/// The state of every row `find` printed, in the order printed: `live`, or
+/// the state of the version, read from the pipe lines or from the JSON.
+fn states_of(world: &World, outcome: &Outcome) -> Vec<String> {
+    match world.mode() {
+        Mode::Text => outcome
+            .stdout
+            .lines()
+            .map(|line| line.split('\t').nth(4).expect("a state field").to_string())
+            .collect(),
+        Mode::Json => {
+            let mut states = Vec::new();
+            outcome.json_only(|json| {
+                states = json["versions"]
+                    .as_array()
+                    .expect("a list of versions")
+                    .iter()
+                    .map(|row| row["state"].as_str().expect("a state").to_string())
+                    .collect();
+            });
+            states
+        }
+    }
+}
+
+#[test]
+fn find_still_finds_a_piece_after_one_of_its_versions_is_unearthed() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .patterns(&["*/*"])
+                .version("projects/scanner", "2026-09-03T121500", &[("a.rs", "a")])
+                .version("projects/scanner", "2026-11-04T090211", &[("a.rs", "a")])
+                .version("tools/scan-old", "2025-02-11T184007", &[("c.sh", "c")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            let before = world.run(&["find", "scan"]);
+            before.expect_code(0);
+            assert_eq!(
+                pieces_of(world, &before),
+                ["projects/scanner", "projects/scanner", "tools/scan-old"]
+            );
+            assert_eq!(states_of(world, &before), ["ok", "ok", "ok"]);
+
+            let unearthed = world.run(&[
+                "unearth",
+                "projects/scanner",
+                "--version",
+                "2026-11-04T090211",
+            ]);
+            unearthed.expect_code(0);
+
+            // The folder is live now and its older version is stored: the
+            // same query finds the piece, its live row first.
+            let after = world.run(&["find", "scan"]);
+            after.expect_code(0);
+            assert_eq!(
+                pieces_of(world, &after),
+                ["projects/scanner", "projects/scanner", "tools/scan-old"]
+            );
+            assert_eq!(states_of(world, &after), ["live", "ok", "ok"]);
+            assert_eq!(after.stderr, "");
+        },
+    );
+}
+
+#[test]
+fn find_finds_the_last_unearthed_version_of_a_piece_as_a_live_piece() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .patterns(&["*/*"])
+                .version("projects/scanner", "2026-11-04T090211", &[("a.rs", "a")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            let unearthed = world.run(&["unearth", "projects/scanner"]);
+            unearthed.expect_code(0);
+
+            let found = world.run(&["find", "scanner"]);
+            found.expect_code(0);
+            assert_eq!(pieces_of(world, &found), ["projects/scanner"]);
+            assert_eq!(states_of(world, &found), ["live"]);
+
+            let archived = world.run(&["find", "--archived", "scanner"]);
+            archived.expect_code(0);
+            assert!(pieces_of(world, &archived).is_empty());
+            assert_eq!(archived.stderr, "note: no versions in the collection\n");
+        },
+    );
+}

@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `find` command: finds and lists the versions of pieces.
+//! The `find` command: finds and lists the pieces and their versions.
 
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
@@ -13,6 +13,7 @@ use crate::cli::table::{
 use crate::cli::{Context, FindArgs};
 use antiq::collection::Collection;
 use antiq::commands::list::{ListReport, Row, State, list};
+use antiq::commands::live::Scope;
 use antiq::query::Query;
 use antiq::shown::{escape_controls, positions};
 use antiq::versions::naming::{local_labels, system_zone};
@@ -24,7 +25,7 @@ pub fn run(ctx: &Context, args: &FindArgs, out: &mut Output) -> anyhow::Result<u
         .map_err(antiq::Error::from)
         .context("find the antiq collection")?;
     let query = args.query.as_deref();
-    let report = list(&collection, query)
+    let report = list(&collection, query, args.scope.scope())
         .map_err(antiq::Error::from)
         .context("list the versions")?;
 
@@ -93,23 +94,41 @@ fn notes(report: &ListReport, query: Option<&str>) -> Vec<Notice> {
             notes.push(Notice::Note(format!(
                 "{} {} is damaged: {fault}",
                 escape_controls(&row.piece.to_string()),
-                row.stamp
+                row.stamp.expect("a damaged row is a version")
             )));
         }
     }
     notes
 }
 
-/// Why there is no row, when there is none.
+/// Why there is no row, when there is none. A side the run could not
+/// tell about (`None`) says neither that there is nothing nor that there is
+/// something, so a warning alone speaks for it.
 fn empty_note(report: &ListReport, query: Option<&str>) -> Option<String> {
     if !report.versions.is_empty() {
         return None;
     }
-    Some(if report.store_has_versions {
-        format!("no piece matches `{}`", query.unwrap_or("").trim())
-    } else {
-        "no versions in the collection".to_string()
-    })
+    let store = report.store_has_versions;
+    let live = report.live_pieces;
+    let (nothing, something) = match report.scope {
+        Scope::Both => (
+            (store == Some(false) && live == Some(false))
+                .then_some("no live pieces and no versions in the collection"),
+            store == Some(true) || live == Some(true),
+        ),
+        Scope::Archived => (
+            (store == Some(false)).then_some("no versions in the collection"),
+            store == Some(true),
+        ),
+        Scope::Live => (
+            (live == Some(false)).then_some("no live pieces in the collection"),
+            live == Some(true),
+        ),
+    };
+    match nothing {
+        Some(text) => Some(text.to_string()),
+        None => something.then(|| format!("no piece matches `{}`", query.unwrap_or("").trim())),
+    }
 }
 
 fn state_name(state: State) -> &'static str {
@@ -119,6 +138,7 @@ fn state_name(state: State) -> &'static str {
         State::Incomplete => "incomplete",
         State::NewerFormat => "newer-format",
         State::Unreadable => "unreadable",
+        State::Live => "live",
     }
 }
 
@@ -126,7 +146,7 @@ fn pipe_line(row: &Row) -> String {
     let number = |number: Option<u64>| number.map_or("-".to_string(), |number| number.to_string());
     [
         escape_controls(&row.piece.to_string()),
-        row.stamp.to_string(),
+        row.stamp.map_or("-".to_string(), |stamp| stamp.to_string()),
         number(row.archive_bytes),
         number(row.files),
         state_name(row.state).to_string(),
@@ -142,13 +162,16 @@ fn mark(state: State) -> Option<(&'static str, Color)> {
         State::Incomplete => Some(("incomplete", Color::Yellow)),
         State::NewerFormat => Some(("newer format", Color::Magenta)),
         State::Unreadable => Some(("unreadable", Color::Red)),
+        // The VERSION column says `live`, so the last column stays empty.
+        State::Live => None,
     }
 }
 
 /// How each row names its version. A version is named by its local time,
 /// with the UTC offset where another version of the piece renders alike. An
 /// incomplete version can be named by its stamp only, so it is shown by its
-/// stamp and takes no part in telling the others apart.
+/// stamp and takes no part in telling the others apart. A live piece has no
+/// version and is named `live`.
 pub(in crate::cli) fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<String> {
     let mut labels = vec![String::new(); rows.len()];
     let mut start = 0;
@@ -157,17 +180,24 @@ pub(in crate::cli) fn version_labels(rows: &[Row], zone: &TimeZone) -> Vec<Strin
             .iter()
             .position(|row| row.piece != rows[start].piece)
             .map_or(rows.len(), |length| start + length);
-        let named: Vec<usize> = (start..end)
-            .filter(|index| rows[*index].state != State::Incomplete)
-            .collect();
-        let stamps: Vec<_> = named.iter().map(|index| rows[*index].stamp).collect();
+        let mut named = Vec::new();
+        let mut stamps = Vec::new();
+        for index in start..end {
+            let row = &rows[index];
+            match row.state {
+                State::Live => labels[index] = "live".to_string(),
+                State::Incomplete => {
+                    let stamp = row.stamp.expect("an incomplete version has a stamp");
+                    labels[index] = stamp.to_string();
+                }
+                _ => {
+                    named.push(index);
+                    stamps.push(row.stamp.expect("a version has a stamp"));
+                }
+            }
+        }
         for (index, label) in named.into_iter().zip(local_labels(&stamps, zone)) {
             labels[index] = label;
-        }
-        for index in start..end {
-            if rows[index].state == State::Incomplete {
-                labels[index] = rows[index].stamp.to_string();
-            }
         }
         start = end;
     }
@@ -320,9 +350,20 @@ pub(in crate::cli) fn table(
             .map_or(&[][..], |look| look.piece_matched.as_slice());
         let label_matched = look.map_or(0, |look| look.label_matched);
         let label_matched: Vec<usize> = (0..label_matched).collect();
+        let version_look = if rows[index].state == State::Live {
+            theme::GREEN
+        } else {
+            base
+        };
         let mut line = [
             cell(&shown_piece, piece_width, false, base, piece_matched),
-            cell(&labels[index], version_width, false, base, &label_matched),
+            cell(
+                &labels[index],
+                version_width,
+                false,
+                version_look,
+                &label_matched,
+            ),
             cell(&sizes[index], size_width, true, base, &[]),
             cell(&files[index], files_width, true, base, &[]),
         ]
@@ -372,8 +413,8 @@ mod tests {
         let stamp: Stamp = stamp.parse().expect("a stamp");
         Row {
             piece: RelPath::parse(piece).expect("a piece"),
-            stamp,
-            version: stamp.time(),
+            stamp: Some(stamp),
+            version: Some(stamp.time()),
             state,
             archive_bytes: sizes.map(|(archive, _, _)| archive),
             bytes: sizes.map(|(_, bytes, _)| bytes),
@@ -391,7 +432,22 @@ mod tests {
             versions,
             warnings: Vec::new(),
             note: None,
-            store_has_versions: true,
+            scope: Scope::Both,
+            store_has_versions: Some(true),
+            live_pieces: Some(false),
+        }
+    }
+
+    fn live(piece: &str) -> Row {
+        Row {
+            piece: RelPath::parse(piece).expect("a piece"),
+            stamp: None,
+            version: None,
+            state: State::Live,
+            archive_bytes: None,
+            bytes: None,
+            files: None,
+            damage: Vec::new(),
         }
     }
 
@@ -895,7 +951,7 @@ mod tests {
     #[test]
     fn nothing_to_list_is_said_on_stderr_in_both_forms() {
         let none = ListReport {
-            store_has_versions: false,
+            store_has_versions: Some(false),
             ..report(Vec::new())
         };
         for style in [TERMINAL, PIPE] {
@@ -903,9 +959,111 @@ mod tests {
             assert!(lines.stdout.is_empty(), "{:?}", lines.stdout);
             assert_eq!(
                 pipe_lines(&lines.stderr),
-                ["note: no versions in the collection"]
+                ["note: no live pieces and no versions in the collection"]
             );
         }
+    }
+
+    /// The note of a listing without a row, for what the run knows of each
+    /// side. `None` is a side the run did not or could not look at.
+    fn note_of(scope: Scope, store: Option<bool>, live: Option<bool>) -> Option<String> {
+        let report = ListReport {
+            scope,
+            store_has_versions: store,
+            live_pieces: live,
+            ..report(Vec::new())
+        };
+        empty_note(&report, Some(" zzz "))
+    }
+
+    #[test]
+    fn the_note_of_an_empty_listing_names_what_the_scope_covers() {
+        let both = |store, live| note_of(Scope::Both, store, live);
+        assert_eq!(
+            both(Some(false), Some(false)).as_deref(),
+            Some("no live pieces and no versions in the collection")
+        );
+        let no_match = Some("no piece matches `zzz`".to_string());
+        assert_eq!(both(Some(true), Some(false)), no_match);
+        assert_eq!(both(Some(false), Some(true)), no_match);
+        assert_eq!(both(Some(true), Some(true)), no_match);
+
+        let archived = |store| note_of(Scope::Archived, store, None);
+        assert_eq!(
+            archived(Some(false)).as_deref(),
+            Some("no versions in the collection")
+        );
+        assert_eq!(archived(Some(true)), no_match);
+
+        let live = |live| note_of(Scope::Live, None, live);
+        assert_eq!(
+            live(Some(false)).as_deref(),
+            Some("no live pieces in the collection")
+        );
+        assert_eq!(live(Some(true)), no_match);
+    }
+
+    #[test]
+    fn a_side_the_run_could_not_tell_about_makes_no_claim_that_it_is_empty() {
+        assert_eq!(note_of(Scope::Both, Some(false), None), None);
+        assert_eq!(note_of(Scope::Live, None, None), None);
+        assert_eq!(
+            note_of(Scope::Both, Some(true), None).as_deref(),
+            Some("no piece matches `zzz`")
+        );
+    }
+
+    #[test]
+    fn a_live_piece_is_a_row_with_live_as_its_version_and_dashes_for_the_rest() {
+        let mut rows = vec![live("notes"), live("projects/scanner")];
+        rows.push(sound(
+            "projects/scanner",
+            "2026-11-04T090211",
+            1_100_000_000,
+            48_211,
+        ));
+        let lines = table(&rows, TERMINAL, &plus_one(), None);
+        insta::assert_snapshot!(lines.join("\n"), @"
+        PIECE              VERSION                 SIZE    FILES
+        notes              live                       -        -
+        projects/scanner   live                       -        -
+        projects/scanner   2026-11-04 10:02:11   1.1 GB   48 211
+        ");
+    }
+
+    #[test]
+    fn the_live_label_is_green_and_the_other_cells_are_plain() {
+        let style = Style {
+            color: true,
+            ..TERMINAL
+        };
+        let lines = table(&[live("notes")], style, &plus_one(), None);
+        let green = "\x1b[32m";
+        let off = "\x1b[0m";
+        assert_eq!(
+            lines[1],
+            format!("notes   {green}live{off}         -       -")
+        );
+    }
+
+    #[test]
+    fn a_live_row_in_a_pipe_has_dashes_for_stamp_and_numbers_and_live_as_state() {
+        let report = report(vec![live("notes")]);
+        let lines = render(&report, None, PIPE, &plus_one());
+        assert_eq!(texts(&lines.stdout), ["notes\t-\t-\t-\tlive"]);
+    }
+
+    #[test]
+    fn a_live_piece_does_not_take_part_in_telling_versions_apart() {
+        let rows = vec![
+            live("projects/scanner"),
+            sound("projects/scanner", "2026-11-04T090211", 10, 1),
+            sound("projects/scanner", "2026-09-03T121500", 10, 1),
+        ];
+        assert_eq!(
+            version_labels(&rows, &plus_one()),
+            ["live", "2026-11-04 10:02:11", "2026-09-03 13:15:00"]
+        );
     }
 
     #[test]

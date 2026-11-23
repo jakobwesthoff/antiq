@@ -5,6 +5,7 @@
 //! The survey that judges every live piece as due, soon, pinned or refused.
 
 use crate::collection::Collection;
+use crate::commands::live::{LiveError, LivePieces};
 use crate::error::HasKind;
 use crate::filesystem::tree::TreeRoot;
 use crate::idle::{self, IdleCheck, IdleError, IdleVerdict};
@@ -12,7 +13,7 @@ use crate::markers::{self, RESTORED_FILE};
 use crate::pin::PIN_FILE;
 use crate::relpath::{Name, RelPath};
 use crate::rules::{PieceRules, RulesError};
-use crate::select::{Rules, SelectError, select};
+use crate::select::SelectError;
 use crate::shown::Shown;
 use crate::tree::{PieceTree, Problem};
 use crate::walk::{Hooks, RealFs, WalkError, walk_piece_with};
@@ -52,6 +53,15 @@ pub enum SurveyError {
 }
 
 impl HasKind for SurveyError {}
+
+impl From<LiveError> for SurveyError {
+    fn from(error: LiveError) -> SurveyError {
+        match error {
+            LiveError::Root { path, source } => SurveyError::Root { path, source },
+            LiveError::Select(error) => SurveyError::Select(error),
+        }
+    }
+}
 
 /// What the survey found: every live piece, sorted by path, and the
 /// directories selection could not read.
@@ -207,24 +217,20 @@ pub(crate) fn survey_with(
     hooks: &dyn Hooks,
 ) -> Result<Survey, SurveyError> {
     let config = &collection.config().collection;
-    let root = TreeRoot::open(collection.root()).map_err(|source| SurveyError::Root {
-        path: Shown(&collection.root()).to_string(),
-        source,
-    })?;
-    let select_rules = Rules::new(&config.patterns, &config.exclude)?.bind(&root)?;
-    let selection = select(&root, &select_rules)?;
+    let live = LivePieces::select(collection)?;
+    let root = live.root();
     let piece_rules = PieceRules::new(&config.ignore, &config.timeless)?;
     let settings = idle::Settings::new(config.idle_days, config.soon_days);
 
     let mut pieces = Vec::new();
-    for top in selection.pieces() {
-        let tree = walk_piece_with(&root, top, &select_rules, &piece_rules, hooks)?;
-        pieces.push(judge(&root, &tree, &settings, config.idle_days, now));
+    for top in live.pieces() {
+        let tree = walk_piece_with(root, top, live.rules(), &piece_rules, hooks)?;
+        pieces.push(judge(root, &tree, &settings, config.idle_days, now));
     }
     pieces.sort_by(|a, b| a.piece.cmp(&b.piece));
     Ok(Survey {
         pieces,
-        unreadable: selection.unreadable().to_vec(),
+        unreadable: live.unreadable().to_vec(),
     })
 }
 
@@ -485,6 +491,14 @@ mod tests {
         assert_eq!(piece(&found, "fresh").clock, Some(at(-5 * DAY)));
         assert_eq!(piece(&found, "empty").verdict, Verdict::Plain);
         assert_eq!(piece(&found, "empty").clock, None);
+    }
+
+    #[test]
+    fn a_pattern_that_cannot_be_used_fails_the_survey() {
+        let temp = world("patterns = [\"[\"]");
+        let collection = Collection::find(temp.root()).expect("a collection");
+        let error = survey(&collection, now()).expect_err("the pattern is invalid");
+        assert!(matches!(error, SurveyError::Select(_)), "{error:?}");
     }
 
     #[test]

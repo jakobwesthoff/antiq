@@ -70,7 +70,7 @@ fn stamp_of(collection: &Collection, piece: &str) -> String {
         .as_array()
         .expect("a list of versions")
         .iter()
-        .find(|version| version["piece"] == piece)
+        .find(|version| version["piece"] == piece && version["state"] != "live")
         .and_then(|version| version["stamp"].as_str())
         .unwrap_or_else(|| panic!("no version of {piece:?} in {}", run.stdout))
         .to_string()

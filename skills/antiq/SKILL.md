@@ -201,7 +201,7 @@ The kinds you meet most:
   piece the user meant before you run the command with it; when it is not
   clearly the same, ask.
 - `unknown_reference`: no piece matched. For `unearth`, `fork`, `rebuild`
-  and `forget` run `find` to see the archived pieces. For `archive`,
+  and `forget` run `find --archived` to see the archived pieces. For `archive`,
   `pin` and `unpin` the piece is a live folder the patterns select, so
   look at the folders of the collection. When `code` is
   `antiq::reference::only_incomplete`, the piece holds only incomplete
@@ -219,11 +219,14 @@ The kinds you meet most:
 `due_in_days`. It also lists damaged and incomplete versions and other
 findings. `status` exits 0 whatever it finds.
 
-`antiq find [<word>] --json` lists every archived version in `versions`,
-each with `piece`, `stamp`, `version` (UTC time), `state` (`ok`,
-`damaged`, `incomplete`, `newer-format` or `unreadable`), `archive_bytes`,
-`bytes` and `files`. The word matches piece paths fuzzily. `list` is the
-same command. `newer-format` is a version written by a newer antiq (error
+`antiq find [<word>] --json` lists every archived version and every live
+piece in `versions`, each with `piece`, `stamp`, `version` (UTC time),
+`state` (`ok`, `damaged`, `incomplete`, `newer-format`, `unreadable` or
+`live`), `archive_bytes`, `bytes` and `files`. A row with `state` `live` is
+a folder of the collection, not a version: its `stamp`, `version` and sizes
+are null, and `unearth`, `fork`, `rebuild` and `forget` cannot take it.
+`--archived` lists the versions only and `--live` the live pieces only. The
+word matches piece paths fuzzily. `list` is the same command. `newer-format` is a version written by a newer antiq (error
 kind `format_too_new` when you try to use it): it is no damage; tell the
 user to update antiq and never offer `forget` for it. `unreadable` is a
 file antiq could not read; `warnings` names it.
@@ -271,7 +274,7 @@ A version is named by its stamp, or by a prefix of the stamp that
 contains the `T`, such as `2026-11-04T09`. An input without `T`, such as
 `2026-11-04`, is read as local time, not as a stamp, and can name another
 version than the stamp's UTC date, so do not cut a stamp before its `T`.
-Take the `stamp` from `find --json` and pass it whole: `unearth` and
+Take the `stamp` from a row of `find --archived --json` and pass it whole: `unearth` and
 `fork` take it as `--version <stamp>` and use the newest version without
 it, `forget` and `rebuild` take it as the second argument. An input that
 matches several versions, or none, is an error of kind `other` (code
@@ -280,7 +283,9 @@ matches several versions, or none, is an error of kind `other` (code
 
 ## Typical tasks
 
-- **"Where is my old project X?"** `antiq find X --json`. Nothing found:
+- **"Where is my old project X?"** `antiq find X --json`. A row with
+  `state` `live` is a folder in the collection already; a version row is
+  archived. Nothing found:
   `antiq grep '<a file name you expect>' --json`.
 - **"I need X again."** Ask whether the archived version may go
   (`unearth`) or should stay (`fork`) unless the user said so. Then

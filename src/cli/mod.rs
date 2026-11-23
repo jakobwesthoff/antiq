@@ -21,6 +21,7 @@ use self::console::block::{Block, Para};
 use self::console::rich::Rich;
 use self::output::{ErrorReport, Output};
 use antiq::commands::forget::{self, Which};
+use antiq::commands::live::Scope;
 use antiq::error::ErrorKind;
 use antiq::shown::{Shown, escape_controls, escape_lines};
 use anyhow::Context as _;
@@ -68,7 +69,7 @@ pub enum Command {
     Rebuild(RebuildArgs),
     /// Pack a folder as a version
     Import(ImportArgs),
-    /// Find and list the versions of pieces
+    /// Find and list the pieces and their versions
     // `list` is an alias, not a visible alias, so the help names `find`
     // alone.
     #[command(alias = "list")]
@@ -200,10 +201,33 @@ pub struct ImportArgs {
     pub dry_run: bool,
 }
 
+/// The two flags that restrict a search to one side.
+#[derive(Debug, Args)]
+pub struct ScopeArgs {
+    /// Search the live pieces only
+    #[arg(long, conflicts_with = "archived")]
+    pub live: bool,
+    /// Search the archived pieces only
+    #[arg(long)]
+    pub archived: bool,
+}
+
+impl ScopeArgs {
+    pub fn scope(&self) -> Scope {
+        match (self.live, self.archived) {
+            (true, _) => Scope::Live,
+            (_, true) => Scope::Archived,
+            _ => Scope::Both,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct FindArgs {
     /// Fuzzy pattern that selects pieces
     pub query: Option<String>,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
 }
 
 #[derive(Debug, Args)]

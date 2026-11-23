@@ -39,7 +39,7 @@ fn help_lists_the_fourteen_subcommands() {
     assert_eq!(listed, expected, "full help:\n{}", run.stdout);
 }
 
-const FIND_HELP_LINE: &str = "Find and list the versions of pieces";
+const FIND_HELP_LINE: &str = "Find and list the pieces and their versions";
 
 #[test]
 fn help_describes_find_as_finding_and_listing() {

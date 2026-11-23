@@ -67,6 +67,7 @@ fn stored_versions(world: &World) -> Vec<(String, u64, u64)> {
         .as_array()
         .expect("a list of versions")
         .iter()
+        .filter(|version| version["state"] != "live")
         .map(|version| {
             (
                 version["piece"].as_str().expect("a piece").to_string(),
