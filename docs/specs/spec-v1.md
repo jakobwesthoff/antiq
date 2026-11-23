@@ -1466,7 +1466,10 @@ scored in its stored or its composed form, whichever scores higher.
 spelling the live folder has on disk. `--archived` lists
 the versions only and selects no live piece. Both together are a usage
 error. Without either, `find` lists both. The live pieces are selected
-before the store is read. `find` walks no live piece.
+before the store is read. `find` walks no live piece. A search that runs
+while `unearth` finishes between the two reads can miss the piece it brought
+back, and one that runs while `archive` finishes there can show the piece
+live and archived.
 
 Each version row reads only the head of its listing. A live piece has no
 version: its VERSION reads `live`, in green on a terminal with colour, and
@@ -1563,7 +1566,10 @@ links are searched, directory entries are not. (ADR 0077)
 `--live` searches the live pieces only and reads no listing. `--archived`
 searches the store only and walks nothing. Both together are a usage error.
 Without either, `grep` searches both. The live pieces are selected before
-the store is read. A live piece whose folder shares its name with a store
+the store is read. A search that runs while `unearth` finishes between the
+two reads can miss the piece it brought back; one that runs while `archive`
+finishes there can show the piece live and archived, and `grep` may warn that
+it could not search all of the live piece. A live piece whose folder shares its name with a store
 folder is one piece, reported under the stored spelling (see "Spelling"); its
 files match a pattern as `<piece>/<path>` under either spelling.
 
@@ -1595,7 +1601,9 @@ as for `archive`. The warnings come after the notes on the settings of the
 collection and the lock file, as `warning:` lines and in the `warnings` of
 `--json`. A pattern or exclude entry that selection cannot use, an ignore or
 timeless line that cannot be used, and a walk that runs out of file
-descriptors fail the run; `--archived` selects and walks nothing.
+descriptors fail the run (the last is a problem of the process and not of a
+piece, so every later walk would fail too); `--archived` selects and walks
+nothing, so none of this stops it.
 
 Only the listing of a version is read, so a version that is damaged in another way, such
 as one with no checksum file or an archive whose size differs from its

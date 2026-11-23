@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the end of a terminal listing stays only when a stored version of a piece
   that is not live holds a hit. The help line of `grep` reads `Search the file paths of live pieces
   and archived versions`, and the README of `.antiq` has the same line.
+- `find` and `grep` fail when the patterns or the exclude list of the
+  collection cannot be used or its root cannot be listed, as `status` does.
+  `grep` also fails when an `ignore` or `timeless` line cannot be used or
+  the walk of a live piece runs out of file descriptors. `--archived` reads
+  the store only and does not fail that way. A directory that selection
+  cannot read is the warning `unreadable: <dir>`.
 - A listing of `find` without a row says `no live pieces and no versions in the
   collection` where it said `no versions in the collection`, which stays
   the note of `find --archived`.

@@ -34,7 +34,10 @@ lists every piece, live ones included.
 `grep` searches in a live piece the files an archive of it would hold: it
 walks the piece with the same rules as archiving, so ignored paths are not
 searched. A problem in the walk of one piece is a warning that names the
-piece and the reason. `grep` shows `live` as it shows a version.
+piece and the reason. A walk that runs out of file descriptors is no problem
+of the piece: it fails `grep`, since it is a problem of the process and every
+later walk would fail too, so the result would be cut off at an arbitrary
+point. `grep` shows `live` as it shows a version.
 
 The help line of `find` reads "Find and list the pieces and their
 versions". The help line of `grep` reads "Search the file paths of live
@@ -49,6 +52,11 @@ live piece. It needs `--archived` to see versions only.
 `grep` walks every live piece whose name the pattern does not match, on top
 of reading the listings.
 
-A search that runs while `archive` or `unearth` finishes between the
-reading of the live pieces and the reading of the store can miss the piece
-that run moved.
+A search that runs while `unearth` finishes between the reading of the live
+pieces and the reading of the store can miss the piece it brought back. One
+that runs while `archive` finishes in that gap can show the piece live and
+archived, and `grep` may warn that it could not search all of the live
+piece.
+
+`--archived` is the way to a search that does not depend on the rules of the
+collection.
