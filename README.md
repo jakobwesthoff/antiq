@@ -247,10 +247,10 @@ antiq grep 'main\.rs'
 
 For the archives, `grep` reads the **listings**, the checksum lists antiq
 keeps beside each archive, so nothing is unpacked. A live folder is walked
-with the rules an archive of it would use, and the directories they ignore are
-not entered, so what `ignore` and `.antiqignore` leave out is not searched and
-a `target/` among them costs the walk one entry. `grep --archived` skips the live folders and `grep
---live` the archives.
+with the rules an archive of it would use, and the directories they ignore
+are not entered, so what `ignore` and `.antiqignore` leave out is not
+searched and a `target/` among them costs the walk one entry. `grep
+--archived` skips the live folders and `grep --live` the archives.
 
 ## Bringing a version back
 
