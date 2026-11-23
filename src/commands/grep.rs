@@ -2,19 +2,25 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `grep` operation: searches the paths of every archived file in the
+//! The `grep` operation: searches the paths of the files of the live pieces,
+//! by the walk an archive would make, and of every archived file, in the
 //! listings of the store.
 
 use crate::collection::Collection;
+use crate::commands::live::{LiveError, LivePieces, Scope};
+use crate::commands::survey::Refusal;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing;
 use crate::relpath::{Name, RelPath};
 use crate::report::{self, Warning};
+use crate::rules::{PieceRules, RulesError};
 use crate::shown::Shown;
+use crate::tree::{EntryKind, PieceTree, Problem};
 use crate::versions::VersionsError;
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
+use crate::walk::{Hooks, RealFs, WalkError, walk_piece_with};
 use regex::bytes::Regex;
 use std::collections::BTreeMap;
 use std::os::unix::ffi::OsStrExt;
@@ -23,7 +29,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 /// Why grep failed. A listing that cannot be searched is not an error: its
-/// version is skipped and reported in [`GrepReport::skipped`].
+/// version is skipped and reported in [`GrepReport::skipped`]. Neither is a
+/// problem in the walk of a live piece: it is a warning of the report.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum GrepError {
     #[error("the pattern is not a valid regular expression: {0}")]
@@ -34,6 +41,25 @@ pub enum GrepError {
         #[diagnostic_source]
         VersionsError,
     ),
+    #[error("cannot select the live pieces: {0}")]
+    Live(
+        #[from]
+        #[diagnostic_source]
+        LiveError,
+    ),
+    #[error("cannot use the ignore and timeless rules: {0}")]
+    Rules(
+        #[from]
+        #[diagnostic_source]
+        RulesError,
+    ),
+    /// The walk of a live piece ran out of file descriptors.
+    #[error("cannot walk a live piece: {0}")]
+    Walk(
+        #[from]
+        #[diagnostic_source]
+        WalkError,
+    ),
 }
 
 impl HasKind for GrepError {
@@ -41,7 +67,9 @@ impl HasKind for GrepError {
         match self {
             // The pattern is part of the command line.
             GrepError::InvalidPattern(_) => ErrorKind::Usage,
-            GrepError::Store(_) => ErrorKind::Other,
+            GrepError::Store(_) | GrepError::Live(_) | GrepError::Rules(_) | GrepError::Walk(_) => {
+                ErrorKind::Other
+            }
         }
     }
 }
@@ -51,7 +79,9 @@ impl HasKind for GrepError {
 pub struct GrepReport {
     pub pieces: Vec<PieceHits>,
     pub skipped: Vec<SkippedVersion>,
-    /// The notes on the settings of the collection and on its lock file.
+    /// The notes on the settings of the collection and on its lock file, the
+    /// directories selection could not read and what keeps a live piece from
+    /// being searched whole.
     pub warnings: Vec<Warning>,
     /// The run that holds the lock, while there is one.
     pub note: Option<String>,
@@ -64,6 +94,8 @@ pub struct PieceHits {
     /// The pattern matches the piece path itself (see [`is_name_match`]).
     /// The piece then has no `files`: every file in it would match too.
     pub name_match: bool,
+    /// The piece is live. Its files are those of an archive of it.
+    pub live: bool,
     /// The versions that were searched, newest first.
     pub versions: Vec<SearchedVersion>,
     /// Every version of the piece that has an archive, newest first,
@@ -87,7 +119,9 @@ pub struct SearchedVersion {
 pub struct FileHit {
     /// The path as the filesystem holds it.
     pub path: Vec<u8>,
-    /// Newest first.
+    /// The live piece holds the path.
+    pub live: bool,
+    /// The stored versions that hold the path, newest first.
     pub versions: Vec<Stamp>,
 }
 
@@ -105,13 +139,43 @@ pub fn compile(pattern: &str) -> Result<Regex, GrepError> {
     Regex::new(pattern).map_err(GrepError::InvalidPattern)
 }
 
-/// Searches the store of `collection`, and adds the notes on its settings
-/// and its lock. Nothing is locked, so a running `archive` is only noted.
-pub fn grep_collection(collection: &Collection, pattern: &Regex) -> Result<GrepReport, GrepError> {
-    let mut found = grep(&collection.pieces_dir(), pattern)?;
-    found.warnings = report::setting_notes(collection);
+/// Searches the pieces of `collection` that `scope` covers, and adds the
+/// notes on its settings and its lock. Nothing is locked, so a running
+/// `archive` is only noted.
+///
+/// The live pieces are selected before the store is read.
+pub fn grep_collection(
+    collection: &Collection,
+    pattern: &Regex,
+    scope: Scope,
+) -> Result<GrepReport, GrepError> {
+    let live = scope
+        .includes_live()
+        .then(|| LivePieces::select(collection))
+        .transpose()?;
+    let config = &collection.config().collection;
+    let rules = live
+        .as_ref()
+        .map(|_| PieceRules::new(&config.ignore, &config.timeless))
+        .transpose()?;
+    let side = live
+        .as_ref()
+        .zip(rules.as_ref())
+        .map(|(pieces, rules)| LiveSide {
+            pieces,
+            rules,
+            hooks: &RealFs,
+        });
+    let store = scope.includes_store().then(|| collection.pieces_dir());
+
+    let mut found = search(store.as_deref(), side.as_ref(), pattern, workers())?;
+
+    let mut warnings = report::setting_notes(collection);
     let (note, unreadable_lock) = report::lock_status(collection);
-    found.warnings.extend(unreadable_lock);
+    warnings.extend(unreadable_lock);
+    warnings.extend(live.iter().flat_map(LivePieces::unreadable_warnings));
+    warnings.append(&mut found.warnings);
+    found.warnings = warnings;
     found.note = note;
     Ok(found)
 }
@@ -121,12 +185,15 @@ pub fn grep_collection(collection: &Collection, pattern: &Regex) -> Result<GrepR
 /// An incomplete version, one without an archive, is not searched and not
 /// reported: it is the leftover of an interrupted run.
 pub fn grep(pieces_dir: &Path, pattern: &Regex) -> Result<GrepReport, GrepError> {
-    // All cores but two, so that the machine stays usable during a search.
-    let workers = std::thread::available_parallelism()
+    search(Some(pieces_dir), None, pattern, workers())
+}
+
+/// All cores but two, so that the machine stays usable during a search.
+fn workers() -> usize {
+    std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
         .saturating_sub(2)
-        .max(1);
-    search(pieces_dir, pattern, workers)
+        .max(1)
 }
 
 /// Whether the pattern matches the piece path itself: its leftmost match in
@@ -144,12 +211,35 @@ fn is_name_match(pattern: &Regex, piece: &RelPath) -> bool {
         .is_some_and(|found| found.end() < text.len())
 }
 
+/// The live pieces of a search, with what walking them takes.
+struct LiveSide<'a> {
+    pieces: &'a LivePieces,
+    rules: &'a PieceRules,
+    hooks: &'a dyn Hooks,
+}
+
 /// One version to search.
 struct Job<'a> {
     piece: &'a RelPath,
     version: &'a StoreVersion,
     /// Only the head is read: the piece name matches.
     head_only: bool,
+}
+
+/// One unit of the search: a listing to read or a live piece to walk.
+enum Work<'a> {
+    Version(Job<'a>),
+    Live {
+        piece: &'a RelPath,
+        /// The piece name matches, so the piece is not walked.
+        name_match: bool,
+    },
+}
+
+/// What one unit of work came to.
+enum Done {
+    Version(Outcome),
+    Live(Result<LiveOutcome, WalkError>),
 }
 
 /// What searching one version came to.
@@ -162,12 +252,36 @@ enum Outcome {
     Skipped(String),
 }
 
-fn search(pieces_dir: &Path, pattern: &Regex, workers: usize) -> Result<GrepReport, GrepError> {
-    let scan = store::scan(pieces_dir).map_err(GrepError::Store)?;
+/// What walking one live piece came to.
+#[derive(Default)]
+struct LiveOutcome {
+    /// The matching paths, each once, in path order.
+    paths: Vec<Vec<u8>>,
+    warnings: Vec<Warning>,
+}
+
+/// What is known of one piece while the hits are put together.
+#[derive(Default)]
+struct Gathered {
+    live: bool,
+    searched: Vec<SearchedVersion>,
+    all_stamps: Vec<Stamp>,
+    files: BTreeMap<Vec<u8>, FileHit>,
+}
+
+fn search(
+    store_dir: Option<&Path>,
+    live: Option<&LiveSide>,
+    pattern: &Regex,
+    workers: usize,
+) -> Result<GrepReport, GrepError> {
+    let scan = store_dir
+        .map(|dir| store::scan(dir).map_err(GrepError::Store))
+        .transpose()?;
 
     // Newest first, as every list of versions is reported.
     let mut complete: Vec<(&RelPath, Vec<&StoreVersion>)> = Vec::new();
-    for piece in &scan.pieces {
+    for piece in scan.iter().flat_map(|scan| &scan.pieces) {
         let mut versions: Vec<&StoreVersion> = piece
             .versions
             .iter()
@@ -176,42 +290,61 @@ fn search(pieces_dir: &Path, pattern: &Regex, workers: usize) -> Result<GrepRepo
         versions.sort_by_key(|version| std::cmp::Reverse(version.stamp));
         complete.push((&piece.path, versions));
     }
-    let name_matches: Vec<bool> = complete
-        .iter()
-        .map(|(piece, _)| is_name_match(pattern, piece))
-        .collect();
 
-    let mut jobs = Vec::new();
-    for ((piece, versions), head_only) in complete.iter().zip(&name_matches) {
+    let mut work = Vec::new();
+    for (piece, versions) in &complete {
+        let head_only = is_name_match(pattern, piece);
         for version in versions {
-            jobs.push(Job {
+            work.push(Work::Version(Job {
                 piece,
                 version,
-                head_only: *head_only,
-            });
+                head_only,
+            }));
         }
     }
-    let outcomes = run_jobs(pieces_dir, pattern, &jobs, workers)?;
+    let live_tops: Vec<&RelPath> = live.iter().flat_map(|side| side.pieces.pieces()).collect();
+    for piece in &live_tops {
+        work.push(Work::Live {
+            piece,
+            name_match: is_name_match(pattern, piece),
+        });
+    }
 
-    // The outcomes come in the order of the jobs, so each piece reads its
-    // own slice of them.
-    let mut report = GrepReport::default();
+    // The outcomes come in the order of the work, and the versions come
+    // before the live pieces, so each piece reads its own slice of them.
+    let mut outcomes = Vec::new();
+    let mut walks = Vec::new();
+    for done in run_work(store_dir, live, pattern, &work, workers)? {
+        match done {
+            Done::Version(outcome) => outcomes.push(outcome),
+            Done::Live(walk) => walks.push(walk),
+        }
+    }
     let mut outcomes = outcomes.into_iter();
-    for ((piece, versions), name_match) in complete.iter().zip(name_matches) {
-        let mut searched = Vec::new();
-        let mut files: BTreeMap<Vec<u8>, Vec<Stamp>> = BTreeMap::new();
+
+    let mut report = GrepReport::default();
+    let mut gathered: BTreeMap<&RelPath, Gathered> = BTreeMap::new();
+    for (piece, versions) in &complete {
+        let entry = gathered.entry(piece).or_default();
+        entry.all_stamps = versions.iter().map(|version| version.stamp).collect();
         for version in versions {
-            match outcomes.next().expect("every job has an outcome") {
+            let outcome = outcomes.next().expect("every version has an outcome");
+            match outcome {
                 Outcome::Searched {
                     files: count,
                     paths,
                 } => {
-                    searched.push(SearchedVersion {
+                    entry.searched.push(SearchedVersion {
                         stamp: version.stamp,
                         files: count,
                     });
                     for path in paths {
-                        files.entry(path).or_default().push(version.stamp);
+                        let hit = entry.files.entry(path.clone()).or_insert_with(|| FileHit {
+                            path,
+                            live: false,
+                            versions: Vec::new(),
+                        });
+                        hit.versions.push(version.stamp);
                     }
                 }
                 Outcome::Skipped(reason) => report.skipped.push(SkippedVersion {
@@ -221,47 +354,91 @@ fn search(pieces_dir: &Path, pattern: &Regex, workers: usize) -> Result<GrepRepo
                 }),
             }
         }
+    }
+    for (piece, walk) in live_tops.iter().zip(walks) {
+        let outcome = walk?;
+        let entry = gathered.entry(piece).or_default();
+        entry.live = true;
+        for path in outcome.paths {
+            let hit = entry.files.entry(path.clone()).or_insert_with(|| FileHit {
+                path,
+                live: false,
+                versions: Vec::new(),
+            });
+            hit.live = true;
+        }
+        report.warnings.extend(outcome.warnings);
+    }
+
+    for (piece, entry) in gathered {
+        let name_match = is_name_match(pattern, piece);
         let found = if name_match {
-            !searched.is_empty()
+            entry.live || !entry.searched.is_empty()
         } else {
-            !files.is_empty()
+            !entry.files.is_empty()
         };
         if found {
             report.pieces.push(PieceHits {
-                piece: (*piece).clone(),
+                piece: piece.clone(),
                 name_match,
-                versions: searched,
-                all_stamps: versions.iter().map(|version| version.stamp).collect(),
-                files: files
-                    .into_iter()
-                    .map(|(path, versions)| FileHit { path, versions })
-                    .collect(),
+                live: entry.live,
+                versions: entry.searched,
+                all_stamps: entry.all_stamps,
+                files: entry.files.into_values().collect(),
             });
         }
     }
     Ok(report)
 }
 
-/// Runs the jobs on `workers` threads (at most one per job). The outcomes
-/// come in the order of `jobs`.
-fn run_jobs(
-    pieces_dir: &Path,
+/// Runs the work on `workers` threads (at most one per unit). The
+/// outcomes come in the order of `work`.
+fn run_work(
+    store_dir: Option<&Path>,
+    live: Option<&LiveSide>,
     pattern: &Regex,
-    jobs: &[Job],
+    work: &[Work],
     workers: usize,
-) -> Result<Vec<Outcome>, GrepError> {
+) -> Result<Vec<Done>, GrepError> {
+    let store = match store_dir {
+        Some(dir) if work.iter().any(|unit| matches!(unit, Work::Version(_))) => {
+            Some(TreeRoot::open(dir).map_err(|source| {
+                GrepError::Store(VersionsError::Io {
+                    action: "open",
+                    path: Shown(&dir).to_string(),
+                    source,
+                })
+            })?)
+        }
+        _ => None,
+    };
+    Ok(parallel_map(work, workers, |unit| match unit {
+        Work::Version(job) => Done::Version(search_version(
+            store.as_ref().expect("a version is searched in a store"),
+            pattern,
+            job,
+        )),
+        Work::Live { piece, name_match } => Done::Live(search_live(
+            live.expect("a live piece is searched with its side"),
+            pattern,
+            piece,
+            *name_match,
+        )),
+    }))
+}
+
+/// Applies `work` to every job on `workers` threads (at most one per job)
+/// and returns the results in the order of `jobs`.
+fn parallel_map<J: Sync, R: Send>(
+    jobs: &[J],
+    workers: usize,
+    work: impl Fn(&J) -> R + Sync,
+) -> Vec<R> {
     if jobs.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let store = TreeRoot::open(pieces_dir).map_err(|source| {
-        GrepError::Store(VersionsError::Io {
-            action: "open",
-            path: Shown(&pieces_dir).to_string(),
-            source,
-        })
-    })?;
     let next = AtomicUsize::new(0);
-    let outcomes: Mutex<Vec<Option<Outcome>>> = Mutex::new(jobs.iter().map(|_| None).collect());
+    let results: Mutex<Vec<Option<R>>> = Mutex::new(jobs.iter().map(|_| None).collect());
     std::thread::scope(|scope| {
         for _ in 0..workers.clamp(1, jobs.len()) {
             scope.spawn(|| {
@@ -270,19 +447,117 @@ fn run_jobs(
                     let Some(job) = jobs.get(index) else {
                         break;
                     };
-                    let outcome = search_version(&store, pattern, job);
-                    let mut outcomes = outcomes.lock().unwrap_or_else(PoisonError::into_inner);
-                    outcomes[index] = Some(outcome);
+                    let result = work(job);
+                    let mut results = results.lock().unwrap_or_else(PoisonError::into_inner);
+                    results[index] = Some(result);
                 }
             });
         }
     });
-    Ok(outcomes
+    results
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner)
         .into_iter()
-        .map(|outcome| outcome.expect("every job was run"))
-        .collect())
+        .map(|result| result.expect("every job was run"))
+        .collect()
+}
+
+/// Walks a live piece the way an archive of it would, and matches the files
+/// the archive would hold. A piece whose name matches is not walked: it has
+/// no files in the report.
+///
+/// What the archive would not hold stays out, although the walk records it:
+/// special files (the archive skips them), entries on the exclude list and
+/// everything inside the store of a nested collection.
+fn search_live(
+    live: &LiveSide,
+    pattern: &Regex,
+    piece: &RelPath,
+    name_match: bool,
+) -> Result<LiveOutcome, WalkError> {
+    if name_match {
+        return Ok(LiveOutcome::default());
+    }
+    let tree = walk_piece_with(
+        live.pieces.root(),
+        piece,
+        live.pieces.rules(),
+        live.rules,
+        live.hooks,
+    )?;
+    let mut excluded = Vec::new();
+    let mut nested = Vec::new();
+    for problem in tree.problems() {
+        match problem {
+            Problem::Excluded { path } => excluded.push(path),
+            Problem::NestedCollection { root } => nested.push(root),
+            _ => {}
+        }
+    }
+    let is_kept_out = |path: &RelPath| {
+        excluded.contains(&path) || nested.iter().any(|root| inside_inner_store(path, root))
+    };
+
+    // A prefix of the text each path is matched in: the piece and a slash.
+    let mut haystack = piece.as_bytes().to_vec();
+    haystack.push(b'/');
+    let prefix = haystack.len();
+    let mut paths = Vec::new();
+    for entry in tree.packed_entries() {
+        if !matches!(entry.kind, EntryKind::File | EntryKind::Symlink) || is_kept_out(&entry.path) {
+            continue;
+        }
+        haystack.truncate(prefix);
+        haystack.extend_from_slice(entry.path.as_bytes());
+        if pattern.is_match(&haystack) {
+            paths.push(entry.path.as_bytes().to_vec());
+        }
+    }
+    Ok(LiveOutcome {
+        paths,
+        warnings: walk_warnings(&tree),
+    })
+}
+
+/// Whether `path` is the `.antiq` directory of the nested collection at
+/// `holder`, or lies below it. The name is compared without regard to case,
+/// as the walk does.
+fn inside_inner_store(path: &RelPath, holder: &RelPath) -> bool {
+    let mut parts = path.components();
+    for part in holder.components() {
+        if parts.next() != Some(part) {
+            return false;
+        }
+    }
+    parts
+        .next()
+        .is_some_and(|part| part.eq_ignore_ascii_case(b".antiq"))
+}
+
+/// One warning for each problem of the walk that keeps something out of the
+/// search. A lock, or a marker that is no file, only matters to removing the
+/// piece. A top that is a mount point is walked completely.
+fn walk_warnings(tree: &PieceTree) -> Vec<Warning> {
+    tree.problems()
+        .iter()
+        .filter(|problem| match problem {
+            Problem::Unreadable { .. }
+            | Problem::Excluded { .. }
+            | Problem::NestedCollection { .. }
+            | Problem::RuleFile { .. } => true,
+            Problem::MountPoint { other } => !other.is_root(),
+            Problem::Locked { .. }
+            | Problem::LockedParent { .. }
+            | Problem::MarkerNotAFile { .. } => false,
+        })
+        .map(|problem| {
+            let reason = Refusal::of(tree.top(), problem);
+            Warning::new(format!(
+                "cannot search all of the live piece {}: {reason}",
+                Shown(tree.top())
+            ))
+        })
+        .collect()
 }
 
 fn search_version(store: &TreeRoot, pattern: &Regex, job: &Job) -> Outcome {
@@ -377,7 +652,7 @@ mod tests {
 
     fn found(store: &Store, pattern: &str) -> GrepReport {
         let pattern = compile(pattern).expect("the pattern compiles");
-        search(&store.pieces_dir(), &pattern, 2).expect("the search runs")
+        search(Some(&store.pieces_dir()), None, &pattern, 2).expect("the search runs")
     }
 
     fn paths(hits: &PieceHits) -> Vec<String> {
@@ -572,8 +847,13 @@ mod tests {
     #[test]
     fn a_missing_store_is_an_empty_store() {
         let pattern = compile("x").expect("compiles");
-        let report = search(Path::new("/nonexistent-antiq-pieces"), &pattern, 1)
-            .expect("a missing store is empty");
+        let report = search(
+            Some(Path::new("/nonexistent-antiq-pieces")),
+            None,
+            &pattern,
+            1,
+        )
+        .expect("a missing store is empty");
         assert_eq!(report, GrepReport::default());
     }
 
@@ -583,7 +863,7 @@ mod tests {
         let not_a_directory = tree.file("pieces", "a file where the store should be");
         let pattern = compile("x").expect("compiles");
 
-        let error = search(&not_a_directory, &pattern, 1).expect_err("the scan fails");
+        let error = search(Some(&not_a_directory), None, &pattern, 1).expect_err("the scan fails");
 
         assert!(matches!(error, GrepError::Store(_)), "{error}");
         assert_eq!(error.kind(), ErrorKind::Other);
@@ -770,8 +1050,8 @@ mod tests {
         }
         let pattern = compile("needle").expect("compiles");
 
-        let one = search(&store.pieces_dir(), &pattern, 1).expect("one worker");
-        let four = search(&store.pieces_dir(), &pattern, 4).expect("four workers");
+        let one = search(Some(&store.pieces_dir()), None, &pattern, 1).expect("one worker");
+        let four = search(Some(&store.pieces_dir()), None, &pattern, 4).expect("four workers");
 
         assert_eq!(one, four);
         assert_eq!(one.pieces[0].files[0].versions.len(), 12);
@@ -779,5 +1059,629 @@ mod tests {
             one.pieces[0].files[0].versions[0],
             stamp("2026-10-12T100000")
         );
+    }
+
+    // =========================================================
+    // Live pieces
+    // =========================================================
+
+    use crate::testing::tree::{COLLECTION_ID, TempCollection};
+    use crate::walk::Call;
+    use rustix::io::Errno;
+    use std::io;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Condvar, Mutex as StdMutex};
+    use std::time::Duration;
+
+    fn collection(temp: &TempCollection, config_lines: &str) -> Collection {
+        fs::write(
+            temp.root().join(".antiq/config.toml"),
+            format!("[collection]\nid = \"{COLLECTION_ID}\"\n{config_lines}\n"),
+        )
+        .expect("a config can be written");
+        Collection::find(temp.root()).expect("a collection")
+    }
+
+    /// A collection whose live pieces hold the given files.
+    fn live_world(files: &[&str]) -> TempCollection {
+        let mut temp = TempCollection::minimal();
+        for file in files {
+            temp.tree().file(file, "x");
+        }
+        temp
+    }
+
+    fn searched_live(temp: &TempCollection, config: &str, pattern: &str) -> GrepReport {
+        grep_collection(
+            &collection(temp, config),
+            &compile(pattern).expect("the pattern compiles"),
+            Scope::Live,
+        )
+        .expect("the search runs")
+    }
+
+    fn warning_texts(report: &GrepReport) -> Vec<&str> {
+        report
+            .warnings
+            .iter()
+            .map(|warning| warning.message.as_str())
+            .collect()
+    }
+
+    /// Replaces the mount roots and fails calls of a walk, at paths relative
+    /// to the top of the piece. It cannot tell which piece it is asked for.
+    #[derive(Default)]
+    struct Staged {
+        mount_roots: Vec<RelPath>,
+        faults: Vec<(RelPath, Call, Errno)>,
+    }
+
+    impl Hooks for Staged {
+        fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+            self.faults
+                .iter()
+                .find(|(at, kind, _)| at == path && *kind == call)
+                .map(|(_, _, errno)| io::Error::from_raw_os_error(errno.raw_os_error()))
+        }
+
+        fn mount_root(&self, path: &RelPath, reported: bool) -> bool {
+            reported || self.mount_roots.contains(path)
+        }
+    }
+
+    /// Searches the live pieces with `hooks` on `workers` threads.
+    fn live_with(
+        temp: &TempCollection,
+        config: &str,
+        hooks: &dyn Hooks,
+        pattern: &str,
+        workers: usize,
+    ) -> Result<GrepReport, GrepError> {
+        let collection = collection(temp, config);
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let settings = &collection.config().collection;
+        let rules = PieceRules::new(&settings.ignore, &settings.timeless).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks,
+        };
+        let pattern = compile(pattern).expect("the pattern compiles");
+        search(None, Some(&side), &pattern, workers)
+    }
+
+    #[test]
+    fn a_live_file_is_found() {
+        let temp = live_world(&["notes/a.txt", "notes/b.md"]);
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(pieces(&report), ["notes"]);
+        let hits = &report.pieces[0];
+        assert!(hits.live && !hits.name_match);
+        assert!(hits.versions.is_empty() && hits.all_stamps.is_empty());
+        assert_eq!(paths(hits), ["a.txt"]);
+        assert!(hits.files[0].live && hits.files[0].versions.is_empty());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn the_search_of_a_store_directory_finds_the_paths_of_its_versions() {
+        let store = two_pieces();
+        let pattern = compile(r"main\.rs$").expect("the pattern compiles");
+
+        let report = grep(&store.pieces_dir(), &pattern).expect("the search runs");
+
+        assert_eq!(pieces(&report), ["projects/scanner", "tools/scan-old"]);
+        assert!(report.pieces.iter().all(|hits| !hits.live));
+    }
+
+    #[test]
+    fn a_pattern_is_matched_in_the_live_piece_and_the_path_together() {
+        let temp = live_world(&["projects/scanner/src/main.rs"]);
+
+        let across = searched_live(&temp, "patterns = [\"*/*\"]", "scanner/src");
+        assert_eq!(paths(&across.pieces[0]), ["src/main.rs"]);
+
+        let anchored = searched_live(&temp, "patterns = [\"*/*\"]", "^src");
+        assert!(anchored.pieces.is_empty());
+    }
+
+    #[test]
+    fn a_path_the_config_ignores_is_not_searched() {
+        let temp = live_world(&["notes/debug.log", "notes/kept.txt"]);
+
+        let report = searched_live(&temp, "ignore = [\"*.log\"]", "notes/");
+
+        assert_eq!(paths(&report.pieces[0]), ["kept.txt"]);
+    }
+
+    #[test]
+    fn a_path_an_antiqignore_file_ignores_is_not_searched() {
+        let mut temp = live_world(&["notes/secret.txt", "notes/kept.txt"]);
+        temp.tree().file("notes/.antiqignore", "secret.txt\n");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["kept.txt"]);
+    }
+
+    #[test]
+    fn the_restored_marker_is_not_searched_but_the_rule_files_are() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().file("notes/.antiq-restored", "");
+        temp.tree().file("notes/.antiqignore", "nothing\n");
+
+        let report = searched_live(&temp, "", r"\.antiq");
+
+        assert_eq!(paths(&report.pieces[0]), [".antiqignore"]);
+    }
+
+    #[test]
+    fn a_directory_is_no_hit_but_a_symlink_is() {
+        let mut temp = live_world(&["notes/sub/inside", "notes/x/sub"]);
+        temp.tree().symlink("notes/soft-sub", "x/sub");
+
+        let report = searched_live(&temp, "", "sub$");
+
+        assert_eq!(paths(&report.pieces[0]), ["soft-sub", "x/sub"]);
+    }
+
+    #[test]
+    fn a_fifo_and_a_socket_are_not_listed_as_the_archive_does_not_hold_them() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().fifo("notes/pipe");
+        temp.tree().socket("notes/sock");
+
+        let report = searched_live(&temp, "", "pipe|sock");
+
+        assert!(report.pieces.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn an_entry_of_the_exclude_list_is_not_listed_and_the_piece_is_warned_about() {
+        let temp = live_world(&["notes/secret.txt", "notes/kept.txt"]);
+
+        let report = searched_live(&temp, "exclude = [\"notes/secret.txt\"]", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["kept.txt"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: exclude entry: notes/secret.txt"]
+        );
+    }
+
+    #[test]
+    fn the_store_of_a_nested_collection_is_not_listed_and_the_piece_is_warned_about() {
+        let temp = live_world(&["notes/sub/.antiq/config.toml", "notes/sub/file"]);
+
+        let report = searched_live(&temp, "", "config|file");
+
+        assert_eq!(paths(&report.pieces[0]), ["sub/file"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: nested antiq collection: notes/sub"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_differs_only_in_case_is_the_nested_store_too() {
+        let temp = live_world(&["notes/sub/.ANTIQ/config.toml", "notes/sub/file"]);
+
+        let report = searched_live(&temp, "", "config|file");
+
+        assert_eq!(paths(&report.pieces[0]), ["sub/file"]);
+    }
+
+    #[test]
+    fn a_piece_that_is_the_nested_collection_itself_is_warned_about() {
+        let temp = live_world(&["notes/.antiq/config.toml", "notes/file"]);
+
+        let report = searched_live(&temp, "", "config|file");
+
+        assert_eq!(paths(&report.pieces[0]), ["file"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: nested antiq collection: notes"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_warned_about_and_the_rest_is_searched() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().unreadable_dir("notes/locked");
+        assert_not_root(&temp.root().join("notes/locked"));
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: unreadable entry: notes/locked"]
+        );
+    }
+
+    fn assert_not_root(directory: &Path) {
+        assert!(
+            fs::read_dir(directory).is_err(),
+            "the test needs a user that mode 000 locks out"
+        );
+    }
+
+    #[test]
+    fn a_rule_file_that_cannot_be_used_is_warned_about() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().file("notes/.antiqignore", "broken\\\n");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: rule file: notes/.antiqignore:1"]
+        );
+    }
+
+    #[test]
+    fn a_marker_that_is_no_file_is_not_warned_about() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().dir("notes/.antiq-pin");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_fifo_named_like_a_rule_file_does_not_stop_the_search() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().fifo("notes/.antiqignore");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+    }
+
+    #[test]
+    fn a_pinned_piece_is_searched_without_a_word_about_it() {
+        let mut temp = live_world(&["notes/a.txt", "pinned/b.txt"]);
+        temp.tree().file("pinned/.antiq-pin", "");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(pieces(&report), ["notes", "pinned"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_mount_point_below_the_top_is_not_entered_and_is_warned_about() {
+        let temp = live_world(&["notes/a.txt", "notes/sub/inner.txt"]);
+        let hooks = Staged {
+            mount_roots: vec![piece("sub")],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "", &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: mount point: notes/sub"]
+        );
+    }
+
+    #[test]
+    fn a_top_that_is_a_mount_point_is_searched_completely_and_without_a_warning() {
+        let temp = live_world(&["notes/a.txt", "notes/sub/inner.txt"]);
+        let hooks = Staged {
+            mount_roots: vec![RelPath::root()],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "", &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt", "sub/inner.txt"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_piece_that_vanishes_during_the_walk_is_warned_about() {
+        let temp = live_world(&["notes/a.txt"]);
+        let hooks = Staged {
+            faults: vec![(RelPath::root(), Call::Stat, Errno::NOENT)],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "", &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert!(report.pieces.is_empty());
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot search all of the live piece notes: unreadable entry: notes"]
+        );
+    }
+
+    #[test]
+    fn running_out_of_file_descriptors_fails_the_search() {
+        let temp = live_world(&["notes/a.txt"]);
+        let hooks = Staged {
+            faults: vec![(RelPath::root(), Call::Open, Errno::MFILE)],
+            ..Staged::default()
+        };
+
+        let error = live_with(&temp, "", &hooks, r"\.txt$", 1).expect_err("the walk fails");
+
+        assert!(matches!(error, GrepError::Walk(_)), "{error:?}");
+        assert_eq!(error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn a_live_piece_whose_name_matches_is_not_walked() {
+        let temp = live_world(&["notes/a.txt"]);
+        let hooks = Staged {
+            faults: vec![(RelPath::root(), Call::Stat, Errno::NOENT)],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "", &hooks, "notes", 1).expect("the search runs");
+
+        assert_eq!(pieces(&report), ["notes"]);
+        let hits = &report.pieces[0];
+        assert!(hits.name_match && hits.live && hits.files.is_empty());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_live_search_reads_no_listing_and_a_store_search_walks_nothing() {
+        let temp = live_world(&["notes/a.txt"]);
+        let archived = grep_collection(
+            &collection(&temp, ""),
+            &compile(r"\.txt$").expect("compiles"),
+            Scope::Archived,
+        )
+        .expect("the search runs");
+        assert!(archived.pieces.is_empty() && archived.warnings.is_empty());
+
+        let mut store = Store::new();
+        let version = store.add_version(&source(&["notes/a.txt"]), "notes", NEW);
+        version.cut_listing();
+        let collection = collection(&temp, "");
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks: &Staged::default(),
+        };
+        let pattern = compile(r"\.txt$").expect("compiles");
+        let live_only = search(None, Some(&side), &pattern, 1).expect("the search runs");
+        assert!(live_only.skipped.is_empty());
+        assert_eq!(paths(&live_only.pieces[0]), ["a.txt"]);
+    }
+
+    #[test]
+    fn a_piece_that_is_live_and_stored_is_one_hit_with_both() {
+        let mut store = Store::new();
+        store.add_version(&source(&["notes/a.txt"]), "notes", OLD);
+        store.add_version(&source(&["notes/a.txt", "notes/gone.txt"]), "notes", NEW);
+        store.add_version(&source(&["tools/old/run.txt"]), "tools/old", NEW);
+        let temp = live_world(&["notes/a.txt", "notes/b.txt", "zeta/z.txt"]);
+        let collection = collection(&temp, "");
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks: &RealFs,
+        };
+        let pattern = compile(r"\.txt$").expect("compiles");
+
+        let report =
+            search(Some(&store.pieces_dir()), Some(&side), &pattern, 2).expect("the search runs");
+
+        assert_eq!(pieces(&report), ["notes", "tools/old", "zeta"]);
+        let notes = &report.pieces[0];
+        assert!(notes.live);
+        assert_eq!(
+            notes.versions.iter().map(|v| v.stamp).collect::<Vec<_>>(),
+            [stamp(NEW), stamp(OLD)]
+        );
+        assert_eq!(paths(notes), ["a.txt", "b.txt", "gone.txt"]);
+        assert_eq!(
+            notes
+                .files
+                .iter()
+                .map(|file| (file.live, file.versions.len()))
+                .collect::<Vec<_>>(),
+            [(true, 2), (true, 0), (false, 1)]
+        );
+        assert!(!report.pieces[1].live);
+        assert!(report.pieces[2].live && report.pieces[2].versions.is_empty());
+    }
+
+    #[test]
+    fn a_name_match_of_a_live_and_stored_piece_keeps_the_file_count_of_its_newest_version() {
+        let mut store = Store::new();
+        store.add_version(&source(&["notes/a", "notes/b"]), "notes", NEW);
+        let temp = live_world(&["notes/a"]);
+        let collection = collection(&temp, "");
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks: &RealFs,
+        };
+        let pattern = compile("notes").expect("compiles");
+
+        let report =
+            search(Some(&store.pieces_dir()), Some(&side), &pattern, 1).expect("the search runs");
+
+        let hits = &report.pieces[0];
+        assert!(hits.name_match && hits.live);
+        assert_eq!(hits.versions[0].files, Some(2));
+    }
+
+    #[test]
+    fn a_directory_selection_cannot_read_is_a_warning_before_the_walk_problems() {
+        let mut temp = live_world(&["notes/sub/a.txt"]);
+        temp.tree().unreadable_dir("projects");
+        assert_not_root(&temp.root().join("projects"));
+
+        let report = grep_collection(
+            &collection(&temp, "patterns = [\"*/*\"]"),
+            &compile(r"\.txt$").expect("compiles"),
+            Scope::Both,
+        )
+        .expect("the search runs");
+
+        assert_eq!(warning_texts(&report), ["unreadable: projects"]);
+    }
+
+    #[test]
+    fn patterns_that_cannot_be_used_fail_a_search_that_selects() {
+        let temp = live_world(&["notes/a.txt"]);
+        let collection = collection(&temp, "patterns = [\"[\"]");
+        let pattern = compile("a").expect("compiles");
+
+        let error = grep_collection(&collection, &pattern, Scope::Both)
+            .expect_err("the pattern of the config is invalid");
+        assert!(matches!(error, GrepError::Live(_)), "{error:?}");
+
+        grep_collection(&collection, &pattern, Scope::Archived)
+            .expect("a search of the store selects nothing");
+    }
+
+    #[test]
+    fn an_ignore_line_that_cannot_be_used_fails_a_search_of_live_pieces() {
+        let temp = live_world(&["notes/a.txt"]);
+        let collection = collection(&temp, "ignore = [\"broken\\\\\"]");
+        let pattern = compile("a").expect("compiles");
+
+        let error = grep_collection(&collection, &pattern, Scope::Live)
+            .expect_err("the ignore line is invalid");
+        assert!(matches!(error, GrepError::Rules(_)), "{error:?}");
+    }
+
+    #[test]
+    fn the_live_pieces_come_in_the_order_of_their_paths_whatever_the_number_of_workers() {
+        let names: Vec<String> = (0..12).map(|number| format!("piece-{number:02}")).collect();
+        let files: Vec<String> = names.iter().map(|name| format!("{name}/needle")).collect();
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let temp = live_world(&refs);
+
+        let one = live_with(&temp, "", &Staged::default(), "needle", 1).expect("one worker");
+        let four = live_with(&temp, "", &Staged::default(), "needle", 4).expect("four workers");
+
+        assert_eq!(one, four);
+        assert_eq!(pieces(&one), names);
+    }
+
+    // =========================================================
+    // The workers
+    // =========================================================
+
+    /// Lets a unit of work wait until others have reached the same point.
+    /// A wait that is never answered ends after ten seconds with `false`.
+    struct Meeting {
+        arrived: StdMutex<usize>,
+        changed: Condvar,
+    }
+
+    impl Meeting {
+        fn new() -> Meeting {
+            Meeting {
+                arrived: StdMutex::new(0),
+                changed: Condvar::new(),
+            }
+        }
+
+        fn arrive(&self) {
+            *self.arrived.lock().expect("the meeting is not poisoned") += 1;
+            self.changed.notify_all();
+        }
+
+        fn wait_for(&self, count: usize) -> bool {
+            let arrived = self.arrived.lock().expect("the meeting is not poisoned");
+            let (_guard, outcome) = self
+                .changed
+                .wait_timeout_while(arrived, Duration::from_secs(10), |arrived| *arrived < count)
+                .expect("the meeting is not poisoned");
+            !outcome.timed_out()
+        }
+    }
+
+    #[test]
+    fn jobs_run_at_the_same_time_on_several_workers() {
+        let meeting = Meeting::new();
+
+        let met = parallel_map(&[0, 1], 2, |_| {
+            meeting.arrive();
+            meeting.wait_for(2)
+        });
+
+        assert_eq!(met, [true, true], "the two jobs never ran together");
+    }
+
+    #[test]
+    fn results_come_in_the_order_of_the_jobs_not_of_their_end() {
+        let meeting = Meeting::new();
+
+        let results = parallel_map(&[0, 1, 2, 3], 4, |job| {
+            if *job == 0 {
+                // The first job ends after the other three.
+                assert!(meeting.wait_for(3), "the other jobs never ran");
+            } else {
+                meeting.arrive();
+            }
+            *job
+        });
+
+        assert_eq!(results, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn no_job_gives_no_result_and_starts_no_worker() {
+        let none: Vec<u8> = parallel_map(&[] as &[u8], 4, |job| *job);
+        assert!(none.is_empty());
+    }
+
+    /// Holds the walk of every piece at the opening of its top until a
+    /// second walk has reached that point too, and remembers whether every
+    /// walk found one.
+    struct Gate {
+        meeting: Meeting,
+        always_met: AtomicBool,
+    }
+
+    impl Hooks for Gate {
+        fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+            if call == Call::Open && path.is_root() {
+                self.meeting.arrive();
+                let met = self.meeting.wait_for(2);
+                self.always_met.fetch_and(met, Ordering::SeqCst);
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn two_live_pieces_are_walked_at_the_same_time() {
+        let temp = live_world(&["one/needle", "two/needle"]);
+
+        let gate = Gate {
+            meeting: Meeting::new(),
+            always_met: AtomicBool::new(true),
+        };
+
+        let report = live_with(&temp, "", &gate, "needle", 2).expect("the search runs");
+
+        assert!(
+            gate.always_met.load(Ordering::SeqCst),
+            "a walk waited for the other and it never came"
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(pieces(&report), ["one", "two"]);
     }
 }

@@ -226,18 +226,22 @@ piece in `versions`, each with `piece`, `stamp`, `version` (UTC time),
 a folder of the collection, not a version: its `stamp`, `version` and sizes
 are null, and `unearth`, `fork`, `rebuild` and `forget` cannot take it.
 `--archived` lists the versions only and `--live` the live pieces only. The
-word matches piece paths fuzzily. `list` is the same command. `newer-format` is a version written by a newer antiq (error
+word matches piece paths fuzzily. `list` is the same command.
+
+`newer-format` is a version written by a newer antiq (error
 kind `format_too_new` when you try to use it): it is no damage; tell the
 user to update antiq and never offer `forget` for it. `unreadable` is a
 file antiq could not read; `warnings` names it.
 
-`antiq grep <regex> --json` searches the paths of the files inside all
-archives without unpacking anything. Each path is matched as
-`<piece>/<path inside the piece>`, case-sensitively. `pieces` lists the
-pieces with hits, each with `name_match` (the regex matched the piece's
-own name), `versions` and `files`, where each file has `path` and the
-stamps of the `versions` that hold it. Use it when the user remembers a
-file but not the folder.
+`antiq grep <regex> --json` searches the paths of the files of the live
+pieces and inside all archives, without unpacking anything. Each path is
+matched as `<piece>/<path inside the piece>`, case-sensitively. `pieces`
+lists the pieces with hits, each with `name_match` (the regex matched the
+piece's own name), `live` (the folder is in the collection), `versions` (the
+stored versions searched, empty for a piece that is only live) and `files`,
+where each file has `path`, `live` and the stamps of the `versions` that hold
+it. `--archived` searches the archives only and `--live` the live pieces
+only. Use it when the user remembers a file but not the folder.
 
 To read a file of a version without changing anything, read the archive
 itself. It is the file in `.antiq/pieces/<piece path>/` whose name ends

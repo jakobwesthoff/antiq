@@ -234,8 +234,9 @@ antiq find scan
 ### Searching inside the archives
 
 You remember a file, but not which folder it was in. `grep` searches the
-paths of the files in all archives at once, with a regular expression,
-and shows the piece and the version that hold each match:
+paths of the files in all archives and in the live folders at once, with a
+regular expression, and shows the piece and the version that hold each
+match, or `live` for a folder of the collection:
 
 ```bash
 antiq grep 'main\.rs'
@@ -244,8 +245,11 @@ antiq grep 'main\.rs'
 ![antiq grep lists the main.rs files of scan-old and scanner with the version they are in](docs/pages/assets/shots/grep.png)
 *`grep` finds a file without knowing its folder*
 
-`grep` reads the **listings**, the checksum lists antiq keeps beside each
-archive, so nothing is unpacked.
+For the archives, `grep` reads the **listings**, the checksum lists antiq
+keeps beside each archive, so nothing is unpacked. A live folder is walked
+the way an archive of it would be, so what `ignore` and `.antiqignore` leave
+out is not searched. `grep --archived` skips the live folders and `grep
+--live` the archives.
 
 ## Bringing a version back
 
@@ -611,7 +615,7 @@ Commands:
   rebuild  Repair a damaged version
   import   Pack a folder as a version
   find     Find and list the pieces and their versions
-  grep     Search the paths of all archived files
+  grep     Search the file paths of live pieces and archived versions
   pin      Keep a piece from being archived
   unpin    Let a piece be archived again
   push     Mirror the collection to the target

@@ -74,7 +74,7 @@ pub enum Command {
     // alone.
     #[command(alias = "list")]
     Find(FindArgs),
-    /// Search the paths of all archived files
+    /// Search the file paths of live pieces and archived versions
     Grep(GrepArgs),
     /// Keep a piece from being archived
     Pin(PieceArgs),
@@ -232,8 +232,10 @@ pub struct FindArgs {
 
 #[derive(Debug, Args)]
 pub struct GrepArgs {
-    /// Regular expression matched against archived paths
+    /// Regular expression matched against file paths
     pub pattern: String,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
 }
 
 #[derive(Debug, Args)]

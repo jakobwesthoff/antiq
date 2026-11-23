@@ -2,7 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The `grep` command: searches the paths of all archived files.
+//! The `grep` command: searches the paths of the files of the live pieces
+//! and of the archived versions.
 
 use crate::cli::console::theme;
 use crate::cli::notice::{self, Notice};
@@ -11,6 +12,7 @@ use crate::cli::table::{Color, WIDE_FROM, mid, paint, painted, spaces};
 use crate::cli::{Context, GrepArgs};
 use antiq::collection::Collection;
 use antiq::commands::grep::{FileHit, GrepReport, PieceHits, compile, grep_collection};
+use antiq::commands::live::Scope;
 use antiq::report::Warning;
 use antiq::shown::{Shown, escape_controls};
 use antiq::versions::naming::{local_labels, system_zone};
@@ -32,9 +34,10 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
     let collection = Collection::find(&ctx.start)
         .map_err(antiq::Error::from)
         .context("find the antiq collection")?;
-    let found = grep_collection(&collection, &pattern)
+    let scope = args.scope.scope();
+    let found = grep_collection(&collection, &pattern, scope)
         .map_err(antiq::Error::from)
-        .context("search the listings")?;
+        .context("search the files")?;
     print_report(
         out,
         ctx.json,
@@ -42,6 +45,7 @@ pub fn run(ctx: &Context, args: &GrepArgs, out: &mut Output) -> anyhow::Result<u
             pattern: &args.pattern,
             regex: &pattern,
             found: &found,
+            scope,
             zone: &system_zone(),
         },
     )?;
@@ -53,6 +57,7 @@ struct Printed<'a> {
     pattern: &'a str,
     regex: &'a Regex,
     found: &'a GrepReport,
+    scope: Scope,
     /// The zone that dates are shown in on a terminal.
     zone: &'a TimeZone,
 }
@@ -90,8 +95,13 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
         out.notices(&notices).context("print the notes")?;
     }
     if found.pieces.is_empty() {
+        let kind = match printed.scope {
+            Scope::Both => "",
+            Scope::Live => "live ",
+            Scope::Archived => "archived ",
+        };
         out.note(&format!(
-            "no archived path matches {}",
+            "no {kind}path matches {}",
             escape_controls(printed.pattern)
         ))
         .context("print the notes")?;
@@ -106,12 +116,16 @@ fn print_report(out: &mut Output, json: bool, printed: &Printed) -> anyhow::Resu
 /// One line `piece<TAB>stamp<TAB>path` per hit and version, the piece and
 /// the path by the rule for names, so a tab or a newline in a name cannot
 /// add a field or a line, and `-` for the path of a piece whose name
-/// matches.
+/// matches. A live piece is `live` in place of the stamp, before the
+/// versions.
 fn pipe_lines(found: &GrepReport) -> Vec<String> {
     let mut lines = Vec::new();
     for hits in &found.pieces {
         let line = |stamp: String, path: String| format!("{}\t{stamp}\t{path}", Shown(&hits.piece));
         if hits.name_match {
+            if hits.live {
+                lines.push(line("live".to_string(), "-".to_string()));
+            }
             lines.extend(
                 hits.versions
                     .iter()
@@ -119,10 +133,14 @@ fn pipe_lines(found: &GrepReport) -> Vec<String> {
             );
         }
         for file in &hits.files {
+            let path = Shown(&file.path[..]).to_string();
+            if file.live {
+                lines.push(line("live".to_string(), path.clone()));
+            }
             lines.extend(
                 file.versions
                     .iter()
-                    .map(|stamp| line(stamp.to_string(), Shown(&file.path[..]).to_string())),
+                    .map(|stamp| line(stamp.to_string(), path.clone())),
             );
         }
     }
@@ -231,20 +249,21 @@ fn version_labels(hits: &PieceHits, zone: &TimeZone) -> HashMap<Stamp, String> {
 
 fn piece_row(hits: &PieceHits, labels: &HashMap<Stamp, String>, style: Style) -> Row {
     let name = display(hits.piece.as_bytes()).text();
-    let newest = hits
-        .versions
-        .first()
-        .expect("a hit piece has a searched version");
     let count = hits.versions.len();
-    let mut right = format!(
-        "{count} {}, {}{}",
-        if count == 1 { "version" } else { "versions" },
-        if count == 1 { "" } else { "newest " },
-        labels[&newest.stamp],
-    );
+    // The versions of the piece, `live` before them.
+    let mut right = match hits.versions.first() {
+        Some(newest) => format!(
+            "{}{count} {}, {}{}",
+            if hits.live { "live, " } else { "" },
+            if count == 1 { "version" } else { "versions" },
+            if count == 1 { "" } else { "newest " },
+            labels[&newest.stamp],
+        ),
+        None => "live".to_string(),
+    };
     if hits.name_match {
         right = format!("piece name matches, {right}");
-        if let Some(files) = newest.files {
+        if let Some(files) = hits.versions.first().and_then(|newest| newest.files) {
             right = format!("{right}, {} files", grouped(files));
         }
     }
@@ -262,19 +281,32 @@ fn file_row(
     regex: &Regex,
     style: Style,
 ) -> Row {
-    let right = if hits.versions.len() == 1 {
-        labels[&file.versions[0]].clone()
+    // What names the versions that hold the path, and whether it names them
+    // all, which `live` joins with "and" and a list with a comma.
+    let (stored, every) = if file.versions.is_empty() {
+        (None, false)
+    } else if hits.versions.len() == 1 {
+        (Some(labels[&file.versions[0]].clone()), true)
     } else if file.versions.len() == hits.versions.len() {
-        match file.versions.len() {
+        let text = match file.versions.len() {
             2 => "both versions".to_string(),
             count => format!("all {count} versions"),
-        }
+        };
+        (Some(text), true)
     } else {
-        file.versions
+        let list = file
+            .versions
             .iter()
             .map(|stamp| labels[stamp].as_str())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", ");
+        (Some(list), false)
+    };
+    let right = match (file.live, stored) {
+        (true, None) => "live".to_string(),
+        (true, Some(stored)) if every => format!("live and {stored}"),
+        (true, Some(stored)) => format!("live, {stored}"),
+        (false, stored) => stored.expect("a path is held by a version or by the live piece"),
     };
 
     // The match is found in the text the pattern was run against, the piece
@@ -298,7 +330,7 @@ fn file_row(
 }
 
 /// The line under the groups: how much was found, and how to bring it
-/// back.
+/// back when a stored version holds a hit.
 fn summary(found: &GrepReport, style: Style) -> String {
     let files: usize = found.pieces.iter().map(|hits| hits.files.len()).sum();
     let in_pieces = found.pieces.iter().filter(|hits| !hits.name_match).count();
@@ -317,9 +349,16 @@ fn summary(found: &GrepReport, style: Style) -> String {
             if names == 1 { "name" } else { "names" }
         ));
     }
+    let counts = counts.join(", ");
+    let stored_hit = found.pieces.iter().any(|hits| {
+        (hits.name_match && !hits.versions.is_empty())
+            || hits.files.iter().any(|file| !file.versions.is_empty())
+    });
+    if !stored_hit {
+        return counts;
+    }
     format!(
-        "{} {} antiq unearth <piece> [--version <version>]",
-        counts.join(", "),
+        "{counts} {} antiq unearth <piece> [--version <version>]",
         style.symbols().separator
     )
 }
@@ -411,6 +450,7 @@ struct JsonReport<'a> {
 struct JsonPiece {
     piece: String,
     name_match: bool,
+    live: bool,
     versions: Vec<JsonVersion>,
     files: Vec<JsonFile>,
 }
@@ -426,6 +466,7 @@ struct JsonVersion {
 #[derive(Serialize)]
 struct JsonFile {
     path: String,
+    live: bool,
     versions: Vec<String>,
 }
 
@@ -442,6 +483,7 @@ fn json_report<'a>(pattern: &'a str, found: &'a GrepReport) -> JsonReport<'a> {
     let piece = |hits: &PieceHits| JsonPiece {
         piece: hits.piece.to_string(),
         name_match: hits.name_match,
+        live: hits.live,
         versions: hits
             .versions
             .iter()
@@ -456,6 +498,7 @@ fn json_report<'a>(pattern: &'a str, found: &'a GrepReport) -> JsonReport<'a> {
             .iter()
             .map(|file| JsonFile {
                 path: antiq::relpath::escape(&file.path),
+                live: file.live,
                 versions: file.versions.iter().map(ToString::to_string).collect(),
             })
             .collect(),
@@ -510,6 +553,7 @@ mod tests {
         PieceHits {
             piece: RelPath::parse(piece).expect("a valid piece"),
             name_match,
+            live: false,
             versions: stamps
                 .iter()
                 .map(|stamp| SearchedVersion {
@@ -522,6 +566,7 @@ mod tests {
                 .iter()
                 .map(|(path, held)| FileHit {
                     path: path.as_bytes().to_vec(),
+                    live: false,
                     versions: held.iter().map(|text| stamp(text)).collect(),
                 })
                 .collect(),
@@ -825,6 +870,7 @@ mod tests {
                 pattern: r"main\.rs",
                 regex: &regex,
                 found: &found,
+                scope: Scope::Both,
                 zone: &TimeZone::UTC,
             },
         )
@@ -878,5 +924,207 @@ mod tests {
         assert_eq!(grouped(812), "812");
         assert_eq!(grouped(1000), "1 000");
         assert_eq!(grouped(1234567), "1 234 567");
+    }
+
+    // =========================================================
+    // Live pieces
+    // =========================================================
+
+    /// `piece` marked live, and the paths of `live_paths` as held by it.
+    fn made_live(mut piece: PieceHits, live_paths: &[&str]) -> PieceHits {
+        piece.live = true;
+        for file in &mut piece.files {
+            file.live = live_paths
+                .iter()
+                .any(|path| path.as_bytes() == &file.path[..]);
+        }
+        piece
+    }
+
+    #[test]
+    fn live_comes_first_in_the_versions_of_a_piece_and_of_a_path() {
+        let found = report(vec![made_live(
+            hits(
+                "notes",
+                &[NEW, OLD, ANCIENT],
+                &[
+                    ("a", &[NEW, OLD, ANCIENT]),
+                    ("b", &[NEW]),
+                    ("c", &[]),
+                    ("d", &[OLD]),
+                ],
+            ),
+            &["a", "b", "c"],
+        )]);
+
+        let lines = render(&found, "x", style(120, false));
+
+        assert_eq!(lines[0], "notes   live, 3 versions, newest 2026-11-04");
+        assert_eq!(lines[1], "  a     live and all 3 versions");
+        assert_eq!(lines[2], "  b     live, 2026-11-04");
+        assert_eq!(lines[3], "  c     live");
+        assert_eq!(lines[4], "  d     2026-09-03");
+    }
+
+    #[test]
+    fn live_and_both_versions_and_live_and_the_date_of_a_single_version() {
+        let two = report(vec![made_live(
+            hits("notes", &[NEW, OLD], &[("src/main.rs", &[NEW, OLD])]),
+            &["src/main.rs"],
+        )]);
+        let lines = render(&two, "x", style(120, false));
+        let first: Vec<&str> = lines[0].split_whitespace().collect();
+        assert_eq!(
+            first,
+            ["notes", "live,", "2", "versions,", "newest", "2026-11-04"]
+        );
+        assert_eq!(lines[1], "  src/main.rs   live and both versions");
+
+        let one = report(vec![made_live(
+            hits("notes", &[NEW], &[("a", &[NEW])]),
+            &["a"],
+        )]);
+        let lines = render(&one, "x", style(120, false));
+        assert_eq!(lines[0], "notes   live, 1 version, 2026-11-04");
+        assert_eq!(lines[1], "  a     live and 2026-11-04");
+    }
+
+    #[test]
+    fn a_piece_that_is_only_live_reads_live_and_has_no_unearth_hint() {
+        let found = report(vec![made_live(hits("notes", &[], &[("a", &[])]), &["a"])]);
+
+        let lines = render(&found, "a", style(120, false));
+
+        assert_eq!(
+            lines,
+            ["notes   live", "  a     live", "", "1 file in 1 piece"]
+        );
+    }
+
+    #[test]
+    fn the_unearth_hint_stays_when_a_stored_version_holds_a_hit() {
+        let found = report(vec![
+            made_live(hits("a", &[], &[("x", &[])]), &["x"]),
+            hits("b", &[NEW], &[("x", &[NEW])]),
+        ]);
+
+        let lines = render(&found, "x", style(120, false));
+
+        assert_eq!(
+            lines.last().expect("a summary"),
+            "2 files in 2 pieces · antiq unearth <piece> [--version <version>]"
+        );
+    }
+
+    #[test]
+    fn a_live_piece_whose_name_matches_says_so_with_and_without_versions() {
+        let mut stored = hits_of("projects/scanner", &[NEW, OLD], &[], true);
+        stored.live = true;
+        let mut only_live = hits_of("tools/scan-old", &[], &[], true);
+        only_live.live = true;
+
+        let lines = render(&report(vec![stored, only_live]), "scan", style(140, false));
+
+        assert_eq!(
+            lines[0],
+            "projects/scanner   piece name matches, live, 2 versions, newest 2026-11-04, 48 211 files"
+        );
+        assert_eq!(lines[1], "tools/scan-old     piece name matches, live");
+        assert_eq!(
+            lines.last().expect("a summary"),
+            "2 piece names · antiq unearth <piece> [--version <version>]"
+        );
+    }
+
+    #[test]
+    fn a_live_piece_whose_name_matches_and_has_no_version_has_no_hint() {
+        let mut only_live = hits_of("tools/scan-old", &[], &[], true);
+        only_live.live = true;
+
+        let lines = render(&report(vec![only_live]), "scan", style(140, false));
+
+        assert_eq!(lines.last().expect("a summary"), "1 piece name");
+    }
+
+    #[test]
+    fn a_pipe_has_live_in_the_place_of_the_stamp_before_the_versions() {
+        let mut named = hits_of("tools/scan-old", &[ANCIENT], &[], true);
+        named.live = true;
+        let found = report(vec![
+            made_live(
+                hits("notes", &[NEW], &[("a", &[NEW]), ("b", &[])]),
+                &["a", "b"],
+            ),
+            named,
+        ]);
+
+        assert_eq!(
+            pipe_lines(&found),
+            [
+                "notes\tlive\ta",
+                "notes\t2026-11-04T100211\ta",
+                "notes\tlive\tb",
+                "tools/scan-old\tlive\t-",
+                "tools/scan-old\t2025-02-11T194007\t-",
+            ]
+        );
+    }
+
+    #[test]
+    fn json_tells_a_live_hit_from_a_version_by_a_flag() {
+        let found = report(vec![
+            made_live(hits("notes", &[], &[("a", &[])]), &["a"]),
+            made_live(
+                hits("tools", &[NEW], &[("a", &[NEW]), ("b", &[NEW])]),
+                &["a"],
+            ),
+        ]);
+
+        let json = serde_json::to_value(json_report("a|b", &found)).expect("serialises");
+
+        assert_eq!(
+            json["pieces"][0],
+            serde_json::json!({
+                "piece": "notes",
+                "name_match": false,
+                "live": true,
+                "versions": [],
+                "files": [{"path": "a", "live": true, "versions": []}]
+            })
+        );
+        assert_eq!(json["pieces"][1]["live"], true);
+        assert_eq!(json["pieces"][1]["files"][0]["live"], true);
+        assert_eq!(json["pieces"][1]["files"][1]["live"], false);
+        assert_eq!(
+            json["pieces"][1]["files"][1]["versions"],
+            serde_json::json!(["2026-11-04T100211"])
+        );
+    }
+
+    fn noted(scope: Scope) -> String {
+        let capture = Capture::default();
+        let found = report(Vec::new());
+        let regex = compile("zzz").expect("compiles");
+        let mut out = capture.output().with_stdout_style(style(80, false));
+        print_report(
+            &mut out,
+            false,
+            &Printed {
+                pattern: "zzz",
+                regex: &regex,
+                found: &found,
+                scope,
+                zone: &TimeZone::UTC,
+            },
+        )
+        .expect("the report prints");
+        capture.stderr()
+    }
+
+    #[test]
+    fn the_note_of_a_search_without_a_hit_names_the_scope() {
+        assert_eq!(noted(Scope::Both), "no path matches zzz\n");
+        assert_eq!(noted(Scope::Archived), "no archived path matches zzz\n");
+        assert_eq!(noted(Scope::Live), "no live path matches zzz\n");
     }
 }

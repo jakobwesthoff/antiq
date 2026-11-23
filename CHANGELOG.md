@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `grep` searches the files of the live pieces as well as the archived
+  ones. A live piece is walked the way an archive of it would be, so what
+  the `ignore` lines and the `.antiqignore` files leave out is not
+  searched. `live` stands first among the versions of a path and of a
+  piece: `src/main.rs   live and both versions`, in a pipe
+  `piece  live  path`, and in `--json` as `live` on the piece and on the
+  file. A problem in the walk of a piece is a warning that names the piece
+  and the reason. `--live` and `--archived` restrict the search to one side,
+  as for `find`.
 - `find` lists the live pieces, the folders the patterns of the collection
   select, as rows of their own. Their VERSION reads `live`, their SIZE and
   FILES read `-`, and under `--json` they have `"state": "live"` and null
@@ -21,7 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `find` without a query lists the live pieces as well as the archived
   ones, and a query ranks both together. A piece that is live and has
   versions lists its live row directly before its versions.
-- A listing without a row says `no live pieces and no versions in the
+- `grep` without a hit says `no path matches <pattern>`, and `no archived
+  path matches <pattern>` under `--archived`. The hint `antiq unearth` at
+  the end of a terminal listing stays only when a stored version holds a
+  hit. The help line of `grep` reads `Search the file paths of live pieces
+  and archived versions`, and the README of `.antiq` has the same line.
+- A listing of `find` without a row says `no live pieces and no versions in the
   collection` where it said `no versions in the collection`, which stays
   the note of `find --archived`.
 - The help line of `find` reads `Find and list the pieces and their

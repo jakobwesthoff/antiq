@@ -32,7 +32,7 @@ impl crate::error::HasKind for WalkError {}
 /// Points where the walk and the selection can be made to see what an
 /// unprivileged test cannot create: a second device, a descriptor
 /// shortage.
-pub(crate) trait Hooks {
+pub(crate) trait Hooks: Sync {
     /// The device to use for `path`, relative to the piece's top, in place
     /// of the `reported` one.
     fn device(&self, _path: &RelPath, reported: u64) -> u64 {

@@ -95,6 +95,17 @@ fn grep_json(collection: &Collection, pattern: &str) -> Run {
         .run()
 }
 
+/// `--json grep` with `args`, which may hold flags.
+fn grep_json_with(collection: &Collection, args: &[&str]) -> Run {
+    Antiq::new()
+        .arg("-C")
+        .arg(collection.root())
+        .arg("--json")
+        .arg("grep")
+        .args(args)
+        .run()
+}
+
 fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
 }
@@ -220,11 +231,12 @@ fn json_lists_pieces_versions_and_files() {
             "pieces": [{
                 "piece": "projects/scanner",
                 "name_match": false,
+                "live": false,
                 "versions": [
                     {"stamp": NEW, "version": "2026-11-04T10:02:11Z"},
                     {"stamp": OLD, "version": "2026-09-03T12:15:00Z"},
                 ],
-                "files": [{"path": "tools/bench/main.rs", "versions": [OLD]}],
+                "files": [{"path": "tools/bench/main.rs", "live": false, "versions": [OLD]}],
             }],
             "skipped": [],
             "warnings": [],
@@ -244,6 +256,7 @@ fn json_gives_a_name_match_the_file_count_of_each_version() {
         json!([{
             "piece": "tools/scan-old",
             "name_match": true,
+            "live": false,
             "versions": [{"stamp": ANCIENT, "version": "2025-02-11T19:40:07Z", "files": 1}],
             "files": [],
         }])
@@ -274,12 +287,12 @@ fn no_hit_exits_0_and_says_so_on_stderr() {
     let text = grep(&collection, &["qxzv"]);
     assert_eq!(text.code(), 0);
     assert_eq!(text.stdout, "");
-    assert_eq!(text.stderr, "no archived path matches qxzv\n");
+    assert_eq!(text.stderr, "no path matches qxzv\n");
 
     let json = grep_json(&collection, "qxzv");
     assert_eq!(json.code(), 0);
     assert_eq!(json.json()["pieces"], json!([]));
-    assert_eq!(json.stderr, "no archived path matches qxzv\n");
+    assert_eq!(json.stderr, "no path matches qxzv\n");
 }
 
 #[test]
@@ -503,7 +516,7 @@ fn an_unknown_config_key_is_a_note_and_a_warning() {
     assert_eq!(
         text.stderr,
         "warning: unknown setting `bogus` under [collection], which antiq ignores\n\
-         no archived path matches qxzv\n"
+         no path matches qxzv\n"
     );
 
     let json = grep_json(&collection, "README");
@@ -526,4 +539,183 @@ fn the_search_leaves_the_store_as_it_was() {
     grep(&collection, &["main"]);
 
     assert_eq!(crate::support::cmd::snapshot(&collection.root()), before);
+}
+
+// =========================================================
+// Live pieces
+// =========================================================
+
+/// `notes` is live and has two stored versions, `zeta` is live only and
+/// `old` is stored only.
+fn live_and_stored() -> Collection {
+    Collection::build(&Clock::now())
+        .piece("notes", |piece| {
+            piece
+                .file("main.rs", "fn main() {}\n")
+                .file("only-live.rs", "x\n");
+        })
+        .piece("zeta", |piece| {
+            piece.file("z.rs", "z\n");
+        })
+        .version("notes", OLD, &[("main.rs", "a\n"), ("old-only.rs", "b\n")])
+        .version("notes", NEW, &[("main.rs", "a\n")])
+        .version("old", ANCIENT, &[("run.rs", "r\n")])
+        .finish()
+}
+
+#[test]
+fn a_pipe_has_live_in_the_place_of_the_stamp_before_the_versions() {
+    let collection = live_and_stored();
+
+    let run = grep(&collection, &[r"\.rs$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        lines(&run.stdout),
+        [
+            "notes\tlive\tmain.rs".to_string(),
+            format!("notes\t{NEW}\tmain.rs"),
+            format!("notes\t{OLD}\tmain.rs"),
+            format!("notes\t{OLD}\told-only.rs"),
+            "notes\tlive\tonly-live.rs".to_string(),
+            format!("old\t{ANCIENT}\trun.rs"),
+            "zeta\tlive\tz.rs".to_string(),
+        ]
+    );
+    assert_eq!(run.stderr, "");
+}
+
+#[test]
+fn the_live_flag_searches_the_live_pieces_only() {
+    let collection = live_and_stored();
+
+    let run = grep(&collection, &["--live", r"\.rs$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        lines(&run.stdout),
+        [
+            "notes\tlive\tmain.rs",
+            "notes\tlive\tonly-live.rs",
+            "zeta\tlive\tz.rs"
+        ]
+    );
+}
+
+#[test]
+fn the_archived_flag_searches_the_store_only() {
+    let collection = live_and_stored();
+
+    let run = grep(&collection, &["--archived", r"\.rs$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        lines(&run.stdout),
+        [
+            format!("notes\t{NEW}\tmain.rs"),
+            format!("notes\t{OLD}\tmain.rs"),
+            format!("notes\t{OLD}\told-only.rs"),
+            format!("old\t{ANCIENT}\trun.rs"),
+        ]
+    );
+}
+
+#[test]
+fn both_flags_together_are_a_usage_error() {
+    let collection = live_and_stored();
+
+    let run = grep_json_with(&collection, &["--live", "--archived", "main"]);
+
+    assert_eq!(run.code(), 2, "{}", run.stdout);
+    assert_eq!(run.error_kind(), "usage");
+    assert!(
+        run.error_message().contains("cannot be used with"),
+        "{}",
+        run.error_message()
+    );
+}
+
+#[test]
+fn no_hit_in_the_live_pieces_says_so() {
+    let collection = live_and_stored();
+
+    let run = grep(&collection, &["--live", "qxzv"]);
+
+    assert_eq!(run.code(), 0);
+    assert_eq!(run.stderr, "no live path matches qxzv\n");
+}
+
+#[test]
+fn json_has_a_live_flag_on_every_piece_and_file() {
+    let collection = live_and_stored();
+
+    let run = grep_json_with(&collection, &[r"main\.rs$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.json()["pieces"],
+        json!([{
+            "piece": "notes",
+            "name_match": false,
+            "live": true,
+            "versions": [
+                {"stamp": NEW, "version": "2026-11-04T10:02:11Z"},
+                {"stamp": OLD, "version": "2026-09-03T12:15:00Z"},
+            ],
+            "files": [{"path": "main.rs", "live": true, "versions": [NEW, OLD]}],
+        }])
+    );
+}
+
+#[test]
+fn a_piece_that_is_only_live_has_no_versions_in_json() {
+    let collection = live_and_stored();
+
+    let run = grep_json_with(&collection, &["--live", "z"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        run.json()["pieces"],
+        json!([{
+            "piece": "zeta",
+            "name_match": true,
+            "live": true,
+            "versions": [],
+            "files": [],
+        }])
+    );
+}
+
+#[test]
+fn a_live_piece_that_cannot_be_searched_whole_is_a_warning_in_text_and_in_json() {
+    let collection = Collection::build(&Clock::now())
+        .piece("notes", |piece| {
+            piece
+                .file("a.rs", "a\n")
+                .file("sub/.antiq/config.toml", "x\n");
+        })
+        .finish();
+    let message = "cannot search all of the live piece notes: nested antiq collection: notes/sub";
+
+    let text = grep(&collection, &[r"\.rs$"]);
+    assert_eq!(text.code(), 0);
+    assert_eq!(text.stdout, "notes\tlive\ta.rs\n");
+    assert_eq!(text.stderr, format!("warning: {message}\n"));
+
+    let json = grep_json_with(&collection, &[r"\.rs$"]);
+    assert_eq!(json.json()["warnings"], json!([{"message": message}]));
+}
+
+#[test]
+fn a_path_the_config_ignores_is_not_found_in_a_live_piece() {
+    let collection = Collection::build(&Clock::now())
+        .ignore(&["*.log"])
+        .piece("notes", |piece| {
+            piece.file("debug.log", "x\n").file("a.txt", "a\n");
+        })
+        .finish();
+
+    let run = grep(&collection, &["notes/"]);
+
+    assert_eq!(run.stdout, "notes\tlive\ta.txt\n");
 }

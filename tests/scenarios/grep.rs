@@ -75,6 +75,7 @@ fn grep_finds_a_path_in_two_versions_of_two_pieces() {
                     let scanner = &pieces[0];
                     assert_eq!(scanner["piece"], "projects/scanner");
                     assert_eq!(scanner["name_match"], false);
+                    assert_eq!(scanner["live"], false);
                     assert_eq!(
                         scanner["versions"],
                         serde_json::json!([
@@ -85,8 +86,8 @@ fn grep_finds_a_path_in_two_versions_of_two_pieces() {
                     assert_eq!(
                         scanner["files"],
                         serde_json::json!([
-                            {"path": "src/main.rs", "versions": [SCANNER_NEW, SCANNER_OLD]},
-                            {"path": "tools/bench/main.rs", "versions": [SCANNER_OLD]},
+                            {"path": "src/main.rs", "live": false, "versions": [SCANNER_NEW, SCANNER_OLD]},
+                            {"path": "tools/bench/main.rs", "live": false, "versions": [SCANNER_OLD]},
                         ])
                     );
 
@@ -96,7 +97,7 @@ fn grep_finds_a_path_in_two_versions_of_two_pieces() {
                     assert_eq!(
                         old["files"],
                         serde_json::json!([
-                            {"path": "cli/src/main.rs", "versions": [SCAN_OLD]},
+                            {"path": "cli/src/main.rs", "live": false, "versions": [SCAN_OLD]},
                         ])
                     );
                 });
@@ -157,10 +158,105 @@ projects/scanner   piece name matches, 2 versions, newest 2026-11-04, 2 files
                 // No hit is no failure.
                 let none = world.run(&["grep", "zzz"]);
                 none.expect_code(0);
-                assert_eq!(none.stderr, "no archived path matches zzz\n");
+                assert_eq!(none.stderr, "no path matches zzz\n");
                 none.text_only(|out| assert_eq!(out, ""));
                 none.json_only(|json| assert_eq!(json["pieces"], serde_json::json!([])));
             });
+        },
+    );
+}
+
+#[test]
+fn grep_still_finds_a_path_after_one_of_its_versions_is_unearthed() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .version("scanner", SCANNER_OLD, &[("src/main.rs", "a")])
+                .version("scanner", SCANNER_NEW, &[("src/main.rs", "b")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            let before = world.run(&["grep", r"main\.rs"]);
+            before.expect_code(0);
+            before.text_only(|out| {
+                assert_eq!(
+                    out,
+                    format!(
+                        "scanner\t{SCANNER_NEW}\tsrc/main.rs\nscanner\t{SCANNER_OLD}\tsrc/main.rs\n"
+                    )
+                );
+            });
+
+            let unearthed = world.run(&["unearth", "scanner", "--version", SCANNER_NEW]);
+            unearthed.expect_code(0);
+
+            // The folder is live and the older version is stored: the same
+            // pattern finds the path in both, the live piece first.
+            let after = world.run(&["grep", r"main\.rs"]);
+            after.expect_code(0);
+            assert_eq!(after.stderr, "");
+            after.text_only(|out| {
+                assert_eq!(
+                    out,
+                    format!("scanner\tlive\tsrc/main.rs\nscanner\t{SCANNER_OLD}\tsrc/main.rs\n")
+                );
+            });
+            after.json_only(|json| {
+                assert_eq!(json["pieces"][0]["live"], true);
+                assert_eq!(
+                    json["pieces"][0]["files"],
+                    serde_json::json!([
+                        {"path": "src/main.rs", "live": true, "versions": [SCANNER_OLD]},
+                    ])
+                );
+            });
+
+            if world.mode() == Mode::Text {
+                let tty = world.run_tty(&["grep", r"main\.rs"]);
+                tty.expect_code(0);
+                assert_eq!(
+                    tty.plain(),
+                    "\
+scanner         live, 1 version, 2026-09-04
+  src/main.rs   live and 2026-09-04
+
+1 file in 1 piece \u{b7} antiq unearth <piece> [--version <version>]
+"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+fn grep_finds_a_path_of_the_last_unearthed_version_as_a_live_piece_only() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .version("scanner", SCANNER_NEW, &[("src/main.rs", "b")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            world.run(&["unearth", "scanner"]).expect_code(0);
+
+            let found = world.run(&["grep", r"main\.rs"]);
+            found.expect_code(0);
+            found.text_only(|out| assert_eq!(out, "scanner\tlive\tsrc/main.rs\n"));
+
+            let archived = world.run(&["grep", "--archived", r"main\.rs"]);
+            archived.expect_code(0);
+            assert_eq!(archived.stderr, "no archived path matches main\\.rs\n");
+            archived.text_only(|out| assert_eq!(out, ""));
+
+            if world.mode() == Mode::Text {
+                let tty = world.run_tty(&["grep", r"main\.rs"]);
+                assert_eq!(
+                    tty.plain(),
+                    "scanner         live\n  src/main.rs   live\n\n1 file in 1 piece\n"
+                );
+            }
         },
     );
 }

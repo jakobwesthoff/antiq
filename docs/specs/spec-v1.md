@@ -1544,14 +1544,46 @@ never fails that way.
 
 ### grep
 
-`grep <pattern>` searches the paths of the archived files in the listings of
-all versions that have an archive, with a case-sensitive regular expression
-(`regex::bytes`, the listings in parallel on all cores but two). A version
-without an archive is incomplete and not searched. A path is searched as
+`grep <pattern>` searches the paths of the files of the live pieces and of
+the archived files in the listings of all versions that have an archive,
+with a case-sensitive regular expression (`regex::bytes`, the listings and
+the live pieces in parallel on all cores but two). A version without an
+archive is incomplete and not searched. A path is searched as
 `<piece>/<path>`, in its unescaped bytes. Files, symbolic links and hard
-links are searched, directory entries are not.
+links are searched, directory entries are not. (ADR 0077)
 
-Only the listing is read, so a version that is damaged in another way, such
+`--live` searches the live pieces only and reads no listing. `--archived`
+searches the store only and walks nothing. Both together are a usage error.
+Without either, `grep` searches both. The live pieces are selected before
+the store is read.
+
+A live piece is searched through the walk an archive of it makes, with the
+select rules and the ignore and timeless rules of the collection (see
+"Ignore and timeless rules"), so a path that a rule ignores is not searched.
+The files searched are those the archive would hold: files and symbolic
+links, not directories, not special files (fifos, sockets and devices, which
+an archive skips), not the `.antiq-restored` marker, not an entry of the
+exclude list and not what lies in the `.antiq` directory of a nested
+collection. A piece whose name the pattern matches is not walked. Nothing is
+cached or written.
+
+A problem in the walk of a live piece does not fail the run. What was walked
+is searched, and each problem that keeps something out of the search is a
+warning, `cannot search all of the live piece <piece>: <reason>`: an
+unreadable entry (also a piece that vanishes during the walk), a mount point
+below the top of the piece (not entered), an entry of the exclude list, a
+nested collection, and a rule file that cannot be used (`rule file:
+<path>:<line>`). A lock on the piece, a marker that is no file and a top
+directory that is itself a mount point are not warned about: the first two
+concern removing the piece only, and the piece is walked completely.
+A directory that selection could not read is a warning, `unreadable: <dir>`,
+as for `archive`. The warnings come after the notes on the settings of the
+collection and the lock file, as `warning:` lines and in the `warnings` of
+`--json`. A pattern or exclude entry that selection cannot use, an ignore or
+timeless line that cannot be used, and a walk that runs out of file
+descriptors fail the run; `--archived` selects and walks nothing.
+
+Only the listing of a version is read, so a version that is damaged in another way, such
 as one with no checksum file or an archive whose size differs from its
 listing, is searched as long as its listing reads.
 
@@ -1567,24 +1599,32 @@ On a terminal the hits are grouped by piece, each in-piece path once with
 the versions that hold it, the match highlighted:
 
 ```text
-projects/scanner        2 versions, newest 2026-11-04
-  src/main.rs           both versions
+projects/scanner        live, 2 versions, newest 2026-11-04
+  src/main.rs           live and both versions
   tools/bench/main.rs   2026-09-03
 tools/scan-old          1 version, 2025-02-11
   cli/src/main.rs       2025-02-11
+zeta                    live
+  z.rs                  live
 
-3 files in 2 pieces · antiq unearth <piece> [--version <version>]
+4 files in 3 pieces · antiq unearth <piece> [--version <version>]
 ```
 
-A piece row counts the searched versions. The versions of a path read `both
-versions` when it is in both of two, `all N versions` when it is in every one
-of more than two, the date of the version when the piece has a single
-searched version, and otherwise the dates of the versions that hold it,
-newest first. A date is a local date. Where two versions of a piece share a
+A piece row counts the searched versions, with `live, ` in front when the
+piece is live; a live piece with no searched version reads `live`. The
+versions of a path read `both versions` when it is in both of two, `all N
+versions` when it is in every one of more than two, the date of the version
+when the piece has a single searched version, and otherwise the dates of the
+versions that hold it, newest first. For a path of a live piece, `live`
+comes first: `live and` in front of `both versions`, `all N versions` or the
+single date, and `live, ` in front of a list of dates. A path that only the
+live piece holds reads `live`. A date is a local date. Where two versions of a piece share a
 local date, searched or not, every version of that piece is named by its
 local time with seconds instead, with the UTC offset added as `find` does.
 The last line counts the files with hits and the pieces they are in, and the
-pieces whose name matched.
+pieces whose name matched, and ends with the hint `antiq unearth <piece>
+[--version <version>]` when a stored version holds a hit; without one the
+line has the counts only.
 
 The left column is as wide as the longest piece or indented path, and three
 spaces separate it from the right column. On a terminal of 100 columns or
@@ -1599,19 +1639,22 @@ a pipe: a `%` as `%25`, a control character as `%XX` of its bytes and a byte
 that is not UTF-8 as `%XX`. A backslash is shown as it is. The match is
 highlighted on the characters it covers. A piece whose name matches gives one row, `piece name matches,
 2 versions, newest 2026-11-04, 48 211 files`, with the version count and the
-file count and no file list. The name matches when the
+file count and no file list; a live piece reads `piece name matches, live, 2
+versions, ...`, and one without a version `piece name matches, live`. The name matches when the
 leftmost match of the pattern in `<piece>/`, the piece path and a slash, ends
 before the slash. `scanner` matches the piece `projects/scanner`; `scanner$`
 and `scanner.*` do not, and `scanner.*` lists the files below the piece. Only
 the heads of the listings of such a piece are read, and the file count is the
 one of its newest searched version. In a pipe every hit and
 version is one tab-separated line `piece  stamp  path`, with the full
-version stamp (`-` as the path for a name match). A tab or a newline in a
+version stamp (`-` as the path for a name match); `live` stands in the place
+of the stamp for the live piece, in a line before those of the versions. A tab or a newline in a
 name is shown escaped, so a line has three fields and a hit is one line.
 The lines are ordered by piece, then
 path, then version with the newest first. A skipped version is a `warning:`
-line on stderr. With no hit `grep` exits 0 and says `no archived path
-matches <pattern>` on stderr; a pattern that is not a valid regular
+line on stderr. With no hit `grep` exits 0 and says `no path
+matches <pattern>` on stderr, with `--archived` `no archived path matches
+<pattern>`, with `--live` `no live path matches <pattern>`; a pattern that is not a valid regular
 expression is a usage error, exit 2, also outside a collection. A held lock
 is noted as for `find`: a `note:` line on stderr, after the `warning:` lines
 on the settings of the collection.
@@ -2205,7 +2248,7 @@ error naming the key, exit 1.
 | `rebuild <piece> <version> [-n]` | repairs a damaged version |
 | `import <folder> [--as <path>] [--time <time>] [-n]` | packs a folder as a version |
 | `find [<query>] [--live \| --archived]` | finds and lists the pieces and their versions; also called `list` |
-| `grep <pattern>` | searches the paths of all archived files |
+| `grep <pattern> [--live \| --archived]` | searches the paths of the files of the live pieces and of all archived files |
 | `pin <piece> [-n]`, `unpin <piece> [-n]` | create or remove a piece's `.antiq-pin` |
 | `push [--init] [--force] [--take-over] [--if-reachable] [-n]` | mirrors the collection to the target |
 | `skill [<part>]`, `skill --install <dir>` | prints the agent skill, or installs it |
@@ -2746,7 +2789,7 @@ and its parent is a directory when the plan is made. The run decides.
 
 | Kind | Exit | Raised when | Added keys |
 |------|------|-------------|------------|
-| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `find` is given `--live` with `--archived`, `--init`, `--force` or `--take-over` is given with `--if-reachable`, `--take-over` is given with `--init` or `--force`, or `forget --all-versions` is given without `--force` | |
+| `usage` | 2 | the command line does not parse, a `--pattern` of `init` is invalid, the `--name` of `fork` or the `--as` of `import` is not a path, the piece of `archive`, `pin`, `unpin`, `unearth`, `fork`, `forget` or `rebuild`, or the version of `unearth`, `fork`, `forget` or `rebuild`, is empty, the `--name` of `fork` is empty, the `--time` of `import` is not a time, a pattern of `grep` is not a valid regular expression, `find` or `grep` is given `--live` with `--archived`, `--init`, `--force` or `--take-over` is given with `--if-reachable`, `--take-over` is given with `--init` or `--force`, or `forget --all-versions` is given without `--force` | |
 | `not_a_collection` | 1 | a command runs outside a collection | |
 | `ambiguous_reference` | 1 | a piece reference matches several candidates | `candidates`: list of `{path}` |
 | `inexact_reference` | 1 | `unearth` or `forget` is given a search word that matches exactly one candidate | `candidates`: list of one `{path}` |
@@ -2822,14 +2865,17 @@ list with `state` `live` and null for `stamp`, `version`, `archive_bytes`,
 `bytes` and `files`.
 
 `grep` adds `pattern`, `pieces`, `skipped` and `warnings` (the notes on the
-settings of the collection and on the lock file, as warning objects),
-and a `note` field while the lock is held. Each element of `pieces` has
-`piece`, `name_match`, `versions` and `files`. `versions` lists the searched
-versions of the piece, newest first, each with `stamp` (the version stamp)
-and `version` (its time as RFC 3339 in UTC); for a piece whose name matches
-each also has `files`, the file count of that version. `files` lists the
-matching paths in byte order, each with `path` and the `versions` that hold
-it as stamps, newest first; it is empty for a piece whose name matches.
+settings of the collection and on the lock file, the directories selection
+could not read and what keeps a live piece from being searched whole, as
+warning objects), and a `note` field while the lock is held. Each element of
+`pieces` has `piece`, `name_match`, `live` (whether the piece is live),
+`versions` and `files`. `versions` lists the searched stored versions of the
+piece, newest first, each with `stamp` (the version stamp) and `version`
+(its time as RFC 3339 in UTC); for a piece whose name matches each also has
+`files`, the file count of that version. It is empty for a piece that is
+only live. `files` lists the matching paths in byte order, each with `path`,
+`live` (whether the live piece holds it) and the `versions` that hold it as
+stamps, newest first; it is empty for a piece whose name matches.
 `skipped` lists the versions that could not be searched, each with `piece`,
 `stamp` and `reason`, and is empty when there are none. Under `--json` a
 skipped version and the lock note appear only in the object, while the note
