@@ -1581,11 +1581,15 @@ A problem in the walk of a live piece does not fail the run. What was walked
 is searched, and each problem that keeps something out of the search is a
 warning, `cannot search all of the live piece <piece>: <reason>`: an
 unreadable entry (also a piece that vanishes during the walk), a mount point
-below the top of the piece (not entered), an entry of the exclude list, a
-nested collection, and a rule file that cannot be used (`rule file:
-<path>:<line>`). A lock on the piece, a marker that is no file and a top
-directory that is itself a mount point are not warned about: the first two
-concern removing the piece only, and the piece is walked completely.
+below the top of the piece (not entered), an entry of the exclude list and a
+nested collection. A rule file that cannot be used is not applied, so what it
+would ignore is searched: for a `.antiqignore` that is the warning `cannot use
+the rules of <path>[:<line>], so the live piece <piece> is searched without
+them` (with `:<line>` where a rule is at fault); a `.antiq-timeless` that
+cannot be used gives none, as it only decides the idle clock. A lock on the
+piece, a marker that is no file and a top directory that is itself a mount
+point are not warned about: the first two concern removing the piece only,
+and the piece is walked completely.
 A directory that selection could not read is a warning, `unreadable: <dir>`,
 as for `archive`. The warnings come after the notes on the settings of the
 collection and the lock file, as `warning:` lines and in the `warnings` of

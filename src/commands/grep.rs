@@ -14,7 +14,7 @@ use crate::filesystem::tree::TreeRoot;
 use crate::listing;
 use crate::relpath::{Name, RelPath};
 use crate::report::{self, Warning};
-use crate::rules::{PieceRules, RulesError};
+use crate::rules::{IGNORE_FILE, PieceRules, RulesError};
 use crate::shown::Shown;
 use crate::tree::{EntryKind, PieceTree, Problem};
 use crate::versions::VersionsError;
@@ -602,28 +602,46 @@ fn inside_inner_store(path: &RelPath, holder: &RelPath) -> bool {
         .is_some_and(|part| part.eq_ignore_ascii_case(b".antiq"))
 }
 
-/// One warning for each problem of the walk that keeps something out of the
-/// search. A lock, or a marker that is no file, only matters to removing the
-/// piece. A top that is a mount point is walked completely.
+/// One warning for each problem of the walk that changes what the search
+/// sees. A lock, or a marker that is no file, only matters to removing the
+/// piece. A top that is a mount point is walked completely. A rule file that
+/// cannot be used is not applied, so the paths it would ignore are searched:
+/// that is a warning for an ignore file, and none for a timeless file, which
+/// only decides the idle clock.
 fn walk_warnings(tree: &PieceTree) -> Vec<Warning> {
+    let top = tree.top();
+    let cannot_search_all = |problem: &Problem| {
+        let reason = Refusal::of(top, problem);
+        Some(Warning::new(format!(
+            "cannot search all of the live piece {}: {reason}",
+            Shown(top)
+        )))
+    };
     tree.problems()
         .iter()
-        .filter(|problem| match problem {
+        .filter_map(|problem| match problem {
             Problem::Unreadable { .. }
             | Problem::Excluded { .. }
-            | Problem::NestedCollection { .. }
-            | Problem::RuleFile { .. } => true,
-            Problem::MountPoint { other } => !other.is_root(),
-            Problem::Locked { .. }
+            | Problem::NestedCollection { .. } => cannot_search_all(problem),
+            Problem::MountPoint { other } if !other.is_root() => cannot_search_all(problem),
+            Problem::MountPoint { .. }
+            | Problem::Locked { .. }
             | Problem::LockedParent { .. }
-            | Problem::MarkerNotAFile { .. } => false,
-        })
-        .map(|problem| {
-            let reason = Refusal::of(tree.top(), problem);
-            Warning::new(format!(
-                "cannot search all of the live piece {}: {reason}",
-                Shown(tree.top())
-            ))
+            | Problem::MarkerNotAFile { .. } => None,
+            Problem::RuleFile { path, line } => {
+                let is_ignore_file = path
+                    .components()
+                    .last()
+                    .is_some_and(|name| name == IGNORE_FILE);
+                is_ignore_file.then(|| {
+                    let line = line.map(|line| format!(":{line}")).unwrap_or_default();
+                    Warning::new(format!(
+                        "cannot use the rules of {}{line}, so the live piece {} is searched without them",
+                        Shown(&top.concat(path)),
+                        Shown(top)
+                    ))
+                })
+            }
         })
         .collect()
 }
@@ -1386,8 +1404,50 @@ mod tests {
         assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
         assert_eq!(
             warning_texts(&report),
-            ["cannot search all of the live piece notes: rule file: notes/.antiqignore:1"]
+            [
+                "cannot use the rules of notes/.antiqignore:1, so the live piece notes is searched without them"
+            ]
         );
+    }
+
+    #[test]
+    fn the_paths_an_unusable_ignore_file_would_have_ignored_are_searched() {
+        let mut temp = live_world(&["notes/a.txt", "notes/secret.txt"]);
+        temp.tree()
+            .file("notes/.antiqignore", "secret.txt\nbroken\\\n");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt", "secret.txt"]);
+    }
+
+    #[test]
+    fn an_ignore_file_that_cannot_be_read_is_a_warning_without_a_line() {
+        let temp = live_world(&["notes/a.txt", "notes/.antiqignore"]);
+        let hooks = Staged {
+            faults: vec![(piece(".antiqignore"), Call::Read, Errno::ACCESS)],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "", &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert_eq!(
+            warning_texts(&report),
+            [
+                "cannot use the rules of notes/.antiqignore, so the live piece notes is searched without them"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_timeless_file_that_cannot_be_used_is_no_warning() {
+        let mut temp = live_world(&["notes/a.txt"]);
+        temp.tree().file("notes/.antiq-timeless", "broken\\\n");
+
+        let report = searched_live(&temp, "", r"\.txt$");
+
+        assert_eq!(paths(&report.pieces[0]), ["a.txt"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]
