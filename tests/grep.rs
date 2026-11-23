@@ -811,3 +811,25 @@ fn the_live_flag_shows_the_spelling_the_folder_has_on_disk() {
 
     assert_eq!(lines(&run.stdout), ["Notes\tlive\ta.txt"]);
 }
+
+#[test]
+fn a_live_piece_with_an_ignored_directory_gives_the_hits_outside_it() {
+    let collection = Collection::build(&Clock::now())
+        .ignore(&["target/"])
+        .piece("notes", |piece| {
+            piece
+                .file("keep.txt", "k\n")
+                .file("target/debug/a.txt", "a\n")
+                .file("target-notes/b.txt", "b\n");
+        })
+        .finish();
+
+    let run = grep(&collection, &[r"\.txt$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    assert_eq!(
+        lines(&run.stdout),
+        ["notes\tlive\tkeep.txt", "notes\tlive\ttarget-notes/b.txt"]
+    );
+    assert_eq!(run.stderr, "");
+}

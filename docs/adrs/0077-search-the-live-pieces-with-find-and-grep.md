@@ -33,7 +33,9 @@ lists every piece, live ones included.
 
 `grep` searches in a live piece the files an archive of it would hold: it
 walks the piece with the same rules as archiving, so ignored paths are not
-searched. A problem in the walk of one piece is a warning that names the
+searched. It does not enter a directory an ignore rule matches, since that
+directory hides everything below it and nothing there can be a hit, which also
+makes a `target/` in the ignore rules speed the search up. A problem in the walk of one piece is a warning that names the
 piece and the reason. A walk that runs out of file descriptors is no problem
 of the piece: it fails `grep`, since it is a problem of the process and every
 later walk would fail too, so the result would be cut off at an arbitrary

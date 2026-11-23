@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `grep` searches the files of the live pieces as well as the archived
-  ones. A live piece is walked the way an archive of it would be, so what
-  the `ignore` lines and the `.antiqignore` files leave out is not
-  searched. `live` stands first among the versions of a path and of a
+  ones. A live piece is walked with the rules an archive of it would use,
+  without entering the directories they ignore, so what the `ignore` lines
+  and the `.antiqignore` files leave out is not searched and a `target/`
+  among them costs the walk one entry. `live` stands first among the versions of a path and of a
   piece: `src/main.rs   live and both versions`, in a pipe
   `piece  live  path`, and in `--json` as `live` on the piece and on the
   file. A problem in the walk of a piece is a warning that names the piece

@@ -9,6 +9,7 @@
 use crate::collection::Collection;
 use crate::commands::live::{LiveError, LivePieces, Scope, Spelled, Spelling, spell_as_stored};
 use crate::commands::survey::Refusal;
+use crate::config::CollectionConfig;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
 use crate::listing;
@@ -16,7 +17,7 @@ use crate::relpath::{Name, RelPath};
 use crate::report::{self, Warning};
 use crate::rules::{IGNORE_FILE, PieceRules, RulesError};
 use crate::shown::Shown;
-use crate::tree::{EntryKind, PieceTree, Problem};
+use crate::tree::{Class, EntryKind, PieceTree, Problem};
 use crate::versions::VersionsError;
 use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
@@ -154,10 +155,7 @@ pub fn grep_collection(
         .then(|| LivePieces::select(collection))
         .transpose()?;
     let config = &collection.config().collection;
-    let rules = live
-        .as_ref()
-        .map(|_| PieceRules::new(&config.ignore, &config.timeless))
-        .transpose()?;
+    let rules = live.as_ref().map(|_| live_rules(config)).transpose()?;
     let side = live
         .as_ref()
         .zip(rules.as_ref())
@@ -209,6 +207,14 @@ fn is_name_match(pattern: &Regex, piece: &RelPath) -> bool {
     pattern
         .find(&text)
         .is_some_and(|found| found.end() < text.len())
+}
+
+/// The rules a live piece is walked by: those of the collection, with the
+/// directories its ignore rules match left unentered. Everything below such a
+/// directory is ignored with it, so no hit is lost, and a `target/` that the
+/// rules ignore costs the walk one entry.
+fn live_rules(config: &CollectionConfig) -> Result<PieceRules, RulesError> {
+    Ok(PieceRules::new(&config.ignore, &config.timeless)?.skipping_ignored_directories())
 }
 
 /// The live pieces of a search, with what walking them takes.
@@ -607,12 +613,19 @@ fn inside_inner_store(path: &RelPath, holder: &RelPath) -> bool {
 
 /// One warning for each problem of the walk that changes what the search
 /// sees. A lock, or a marker that is no file, only matters to removing the
-/// piece. A top that is a mount point is walked completely. A rule file that
+/// piece. A top that is a mount point is walked completely. A directory that
+/// the rules ignore is not entered, so a mount point or an entry of the
+/// exclude list that is such a directory leaves nothing out of the search. A rule file that
 /// cannot be used is not applied, so the paths it would ignore are searched:
 /// that is a warning for an ignore file, and none for a timeless file, which
 /// only decides the idle clock.
 fn walk_warnings(tree: &PieceTree) -> Vec<Warning> {
     let top = tree.top();
+    let is_ignored = |path: &RelPath| {
+        tree.entries()
+            .iter()
+            .any(|entry| &entry.path == path && entry.class == Class::Ignored)
+    };
     let cannot_search_all = |problem: &Problem| {
         let reason = Refusal::of(top, problem);
         Some(Warning::new(format!(
@@ -623,10 +636,13 @@ fn walk_warnings(tree: &PieceTree) -> Vec<Warning> {
     tree.problems()
         .iter()
         .filter_map(|problem| match problem {
+            Problem::Excluded { path } if is_ignored(path) => None,
             Problem::Unreadable { .. }
             | Problem::Excluded { .. }
             | Problem::NestedCollection { .. } => cannot_search_all(problem),
-            Problem::MountPoint { other } if !other.is_root() => cannot_search_all(problem),
+            Problem::MountPoint { other } if !other.is_root() && !is_ignored(other) => {
+                cannot_search_all(problem)
+            }
             Problem::MountPoint { .. }
             | Problem::Locked { .. }
             | Problem::LockedParent { .. }
@@ -1228,8 +1244,7 @@ mod tests {
     ) -> Result<GrepReport, GrepError> {
         let collection = collection(temp, config);
         let live = LivePieces::select(&collection).expect("the pieces are selected");
-        let settings = &collection.config().collection;
-        let rules = PieceRules::new(&settings.ignore, &settings.timeless).expect("valid rules");
+        let rules = live_rules(&collection.config().collection).expect("valid rules");
         let side = LiveSide {
             pieces: &live,
             rules: &rules,
@@ -2063,5 +2078,102 @@ mod tests {
 
         let expected: [&[&str]; 2] = [&["Notes", "notes"], &["notes"]];
         assert_eq!(pieces(&report), expected[usize::from(folds)]);
+    }
+
+    // =========================================================
+    // Ignored directories
+    // =========================================================
+
+    /// Notes every call the walk makes for a path of the piece.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<(RelPath, Call)>>);
+
+    impl Hooks for Recorded {
+        fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+            self.0
+                .lock()
+                .expect("the record is not poisoned")
+                .push((path.clone(), call));
+            None
+        }
+    }
+
+    impl Recorded {
+        /// The calls that enter `directory` or reach something inside it:
+        /// its own `Open` and `List` and every call below it, by components.
+        fn calls_into(&self, directory: &str) -> Vec<String> {
+            let directory = piece(directory);
+            let inside = |at: &RelPath| {
+                let mut parts = at.components();
+                directory
+                    .components()
+                    .all(|part| parts.next() == Some(part))
+            };
+            self.0
+                .lock()
+                .expect("the record is not poisoned")
+                .iter()
+                .filter(|(at, call)| {
+                    inside(at) && (at != &directory || matches!(call, Call::Open | Call::List))
+                })
+                .map(|(at, call)| format!("{at} {call:?}"))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_directory_the_rules_ignore_is_not_entered_and_the_hits_are_the_same() {
+        let mut temp = live_world(&[
+            "notes/keep.txt",
+            "notes/target/debug/a.txt",
+            "notes/build/deep/b.txt",
+            "notes/build-tools/c.txt",
+        ]);
+        temp.tree().file("notes/.antiqignore", "build/\n");
+        let recorded = Recorded::default();
+
+        let report = live_with(&temp, "ignore = [\"target/\"]", &recorded, r"\.txt$", 1)
+            .expect("the search runs");
+
+        assert_eq!(paths(&report.pieces[0]), ["build-tools/c.txt", "keep.txt"]);
+        assert_eq!(recorded.calls_into("target"), Vec::<String>::new());
+        assert_eq!(recorded.calls_into("build"), Vec::<String>::new());
+        assert!(!recorded.calls_into("build-tools").is_empty());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn an_ignored_directory_that_is_a_mount_or_on_the_exclude_list_is_no_warning() {
+        let temp = live_world(&["notes/keep.txt", "notes/cache/x.txt", "notes/skipped/y.txt"]);
+        let hooks = Staged {
+            mount_roots: vec![piece("cache")],
+            ..Staged::default()
+        };
+        let config = "ignore = [\"cache/\", \"skipped/\"]\nexclude = [\"notes/skipped\"]";
+
+        let report = live_with(&temp, config, &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert_eq!(paths(&report.pieces[0]), ["keep.txt"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_mount_or_an_excluded_entry_that_no_rule_ignores_is_still_a_warning() {
+        let temp = live_world(&["notes/keep.txt", "notes/cache/x.txt", "notes/skipped/y.txt"]);
+        let hooks = Staged {
+            mount_roots: vec![piece("cache")],
+            ..Staged::default()
+        };
+
+        let report = live_with(&temp, "exclude = [\"notes/skipped\"]", &hooks, r"\.txt$", 1)
+            .expect("the search runs");
+
+        assert_eq!(
+            warning_texts(&report),
+            [
+                "cannot search all of the live piece notes: mount point: notes/cache",
+                "cannot search all of the live piece notes: exclude entry: notes/skipped"
+            ]
+        );
     }
 }

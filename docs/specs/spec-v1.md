@@ -270,7 +270,7 @@ match is ignored.
 ignored paths too, without hashing them, for mount points, nested
 collections, unreadable entries, exclude entries, locked entries and the
 depth limit, since `archive` deletes them with the folder. Only packing,
-the listing and the idle check leave them out.
+the listing and the idle check leave them out. `grep` does not enter them.
 
 ## Control files and markers
 
@@ -1573,9 +1573,13 @@ it could not search all of the live piece. A live piece whose folder shares its 
 folder is one piece, reported under the stored spelling (see "Spelling"); its
 files match a pattern as `<piece>/<path>` under either spelling.
 
-A live piece is searched through the walk an archive of it makes, with the
-select rules and the ignore and timeless rules of the collection (see
-"Ignore and timeless rules"), so a path that a rule ignores is not searched.
+A live piece is searched through a walk with the select rules and the
+ignore and timeless rules of the collection (see "Ignore and timeless
+rules"), as an archive of it makes, except that a directory an ignore rule
+matches is not entered: it hides everything below it, so nothing there can be
+a hit, and what lies below it is not checked for mount points, nested
+collections or unreadable entries either. A path that a rule ignores is not
+searched.
 The files searched are those the archive would hold: files and symbolic
 links, not directories, not special files (fifos, sockets and devices, which
 an archive skips), not the `.antiq-restored` marker, not an entry of the
