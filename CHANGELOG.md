@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `find` lists the pieces that match the query by the score of the match,
+  best first, and by path among equal scores. Without a query it still
+  lists by path. The candidates of an ambiguous search word come in the
+  same order, in the table on a terminal, in the `candidate:` lines and
+  in `error.candidates`.
+
+### Fixed
+
+- The table of the closest pieces that follows an unknown search word
+  lists them nearest first, as documented, and no longer by path.
+
 ## [1.7.1] - 2026-11-20
 
 ### Fixed

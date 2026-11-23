@@ -338,9 +338,14 @@ fn piece_table(
         .iter()
         .map(|piece| (piece.path.clone(), shown_matches(&mut query, &piece.path)))
         .collect();
-    let versions: Vec<Row> = rows
+    // The rows of one piece are next to each other and newest first. The
+    // pieces keep the order they were given in.
+    let versions: Vec<Row> = named
         .iter()
-        .filter(|row| named.iter().any(|(path, _)| *path == row.piece.to_string()))
+        .flat_map(|(path, _)| {
+            rows.iter()
+                .filter(move |row| row.piece.to_string() == *path)
+        })
         .cloned()
         .collect();
     let every_piece_has_versions = named
@@ -964,8 +969,8 @@ mod tests {
 
     #[test]
     fn a_store_piece_without_a_version_turns_the_table_into_a_count() {
-        // `forget` also names folders that hold sidecars only; they have no
-        // row, and a list table would leave them out of the two it announces.
+        // A candidate with no listed version would be left out of a list
+        // table, which then could not show all the pieces it announces.
         let pieces = candidates(&["projects/gone", "projects/scanner"]);
         let rows = [row("projects/scanner", "2026-11-04T090211")];
         let action = action(&cli(&["forget", "p", "v"]).command).expect("forget is an action");
@@ -992,6 +997,90 @@ mod tests {
                 "projects/scanner          1",
             ]
         );
+    }
+
+    /// The piece column of a table: the first word of each row under the header.
+    fn pieces_shown(lines: &[String]) -> Vec<&str> {
+        lines[1..]
+            .iter()
+            .map(|line| line.split_whitespace().next().expect("a row has a piece"))
+            .collect()
+    }
+
+    fn plain_terminal() -> Style {
+        Style {
+            width: 80,
+            color: false,
+            terminal: true,
+            utf8: true,
+        }
+    }
+
+    #[test]
+    fn the_list_table_of_an_ambiguous_word_follows_the_order_of_the_candidates() {
+        let pieces = candidates(&["tools/scan-old", "clients/scala-notes"]);
+        let rows = [
+            row("clients/scala-notes", "2026-11-04T090211"),
+            row("tools/scan-old", "2025-02-11T184007"),
+            row("tools/scan-old", "2024-02-11T184007"),
+        ];
+        let action = action(&cli(&["unearth", "p"]).command).expect("unearth is an action");
+        let lines = piece_table(
+            &pieces,
+            "scan",
+            action,
+            Some(&rows),
+            plain_terminal(),
+            &TimeZone::UTC,
+        )
+        .expect("there is a listing");
+        assert_eq!(
+            pieces_shown(&lines),
+            ["tools/scan-old", "tools/scan-old", "clients/scala-notes"]
+        );
+    }
+
+    #[test]
+    fn the_list_table_of_the_closest_pieces_follows_their_order() {
+        let pieces = candidates(&["tools/scan-old", "clients/scala-notes"]);
+        let rows = [
+            row("clients/scala-notes", "2026-11-04T090211"),
+            row("tools/scan-old", "2025-02-11T184007"),
+        ];
+        let action = action(&cli(&["unearth", "p"]).command).expect("unearth is an action");
+        let lines = piece_table(
+            &pieces,
+            "",
+            action,
+            Some(&rows),
+            plain_terminal(),
+            &TimeZone::UTC,
+        )
+        .expect("there is a listing");
+        assert_eq!(
+            pieces_shown(&lines),
+            ["tools/scan-old", "clients/scala-notes"]
+        );
+    }
+
+    #[test]
+    fn a_folder_of_sidecars_with_an_incomplete_version_gets_the_list_table() {
+        let pieces = candidates(&["projects/sidecars"]);
+        let mut incomplete = row("projects/sidecars", "2026-11-04T090211");
+        incomplete.state = antiq::commands::list::State::Incomplete;
+        let rows = [incomplete];
+        let action = action(&cli(&["forget", "p", "v"]).command).expect("forget is an action");
+        let lines = piece_table(
+            &pieces,
+            "side",
+            action,
+            Some(&rows),
+            plain_terminal(),
+            &TimeZone::UTC,
+        )
+        .expect("there is a listing");
+        assert!(lines[0].contains("SIZE"), "{:?}", lines[0]);
+        assert_eq!(pieces_shown(&lines), ["projects/sidecars"]);
     }
 
     /// A piece with a tab in its name: the table shows `a%09b/scanner`.

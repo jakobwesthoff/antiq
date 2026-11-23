@@ -1442,12 +1442,17 @@ the same output. The help lists `find` alone, and the help and the usage
 of `list` read as those of `find`. The envelope of `--json` carries `find`
 (see "JSON output"). `search` is not a name of the command. (ADR 0069)
 
-`find [query]` prints one row per version: pieces by path, the versions of
-a piece newest first. The query matches piece paths fuzzily, as a search
-word does, and keeps the pieces that match. Each row reads only the head of
-its listing. SIZE is the archive file's size (`archive-bytes`) in decimal
-units (B, kB, MB, GB, TB; 1 kB = 1000 bytes; one decimal below 10, none
-from 10 on); `--json` also carries the unpacked size and the file count.
+`find [query]` prints one row per version: pieces by the score of the
+match, best first, and by path among equal scores, the versions of a piece
+newest first. The query matches piece paths fuzzily, as a search word does,
+and keeps the pieces that match. A query that scores every match alike
+(none, or only negated words) lists the pieces by path. A query of several
+words scores each word on its own against the path and adds the scores;
+a path is scored in its stored or its composed form, whichever scores
+higher. (ADR 0076)
+Each row reads only the head of its listing. SIZE is the archive file's
+size (`archive-bytes`) in decimal units (B, kB, MB, GB, TB; 1 kB = 1000
+bytes; one decimal below 10, none from 10 on); `--json` also carries the unpacked size and the file count.
 The piece is in every row, so each row stands on its own after `sort` or
 `grep`. (ADR 0021)
 
@@ -2215,7 +2220,11 @@ No match is the error kind `unknown_reference`; several matches are
 `ambiguous_reference`, listing the candidates. All three exit 1. The
 candidates are the live pieces for `archive`, `pin` and `unpin`; the
 pieces of the store for `unearth`, `fork` and `rebuild`; the pieces of the
-store and the store folders that hold sidecars only for `forget`.
+store and the store folders that hold sidecars only for `forget`. The
+candidates of an ambiguous word come with the best fuzzy score of the word
+against their escaped paths first and by path among equal scores, the rule
+`find` uses (ADR 0076); the pipe lines, `error.candidates` and the
+terminal table all use that order.
 
 On a pipe the error line is followed by one line `    candidate: <path>` per
 candidate, in the order and the escaped form of `error.candidates`. On a
@@ -2237,8 +2246,9 @@ terminal by the same info "Nothing was <done>.".
   table of `antiq find` with all versions of the candidate pieces, in which
   the letters the word matched are bold red. For `archive`, `pin` and
   `unpin` it has the columns PIECE and VERSIONS, the number of stored
-  versions, which is 0 for a live piece without any. `forget` uses that
-  table too when a candidate is a folder that holds sidecars only.
+  versions, which is 0 for a live piece without any. The commands on the
+  store use that table too when a candidate has no listed version, for
+  example a store folder whose only version is still being moved in.
 - No piece matches a word. The block says so; its "How to fix it" tells to
   check the spelling and then to name the piece by its path, the same for
   every command.

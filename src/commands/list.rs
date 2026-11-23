@@ -79,8 +79,9 @@ pub struct Rows {
     pub warnings: Vec<Warning>,
 }
 
-/// The rows of the pieces whose path matches `query`, pieces by path and
-/// versions newest first.
+/// The rows of the pieces whose path matches `query`, pieces by the score
+/// of the match (best first, by path among equal scores) and versions
+/// newest first.
 ///
 /// The folders that hold sidecars only are searched too: their incomplete
 /// versions are listed. A version whose archive is staged in `tmp/pack/` is
@@ -89,11 +90,10 @@ pub fn gather(places: &Places, query: Option<&str>) -> Result<Rows, ListError> {
     let scan = store::scan(places.pieces_dir)?;
     let mut matcher = Query::parse(query.unwrap_or(""));
 
-    let mut folders: Vec<&StorePiece> = scan.pieces.iter().chain(&scan.sidecar_only).collect();
-    folders.sort_by(|left, right| left.path.cmp(&right.path));
-    let items: Vec<(RelPath, StoreVersion)> = folders
-        .iter()
-        .filter(|folder| matcher.score(&folder.path.to_string()).is_some())
+    let folders: Vec<&StorePiece> = scan.pieces.iter().chain(&scan.sidecar_only).collect();
+    let items: Vec<(RelPath, StoreVersion)> = matcher
+        .rank(folders.clone(), |folder| &folder.path)
+        .into_iter()
         .flat_map(|folder| {
             let newest_first = folder.versions.iter().rev();
             newest_first.map(|version| (folder.path.clone(), version.clone()))
@@ -239,6 +239,7 @@ mod tests {
         tree.file("notes/sub/b.txt", "beta");
         tree.file("projects/scanner/main.rs", "fn main() {}");
         tree.file("tools/scan-old/run.sh", "echo");
+        tree.file("clients/scala-notes/todo.txt", "call");
         tree
     }
 
@@ -314,6 +315,53 @@ mod tests {
             ]
         );
         assert_eq!(rows(&store, Some("   ")).versions.len(), 3);
+    }
+
+    #[test]
+    fn a_word_at_a_word_start_is_listed_before_scattered_letters() {
+        let mut store = Store::new();
+        let tree = source();
+        store.add_version(&tree, "clients/scala-notes", "2026-11-04T090211");
+        store.add_version(&tree, "tools/scan-old", "2025-02-11T184007");
+        assert_eq!(
+            found(&rows(&store, Some("scan"))),
+            [
+                "tools/scan-old 2025-02-11T184007",
+                "clients/scala-notes 2026-11-04T090211"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_versions_of_a_ranked_piece_stay_together_newest_first() {
+        let mut store = Store::new();
+        let tree = source();
+        store.add_version(&tree, "clients/scala-notes", "2026-11-04T090211");
+        store.add_version(&tree, "tools/scan-old", "2025-02-11T184007");
+        store.add_version(&tree, "tools/scan-old", "2026-01-05T101010");
+        assert_eq!(
+            found(&rows(&store, Some("scan"))),
+            [
+                "tools/scan-old 2026-01-05T101010",
+                "tools/scan-old 2025-02-11T184007",
+                "clients/scala-notes 2026-11-04T090211"
+            ]
+        );
+    }
+
+    #[test]
+    fn pieces_with_equal_scores_come_by_path() {
+        let mut store = Store::new();
+        let tree = source();
+        store.add_version(&tree, "tools/scan-old", "2025-02-11T184007");
+        store.add_version(&tree, "projects/scanner", "2026-11-04T090211");
+        assert_eq!(
+            found(&rows(&store, Some("scan"))),
+            [
+                "projects/scanner 2026-11-04T090211",
+                "tools/scan-old 2025-02-11T184007"
+            ]
+        );
     }
 
     #[test]

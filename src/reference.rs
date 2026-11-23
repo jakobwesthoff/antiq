@@ -307,11 +307,7 @@ pub fn resolve_piece(
     }
 
     let mut query = Query::parse(&reference);
-    let mut matches: Vec<&RelPath> = set
-        .paths
-        .iter()
-        .filter(|candidate| query.score(&candidate.to_string()).is_some())
-        .collect();
+    let mut matches: Vec<&RelPath> = query.rank(set.paths.iter().collect(), |candidate| *candidate);
     match matches.len() {
         0 => Err(ReferenceError::Unknown {
             closest: closest_pieces(&reference, &set.paths),
@@ -959,6 +955,21 @@ mod tests {
             serde_json::json!({"candidates": [
                 {"path": "projects/alpha"},
                 {"path": "projects/alphabet"},
+            ]})
+        );
+    }
+
+    #[test]
+    fn the_candidates_of_an_ambiguous_word_come_best_score_first() {
+        let fx = Fixture::new();
+        let set = set_of(&fx, &["clients/scala-notes", "tools/scan-old"]);
+        let error = resolve_in(&fx, &set, "scan").expect_err("ambiguous");
+        let error: crate::error::Error = error.into();
+        assert_eq!(
+            serde_json::Value::Object(error.details()),
+            serde_json::json!({"candidates": [
+                {"path": "tools/scan-old"},
+                {"path": "clients/scala-notes"},
             ]})
         );
     }

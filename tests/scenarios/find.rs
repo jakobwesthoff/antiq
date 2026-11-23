@@ -251,3 +251,76 @@ fn unearth_refuses_a_word_that_matches_several_pieces_and_takes_a_path() {
         },
     );
 }
+
+#[test]
+fn find_lists_the_pieces_by_the_score_of_the_match_and_by_path_among_equals() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .version(
+                    "clients/scala-notes",
+                    "2026-09-03T121500",
+                    &[("a.txt", "a")],
+                )
+                .version("projects/scanner", "2026-09-03T121500", &[("b.txt", "b")])
+                .version("tools/scan-old", "2025-02-11T184007", &[("c.txt", "c")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            let found = world.run(&["find", "scan"]);
+            found.expect_code(0);
+            assert_eq!(
+                pieces_of(world, &found),
+                ["projects/scanner", "tools/scan-old", "clients/scala-notes"]
+            );
+            let everything = world.run(&["find"]);
+            everything.expect_code(0);
+            assert_eq!(
+                pieces_of(world, &everything),
+                ["clients/scala-notes", "projects/scanner", "tools/scan-old"]
+            );
+        },
+    );
+}
+
+#[test]
+fn the_candidates_of_an_ambiguous_word_come_by_score_and_by_path_among_equals() {
+    both_modes(
+        |clock| {
+            let collection = Collection::build(clock)
+                .patterns(&["*/*"])
+                .version(
+                    "clients/scala-notes",
+                    "2026-09-03T121500",
+                    &[("a.txt", "a")],
+                )
+                .version("projects/scanner", "2026-09-03T121500", &[("b.txt", "b")])
+                .version("tools/scan-old", "2025-02-11T184007", &[("c.txt", "c")])
+                .finish();
+            Setup::new(collection)
+        },
+        |world| {
+            let several = world.run(&["unearth", "scan"]);
+            several.expect_code(1);
+            let order = ["projects/scanner", "tools/scan-old", "clients/scala-notes"];
+            several.json_only(|json| {
+                let paths: Vec<&str> = json["error"]["candidates"]
+                    .as_array()
+                    .expect("a list of candidates")
+                    .iter()
+                    .map(|candidate| candidate["path"].as_str().expect("a path"))
+                    .collect();
+                assert_eq!(paths, order);
+            });
+            if world.mode() == Mode::Text {
+                let lines: Vec<&str> = several
+                    .stderr
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("    candidate: "))
+                    .collect();
+                assert_eq!(lines, order, "{:?}", several.stderr);
+            }
+        },
+    );
+}

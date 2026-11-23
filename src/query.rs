@@ -5,8 +5,10 @@
 //! The fuzzy query that search-word piece references and `find` share.
 
 use crate::error::HasKind;
+use crate::relpath::RelPath;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32String};
+use std::cmp::Reverse;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -107,6 +109,29 @@ impl Query {
         stored.max(composed)
     }
 
+    /// The `items` whose path matches, best score first. Items with the
+    /// same score keep the order of their paths, so a query that scores
+    /// every match alike (none, or only negated words) leaves them by path.
+    ///
+    /// This is the one place that filters and orders by the query:
+    /// `find` and the candidates of an ambiguous search word both come
+    /// through it.
+    pub fn rank<T>(&mut self, items: Vec<T>, path: impl Fn(&T) -> &RelPath) -> Vec<T> {
+        let mut scored: Vec<(u32, T)> = items
+            .into_iter()
+            .filter_map(|item| {
+                let score = self.score(&path(&item).to_string())?;
+                Some((score, item))
+            })
+            .collect();
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            Reverse(left_score)
+                .cmp(&Reverse(right_score))
+                .then_with(|| path(left).cmp(path(right)))
+        });
+        scored.into_iter().map(|(_, item)| item).collect()
+    }
+
     /// The positions, counted in characters (`char`s), of the letters of
     /// `text` that the query matched; empty when it does not match, and
     /// also when every word of the query is negated. A letter with
@@ -165,6 +190,69 @@ mod tests {
 
     fn score(query: &str, haystack: &str) -> Option<u32> {
         Query::parse(query).score(haystack)
+    }
+
+    fn ranked(query: &str, paths: &[&str]) -> Vec<String> {
+        let items: Vec<RelPath> = paths
+            .iter()
+            .map(|path| RelPath::parse(path).expect("a valid path"))
+            .collect();
+        Query::parse(query)
+            .rank(items, |path| path)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn rank_puts_the_best_score_first() {
+        assert_eq!(
+            ranked("scan", &["clients/scala-notes", "tools/scan-old"]),
+            ["tools/scan-old", "clients/scala-notes"]
+        );
+    }
+
+    #[test]
+    fn rank_orders_equal_scores_by_path() {
+        assert_eq!(
+            ranked("scan", &["tools/scan-old", "projects/scanner"]),
+            ["projects/scanner", "tools/scan-old"]
+        );
+    }
+
+    #[test]
+    fn rank_drops_what_does_not_match() {
+        assert_eq!(
+            ranked("scan", &["notes", "tools/scan-old"]),
+            ["tools/scan-old"]
+        );
+    }
+
+    #[test]
+    fn rank_leaves_every_item_by_path_for_an_empty_query() {
+        assert_eq!(
+            ranked("", &["tools/scan-old", "notes"]),
+            ["notes", "tools/scan-old"]
+        );
+    }
+
+    #[test]
+    fn rank_leaves_the_items_by_path_for_a_query_of_negated_words_only() {
+        assert_eq!(
+            ranked("!zzz", &["tools/scan-old", "clients/scala-notes"]),
+            ["clients/scala-notes", "tools/scan-old"]
+        );
+    }
+
+    #[test]
+    fn rank_does_not_let_a_negated_word_change_the_order() {
+        assert_eq!(
+            ranked(
+                "scan !old",
+                &["clients/scala-notes", "tools/scan-old", "tools/scan-new"]
+            ),
+            ["tools/scan-new", "clients/scala-notes"]
+        );
     }
 
     #[test]
