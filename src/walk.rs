@@ -191,6 +191,7 @@ pub(crate) fn walk_piece_with(
         piece: top,
         select,
         read_rule_files: rules.reads_files(),
+        enter_ignored_directories: rules.enters_ignored_directories(),
         ignore,
         timeless,
         hooks,
@@ -339,6 +340,8 @@ struct Walker<'a> {
     select: &'a Rules,
     /// Whether rule files are read.
     read_rule_files: bool,
+    /// Whether a directory that an ignore rule matches is entered.
+    enter_ignored_directories: bool,
     ignore: Scope,
     timeless: Scope,
     hooks: &'a dyn Hooks,
@@ -644,8 +647,11 @@ impl Walker<'_> {
         if excluded {
             self.excluded.push(child.clone());
         }
-        let enter = entry.kind == EntryKind::Directory && !foreign && !excluded;
         let ignored = entry.class == Class::Ignored;
+        let enter = entry.kind == EntryKind::Directory
+            && !foreign
+            && !excluded
+            && (self.enter_ignored_directories || !ignored);
         self.entries.push(entry);
         if !enter {
             return Ok(());
@@ -2064,5 +2070,145 @@ mod tests {
             path: path.clone()
         }));
         assert!(!only_blocks_removal(&Problem::MountPoint { other: path }));
+    }
+
+    // =========================================================
+    // Ignored directories that are not entered
+    // =========================================================
+
+    fn skipping(ignore: &[&str]) -> PieceRules {
+        let lines: Vec<String> = ignore.iter().map(|line| line.to_string()).collect();
+        PieceRules::new(&lines, &[])
+            .expect("valid rules")
+            .skipping_ignored_directories()
+    }
+
+    /// Notes every call the walk makes for a path.
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<(RelPath, Call)>>);
+
+    impl Hooks for Recording {
+        fn fault(&self, path: &RelPath, call: Call) -> Option<io::Error> {
+            self.0
+                .lock()
+                .expect("the record is not poisoned")
+                .push((path.clone(), call));
+            None
+        }
+    }
+
+    impl Recording {
+        /// The calls that enter `directory` or reach something inside it:
+        /// the `Open` and the `List` of the directory itself and every call
+        /// for a path below it, by components. The `Stat` of the directory
+        /// is no entry: the walk records it before it decides.
+        fn calls_into(&self, directory: &str) -> Vec<String> {
+            let directory = path(directory);
+            let inside = |at: &RelPath| {
+                let mut parts = at.components();
+                directory
+                    .components()
+                    .all(|part| parts.next() == Some(part))
+            };
+            self.0
+                .lock()
+                .expect("the record is not poisoned")
+                .iter()
+                .filter(|(at, call)| {
+                    inside(at) && (at != &directory || matches!(call, Call::Open | Call::List))
+                })
+                .map(|(at, call)| format!("{at} {call:?}"))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn the_default_walk_lists_what_lies_inside_an_ignored_directory() {
+        let mut tree = Tree::new();
+        tree.file("piece/target/debug/a.o", "x");
+        tree.file("piece/keep", "x");
+
+        let walked = walk_ruled(&tree, &["target/"], &[]);
+
+        assert_eq!(
+            paths(&walked),
+            ["", "keep", "target", "target/debug", "target/debug/a.o"]
+        );
+    }
+
+    #[test]
+    fn a_walk_that_skips_ignored_directories_records_the_directory_and_nothing_below() {
+        let mut tree = Tree::new();
+        tree.file("piece/target/debug/a.o", "x");
+        tree.file("piece/keep", "x");
+
+        let walked =
+            walk_with(&tree, "piece", &skipping(&["target/"]), &RealFs).expect("the walk succeeds");
+
+        assert_eq!(paths(&walked), ["", "keep", "target"]);
+        assert_eq!(class_of(&walked, "target"), Class::Ignored);
+        assert_eq!(packed(&walked), ["", "keep"]);
+    }
+
+    #[test]
+    fn a_skipped_directory_is_not_opened_listed_or_read_inside() {
+        let mut tree = Tree::new();
+        tree.file("piece/build/.antiqignore", "x\n");
+        tree.file("piece/build/deep/x", "x");
+        tree.dir("piece/empty-build");
+        tree.file("piece/build-tools/x", "x");
+        tree.file("piece/keep", "x");
+        let recording = Recording::default();
+
+        let walked = walk_with(
+            &tree,
+            "piece",
+            &skipping(&["build/", "empty-build/"]),
+            &recording,
+        )
+        .expect("the walk succeeds");
+
+        assert_eq!(recording.calls_into("build"), Vec::<String>::new());
+        assert_eq!(recording.calls_into("empty-build"), Vec::<String>::new());
+        // A name that only starts like the directory is another directory.
+        assert!(!recording.calls_into("build-tools").is_empty());
+        assert_eq!(
+            paths(&walked),
+            [
+                "",
+                "build",
+                "build-tools",
+                "build-tools/x",
+                "empty-build",
+                "keep"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rule_file_outside_ignored_directories_still_ignores_a_directory_that_is_skipped() {
+        let mut tree = Tree::new();
+        tree.file("piece/.antiqignore", "cache/\n");
+        tree.file("piece/cache/x", "x");
+        tree.file("piece/keep", "x");
+
+        let walked = walk_with(&tree, "piece", &skipping(&[]), &RealFs).expect("the walk succeeds");
+
+        assert_eq!(paths(&walked), ["", ".antiqignore", "cache", "keep"]);
+        assert_eq!(class_of(&walked, "cache"), Class::Ignored);
+    }
+
+    #[test]
+    fn a_nested_collection_below_an_ignored_directory_is_reported_by_default_and_not_when_skipping()
+    {
+        let mut tree = Tree::new();
+        tree.dir("piece/skip/nested/.antiq");
+
+        let by_default = walk_ruled(&tree, &["skip/"], &[]);
+        let skipped =
+            walk_with(&tree, "piece", &skipping(&["skip/"]), &RealFs).expect("the walk succeeds");
+
+        assert!(!by_default.problems().is_empty());
+        assert!(skipped.problems().is_empty(), "{:?}", skipped.problems());
     }
 }

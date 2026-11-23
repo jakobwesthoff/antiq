@@ -51,6 +51,10 @@ pub struct PieceRules {
     /// Whether the walk reads the rule files it meets. A staged tree is
     /// checked with `none()`, which reads none.
     read_files: bool,
+    /// Whether the walk goes into a directory that an ignore rule matches.
+    /// Everything below such a directory is ignored with it, so a walk that
+    /// only wants the entries that count can leave it out.
+    enter_ignored_directories: bool,
 }
 
 impl PieceRules {
@@ -69,7 +73,20 @@ impl PieceRules {
             ignore: compile_setting("collection.ignore", ignore)?,
             timeless: compile_setting("collection.timeless", timeless)?,
             read_files: true,
+            enter_ignored_directories: true,
         })
+    }
+
+    /// These rules with ignored directories left unentered: the walk records
+    /// such a directory and nothing below it.
+    pub fn skipping_ignored_directories(mut self) -> PieceRules {
+        self.enter_ignored_directories = false;
+        self
+    }
+
+    /// Whether the walk goes into the directories that an ignore rule matches.
+    pub(crate) fn enters_ignored_directories(&self) -> bool {
+        self.enter_ignored_directories
     }
 
     /// Whether the walk reads the rule files it meets.
@@ -91,6 +108,7 @@ impl PieceRules {
             ignore: Gitignore::empty(),
             timeless: Gitignore::empty(),
             read_files: false,
+            enter_ignored_directories: true,
         }
     }
 }
@@ -269,6 +287,21 @@ mod tests {
             parse_rule_file(vec![0xff, 0xfe, b'\n']),
             Err(RulesError::NotUtf8)
         ));
+    }
+
+    #[test]
+    fn ignored_directories_are_entered_unless_the_rules_say_otherwise() {
+        assert!(
+            PieceRules::new(&[], &[])
+                .expect("valid rules")
+                .enters_ignored_directories()
+        );
+        assert!(PieceRules::none().enters_ignored_directories());
+        assert!(
+            !PieceRules::none()
+                .skipping_ignored_directories()
+                .enters_ignored_directories()
+        );
     }
 
     #[test]
