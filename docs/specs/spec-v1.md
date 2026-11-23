@@ -1450,10 +1450,11 @@ and keeps the pieces that match. A query that scores every match alike
 words scores each word on its own against the path and adds the scores;
 a path is scored in its stored or its composed form, whichever scores
 higher. (ADR 0076)
+
 Each row reads only the head of its listing. SIZE is the archive file's
 size (`archive-bytes`) in decimal units (B, kB, MB, GB, TB; 1 kB = 1000
-bytes; one decimal below 10, none from 10 on); `--json` also carries the unpacked size and the file count.
-The piece is in every row, so each row stands on its own after `sort` or
+bytes; one decimal below 10, none from 10 on); `--json` also carries the
+unpacked size and the file count. The piece is in every row, so each row stands on its own after `sort` or
 `grep`. (ADR 0021)
 
 On a terminal the rows are a table. VERSION is the local time with seconds,

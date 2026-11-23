@@ -30,12 +30,12 @@ all use that order.
 
 The output carries no mark or separator for the ranking.
 
-The ranking is the fuzzy matcher's own, without grouping rules of antiq,
-for all of antiq's filtered output.
+The order is the fuzzy matcher's own score, with no grouping rule added
+by antiq, so every list antiq filters by a query is ordered alike.
 
 ## Consequences
 
-A query that starts inside a word or at a camelCase boundary gets a
+A match that starts inside a word or at a camelCase boundary gets a
 smaller bonus than letters at word starts. Such a piece can rank below a
 scattered match: for `scan`, `tools/oldScan` scores 89 and
 `archive/rescan-logs` scores 76, below `clients/scala-notes` at 103.

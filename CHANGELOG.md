@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The table of the closest pieces that follows an unknown search word
-  lists them nearest first, as documented, and no longer by path.
+- The table of the closest pieces that `unearth`, `fork`, `rebuild` and
+  `forget` show after an unknown search word lists them nearest first, as
+  documented, and no longer by path.
 
 ## [1.7.1] - 2026-11-20
 
