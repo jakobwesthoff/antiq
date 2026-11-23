@@ -10,6 +10,8 @@ Amends [23. Name the commands to fit the name while staying recognizable](0023-n
 
 Amends [21. Search with list and grep](0021-search-with-list-and-grep.md)
 
+Amended by [77. Search the live pieces with find and grep](0077-search-the-live-pieces-with-find-and-grep.md)
+
 ## Context
 
 Users kept typing `find`, `search` or similar because they did not

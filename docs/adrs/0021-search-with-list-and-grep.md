@@ -8,6 +8,8 @@ Accepted
 
 Amended by [69. Make find the command and keep list as its alias](0069-make-find-the-command-and-keep-list-as-its-alias.md)
 
+Amended by [77. Search the live pieces with find and grep](0077-search-the-live-pieces-with-find-and-grep.md)
+
 ## Context
 
 `archive.sh` lists archives by name and restores one through an fzf
