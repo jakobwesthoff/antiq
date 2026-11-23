@@ -719,3 +719,31 @@ fn a_path_the_config_ignores_is_not_found_in_a_live_piece() {
 
     assert_eq!(run.stdout, "notes\tlive\ta.txt\n");
 }
+
+#[test]
+fn a_pattern_that_cannot_be_used_is_one_error_chain() {
+    let collection = Collection::build(&Clock::now()).patterns(&["["]).finish();
+
+    let text = grep(&collection, &["x"]);
+    assert_eq!(text.code(), 1);
+    assert!(
+        text.stderr
+            .starts_with("error: cannot select the live pieces: pattern [ is invalid: "),
+        "{:?}",
+        text.stderr
+    );
+    assert!(
+        text.stderr
+            .ends_with("\n  while attempting to search the files\n"),
+        "{:?}",
+        text.stderr
+    );
+
+    let json = grep_json_with(&collection, &["x"]);
+    assert!(
+        json.error_message()
+            .starts_with("cannot select the live pieces: pattern [ is invalid: "),
+        "{}",
+        json.error_message()
+    );
+}

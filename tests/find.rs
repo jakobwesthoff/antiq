@@ -684,3 +684,36 @@ fn a_query_that_no_live_piece_matches_says_so() {
     run.expect_code(0);
     assert_eq!(run.stderr, "note: no piece matches `zzz`\n");
 }
+
+#[test]
+fn a_pattern_that_cannot_be_used_is_one_error_chain_in_text_and_in_json() {
+    for mode in [Mode::Text, Mode::Json] {
+        let world = world(mode, |builder| {
+            builder.patterns(&["["]);
+        });
+        let run = world.run(&["find"]);
+        run.expect_code(1);
+        run.text_only(|out| assert_eq!(out, ""));
+        if mode == Mode::Text {
+            assert!(
+                run.stderr
+                    .starts_with("error: cannot select the live pieces: pattern [ is invalid: "),
+                "{:?}",
+                run.stderr
+            );
+            assert!(
+                run.stderr
+                    .ends_with("\n  while attempting to list the pieces and their versions\n"),
+                "{:?}",
+                run.stderr
+            );
+        }
+        run.json_only(|json| {
+            let message = json["error"]["message"].as_str().expect("a message");
+            assert!(
+                message.starts_with("cannot select the live pieces: pattern [ is invalid: "),
+                "{message}"
+            );
+        });
+    }
+}

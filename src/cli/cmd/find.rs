@@ -27,7 +27,7 @@ pub fn run(ctx: &Context, args: &FindArgs, out: &mut Output) -> anyhow::Result<u
     let query = args.query.as_deref();
     let report = list(&collection, query, args.scope.scope())
         .map_err(antiq::Error::from)
-        .context("list the versions")?;
+        .context("list the pieces and their versions")?;
 
     if ctx.json {
         out.json(Some("find"), &report)

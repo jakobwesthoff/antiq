@@ -45,7 +45,7 @@ pub enum LiveError {
         #[source]
         source: std::io::Error,
     },
-    #[error("cannot select the pieces: {0}")]
+    #[error("{0}")]
     Select(
         #[from]
         #[diagnostic_source]
@@ -150,6 +150,18 @@ mod tests {
             .map(|warning| warning.message)
             .collect();
         assert_eq!(warnings, ["unreadable: projects"]);
+    }
+
+    #[test]
+    fn a_pattern_that_cannot_be_used_is_the_error_of_the_selection_alone() {
+        let temp = TempCollection::minimal();
+        let error = LivePieces::select(&collection(&temp, "patterns = [\"[\"]"))
+            .err()
+            .expect("the pattern is invalid");
+        assert!(
+            error.to_string().starts_with("pattern [ is invalid: "),
+            "{error}"
+        );
     }
 
     #[test]

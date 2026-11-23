@@ -41,7 +41,7 @@ pub enum GrepError {
         #[diagnostic_source]
         VersionsError,
     ),
-    #[error("cannot select the live pieces: {0}")]
+    #[error("cannot select the live pieces")]
     Live(
         #[from]
         #[diagnostic_source]
