@@ -221,7 +221,7 @@ fn grep_still_finds_a_path_after_one_of_its_versions_is_unearthed() {
 scanner         live, 1 version, 2026-09-04
   src/main.rs   live and 2026-09-04
 
-1 file in 1 piece \u{b7} antiq unearth <piece> [--version <version>]
+1 file in 1 piece
 "
                 );
             }

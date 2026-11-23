@@ -37,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versions lists its live row directly before its versions.
 - `grep` without a hit says `no path matches <pattern>`, and `no archived
   path matches <pattern>` under `--archived`. The hint `antiq unearth` at
-  the end of a terminal listing stays only when a stored version holds a
-  hit. The help line of `grep` reads `Search the file paths of live pieces
+  the end of a terminal listing stays only when a stored version of a piece
+  that is not live holds a hit. The help line of `grep` reads `Search the file paths of live pieces
   and archived versions`, and the README of `.antiq` has the same line.
 - A listing of `find` without a row says `no live pieces and no versions in the
   collection` where it said `no versions in the collection`, which stays

@@ -1637,8 +1637,8 @@ local date, searched or not, every version of that piece is named by its
 local time with seconds instead, with the UTC offset added as `find` does.
 The last line counts the files with hits and the pieces they are in, and the
 pieces whose name matched, and ends with the hint `antiq unearth <piece>
-[--version <version>]` when a stored version holds a hit; without one the
-line has the counts only.
+[--version <version>]` when a stored version of a piece that is not live holds
+a hit; without one the line has the counts only. A live piece gets no hint.
 
 The left column is as wide as the longest piece or indented path, and three
 spaces separate it from the right column. On a terminal of 100 columns or

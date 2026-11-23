@@ -330,7 +330,9 @@ fn file_row(
 }
 
 /// The line under the groups: how much was found, and how to bring it
-/// back when a stored version holds a hit.
+/// back when a stored version of a piece that is not live holds a hit.
+/// `unearth` would take a version of a piece whose folder is there already
+/// only to fail, so a live piece gets no hint.
 fn summary(found: &GrepReport, style: Style) -> String {
     let files: usize = found.pieces.iter().map(|hits| hits.files.len()).sum();
     let in_pieces = found.pieces.iter().filter(|hits| !hits.name_match).count();
@@ -351,8 +353,9 @@ fn summary(found: &GrepReport, style: Style) -> String {
     }
     let counts = counts.join(", ");
     let stored_hit = found.pieces.iter().any(|hits| {
-        (hits.name_match && !hits.versions.is_empty())
-            || hits.files.iter().any(|file| !file.versions.is_empty())
+        !hits.live
+            && ((hits.name_match && !hits.versions.is_empty())
+                || hits.files.iter().any(|file| !file.versions.is_empty()))
     });
     if !stored_hit {
         return counts;
@@ -1002,6 +1005,18 @@ mod tests {
     }
 
     #[test]
+    fn a_live_piece_with_versions_has_no_unearth_hint() {
+        let found = report(vec![made_live(
+            hits("notes", &[NEW], &[("a", &[NEW])]),
+            &["a"],
+        )]);
+
+        let lines = render(&found, "a", style(120, false));
+
+        assert_eq!(lines.last().expect("a summary"), "1 file in 1 piece");
+    }
+
+    #[test]
     fn the_unearth_hint_stays_when_a_stored_version_holds_a_hit() {
         let found = report(vec![
             made_live(hits("a", &[], &[("x", &[])]), &["x"]),
@@ -1030,10 +1045,7 @@ mod tests {
             "projects/scanner   piece name matches, live, 2 versions, newest 2026-11-04, 48 211 files"
         );
         assert_eq!(lines[1], "tools/scan-old     piece name matches, live");
-        assert_eq!(
-            lines.last().expect("a summary"),
-            "2 piece names · antiq unearth <piece> [--version <version>]"
-        );
+        assert_eq!(lines.last().expect("a summary"), "2 piece names");
     }
 
     #[test]
