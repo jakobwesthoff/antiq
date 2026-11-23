@@ -228,8 +228,8 @@ antiq find
 antiq find scan
 ```
 
-![antiq find shows the archived pieces recipe-api, scan-old and scanner with their versions, then antiq find scan shows only scan-old and scanner with the letters of scan in red](docs/pages/assets/shots/find.png)
-*`find` shows the whole archive, a search word narrows it*
+![antiq find shows the live folders fresh-idea, keep-me and ledger-cli and the archived pieces recipe-api, scan-old and scanner with their versions, then antiq find scan shows only scan-old and scanner with the letters of scan in red](docs/pages/assets/shots/find.png)
+*`find` shows the live folders and the whole archive, a search word narrows it*
 
 ### Searching inside the archives
 
