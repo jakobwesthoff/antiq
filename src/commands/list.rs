@@ -89,7 +89,8 @@ pub struct Rows {
     pub versions: Vec<Row>,
     /// Whether the store holds any version at all: false for a store
     /// without a version, a version being stored apart. It tells "nothing
-    /// to list" from "nothing matches". `None` when the store was not read.
+    /// to list" from "nothing matches". `None` when the store was not
+    /// asked: it was not read, or the rows listed are live pieces only.
     pub store_has_versions: Option<bool>,
     /// The files that could not be read.
     pub warnings: Vec<Warning>,
@@ -204,26 +205,33 @@ pub fn gather(
         }
     }
 
-    let store_has_versions = scope.includes_store().then(|| {
-        stored_rows > 0 || {
-            // A query that matches nothing says nothing about the rest of
-            // the store, so the folders it left out are asked.
-            let everything: Vec<(RelPath, StoreVersion)> = folders
-                .iter()
-                .flat_map(|folder| {
-                    folder
-                        .versions
-                        .iter()
-                        .map(|version| (folder.path.clone(), version.clone()))
-                })
-                .collect();
-            damage::inspect_all(places, &everything, Check::Head, workers)
-                .into_iter()
-                .any(|inspection| {
-                    inspection.map_or(true, |found| found.condition != Condition::BeingStored)
-                })
-        }
-    });
+    let store_has_versions = if !scope.includes_store() {
+        None
+    } else if stored_rows > 0 {
+        Some(true)
+    } else if !versions.is_empty() {
+        // Only live rows are listed, and the note that needs this answer is
+        // printed only when nothing is.
+        None
+    } else {
+        // A query that matches nothing says nothing about the rest of the
+        // store, so the folders it left out are asked.
+        let everything: Vec<(RelPath, StoreVersion)> = folders
+            .iter()
+            .flat_map(|folder| {
+                folder
+                    .versions
+                    .iter()
+                    .map(|version| (folder.path.clone(), version.clone()))
+            })
+            .collect();
+        let found = damage::inspect_all(places, &everything, Check::Head, workers)
+            .into_iter()
+            .any(|inspection| {
+                inspection.map_or(true, |found| found.condition != Condition::BeingStored)
+            });
+        Some(found)
+    };
     Ok(Rows {
         versions,
         store_has_versions,
@@ -294,7 +302,8 @@ pub struct ListReport {
     /// Which sides the listing covers.
     #[serde(skip)]
     pub scope: Scope,
-    /// Whether the store holds a version; `None` when it was not read.
+    /// Whether the store holds a version; `None` when the store was not
+    /// asked (see [`Rows::store_has_versions`]).
     #[serde(skip)]
     pub store_has_versions: Option<bool>,
     /// Whether the collection has a live piece; `None` when the live pieces
@@ -926,8 +935,25 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_store_with_a_live_piece_has_no_versions() {
+    fn a_listing_of_live_pieces_alone_does_not_ask_the_store() {
         let rows = with_live(&Store::new(), None, Scope::Both, &["notes"]);
+        assert_eq!(rows.store_has_versions, None);
+    }
+
+    #[test]
+    fn a_listing_with_a_stored_row_says_the_store_has_versions() {
+        let (store, _) = one_version("notes");
+        let rows = with_live(&store, None, Scope::Both, &["notes", "other"]);
+        assert_eq!(rows.store_has_versions, Some(true));
+    }
+
+    #[test]
+    fn an_empty_listing_asks_the_store_about_the_pieces_the_query_left_out() {
+        let (store, _) = one_version("notes");
+        let rows = with_live(&store, Some("zzz"), Scope::Both, &["other"]);
+        assert!(rows.versions.is_empty());
+        assert_eq!(rows.store_has_versions, Some(true));
+        let rows = with_live(&Store::new(), Some("zzz"), Scope::Both, &["other"]);
         assert_eq!(rows.store_has_versions, Some(false));
     }
 
@@ -967,7 +993,7 @@ mod tests {
             "a pinned piece and one that archive refuses are live too"
         );
         assert_eq!(report.live_pieces, Some(true));
-        assert_eq!(report.store_has_versions, Some(false));
+        assert_eq!(report.store_has_versions, None);
     }
 
     #[test]
