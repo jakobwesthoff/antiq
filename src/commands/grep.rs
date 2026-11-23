@@ -343,7 +343,15 @@ fn search_with(
         complete.push((&piece.path, versions));
     }
 
+    // The walks of the live pieces are the long units of work, so they are
+    // queued first and the workers that finish early take the short ones.
     let mut work = Vec::new();
+    for piece in &spelled {
+        work.push(Work::Live {
+            piece,
+            name_match: name_matches(&piece.stored),
+        });
+    }
     for (piece, versions) in &complete {
         let head_only = name_matches(piece);
         for version in versions {
@@ -354,15 +362,10 @@ fn search_with(
             }));
         }
     }
-    for piece in &spelled {
-        work.push(Work::Live {
-            piece,
-            name_match: name_matches(&piece.stored),
-        });
-    }
 
-    // The outcomes come in the order of the work, and the versions come
-    // before the live pieces, so each piece reads its own slice of them.
+    // The outcomes come in the order of the work. Each kind is taken apart
+    // from the other, so the n-th walk is the one of the n-th live piece and
+    // the n-th outcome of a version the one of the n-th version.
     let mut outcomes = Vec::new();
     let mut walks = Vec::new();
     for done in run_work(store_dir, live, pattern, &work, workers)? {
@@ -1560,32 +1563,121 @@ mod tests {
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
+    /// Copies the files below `from` to `to`.
+    fn copy_below(from: &Path, to: &Path) {
+        for entry in fs::read_dir(from).expect("the directory lists") {
+            let entry = entry.expect("an entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("a type").is_dir() {
+                fs::create_dir_all(&target).expect("the directory is made");
+                copy_below(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).expect("the file is copied");
+            }
+        }
+    }
+
+    // A guard: the scope decides which side is read at all.
     #[test]
     fn a_live_search_reads_no_listing_and_a_store_search_walks_nothing() {
         let temp = live_world(&["notes/a.txt"]);
-        let archived = grep_collection(
-            &collection(&temp, ""),
-            &compile(r"\.txt$").expect("compiles"),
-            Scope::Archived,
-        )
-        .expect("the search runs");
-        assert!(archived.pieces.is_empty() && archived.warnings.is_empty());
-
         let mut store = Store::new();
         let version = store.add_version(&source(&["notes/a.txt"]), "notes", NEW);
         version.cut_listing();
+        copy_below(&store.pieces_dir(), &temp.root().join(".antiq/pieces"));
+        let collection = collection(&temp, "");
+        let pattern = compile(r"\.txt$").expect("compiles");
+        let in_scope = |scope| grep_collection(&collection, &pattern, scope).expect("it runs");
+
+        let live_only = in_scope(Scope::Live);
+        assert!(live_only.skipped.is_empty());
+        assert_eq!(pieces(&live_only), ["notes"]);
+        assert!(live_only.pieces.iter().all(|hits| hits.versions.is_empty()));
+
+        let archived = in_scope(Scope::Archived);
+        assert_eq!(archived.skipped.len(), 1);
+        assert!(archived.pieces.is_empty(), "nothing is walked");
+
+        let both = in_scope(Scope::Both);
+        assert_eq!(both.skipped.len(), 1);
+        assert_eq!(pieces(&both), ["notes"]);
+    }
+
+    /// What a report holds of each piece: its name, whether it is live, the
+    /// searched versions and the files with their live flag and versions.
+    #[allow(clippy::type_complexity)]
+    fn contents(
+        report: &GrepReport,
+    ) -> Vec<(String, bool, Vec<Stamp>, Vec<(String, bool, Vec<Stamp>)>)> {
+        report
+            .pieces
+            .iter()
+            .map(|hits| {
+                let files = hits
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let path = String::from_utf8(file.path.clone()).expect("UTF-8 paths");
+                        (path, file.live, file.versions.clone())
+                    })
+                    .collect();
+                let versions = hits.versions.iter().map(|version| version.stamp).collect();
+                (hits.piece.to_string(), hits.live, versions, files)
+            })
+            .collect()
+    }
+
+    // A guard: the live walks and the listings queue together, and each kind
+    // of outcome goes to the pieces of its own kind.
+    #[test]
+    fn a_mixed_search_puts_each_unit_in_its_own_piece() {
+        let mut store = Store::new();
+        store.add_version(&source(&["b/only.txt", "b/both.txt"]), "b", OLD);
+        store.add_version(&source(&["b/both.txt"]), "b", NEW);
+        store.add_version(&source(&["c/c.txt"]), "c", NEW);
+        let temp = live_world(&["a/x.txt", "c/c.txt", "c/live.txt"]);
         let collection = collection(&temp, "");
         let live = LivePieces::select(&collection).expect("the pieces are selected");
         let rules = PieceRules::new(&[], &[]).expect("valid rules");
         let side = LiveSide {
             pieces: &live,
             rules: &rules,
-            hooks: &Staged::default(),
+            hooks: &RealFs,
         };
         let pattern = compile(r"\.txt$").expect("compiles");
-        let live_only = search(None, Some(&side), &pattern, 1).expect("the search runs");
-        assert!(live_only.skipped.is_empty());
-        assert_eq!(paths(&live_only.pieces[0]), ["a.txt"]);
+        let (new, old) = (stamp(NEW), stamp(OLD));
+        let expected = vec![
+            (
+                "a".to_string(),
+                true,
+                vec![],
+                vec![("x.txt".to_string(), true, vec![])],
+            ),
+            (
+                "b".to_string(),
+                false,
+                vec![new, old],
+                vec![
+                    ("both.txt".to_string(), false, vec![new, old]),
+                    ("only.txt".to_string(), false, vec![old]),
+                ],
+            ),
+            (
+                "c".to_string(),
+                true,
+                vec![new],
+                vec![
+                    ("c.txt".to_string(), true, vec![new]),
+                    ("live.txt".to_string(), true, vec![]),
+                ],
+            ),
+        ];
+
+        for workers in [1, 4] {
+            let report = search(Some(&store.pieces_dir()), Some(&side), &pattern, workers)
+                .expect("the search runs");
+            assert_eq!(contents(&report), expected);
+        }
     }
 
     #[test]
