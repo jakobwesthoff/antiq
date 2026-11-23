@@ -287,7 +287,7 @@ pub fn lookup_exact(root: &TreeRoot, path: &RelPath) -> Result<Option<RelPath>, 
 /// Whether the error says there is no such thing, as opposed to a failure
 /// to look. A symlink in the way gives `ELOOP` on macOS and `ENOTDIR` on
 /// Linux.
-fn is_absent(error: &io::Error) -> bool {
+pub(crate) fn is_absent(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::NotFound
         || matches!(
             error.raw_os_error(),

@@ -157,7 +157,14 @@ live folder whose path the collection's volume treats as the same name
 (case, Unicode normalization, as probed per ADR 0054) is the same piece
 and is archived into that folder. `unearth` and `fork` extract to the
 stored spelling, `find` shows it, and `status` warns when a live spelling
-differs from the stored one. A new store folder below an existing parent
+differs from the stored one. `find` and `grep` do the same for a live
+folder: where the store is read, a live folder that shares its name with a
+store folder is listed and reported under the stored spelling, and a query or
+a pattern that matches either spelling finds it. A live folder whose name
+shares nothing with a store folder keeps its own spelling, and so does every
+live folder under `--live`, which does not read the store. A spelling that
+cannot be looked up is a warning, `cannot compare the spelling of <piece>:
+<reason>`, and the live spelling stays. A new store folder below an existing parent
 folder is created inside the parent's stored spelling.
 
 ## Walks
@@ -1455,7 +1462,8 @@ each word on its own against the path and adds the scores; a path is
 scored in its stored or its composed form, whichever scores higher.
 (ADR 0076, ADR 0077)
 
-`--live` lists the live pieces only and reads no store. `--archived` lists
+`--live` lists the live pieces only and reads no store, so it shows the
+spelling the live folder has on disk. `--archived` lists
 the versions only and selects no live piece. Both together are a usage
 error. Without either, `find` lists both. The live pieces are selected
 before the store is read. `find` walks no live piece.
@@ -1555,7 +1563,9 @@ links are searched, directory entries are not. (ADR 0077)
 `--live` searches the live pieces only and reads no listing. `--archived`
 searches the store only and walks nothing. Both together are a usage error.
 Without either, `grep` searches both. The live pieces are selected before
-the store is read.
+the store is read. A live piece whose folder shares its name with a store
+folder is one piece, reported under the stored spelling (see "Spelling"); its
+files match a pattern as `<piece>/<path>` under either spelling.
 
 A live piece is searched through the walk an archive of it makes, with the
 select rules and the ignore and timeless rules of the collection (see

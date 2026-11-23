@@ -117,11 +117,24 @@ impl Query {
     /// `find` and the candidates of an ambiguous search word both come
     /// through it.
     pub fn rank<T>(&mut self, items: Vec<T>, path: impl Fn(&T) -> &RelPath) -> Vec<T> {
+        self.rank_either(items, path, |_| None)
+    }
+
+    /// [`Query::rank`] for items that may have a second spelling of their
+    /// path. An item scores with the better of the two spellings and is
+    /// ordered by its `path`.
+    pub fn rank_either<T>(
+        &mut self,
+        items: Vec<T>,
+        path: impl Fn(&T) -> &RelPath,
+        other: impl Fn(&T) -> Option<&RelPath>,
+    ) -> Vec<T> {
         let mut scored: Vec<(u32, T)> = items
             .into_iter()
             .filter_map(|item| {
-                let score = self.score(&path(&item).to_string())?;
-                Some((score, item))
+                let own = self.score(&path(&item).to_string());
+                let second = other(&item).and_then(|other| self.score(&other.to_string()));
+                Some((own.max(second)?, item))
             })
             .collect();
         scored.sort_by(|(left_score, left), (right_score, right)| {
@@ -202,6 +215,19 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect()
+    }
+
+    #[test]
+    fn rank_either_scores_an_item_with_the_better_of_its_two_spellings() {
+        let notes = RelPath::parse("notes").expect("a valid path");
+        let live = RelPath::parse("Notes").expect("a valid path");
+        let items = vec![(notes.clone(), Some(live)), (notes.clone(), None)];
+        // A capital makes the query case sensitive, so only the item with
+        // the capitalised second spelling matches.
+        let ranked =
+            Query::parse("Notes").rank_either(items, |(path, _)| path, |(_, other)| other.as_ref());
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].1.is_some());
     }
 
     #[test]

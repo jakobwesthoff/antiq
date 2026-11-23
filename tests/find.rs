@@ -717,3 +717,57 @@ fn a_pattern_that_cannot_be_used_is_one_error_chain_in_text_and_in_json() {
         });
     }
 }
+
+// =========================================================
+// Spelling
+// =========================================================
+
+/// `Notes` is live and the store keeps `notes`: one piece on a volume that
+/// folds case, two on one that does not.
+fn live_notes_and_stored_notes(builder: &mut CollectionBuilder) {
+    builder
+        .piece("Notes", |piece| {
+            piece.file("a.txt", "a");
+        })
+        .version("notes", SCANNER_OLD, &[("a.txt", "a\n")]);
+}
+
+fn folds(world: &World) -> bool {
+    crate::support::tree::folds_case(&world.collection().path(".antiq/pieces"))
+}
+
+#[test]
+fn a_live_piece_is_listed_under_the_stored_spelling_on_a_folding_volume() {
+    let world = world(Mode::Text, live_notes_and_stored_notes);
+    let run = world.run(&["find"]);
+    run.expect_code(0);
+    let pieces: Vec<&str> = run.stdout.lines().map(|line| fields(line)[0]).collect();
+    if folds(&world) {
+        assert_eq!(pieces, ["notes", "notes"], "{:?}", run.stdout);
+        assert_eq!(run.stdout.lines().next(), Some("notes\t-\t-\t-\tlive"));
+    } else {
+        assert_eq!(pieces, ["Notes", "notes"], "{:?}", run.stdout);
+    }
+}
+
+#[test]
+fn a_query_finds_the_live_piece_by_the_spelling_it_has_on_disk() {
+    let world = world(Mode::Text, live_notes_and_stored_notes);
+    let run = world.run(&["find", "Notes"]);
+    run.expect_code(0);
+    let live: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|line| line.ends_with("\tlive"))
+        .collect();
+    let shown = if folds(&world) { "notes" } else { "Notes" };
+    assert_eq!(live, [format!("{shown}\t-\t-\t-\tlive")]);
+}
+
+#[test]
+fn the_live_flag_shows_the_spelling_the_folder_has_on_disk() {
+    let world = world(Mode::Text, live_notes_and_stored_notes);
+    let run = world.run(&["find", "--live"]);
+    run.expect_code(0);
+    assert_eq!(run.stdout, "Notes\t-\t-\t-\tlive\n");
+}

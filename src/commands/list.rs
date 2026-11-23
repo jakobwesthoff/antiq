@@ -5,7 +5,7 @@
 //! The `list` operation: one row per live piece and one per version of the store.
 
 use crate::collection::Collection;
-use crate::commands::live::{LiveError, LivePieces, Scope};
+use crate::commands::live::{LiveError, LivePieces, Scope, Spelled, Spelling, spell_as_stored};
 use crate::error::HasKind;
 use crate::query::Query;
 use crate::relpath::RelPath;
@@ -16,7 +16,7 @@ use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StorePiece, StoreVersion};
 use jiff::Timestamp;
 use serde::{Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 /// Why list failed.
@@ -92,15 +92,18 @@ pub struct Rows {
     /// to list" from "nothing matches". `None` when the store was not
     /// asked: it was not read, or the rows listed are live pieces only.
     pub store_has_versions: Option<bool>,
-    /// The files that could not be read.
+    /// The files that could not be read and the spellings that could not be
+    /// compared.
     pub warnings: Vec<Warning>,
 }
 
-/// The piece at one path: whether it is live, and its folder of the store
-/// if it has one.
+/// The piece at one path: whether it is live, the spelling of its live
+/// folder when that differs from the path, and its folder of the store if it
+/// has one.
 struct Candidate<'a> {
     path: RelPath,
     live: bool,
+    live_spelling: Option<RelPath>,
     folder: Option<&'a StorePiece>,
 }
 
@@ -116,6 +119,11 @@ enum Slot {
 /// before its versions and versions newest first. `live` holds the paths of
 /// the live pieces and is read only when `scope` includes them.
 ///
+/// A live piece whose path the volume treats as the name of a store folder
+/// is listed under that folder's spelling, and a query that matches either
+/// spelling finds it. The store is read for that only when the scope covers
+/// both sides.
+///
 /// The folders that hold sidecars only are searched too: their incomplete
 /// versions are listed. A version whose archive is staged in `tmp/pack/` is
 /// being moved in by a run and has no row.
@@ -124,6 +132,20 @@ pub fn gather(
     query: Option<&str>,
     scope: Scope,
     live: &[RelPath],
+) -> Result<Rows, ListError> {
+    let spelling = |live: &[RelPath], folders: &BTreeSet<&RelPath>| {
+        spell_as_stored(places.pieces_dir, live, folders)
+    };
+    gather_with(places, query, scope, live, &spelling)
+}
+
+/// [`gather`] with the spelling of the live pieces given.
+pub(crate) fn gather_with(
+    places: &Places,
+    query: Option<&str>,
+    scope: Scope,
+    live: &[RelPath],
+    spelling: Spelling<'_>,
 ) -> Result<Rows, ListError> {
     let scan = if scope.includes_store() {
         Some(store::scan(places.pieces_dir)?)
@@ -138,14 +160,23 @@ pub fn gather(
         .collect();
     // A store folder is in `pieces` or in `sidecar_only`, never both, so a
     // path has at most one folder.
+    let live: &[RelPath] = if scope.includes_live() { live } else { &[] };
+    let (spelled, mut warnings) = if scope.includes_store() {
+        let paths: BTreeSet<&RelPath> = folders.iter().map(|folder| &folder.path).collect();
+        spelling(live, &paths)
+    } else {
+        (live.iter().map(Spelled::alone).collect(), Vec::new())
+    };
     let mut candidates: BTreeMap<RelPath, Candidate> = BTreeMap::new();
-    for path in live.iter().filter(|_| scope.includes_live()) {
-        let candidate = Candidate {
-            path: path.clone(),
-            live: true,
-            folder: None,
-        };
-        candidates.insert(path.clone(), candidate);
+    for piece in &spelled {
+        candidates
+            .entry(piece.stored.clone())
+            .or_insert_with(|| Candidate {
+                path: piece.stored.clone(),
+                live: true,
+                live_spelling: piece.other_spelling().cloned(),
+                folder: None,
+            });
     }
     for folder in &folders {
         candidates
@@ -153,6 +184,7 @@ pub fn gather(
             .or_insert_with(|| Candidate {
                 path: folder.path.clone(),
                 live: false,
+                live_spelling: None,
                 folder: None,
             })
             .folder = Some(folder);
@@ -160,7 +192,11 @@ pub fn gather(
 
     let mut slots = Vec::new();
     let mut items: Vec<(RelPath, StoreVersion)> = Vec::new();
-    let ranked = matcher.rank(candidates.into_values().collect(), |found| &found.path);
+    let ranked = matcher.rank_either(
+        candidates.into_values().collect(),
+        |found| &found.path,
+        |found| found.live_spelling.as_ref(),
+    );
     for candidate in ranked {
         if candidate.live {
             slots.push(Slot::Live(candidate.path.clone()));
@@ -178,7 +214,6 @@ pub fn gather(
     let inspections = damage::inspect_all(places, &items, Check::Head, workers);
     let mut versions = Vec::new();
     let mut stored_rows = 0;
-    let mut warnings = Vec::new();
     let mut inspected = items.iter().zip(inspections);
     for slot in slots {
         match slot {
@@ -1042,5 +1077,103 @@ mod tests {
             .collect();
         assert_eq!(messages, ["unreadable: projects"]);
         assert_eq!(report.live_pieces, None);
+    }
+
+    // =========================================================
+    // Spelling
+    // =========================================================
+
+    use crate::commands::live::stored_spellings;
+    use crate::testing::tree::folds_case;
+
+    /// A volume that folds case: the store folder is the lower case of the
+    /// live path.
+    fn folding(live: &[RelPath], folders: &BTreeSet<&RelPath>) -> (Vec<Spelled>, Vec<Warning>) {
+        stored_spellings(live, folders, &|path| {
+            Ok(Some(path_of(&path.to_string().to_lowercase())))
+        })
+    }
+
+    fn path_of(text: &str) -> RelPath {
+        RelPath::parse(text).expect("a valid path")
+    }
+
+    fn listed_with(store: &Store, query: Option<&str>, scope: Scope, live: &[&str]) -> Rows {
+        let live: Vec<RelPath> = live.iter().map(|text| path_of(text)).collect();
+        gather_with(&store.places(), query, scope, &live, &folding).expect("the store lists")
+    }
+
+    #[test]
+    fn a_live_piece_is_listed_under_the_spelling_of_its_store_folder() {
+        let (store, _) = one_version("notes");
+
+        let rows = listed_with(&store, None, Scope::Both, &["Notes"]);
+
+        assert_eq!(found(&rows), ["notes live", "notes 2026-11-04T090211"]);
+    }
+
+    #[test]
+    fn a_query_finds_a_live_piece_by_either_spelling() {
+        let (store, _) = one_version("notes");
+
+        for query in ["notes", "Notes"] {
+            let rows = listed_with(&store, Some(query), Scope::Both, &["Notes"]);
+            assert_eq!(
+                found(&rows),
+                ["notes live", "notes 2026-11-04T090211"],
+                "{query}"
+            );
+        }
+        let rows = listed_with(&store, Some("NOTES"), Scope::Both, &["Notes"]);
+        assert!(rows.versions.is_empty(), "{:?}", found(&rows));
+    }
+
+    #[test]
+    fn the_live_scope_keeps_the_live_spelling_and_reads_no_store() {
+        let (store, _) = one_version("notes");
+
+        let rows = listed_with(&store, None, Scope::Live, &["Notes"]);
+
+        assert_eq!(found(&rows), ["Notes live"]);
+    }
+
+    #[test]
+    fn a_folder_of_sidecars_only_gives_its_spelling_too() {
+        let (store, version) = one_version("notes");
+        version.remove(VersionFile::Archive);
+
+        let rows = listed_with(&store, None, Scope::Both, &["Notes"]);
+
+        assert_eq!(found(&rows), ["notes live", "notes 2026-11-04T090211"]);
+        assert_eq!(rows.versions[1].state, State::Incomplete);
+    }
+
+    #[test]
+    fn a_spelling_that_could_not_be_compared_is_a_warning_and_the_live_spelling_stays() {
+        let (store, _) = one_version("notes");
+        let live = [path_of("Notes")];
+        let failing = |live: &[RelPath], _: &BTreeSet<&RelPath>| {
+            (
+                live.iter().map(Spelled::alone).collect(),
+                vec![Warning::new("cannot compare the spelling of Notes: boom")],
+            )
+        };
+
+        let rows = gather_with(&store.places(), None, Scope::Both, &live, &failing)
+            .expect("the store lists");
+
+        assert_eq!(found(&rows), ["Notes live", "notes 2026-11-04T090211"]);
+        assert_eq!(rows.warnings.len(), 1);
+    }
+
+    #[test]
+    fn on_a_folding_volume_the_store_spelling_is_the_one_listed() {
+        let (store, _) = one_version("notes");
+        let folds = folds_case(&store.pieces_dir());
+
+        let rows = with_live(&store, None, Scope::Both, &["Notes"]);
+
+        let live_row = ["Notes live", "notes live"][usize::from(folds)];
+        assert_eq!(found(&rows), [live_row, "notes 2026-11-04T090211"]);
     }
 }

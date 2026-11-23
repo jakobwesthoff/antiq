@@ -7,7 +7,7 @@
 //! listings of the store.
 
 use crate::collection::Collection;
-use crate::commands::live::{LiveError, LivePieces, Scope};
+use crate::commands::live::{LiveError, LivePieces, Scope, Spelled, Spelling, spell_as_stored};
 use crate::commands::survey::Refusal;
 use crate::error::{ErrorKind, HasKind};
 use crate::filesystem::tree::TreeRoot;
@@ -22,7 +22,7 @@ use crate::versions::stamp::Stamp;
 use crate::versions::store::{self, StoreVersion};
 use crate::walk::{Hooks, RealFs, WalkError, walk_piece_with};
 use regex::bytes::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -230,7 +230,7 @@ struct Job<'a> {
 enum Work<'a> {
     Version(Job<'a>),
     Live {
-        piece: &'a RelPath,
+        piece: &'a Spelled,
         /// The piece name matches, so the piece is not walked.
         name_match: bool,
     },
@@ -275,9 +275,61 @@ fn search(
     pattern: &Regex,
     workers: usize,
 ) -> Result<GrepReport, GrepError> {
+    // The spelling is asked for only when the store was scanned.
+    let spelling = |paths: &[RelPath], folders: &BTreeSet<&RelPath>| {
+        spell_as_stored(
+            store_dir.expect("a scanned store has a directory"),
+            paths,
+            folders,
+        )
+    };
+    search_with(store_dir, live, pattern, workers, &spelling)
+}
+
+/// [`search`] with the spelling of the live pieces given.
+///
+/// A live piece whose path the volume treats as the name of a store folder
+/// is reported under that folder's spelling. A pattern that matches either
+/// spelling finds it: the live files are matched under both, the versions of
+/// the store under the stored one.
+fn search_with(
+    store_dir: Option<&Path>,
+    live: Option<&LiveSide>,
+    pattern: &Regex,
+    workers: usize,
+    spelling: Spelling<'_>,
+) -> Result<GrepReport, GrepError> {
     let scan = store_dir
         .map(|dir| store::scan(dir).map_err(GrepError::Store))
         .transpose()?;
+
+    let live_paths: Vec<RelPath> = live
+        .iter()
+        .flat_map(|side| side.pieces.pieces())
+        .cloned()
+        .collect();
+    let (spelled, spelling_warnings) = match &scan {
+        Some(scan) => {
+            let folders: BTreeSet<&RelPath> = scan
+                .pieces
+                .iter()
+                .chain(&scan.sidecar_only)
+                .map(|folder| &folder.path)
+                .collect();
+            spelling(&live_paths, &folders)
+        }
+        None => (live_paths.iter().map(Spelled::alone).collect(), Vec::new()),
+    };
+    let other_spellings: BTreeMap<&RelPath, &RelPath> = spelled
+        .iter()
+        .filter_map(|piece| piece.other_spelling().map(|live| (&piece.stored, live)))
+        .collect();
+    let name_matches = |piece: &RelPath| {
+        is_name_match(pattern, piece)
+            || other_spellings
+                .get(piece)
+                .is_some_and(|live| is_name_match(pattern, live))
+    };
 
     // Newest first, as every list of versions is reported.
     let mut complete: Vec<(&RelPath, Vec<&StoreVersion>)> = Vec::new();
@@ -293,7 +345,7 @@ fn search(
 
     let mut work = Vec::new();
     for (piece, versions) in &complete {
-        let head_only = is_name_match(pattern, piece);
+        let head_only = name_matches(piece);
         for version in versions {
             work.push(Work::Version(Job {
                 piece,
@@ -302,11 +354,10 @@ fn search(
             }));
         }
     }
-    let live_tops: Vec<&RelPath> = live.iter().flat_map(|side| side.pieces.pieces()).collect();
-    for piece in &live_tops {
+    for piece in &spelled {
         work.push(Work::Live {
             piece,
-            name_match: is_name_match(pattern, piece),
+            name_match: name_matches(&piece.stored),
         });
     }
 
@@ -322,7 +373,10 @@ fn search(
     }
     let mut outcomes = outcomes.into_iter();
 
-    let mut report = GrepReport::default();
+    let mut report = GrepReport {
+        warnings: spelling_warnings,
+        ..GrepReport::default()
+    };
     let mut gathered: BTreeMap<&RelPath, Gathered> = BTreeMap::new();
     for (piece, versions) in &complete {
         let entry = gathered.entry(piece).or_default();
@@ -355,9 +409,9 @@ fn search(
             }
         }
     }
-    for (piece, walk) in live_tops.iter().zip(walks) {
+    for (piece, walk) in spelled.iter().zip(walks) {
         let outcome = walk?;
-        let entry = gathered.entry(piece).or_default();
+        let entry = gathered.entry(&piece.stored).or_default();
         entry.live = true;
         for path in outcome.paths {
             let hit = entry.files.entry(path.clone()).or_insert_with(|| FileHit {
@@ -371,7 +425,7 @@ fn search(
     }
 
     for (piece, entry) in gathered {
-        let name_match = is_name_match(pattern, piece);
+        let name_match = name_matches(piece);
         let found = if name_match {
             entry.live || !entry.searched.is_empty()
         } else {
@@ -469,10 +523,13 @@ fn parallel_map<J: Sync, R: Send>(
 /// What the archive would not hold stays out, although the walk records it:
 /// special files (the archive skips them), entries on the exclude list and
 /// everything inside the store of a nested collection.
+///
+/// A path matches when `<piece>/<path>` does, for the spelling of the store
+/// folder and for the spelling of the live folder when they differ.
 fn search_live(
     live: &LiveSide,
     pattern: &Regex,
-    piece: &RelPath,
+    piece: &Spelled,
     name_match: bool,
 ) -> Result<LiveOutcome, WalkError> {
     if name_match {
@@ -480,7 +537,7 @@ fn search_live(
     }
     let tree = walk_piece_with(
         live.pieces.root(),
-        piece,
+        &piece.live,
         live.pieces.rules(),
         live.rules,
         live.hooks,
@@ -498,18 +555,29 @@ fn search_live(
         excluded.contains(&path) || nested.iter().any(|root| inside_inner_store(path, root))
     };
 
-    // A prefix of the text each path is matched in: the piece and a slash.
-    let mut haystack = piece.as_bytes().to_vec();
-    haystack.push(b'/');
-    let prefix = haystack.len();
+    // The prefixes of the text each path is matched in: a spelling of the
+    // piece and a slash.
+    let prefixes: Vec<Vec<u8>> = std::iter::once(&piece.stored)
+        .chain(piece.other_spelling())
+        .map(|spelling| {
+            let mut prefix = spelling.as_bytes().to_vec();
+            prefix.push(b'/');
+            prefix
+        })
+        .collect();
+    let mut haystack = Vec::new();
     let mut paths = Vec::new();
     for entry in tree.packed_entries() {
         if !matches!(entry.kind, EntryKind::File | EntryKind::Symlink) || is_kept_out(&entry.path) {
             continue;
         }
-        haystack.truncate(prefix);
-        haystack.extend_from_slice(entry.path.as_bytes());
-        if pattern.is_match(&haystack) {
+        let matched = prefixes.iter().any(|prefix| {
+            haystack.clear();
+            haystack.extend_from_slice(prefix);
+            haystack.extend_from_slice(entry.path.as_bytes());
+            pattern.is_match(&haystack)
+        });
+        if matched {
             paths.push(entry.path.as_bytes().to_vec());
         }
     }
@@ -1683,5 +1751,165 @@ mod tests {
         );
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert_eq!(pieces(&report), ["one", "two"]);
+    }
+
+    // =========================================================
+    // Spelling
+    // =========================================================
+
+    use crate::commands::live::stored_spellings;
+    use crate::testing::tree::folds_case;
+
+    /// A volume that folds case: the store folder is the lower case of the
+    /// live path.
+    fn folding(live: &[RelPath], folders: &BTreeSet<&RelPath>) -> (Vec<Spelled>, Vec<Warning>) {
+        stored_spellings(live, folders, &|path| {
+            Ok(Some(piece(&path.to_string().to_lowercase())))
+        })
+    }
+
+    /// A search of the live pieces of `temp` and the store of `store`, with
+    /// the spelling given.
+    fn spelled_search(
+        temp: &TempCollection,
+        store: &Store,
+        pattern: &str,
+        spelling: Spelling<'_>,
+    ) -> GrepReport {
+        let collection = collection(temp, "");
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks: &RealFs,
+        };
+        let pattern = compile(pattern).expect("the pattern compiles");
+        search_with(
+            Some(&store.pieces_dir()),
+            Some(&side),
+            &pattern,
+            1,
+            spelling,
+        )
+        .expect("the search runs")
+    }
+
+    /// `notes` in the store with two files, `Notes` live with one of them.
+    fn notes_in_two_spellings() -> (TempCollection, Store) {
+        let mut store = Store::new();
+        store.add_version(&source(&["notes/a.txt", "notes/gone.txt"]), "notes", NEW);
+        (live_world(&["Notes/a.txt"]), store)
+    }
+
+    #[test]
+    fn a_live_piece_is_reported_under_the_spelling_of_its_store_folder() {
+        let (temp, store) = notes_in_two_spellings();
+
+        let report = spelled_search(&temp, &store, r"\.txt$", &folding);
+
+        assert_eq!(pieces(&report), ["notes"]);
+        let hits = &report.pieces[0];
+        assert!(hits.live);
+        assert_eq!(hits.versions.len(), 1);
+        assert_eq!(
+            hits.files
+                .iter()
+                .map(|file| (file.live, file.versions.len()))
+                .collect::<Vec<_>>(),
+            [(true, 1), (false, 1)]
+        );
+    }
+
+    #[test]
+    fn a_pattern_finds_a_live_file_by_either_spelling_of_its_piece() {
+        let (temp, store) = notes_in_two_spellings();
+
+        let live_spelling = spelled_search(&temp, &store, "^Notes/a", &folding);
+        assert_eq!(pieces(&live_spelling), ["notes"]);
+        let hit = &live_spelling.pieces[0].files[0];
+        assert!(hit.live && hit.versions.is_empty(), "{hit:?}");
+
+        let stored_spelling = spelled_search(&temp, &store, "^notes/a", &folding);
+        let hit = &stored_spelling.pieces[0].files[0];
+        assert!(hit.live && hit.versions.len() == 1, "{hit:?}");
+    }
+
+    #[test]
+    fn a_pattern_that_matches_the_name_of_either_spelling_is_a_name_match() {
+        let (temp, store) = notes_in_two_spellings();
+
+        for pattern in ["^Notes", "^notes"] {
+            let report = spelled_search(&temp, &store, pattern, &folding);
+            let hits = &report.pieces[0];
+            assert!(hits.name_match && hits.live, "{pattern}");
+            assert!(hits.files.is_empty(), "{pattern}");
+            assert_eq!(hits.versions[0].files, Some(2), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn a_live_piece_takes_the_spelling_of_a_folder_that_holds_sidecars_only() {
+        let temp = live_world(&["Notes/a.txt"]);
+        let mut lonely = Store::new();
+        let version = lonely.add_version(&source(&["notes/b.txt"]), "notes", NEW);
+        version.remove(VersionFile::Archive);
+
+        let report = spelled_search(&temp, &lonely, r"\.txt$", &folding);
+
+        assert_eq!(pieces(&report), ["notes"]);
+        let hits = &report.pieces[0];
+        assert!(hits.live && hits.versions.is_empty());
+        assert_eq!(paths(hits), ["a.txt"]);
+    }
+
+    #[test]
+    fn a_spelling_that_could_not_be_compared_is_the_first_warning() {
+        let (temp, store) = notes_in_two_spellings();
+        let failing = |live: &[RelPath], _: &BTreeSet<&RelPath>| {
+            (
+                live.iter().map(Spelled::alone).collect(),
+                vec![Warning::new("cannot compare the spelling of Notes: boom")],
+            )
+        };
+
+        let report = spelled_search(&temp, &store, r"\.txt$", &failing);
+
+        assert_eq!(pieces(&report), ["Notes", "notes"]);
+        assert_eq!(
+            warning_texts(&report),
+            ["cannot compare the spelling of Notes: boom"]
+        );
+    }
+
+    #[test]
+    fn the_live_scope_keeps_the_live_spelling_and_reads_no_store() {
+        let (temp, _) = notes_in_two_spellings();
+        let hooks = Staged::default();
+
+        let report = live_with(&temp, "", &hooks, r"\.txt$", 1).expect("the search runs");
+
+        assert_eq!(pieces(&report), ["Notes"]);
+    }
+
+    #[test]
+    fn on_a_folding_volume_the_search_reports_the_store_spelling() {
+        let (temp, store) = notes_in_two_spellings();
+        let folds = folds_case(&store.pieces_dir());
+        let pattern = compile(r"\.txt$").expect("compiles");
+        let collection = collection(&temp, "");
+        let live = LivePieces::select(&collection).expect("the pieces are selected");
+        let rules = PieceRules::new(&[], &[]).expect("valid rules");
+        let side = LiveSide {
+            pieces: &live,
+            rules: &rules,
+            hooks: &RealFs,
+        };
+
+        let report =
+            search(Some(&store.pieces_dir()), Some(&side), &pattern, 1).expect("the search runs");
+
+        let expected: [&[&str]; 2] = [&["Notes", "notes"], &["notes"]];
+        assert_eq!(pieces(&report), expected[usize::from(folds)]);
     }
 }

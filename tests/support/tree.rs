@@ -180,6 +180,16 @@ impl Drop for Tree {
     }
 }
 
+/// Whether the volume of `directory` treats names that differ in case as one.
+/// The probe makes a folder in `directory` and removes it again.
+pub fn folds_case(directory: &Path) -> bool {
+    let probe = directory.join("CaseProbe");
+    fs::create_dir(&probe).expect("the probe is made");
+    let folds = directory.join("caseprobe").exists();
+    fs::remove_dir(&probe).expect("the probe is removed");
+    folds
+}
+
 /// The ULID the minimal collection carries.
 pub const COLLECTION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 

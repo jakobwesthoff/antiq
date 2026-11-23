@@ -747,3 +747,67 @@ fn a_pattern_that_cannot_be_used_is_one_error_chain() {
         json.error_message()
     );
 }
+
+// =========================================================
+// Spelling
+// =========================================================
+
+/// `Notes` is live and the store keeps `notes`.
+fn live_notes_and_stored_notes() -> Collection {
+    Collection::build(&Clock::now())
+        .piece("Notes", |piece| {
+            piece.file("a.txt", "a\n");
+        })
+        .version("notes", OLD, &[("a.txt", "a\n")])
+        .finish()
+}
+
+fn folds(collection: &Collection) -> bool {
+    crate::support::tree::folds_case(&collection.path(".antiq/pieces"))
+}
+
+#[test]
+fn a_live_piece_is_grepped_under_the_stored_spelling_on_a_folding_volume() {
+    let collection = live_notes_and_stored_notes();
+
+    let run = grep(&collection, &[r"a\.txt$"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    if folds(&collection) {
+        assert_eq!(
+            lines(&run.stdout),
+            [
+                "notes\tlive\ta.txt".to_string(),
+                format!("notes\t{OLD}\ta.txt")
+            ]
+        );
+    } else {
+        assert_eq!(
+            lines(&run.stdout),
+            [
+                "Notes\tlive\ta.txt".to_string(),
+                format!("notes\t{OLD}\ta.txt")
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_pattern_with_the_spelling_on_disk_finds_the_live_file() {
+    let collection = live_notes_and_stored_notes();
+
+    let run = grep(&collection, &["^Notes/"]);
+
+    assert_eq!(run.code(), 0, "{}", run.stderr);
+    let shown = if folds(&collection) { "notes" } else { "Notes" };
+    assert_eq!(lines(&run.stdout), [format!("{shown}\tlive\ta.txt")]);
+}
+
+#[test]
+fn the_live_flag_shows_the_spelling_the_folder_has_on_disk() {
+    let collection = live_notes_and_stored_notes();
+
+    let run = grep(&collection, &["--live", r"a\.txt$"]);
+
+    assert_eq!(lines(&run.stdout), ["Notes\tlive\ta.txt"]);
+}

@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On a volume that treats two spellings of a name as one, a live piece that
+  shares its name with a store folder is one piece for `find` and `grep`,
+  shown under the spelling of the store folder. A query or a pattern that
+  matches either spelling finds it, and `--live` shows the spelling the
+  folder has on disk.
 - `find` without a query lists the live pieces as well as the archived
   ones, and a query ranks both together. A piece that is live and has
   versions lists its live row directly before its versions.
