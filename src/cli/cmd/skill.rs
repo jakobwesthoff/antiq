@@ -37,6 +37,10 @@ pub const PARTS: &[(&str, &str)] = &[
         "damage",
         include_str!("../../../skills/antiq/references/damage.md"),
     ),
+    (
+        "rules",
+        include_str!("../../../skills/antiq/references/rules.md"),
+    ),
 ];
 
 /// The names `antiq skill <part>` accepts, for the argument parser.

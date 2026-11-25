@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The skill has a part `rules` (`antiq skill rules`) on how an agent keeps
+  the `.antiqignore` and `.antiq-timeless` files of a piece: what each
+  file does, what may go into `.antiqignore`, what never does, and how to
+  check a change with a dry run.
+
 ## [1.9.0] - 2026-11-23
 
 ### Added

@@ -11,7 +11,7 @@ full, from its path or from the output of `antiq skill`. Read a file
 under `references/` when a step below names it. Each ends with its own
 end line too.
 
-Three files hold details for some tasks:
+Four files hold details for some tasks:
 
 - `references/mirroring.md`, or `antiq skill mirroring`: before you set
   up a target, run `push` or `push -n`, or act on an error of `push`.
@@ -21,6 +21,8 @@ Three files hold details for some tasks:
   `find` or an error reports a damaged or incomplete version, before
   `rebuild`, or `forget` of such a version, and before anything is copied
   back from the target.
+- `references/rules.md`, or `antiq skill rules`: before you write or
+  change an `.antiqignore` or `.antiq-timeless`, or propose one.
 
 # antiq
 
@@ -128,8 +130,9 @@ left out; do not read it as empty.
   `.antiq/recovered/` or `.antiq/trash/`. When `archive` reports that a
   folder went to `recovered/`, or `status` lists `recovered` or `trash`,
   tell the user the path and leave it there.
-- Inside a piece, `.antiq-pin`, `.antiq-restored`, `.antiqignore` and
-  `.antiq-timeless` belong to antiq. Leave them where they are.
+- Inside a piece, `.antiq-pin` and `.antiq-restored` belong to antiq.
+  Leave them where they are. `.antiqignore` and `.antiq-timeless` are
+  rule files; read `references/rules.md` before you touch one.
 
 ### Configuration
 

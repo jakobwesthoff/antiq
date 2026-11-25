@@ -1834,7 +1834,7 @@ fails with `EXDEV` in the real run cannot be foreseen.
 `skill` prints the agent skill that is compiled into the binary, so an
 agent reads the skill of the antiq that runs. (ADR 0070) It needs no
 collection and takes no `-n`. The skill is the core `skills/antiq/SKILL.md`
-and the parts `mirroring`, `import` and `damage`, each
+and the parts `mirroring`, `import`, `damage` and `rules`, each
 `skills/antiq/references/<part>.md`.
 
 - `skill` prints the core and `skill <part>` one part, as they are, on a
