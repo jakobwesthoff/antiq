@@ -38,8 +38,8 @@ pub const PARTS: &[(&str, &str)] = &[
         include_str!("../../../skills/antiq/references/damage.md"),
     ),
     (
-        "rules",
-        include_str!("../../../skills/antiq/references/rules.md"),
+        "tidy-archives",
+        include_str!("../../../skills/antiq/references/tidy-archives.md"),
     ),
 ];
 

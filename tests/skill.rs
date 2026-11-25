@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// The parts of the skill, in the order `--install` writes them before
 /// `SKILL.md`. Each is `references/<name>.md` beside `SKILL.md`.
-const PARTS: [&str; 4] = ["mirroring", "import", "damage", "rules"];
+const PARTS: [&str; 4] = ["mirroring", "import", "damage", "tidy-archives"];
 
 /// The skill's directory in the repository.
 fn skill_dir() -> PathBuf {

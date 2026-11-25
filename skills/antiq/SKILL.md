@@ -21,7 +21,7 @@ Four files hold details for some tasks:
   `find` or an error reports a damaged or incomplete version, before
   `rebuild`, or `forget` of such a version, and before anything is copied
   back from the target.
-- `references/rules.md`, or `antiq skill rules`: before you write or
+- `references/tidy-archives.md`, or `antiq skill tidy-archives`: before you write or
   change an `.antiqignore` or `.antiq-timeless`, or propose one.
 
 # antiq
@@ -131,8 +131,9 @@ left out; do not read it as empty.
   folder went to `recovered/`, or `status` lists `recovered` or `trash`,
   tell the user the path and leave it there.
 - Inside a piece, `.antiq-pin` and `.antiq-restored` belong to antiq.
-  Leave them where they are. `.antiqignore` and `.antiq-timeless` are
-  rule files; read `references/rules.md` before you touch one.
+  Leave them where they are. `.antiqignore` and `.antiq-timeless` are the
+  user's rule files; `references/tidy-archives.md` has recommendations for
+  writing them.
 
 ### Configuration
 

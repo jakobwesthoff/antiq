@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The skill has a part `rules` (`antiq skill rules`) on how an agent keeps
+- The skill has a part `tidy-archives` (`antiq skill tidy-archives`) on how an agent keeps
   the `.antiqignore` and `.antiq-timeless` files of a piece: what each
   file does, what may go into `.antiqignore`, what never does, and how to
   check a change with a dry run.
